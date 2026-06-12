@@ -32,6 +32,10 @@ export interface PauseHandlers {
   onSaveQuit: () => void;
   onToggleMode: () => void;
   onViewDist: (n: number) => void;
+  onToggleMusic: () => void;
+  onToggleSound: () => void;
+  musicOn: () => boolean;
+  soundOn: () => boolean;
   onPack: (files: File[]) => void;
 }
 
@@ -343,6 +347,14 @@ export class HUD {
       b.onclick = () => { this.audio.play('click'); h.onViewDist(n); };
       if (n === viewDist) b.style.background = 'linear-gradient(#5f8f5f, #4d7a4d)';
     }
+
+    const av = el('div', 'menu-row', col);
+    const music = el('button', 'mc-btn small', av);
+    music.textContent = `Music: ${h.musicOn() ? 'On' : 'Off'}`;
+    music.onclick = () => { this.audio.play('click'); h.onToggleMusic(); };
+    const sound = el('button', 'mc-btn small', av);
+    sound.textContent = `Sounds: ${h.soundOn() ? 'On' : 'Off'}`;
+    sound.onclick = () => { this.audio.play('click'); h.onToggleSound(); };
 
     const pack = el('button', 'mc-btn', col);
     pack.textContent = 'Load Resource Pack';

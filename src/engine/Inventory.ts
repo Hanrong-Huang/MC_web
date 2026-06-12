@@ -128,6 +128,9 @@ const RECIPES: Recipe[] = [
   // ranged
   { shape: [[0, S, ST], [S, 0, ST], [0, S, ST]], out: I.BOW, n: 1 },
   { shape: [[I.FLINT], [S], [I.FEATHER]], out: I.ARROW, n: 4 },
+  // farming
+  { shape: [[P, P], [0, S], [0, S]], out: I.HOE, n: 1 },
+  { shape: [[I.WHEAT, I.WHEAT, I.WHEAT]], out: I.BREAD, n: 1 },
   // building materials
   { shape: [[SA, SA], [SA, SA]], out: B.SANDSTONE, n: 1 },
   { shape: [[B.STONE, B.STONE], [B.STONE, B.STONE]], out: B.STONE_BRICKS, n: 4 },

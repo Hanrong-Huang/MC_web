@@ -7,11 +7,45 @@ export type SfxName =
   | 'pop' | 'hurt' | 'hit' | 'eat' | 'burp' | 'click' | 'level'
   | 'explode' | 'bow' | 'snap' | 'fuse' | 'arrowHit';
 
+interface AudioSettings { music: boolean; sound: boolean }
+
+const SETTINGS_KEY = 'voxelcraft-audio';
+
 export class AudioEngine {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  private sfx: GainNode | null = null;
+  private musicBus: GainNode | null = null;
   private noiseBuf: AudioBuffer | null = null;
   private ambientT = 45;
+  private musicT = 14;       // seconds until the next generated piece
+  private settings: AudioSettings = { music: true, sound: true };
+
+  constructor() {
+    try {
+      const raw = localStorage.getItem(SETTINGS_KEY);
+      if (raw) this.settings = { ...this.settings, ...JSON.parse(raw) };
+    } catch { /* default settings */ }
+  }
+
+  get musicOn(): boolean { return this.settings.music; }
+  get soundOn(): boolean { return this.settings.sound; }
+
+  setMusic(on: boolean): void {
+    this.settings.music = on;
+    if (this.musicBus) this.musicBus.gain.value = on ? 1 : 0;
+    this.persist();
+  }
+
+  setSound(on: boolean): void {
+    this.settings.sound = on;
+    if (this.sfx) this.sfx.gain.value = on ? 1 : 0;
+    this.persist();
+  }
+
+  private persist(): void {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings)); } catch { /* ignore */ }
+  }
 
   /** Must be called from a user gesture at least once. */
   ensure(): void {
@@ -24,6 +58,12 @@ export class AudioEngine {
       this.master = this.ctx.createGain();
       this.master.gain.value = 0.35;
       this.master.connect(this.ctx.destination);
+      this.sfx = this.ctx.createGain();
+      this.sfx.gain.value = this.settings.sound ? 1 : 0;
+      this.sfx.connect(this.master);
+      this.musicBus = this.ctx.createGain();
+      this.musicBus.gain.value = this.settings.music ? 1 : 0;
+      this.musicBus.connect(this.master);
       const len = this.ctx.sampleRate;
       this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
       const data = this.noiseBuf.getChannelData(0);
@@ -34,7 +74,7 @@ export class AudioEngine {
   }
 
   private noiseBurst(dur: number, freq: number, vol: number, type: BiquadFilterType = 'lowpass', freqEnd?: number): void {
-    if (!this.ctx || !this.master || !this.noiseBuf) return;
+    if (!this.ctx || !this.sfx || !this.noiseBuf) return;
     const t = this.ctx.currentTime;
     const src = this.ctx.createBufferSource();
     src.buffer = this.noiseBuf;
@@ -47,13 +87,13 @@ export class AudioEngine {
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(vol, t);
     g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    src.connect(filter).connect(g).connect(this.master);
+    src.connect(filter).connect(g).connect(this.sfx);
     src.start(t);
     src.stop(t + dur + 0.02);
   }
 
   private tone(dur: number, f0: number, f1: number, vol: number, type: OscillatorType = 'sine', when = 0): void {
-    if (!this.ctx || !this.master) return;
+    if (!this.ctx || !this.sfx) return;
     const t = this.ctx.currentTime + when;
     const osc = this.ctx.createOscillator();
     osc.type = type;
@@ -63,7 +103,7 @@ export class AudioEngine {
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(vol, t + 0.012);
     g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    osc.connect(g).connect(this.master);
+    osc.connect(g).connect(this.sfx);
     osc.start(t);
     osc.stop(t + dur + 0.02);
   }
@@ -148,31 +188,91 @@ export class AudioEngine {
     }
   }
 
-  /** Gentle ambient pad every couple of minutes. */
-  ambientTick(dt: number): void {
-    if (!this.ctx) return;
-    this.ambientT -= dt;
-    if (this.ambientT > 0) return;
-    this.ambientT = 100 + Math.random() * 120;
-    const roots = [220, 246.9, 196, 174.6];
+  // ---------------------------------------------------------------------------
+  // Generative music: calm piano-and-pad pieces every few minutes, scheduled
+  // entirely on the Web Audio clock. Day pieces are major, night pieces minor.
+  // ---------------------------------------------------------------------------
+
+  /** Call every frame; starts a new piece when the timer runs out. */
+  ambientTick(dt: number, isNight = false): void {
+    if (!this.ctx || !this.settings.music) return;
+    this.musicT -= dt;
+    if (this.musicT > 0) return;
+    const pieceLen = this.playPiece(isNight);
+    this.musicT = pieceLen + 120 + Math.random() * 150;
+    void this.ambientT;
+  }
+
+  /** Schedule one full generated piece; returns its length in seconds. */
+  private playPiece(isNight: boolean): number {
+    if (!this.ctx || !this.musicBus) return 0;
+    const t0 = this.ctx.currentTime + 0.15;
+    const roots = [220, 246.94, 196, 174.61, 261.63];
     const root = roots[(Math.random() * roots.length) | 0];
-    for (const [mult, vol] of [[1, 0.05], [1.5, 0.035], [2, 0.03], [2.5, 0.02]] as const) {
-      this.pad(root * mult, vol, 7);
+    const pent = isNight ? [0, 3, 5, 7, 10] : [0, 2, 4, 7, 9];
+    const third = isNight ? 3 : 4;
+    // I - vi - IV - V style progression as semitone offsets
+    const progression = isNight ? [0, -4, 5, -2] : [0, 9, 5, 7];
+    const bars = 8;
+    const barLen = 3.4;
+
+    for (let bar = 0; bar < bars; bar++) {
+      const tBar = t0 + bar * barLen;
+      const chordRoot = root * Math.pow(2, progression[bar % progression.length] / 12);
+      // pad: root + third + fifth, swelling under everything
+      this.padAt(tBar, chordRoot * 0.5, 0.045, barLen * 1.15);
+      this.padAt(tBar, chordRoot * Math.pow(2, third / 12) * 0.5, 0.032, barLen * 1.15);
+      this.padAt(tBar, chordRoot * Math.pow(2, 7 / 12) * 0.5, 0.028, barLen * 1.15);
+      // soft bass pulse
+      this.pianoNote(tBar, chordRoot * 0.25, 0.05, 2.6);
+      // sparse pentatonic melody
+      for (const beat of [0, 0.25, 0.5, 0.75]) {
+        if (Math.random() > (beat === 0 ? 0.75 : 0.45)) continue;
+        const deg = pent[(Math.random() * pent.length) | 0];
+        const octave = Math.random() < 0.3 ? 4 : 2;
+        const freq = root * octave * Math.pow(2, deg / 12);
+        this.pianoNote(tBar + beat * barLen + Math.random() * 0.04, freq, 0.05 + Math.random() * 0.025, 2.2);
+      }
+    }
+    return bars * barLen;
+  }
+
+  /** Piano-ish voice: three decaying partials through a soft lowpass. */
+  private pianoNote(when: number, freq: number, vol: number, decay: number): void {
+    if (!this.ctx || !this.musicBus) return;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 2600;
+    filter.connect(this.musicBus);
+    const partials: [number, number][] = [[1, 1], [2, 0.32], [3, 0.1]];
+    for (const [mult, pv] of partials) {
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq * mult * (1 + (Math.random() - 0.5) * 0.0015);
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.linearRampToValueAtTime(vol * pv, when + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0005, when + decay);
+      osc.connect(g).connect(filter);
+      osc.start(when);
+      osc.stop(when + decay + 0.05);
     }
   }
 
-  private pad(freq: number, vol: number, dur: number): void {
-    if (!this.ctx || !this.master) return;
-    const t = this.ctx.currentTime;
+  private padAt(when: number, freq: number, vol: number, dur: number): void {
+    if (!this.ctx || !this.musicBus) return;
     const osc = this.ctx.createOscillator();
-    osc.type = 'sine';
+    osc.type = 'triangle';
     osc.frequency.value = freq;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 900;
     const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(vol, t + dur * 0.4);
-    g.gain.linearRampToValueAtTime(0.0001, t + dur);
-    osc.connect(g).connect(this.master);
-    osc.start(t);
-    osc.stop(t + dur + 0.05);
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.linearRampToValueAtTime(vol, when + dur * 0.35);
+    g.gain.linearRampToValueAtTime(0.0001, when + dur);
+    osc.connect(filter).connect(g).connect(this.musicBus);
+    osc.start(when);
+    osc.stop(when + dur + 0.05);
   }
 }

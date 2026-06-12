@@ -85,6 +85,21 @@ npm run dev        # open the printed localhost URL
 - **Feel**: view bobbing while walking, item-name popups on hotbar switch,
   slot tooltips, and synthesized **mob voices** (oinks, baas, moos, clucks,
   groans, hisses, and skeleton rattles) attenuated by distance.
+- **Farming & growth**: break tall grass for seeds, craft a **hoe**, till
+  grass/dirt into farmland, plant and harvest **wheat** (3 visual growth
+  stages), bake **bread**. Leaves drop **saplings** that grow into
+  biome-appropriate trees; grass spreads onto exposed dirt and dies under
+  opaque blocks — all driven by MC-style surface **random ticks**.
+- **Music**: a generative Web Audio composer plays calm piano-and-pad pieces
+  every few minutes — major-pentatonic by day, minor at night — entirely
+  synthesized, no audio files. Music and sounds toggle from the pause menu
+  (persisted).
+- **Effects**: continuous chip particles at the mined face, bigger break
+  bursts, landing dust + thud on hard falls, white poofs on mob deaths,
+  TNT chain flashes.
+- **Extra visuals**: per-vertex **biome tinting** for grass, foliage, and
+  tall grass (dry plains go yellow-green, humid forests deep green, cold
+  biomes pale), and **animated water** with a gentle world-anchored wave.
 - **Creative**: infinite blocks, instant breaking, flight, full item panel.
 - **Persistence**: RLE-compressed chunk diffs + player/inventory/durability/
   chest/furnace/spawn-point/time state in IndexedDB across three save slots.

@@ -75,6 +75,8 @@ class Game {
       // a removed block exposes whatever sat on it; a placed gravity block may drop
       if (newId === B.AIR) this.supportQueue.add(`${x},${y + 1},${z}`);
       if (GRAVITY_BLOCKS.has(newId)) this.supportQueue.add(`${x},${y},${z}`);
+      // covering grass smothers it
+      if (newId !== B.AIR && def(newId).opaque) this.supportQueue.add(`${x},${y - 1},${z}`);
     };
 
     this.player.init({
@@ -249,6 +251,16 @@ class Game {
         this.renderer.setViewDistance(n);
         this.hud.showPause(this.pauseHandlers(), this.player.mode, this.world.viewDist);
       },
+      onToggleMusic: () => {
+        this.audio.setMusic(!this.audio.musicOn);
+        this.hud.showPause(this.pauseHandlers(), this.player.mode, this.world.viewDist);
+      },
+      onToggleSound: () => {
+        this.audio.setSound(!this.audio.soundOn);
+        this.hud.showPause(this.pauseHandlers(), this.player.mode, this.world.viewDist);
+      },
+      musicOn: () => this.audio.musicOn,
+      soundOn: () => this.audio.soundOn,
       onPack: (files: File[]) => void this.applyPack(files),
     };
   }
@@ -472,7 +484,7 @@ class Game {
         this.tickAcc -= 0.05;
         this.tick20();
       }
-      this.audio.ambientTick(dt);
+      this.audio.ambientTick(dt, Math.sin(this.dayTime * Math.PI * 2) < -0.06);
 
       this.autosaveT += dt;
       if (this.autosaveT >= AUTOSAVE_SECONDS) {
@@ -548,9 +560,95 @@ class Game {
               this.entities.spawnDrop(x + 0.5, y + 0.3, z + 0.5, drop.id, drop.min);
             }
           }
+        } else if (id === B.GRASS) {
+          const above = this.world.getBlock(x, y + 1, z);
+          if (above !== B.AIR && hasDef(above) && def(above).opaque) {
+            this.world.setBlock(x, y, z, B.DIRT);
+          }
         }
       }
     }
+
+    this.randomTicks();
+  }
+
+  /** MC-style random ticks at the surface: saplings grow, wheat advances,
+   *  and grass creeps onto exposed dirt. */
+  private randomTicks(): void {
+    const pcx = Math.floor(this.player.pos.x / CX);
+    const pcz = Math.floor(this.player.pos.z / CZ);
+    for (let dz = -3; dz <= 3; dz++) {
+      for (let dx = -3; dx <= 3; dx++) {
+        const chunk = this.world.getChunk(pcx + dx, pcz + dz);
+        if (!chunk || !chunk.ready) continue;
+        for (let n = 0; n < 3; n++) {
+          const lx = (Math.random() * 16) | 0;
+          const lz = (Math.random() * 16) | 0;
+          const hm = chunk.heightmap[lz * 16 + lx];
+          const wx = chunk.cx * CX + lx, wz = chunk.cz * CZ + lz;
+
+          // plant layer sits just above the heightmap surface
+          const plant = this.world.getBlock(wx, hm, wz);
+          if (plant === B.SAPLING) {
+            if (Math.random() < 0.06) this.growTree(wx, hm, wz);
+            continue;
+          }
+          if (plant === B.WHEAT_0 || plant === B.WHEAT_1) {
+            if (Math.random() < 0.2 && this.world.getBlock(wx, hm - 1, wz) === B.FARMLAND) {
+              this.world.setBlock(wx, hm, wz, plant === B.WHEAT_0 ? B.WHEAT_1 : B.WHEAT_2);
+            }
+            continue;
+          }
+          // grass spread onto exposed dirt
+          const ground = this.world.getBlock(wx, hm - 1, wz);
+          if (ground === B.DIRT && Math.random() < 0.3) {
+            let nearGrass = false;
+            scan:
+            for (let gy = -1; gy <= 1; gy++) {
+              for (let gz = -1; gz <= 1; gz++) {
+                for (let gx = -1; gx <= 1; gx++) {
+                  if (this.world.getBlock(wx + gx, hm - 1 + gy, wz + gz) === B.GRASS) {
+                    nearGrass = true;
+                    break scan;
+                  }
+                }
+              }
+            }
+            if (nearGrass) this.world.setBlock(wx, hm - 1, wz, B.GRASS);
+          }
+        }
+      }
+    }
+  }
+
+  /** Grow a sapling into a biome-appropriate tree using live block writes. */
+  private growTree(x: number, y: number, z: number): void {
+    const biome = this.world.generator.biomeAt(x, z);
+    const variant = Math.random();
+    let log = B.LOG, leaves = B.LEAVES;
+    if (biome === 'snow') { log = B.SPRUCE_LOG; leaves = B.SPRUCE_LEAVES; }
+    else if (variant < 0.25) { log = B.BIRCH_LOG; leaves = B.BIRCH_LEAVES; }
+    const h = 4 + ((Math.random() * 3) | 0);
+
+    this.world.setBlock(x, y, z, B.AIR);
+    const leafAt = (lx: number, ly: number, lz: number): void => {
+      const cur = this.world.getBlock(lx, ly, lz);
+      if (cur === B.AIR || cur === B.LEAVES || cur === B.BIRCH_LEAVES || cur === B.SPRUCE_LEAVES) {
+        this.world.setBlock(lx, ly, lz, leaves);
+      }
+    };
+    for (let dy = h - 3; dy <= h; dy++) {
+      const rad = dy >= h - 1 ? 1 : 2;
+      for (let lx = -rad; lx <= rad; lx++) {
+        for (let lz = -rad; lz <= rad; lz++) {
+          if (lx === 0 && lz === 0 && dy < h) continue;
+          if (Math.abs(lx) === rad && Math.abs(lz) === rad && Math.random() < 0.5) continue;
+          leafAt(x + lx, y + dy, z + lz);
+        }
+      }
+    }
+    for (let dy = 0; dy < h; dy++) this.world.setBlock(x, y + dy, z, log);
+    this.audio.dig('grass', 0.7);
   }
 
   private processMeshing(budgetMs: number): void {

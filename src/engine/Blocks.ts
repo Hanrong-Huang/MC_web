@@ -43,6 +43,11 @@ export enum B {
   SUGAR_CANE = 39,
   /** generated chest that rolls loot the first time it is opened */
   CHEST_LOOT = 40,
+  FARMLAND = 41,
+  WHEAT_0 = 42,
+  WHEAT_1 = 43,
+  WHEAT_2 = 44,
+  SAPLING = 45,
 }
 
 export enum I {
@@ -83,10 +88,14 @@ export enum I {
   DIAMOND_AXE = 134,
   DIAMOND_SHOVEL = 135,
   DIAMOND_SWORD = 136,
+  SEEDS = 137,
+  WHEAT = 138,
+  BREAD = 139,
+  HOE = 140,
 }
 
 export type SoundClass = 'stone' | 'wood' | 'grass' | 'sand' | 'glass' | 'none';
-export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
+export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword' | 'hoe';
 
 export interface Def {
   id: number;
@@ -316,6 +325,34 @@ blockDef({
   solid: false, opaque: false, occludes: false,
   faces: { top: 'sugar_cane', bottom: 'sugar_cane', sides: 'sugar_cane' },
 });
+blockDef({
+  id: B.FARMLAND, name: 'farmland', label: 'Farmland', hardness: 0.5, tool: 'shovel', sound: 'grass',
+  faces: { top: 'farmland_top', bottom: 'dirt', sides: 'dirt' },
+  drop: { id: B.DIRT, min: 1, max: 1 },
+});
+blockDef({
+  id: B.WHEAT_0, name: 'wheat_stage0', label: 'Wheat', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'wheat_0', bottom: 'wheat_0', sides: 'wheat_0' },
+  drop: null, // handled specially: seeds
+});
+blockDef({
+  id: B.WHEAT_1, name: 'wheat_stage1', label: 'Wheat', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'wheat_1', bottom: 'wheat_1', sides: 'wheat_1' },
+  drop: null,
+});
+blockDef({
+  id: B.WHEAT_2, name: 'wheat_stage2', label: 'Wheat', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'wheat_2', bottom: 'wheat_2', sides: 'wheat_2' },
+  drop: null, // handled specially: wheat + seeds
+});
+blockDef({
+  id: B.SAPLING, name: 'oak_sapling', label: 'Sapling', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'sapling', bottom: 'sapling', sides: 'sapling' },
+});
 
 // --- items -------------------------------------------------------------------
 
@@ -367,6 +404,13 @@ itemDef({ id: I.BEEF, name: 'beef', label: 'Raw Beef', sprite: 'beef', food: 3 }
 itemDef({ id: I.COOKED_BEEF, name: 'cooked_beef', label: 'Steak', sprite: 'cooked_beef', food: 8 });
 itemDef({ id: I.ROTTEN_FLESH, name: 'rotten_flesh', label: 'Rotten Flesh', sprite: 'rotten_flesh', food: 2 });
 itemDef({ id: I.APPLE, name: 'apple', label: 'Apple', sprite: 'apple', food: 4 });
+itemDef({ id: I.SEEDS, name: 'wheat_seeds', label: 'Seeds', sprite: 'seeds' });
+itemDef({ id: I.WHEAT, name: 'wheat', label: 'Wheat', sprite: 'wheat' });
+itemDef({ id: I.BREAD, name: 'bread', label: 'Bread', sprite: 'bread', food: 5 });
+itemDef({
+  id: I.HOE, name: 'wooden_hoe', label: 'Hoe', sprite: 'hoe', stack: 1,
+  toolInfo: { kind: 'hoe', tier: 2, damage: 1 }, durability: 120,
+});
 
 export function def(id: number): Def {
   const d = DEFS.get(id);
@@ -390,14 +434,23 @@ for (const d of DEFS.values()) {
 export const GRAVITY_BLOCKS = new Set<number>([B.SAND, B.GRAVEL]);
 
 /** Rendered as two crossed billboards instead of a cube. */
-export const CROSS_BLOCKS = new Set<number>([B.POPPY, B.DANDELION, B.TALL_GRASS, B.SUGAR_CANE]);
+export const CROSS_BLOCKS = new Set<number>([
+  B.POPPY, B.DANDELION, B.TALL_GRASS, B.SUGAR_CANE,
+  B.WHEAT_0, B.WHEAT_1, B.WHEAT_2, B.SAPLING,
+]);
 
 /** Blocks that pop off when the block under them is removed.
  *  Sugar cane and cactus may also stack on themselves. */
 export const FLOOR_BLOCKS = new Set<number>([
   B.TORCH, B.POPPY, B.DANDELION, B.TALL_GRASS, B.SUGAR_CANE, B.CACTUS,
+  B.WHEAT_0, B.WHEAT_1, B.WHEAT_2, B.SAPLING,
 ]);
 export const SELF_STACKING = new Set<number>([B.SUGAR_CANE, B.CACTUS]);
+
+/** Atlas tiles whose faces take the per-biome grass/foliage tint. */
+export const TINTED_TILES = new Set<string>([
+  'grass_top', 'leaves', 'birch_leaves', 'tall_grass',
+]);
 
 /** Can the held item harvest drops from this block (tool-tier gate)? */
 export function canHarvest(blockId: number, heldId: number): boolean {
@@ -437,7 +490,7 @@ export const PLACEABLE: number[] = [
   B.PLANKS, B.LEAVES, B.BIRCH_LEAVES, B.SPRUCE_LEAVES,
   B.GLASS, B.TABLE, B.FURNACE, B.CHEST, B.TORCH, B.BED, B.TNT,
   B.SANDSTONE, B.STONE_BRICKS, B.WOOL, B.SNOW_GRASS,
-  B.POPPY, B.DANDELION, B.TALL_GRASS, B.CACTUS, B.SUGAR_CANE,
+  B.POPPY, B.DANDELION, B.TALL_GRASS, B.CACTUS, B.SUGAR_CANE, B.SAPLING, B.FARMLAND,
   B.COAL_ORE, B.IRON_ORE, B.GOLD_ORE, B.DIAMOND_ORE,
   B.IRON_BLOCK, B.GOLD_BLOCK, B.DIAMOND_BLOCK, B.BEDROCK,
 ];
@@ -452,4 +505,5 @@ export const CREATIVE_ITEMS: number[] = [
   I.DIAMOND_PICK, I.DIAMOND_AXE, I.DIAMOND_SHOVEL, I.DIAMOND_SWORD,
   I.PORKCHOP, I.COOKED_PORKCHOP, I.CHICKEN, I.COOKED_CHICKEN,
   I.MUTTON, I.COOKED_MUTTON, I.BEEF, I.COOKED_BEEF, I.ROTTEN_FLESH, I.APPLE,
+  I.SEEDS, I.WHEAT, I.BREAD, I.HOE,
 ];

@@ -15,14 +15,25 @@ const DAWN_TINT = new THREE.Color(0xd99c66);
 // areas stay bright at night.
 const CHUNK_VERT = /* glsl */ `
 attribute vec2 alight;
+attribute vec3 atint;
 varying vec2 vLight;
+varying vec3 vTint;
 varying vec2 vUv2;
+#ifdef WATER_WAVE
+uniform float uTime;
+#endif
 #include <common>
 #include <fog_pars_vertex>
 void main() {
   vUv2 = uv;
   vLight = alight;
-  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+  vTint = atint;
+  vec3 transformed = position;
+#ifdef WATER_WAVE
+  vec4 wp = modelMatrix * vec4(position, 1.0);
+  transformed.y += sin(uTime * 1.7 + wp.x * 0.9 + wp.z * 0.7) * 0.035 - 0.035;
+#endif
+  vec4 mvPosition = modelViewMatrix * vec4(transformed, 1.0);
   gl_Position = projectionMatrix * mvPosition;
   #include <fog_vertex>
 }
@@ -34,6 +45,7 @@ uniform float uDay;
 uniform float uOpacity;
 uniform float uAlphaTest;
 varying vec2 vLight;
+varying vec3 vTint;
 varying vec2 vUv2;
 #include <common>
 #include <fog_pars_fragment>
@@ -44,21 +56,23 @@ void main() {
   vec3 torch = vLight.y * vec3(1.0, 0.91, 0.74);
   // moonlight floor so sheltered night faces never go fully black
   vec3 light = max(max(sky, torch), vec3(0.06, 0.06, 0.08));
-  gl_FragColor = vec4(tex.rgb * light, tex.a * uOpacity);
+  gl_FragColor = vec4(tex.rgb * vTint * light, tex.a * uOpacity);
   #include <fog_fragment>
   #include <colorspace_fragment>
 }
 `;
 
-function makeChunkMaterial(atlas: Atlas, opts: { alphaTest: number; opacity: number; transparent: boolean }): THREE.ShaderMaterial {
+function makeChunkMaterial(atlas: Atlas, opts: { alphaTest: number; opacity: number; transparent: boolean; wave?: boolean }): THREE.ShaderMaterial {
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       ...THREE.UniformsUtils.clone(THREE.UniformsLib.fog),
       map: { value: atlas.texture },
       uDay: { value: 1 },
+      uTime: { value: 0 },
       uOpacity: { value: opts.opacity },
       uAlphaTest: { value: opts.alphaTest },
     },
+    defines: opts.wave ? { WATER_WAVE: '' } : {},
     vertexShader: CHUNK_VERT,
     fragmentShader: CHUNK_FRAG,
     fog: true,
@@ -125,7 +139,7 @@ export class Renderer {
     this.scene.background = DAY_SKY.clone();
 
     this.solidMat = makeChunkMaterial(atlas, { alphaTest: 0.35, opacity: 1, transparent: false });
-    this.waterMat = makeChunkMaterial(atlas, { alphaTest: 0, opacity: 0.8, transparent: true });
+    this.waterMat = makeChunkMaterial(atlas, { alphaTest: 0, opacity: 0.8, transparent: true, wave: true });
 
     // entity lights (chunk lighting is baked; these affect Lambert mob materials)
     this.hemi = new THREE.HemisphereLight(0xbfd6ff, 0x6b5a45, 0.95);
@@ -318,6 +332,7 @@ export class Renderer {
 
     this.solidMat.uniforms.uDay.value = light;
     this.waterMat.uniforms.uDay.value = light;
+    this.waterMat.uniforms.uTime.value = elapsed;
     this.hemi.intensity = 0.25 + light * 0.75;
     this.dir.intensity = 0.1 + light * 0.5;
     this.heldLight.intensity = 0.35 + light * 0.75;

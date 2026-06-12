@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { World } from './World';
 import { Chunk, CX, CZ, CY } from './Chunk';
-import { B, def, isOpaque, occludes, OPAQUE_LUT, CROSS_BLOCKS } from './Blocks';
+import { B, def, isOpaque, occludes, OPAQUE_LUT, CROSS_BLOCKS, TINTED_TILES } from './Blocks';
 import { Atlas } from './Textures';
 
 // face order: +x, -x, +y, -y, +z, -z
@@ -53,6 +53,7 @@ function faceTile(id: number, face: number): string {
 class GeoBuilder {
   positions: number[] = [];
   lights: number[] = [];
+  tints: number[] = [];
   uvs: number[] = [];
   indices: number[] = [];
   vertCount = 0;
@@ -62,12 +63,18 @@ class GeoBuilder {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(this.positions, 3));
     g.setAttribute('alight', new THREE.Float32BufferAttribute(this.lights, 2));
+    g.setAttribute('atint', new THREE.Float32BufferAttribute(this.tints, 3));
     g.setAttribute('uv', new THREE.Float32BufferAttribute(this.uvs, 2));
     g.setIndex(this.indices);
     g.computeBoundingSphere();
     return g;
   }
 }
+
+// per-chunk column tint cache (biome grass/foliage color)
+const TINT_CACHE = new Float32Array(256 * 3);
+const TINT_SET = new Uint8Array(256);
+const tintScratch = { r: 1, g: 1, b: 1 };
 
 export interface ChunkGeometry {
   solid: THREE.BufferGeometry | null;
@@ -108,6 +115,20 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
     return c.skyLight(x & 15, Math.max(0, y), z & 15);
   };
   const occ = (x: number, y: number, z: number): number => (occludes(get(x, y, z)) ? 1 : 0);
+
+  // biome tint per column, computed lazily
+  TINT_SET.fill(0);
+  const tintAt = (x: number, z: number): Float32Array => {
+    const ci = (x & 15) | ((z & 15) << 4);
+    if (!TINT_SET[ci]) {
+      TINT_SET[ci] = 1;
+      world.generator.grassTint(bx + x, bz + z, tintScratch);
+      TINT_CACHE[ci * 3] = tintScratch.r;
+      TINT_CACHE[ci * 3 + 1] = tintScratch.g;
+      TINT_CACHE[ci * 3 + 2] = tintScratch.b;
+    }
+    return TINT_CACHE.subarray(ci * 3, ci * 3 + 3);
+  };
 
   // --- torch flood fill ------------------------------------------------------
   let hasTorches = false;
@@ -172,7 +193,9 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
           continue;
         }
         if (CROSS_BLOCKS.has(id)) {
-          emitCross(solid, atlas, id, x, y, z, skyAt(x, y, z), torchAt(x, y, z));
+          const tileName = def(id).faces!.sides;
+          const tint = TINTED_TILES.has(tileName) ? tintAt(x, z) : null;
+          emitCross(solid, atlas, id, x, y, z, skyAt(x, y, z), torchAt(x, y, z), tint);
           continue;
         }
 
@@ -197,10 +220,12 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
             if (isOpaque(nb) || nb === id) continue;
           }
 
+          const tileName = faceTile(id, face);
           const geo = FACE_GEO[face];
-          const rect = atlas.rect(faceTile(id, face));
+          const rect = atlas.rect(tileName);
           const shade = FACE_SHADE[face];
           const base = target.vertCount;
+          const tint = TINTED_TILES.has(tileName) ? tintAt(x, z) : null;
           const aos: number[] = [];
 
           for (let corner = 0; corner < 4; corner++) {
@@ -237,6 +262,8 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
             const k = shade * AO_SHADE[aoLevel];
             target.positions.push(x + px, y + py, z + pz);
             target.lights.push(k * sky, k * torch);
+            if (tint) target.tints.push(tint[0], tint[1], tint[2]);
+            else target.tints.push(1, 1, 1);
             target.uvs.push(
               a ? rect.u1 : rect.u0,
               b ? rect.v0 : rect.v1, // b=1 is the face top -> image top (flipY=false)
@@ -260,7 +287,7 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
 
 /** Crossed billboards for plants (flowers, grass, sugar cane). Both windings
  *  are emitted so the front-face-culled chunk material shows them from any side. */
-function emitCross(g: GeoBuilder, atlas: Atlas, id: number, x: number, y: number, z: number, sky: number, torch: number): void {
+function emitCross(g: GeoBuilder, atlas: Atlas, id: number, x: number, y: number, z: number, sky: number, torch: number, tint: Float32Array | null): void {
   const rect = atlas.rect(def(id).faces!.sides);
   const a = 0.146, b = 0.854; // ~ MC's sqrt(2)/2-inset diagonal
   const planes: [number, number, number, number][] = [
@@ -278,6 +305,8 @@ function emitCross(g: GeoBuilder, atlas: Atlas, id: number, x: number, y: number
       for (let i = 0; i < 4; i++) {
         g.positions.push(x + corners[i][0], y + corners[i][1], z + corners[i][2]);
         g.lights.push(sky, torch);
+        if (tint) g.tints.push(tint[0], tint[1], tint[2]);
+        else g.tints.push(1, 1, 1);
         g.uvs.push(us[i], vs[i]);
       }
       g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
@@ -304,6 +333,7 @@ function emitTorch(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number,
   const push = (px: number, py: number, pz: number, u: number, v: number): void => {
     g.positions.push(x + px, y + py, z + pz);
     g.lights.push(sky, Math.max(torch, 0.9)); // a torch always glows itself
+    g.tints.push(1, 1, 1);
     g.uvs.push(u, v);
   };
   for (const q of quads) {

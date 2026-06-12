@@ -75,6 +75,7 @@ export class Entity {
   // particle fields
   life = 0;
   maxLife = 0;
+  pGrav = 18;
 
   constructor(kind: EntityKind, pos: Vec3, box: { w: number; h: number }, mesh: THREE.Group) {
     this.kind = kind;
@@ -190,38 +191,84 @@ export class EntityManager {
     this.audio.play('bow');
   }
 
-  /** MC-style block-break particles: textured flecks from the block's tile. */
-  spawnBlockParticles(x: number, y: number, z: number, blockId: number, count: number): void {
-    if (!hasDef(blockId) || !def(blockId).faces) return;
-    const tile = def(blockId).faces!.sides;
+  /** One textured fleck sampled from the block's tile. */
+  private makeParticle(tile: string, x: number, y: number, z: number,
+    vel: { x: number; y: number; z: number }, life: number, grav = 18): void {
     let mat = this.particleMats.get(tile);
     if (!mat) {
       mat = new THREE.MeshBasicMaterial({ map: this.atlas.texture, side: THREE.DoubleSide });
       this.particleMats.set(tile, mat);
     }
     const rect = this.atlas.rect(tile);
+    const geo = new THREE.PlaneGeometry(0.13, 0.13);
+    const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
+    const u = rect.u0 + Math.random() * (rect.u1 - rect.u0) * 0.75;
+    const v = rect.v0 + Math.random() * (rect.v1 - rect.v0) * 0.75;
+    const du = (rect.u1 - rect.u0) * 0.25, dv = (rect.v1 - rect.v0) * 0.25;
+    uv.setXY(0, u, v); uv.setXY(1, u + du, v); uv.setXY(2, u, v + dv); uv.setXY(3, u + du, v + dv);
+    const mesh = new THREE.Group();
+    mesh.add(new THREE.Mesh(geo, mat));
+    const e = new Entity('particle', { x, y, z }, { w: 0.08, h: 0.08 }, mesh);
+    e.vel = vel;
+    e.maxLife = e.life = life;
+    e.pGrav = grav;
+    this.entities.push(e);
+    this.scene.add(mesh);
+  }
+
+  /** MC-style block-break particles: textured flecks from the block's tile. */
+  spawnBlockParticles(x: number, y: number, z: number, blockId: number, count: number): void {
+    if (!hasDef(blockId) || !def(blockId).faces) return;
+    const tile = def(blockId).faces!.sides;
     for (let i = 0; i < count; i++) {
-      const geo = new THREE.PlaneGeometry(0.13, 0.13);
-      const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
-      const u = rect.u0 + Math.random() * (rect.u1 - rect.u0) * 0.75;
-      const v = rect.v0 + Math.random() * (rect.v1 - rect.v0) * 0.75;
-      const du = (rect.u1 - rect.u0) * 0.25, dv = (rect.v1 - rect.v0) * 0.25;
-      uv.setXY(0, u, v); uv.setXY(1, u + du, v); uv.setXY(2, u, v + dv); uv.setXY(3, u + du, v + dv);
-      const mesh = new THREE.Group();
-      mesh.add(new THREE.Mesh(geo, mat));
-      const e = new Entity('particle', {
-        x: x + 0.2 + Math.random() * 0.6,
-        y: y + 0.2 + Math.random() * 0.6,
-        z: z + 0.2 + Math.random() * 0.6,
-      }, { w: 0.08, h: 0.08 }, mesh);
-      e.vel = {
-        x: (Math.random() - 0.5) * 3.5,
-        y: 1.5 + Math.random() * 3,
-        z: (Math.random() - 0.5) * 3.5,
-      };
-      e.maxLife = e.life = 0.35 + Math.random() * 0.45;
-      this.entities.push(e);
-      this.scene.add(mesh);
+      this.makeParticle(tile,
+        x + 0.2 + Math.random() * 0.6,
+        y + 0.2 + Math.random() * 0.6,
+        z + 0.2 + Math.random() * 0.6,
+        {
+          x: (Math.random() - 0.5) * 3.5,
+          y: 1.5 + Math.random() * 3,
+          z: (Math.random() - 0.5) * 3.5,
+        },
+        0.35 + Math.random() * 0.45);
+    }
+  }
+
+  /** Small puffs at the mined face while a block is being broken. */
+  spawnHitParticles(x: number, y: number, z: number, nx: number, ny: number, nz: number, blockId: number): void {
+    if (!hasDef(blockId) || !def(blockId).faces) return;
+    const tile = def(blockId).faces!.sides;
+    for (let i = 0; i < 2; i++) {
+      const jx = (Math.random() - 0.5) * 0.7 * (1 - Math.abs(nx));
+      const jy = (Math.random() - 0.5) * 0.7 * (1 - Math.abs(ny));
+      const jz = (Math.random() - 0.5) * 0.7 * (1 - Math.abs(nz));
+      this.makeParticle(tile,
+        x + 0.5 + nx * 0.56 + jx,
+        y + 0.5 + ny * 0.56 + jy,
+        z + 0.5 + nz * 0.56 + jz,
+        {
+          x: nx * (1 + Math.random()) + (Math.random() - 0.5) * 1.2,
+          y: Math.abs(ny) * 1.5 + 0.8 + Math.random(),
+          z: nz * (1 + Math.random()) + (Math.random() - 0.5) * 1.2,
+        },
+        0.25 + Math.random() * 0.25);
+    }
+  }
+
+  /** White smoke poof (mob deaths). */
+  spawnPoof(x: number, y: number, z: number): void {
+    for (let i = 0; i < 9; i++) {
+      this.makeParticle('wool',
+        x + (Math.random() - 0.5) * 0.7,
+        y + Math.random() * 1.2,
+        z + (Math.random() - 0.5) * 0.7,
+        {
+          x: (Math.random() - 0.5) * 1.2,
+          y: 0.8 + Math.random() * 1.4,
+          z: (Math.random() - 0.5) * 1.2,
+        },
+        0.5 + Math.random() * 0.4,
+        -1.5); // smoke drifts upward
     }
   }
 
@@ -429,7 +476,7 @@ export class EntityManager {
   private updateParticle(e: Entity, dt: number, camQ: THREE.Quaternion): void {
     e.life -= dt;
     if (e.life <= 0) { e.dead = true; return; }
-    e.vel.y -= 18 * dt;
+    e.vel.y -= e.pGrav * dt;
     e.vel.x *= 1 - Math.min(1, 3 * dt);
     e.vel.z *= 1 - Math.min(1, 3 * dt);
     moveEntity(this.world, e.pos, e.vel, dt, e.box);
@@ -715,6 +762,7 @@ export class EntityManager {
     if (e.hp <= 0) {
       e.dead = true;
       this.audio.play('pop');
+      this.spawnPoof(e.pos.x, e.pos.y, e.pos.z);
       this.dropLoot(e);
     }
   }

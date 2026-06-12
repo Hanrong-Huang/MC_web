@@ -205,10 +205,18 @@ export class Player {
     if (wasInWater && (res.hitX || res.hitZ) && space) this.vel.y = Math.max(this.vel.y, 4.5);
     this.onGround = res.onGround;
 
-    // fall damage
+    // fall damage + landing dust on hard impacts
     if (!this.flying && !wasInWater) {
       if (this.vel.y < 0) this.fallDist += -this.vel.y * dt;
       if (this.onGround && this.fallDist > 0) {
+        if (this.fallDist > 2.5) {
+          const below = world.getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y - 0.5), Math.floor(this.pos.z));
+          if (below !== B.AIR && hasDef(below)) {
+            this.deps.entities.spawnBlockParticles(
+              Math.floor(this.pos.x), Math.floor(this.pos.y), Math.floor(this.pos.z), below, 6);
+            this.deps.audio.step(def(below).sound);
+          }
+        }
         const dmg = Math.floor(this.fallDist - 3);
         if (dmg > 0 && this.mode === 'survival') {
           this.damage(dmg);
@@ -331,6 +339,7 @@ export class Player {
       this.swingRepeat = 0.26;
       renderer.triggerSwing();
       audio.dig(def(t.id).sound, 0.25);
+      this.deps.entities.spawnHitParticles(t.x, t.y, t.z, t.nx, t.ny, t.nz, t.id);
     }
 
     if (this.breaking.progress >= 1) {
@@ -369,7 +378,7 @@ export class Player {
 
     world.setBlock(x, y, z, B.AIR);
     audio.dig(def(id).sound, 1);
-    entities.spawnBlockParticles(x, y, z, id, 8);
+    entities.spawnBlockParticles(x, y, z, id, 12);
 
     if (withDrops && this.mode === 'survival') {
       if (def(id).hardness > 0) this.damageHeldTool(true);
@@ -379,8 +388,23 @@ export class Player {
         entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, Math.random() < 0.25 ? I.FLINT : B.GRAVEL, 1);
         return;
       }
-      if (id === B.LEAVES) {
-        if (Math.random() < 0.04) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.APPLE, 1);
+      if (id === B.LEAVES || id === B.BIRCH_LEAVES || id === B.SPRUCE_LEAVES) {
+        const r = Math.random();
+        if (r < 0.06) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, B.SAPLING, 1);
+        else if (id === B.LEAVES && r < 0.1) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.APPLE, 1);
+        return;
+      }
+      if (id === B.TALL_GRASS) {
+        if (Math.random() < 0.18) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.SEEDS, 1);
+        return;
+      }
+      if (id === B.WHEAT_0 || id === B.WHEAT_1) {
+        entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.SEEDS, 1);
+        return;
+      }
+      if (id === B.WHEAT_2) {
+        entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.WHEAT, 1);
+        entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.SEEDS, 1 + Math.floor(Math.random() * 2));
         return;
       }
       const d = def(id);
@@ -471,6 +495,31 @@ export class Player {
         this.deps.igniteTnt(t.x, t.y, t.z);
         return;
       }
+    }
+
+    // hoe: till grass/dirt into farmland
+    if (this.target && heldDef?.toolInfo?.kind === 'hoe' &&
+      (this.target.id === B.GRASS || this.target.id === B.DIRT) &&
+      world.getBlock(this.target.x, this.target.y + 1, this.target.z) === B.AIR) {
+      world.setBlock(this.target.x, this.target.y, this.target.z, B.FARMLAND);
+      this.placeCooldown = 0.25;
+      this.deps.renderer.triggerSwing();
+      audio.dig('grass', 0.9);
+      this.damageHeldTool();
+      return;
+    }
+
+    // seeds: plant wheat on farmland
+    if (this.target && held?.id === I.SEEDS) {
+      if (this.target.id === B.FARMLAND && this.target.ny === 1 &&
+        world.getBlock(this.target.x, this.target.y + 1, this.target.z) === B.AIR) {
+        world.setBlock(this.target.x, this.target.y + 1, this.target.z, B.WHEAT_0);
+        this.placeCooldown = 0.22;
+        this.deps.renderer.triggerSwing();
+        audio.dig('grass', 0.6);
+        if (this.mode === 'survival') this.inventory.consumeSelected();
+      }
+      return;
     }
 
     // placement

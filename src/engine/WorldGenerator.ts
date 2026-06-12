@@ -80,6 +80,21 @@ export class WorldGenerator {
     return Math.max(4, Math.min(CY - 10, Math.floor(h)));
   }
 
+  /** Per-column grass/foliage tint multiplier (warm-dry, lush, cold-pale). */
+  grassTint(wx: number, wz: number, out: { r: number; g: number; b: number }): void {
+    const t = this.temperatureAt(wx, wz);
+    const m = this.humidityAt(wx, wz);
+    // dry climates push yellow, humidity pushes deep green, cold washes pale-blue
+    out.r = Math.min(1.15, 0.78 + (1 - m) * 0.34);
+    out.g = 1.0;
+    out.b = 0.55 + (1 - t) * 0.4;
+    if (t < 0.32) { // cold fade
+      const k = (0.32 - t) / 0.32;
+      out.r = out.r * (1 - k) + 0.85 * k;
+      out.b = Math.min(1, out.b + k * 0.15);
+    }
+  }
+
   biomeAt(wx: number, wz: number): BiomeId {
     const t = this.temperatureAt(wx, wz);
     const m = this.humidityAt(wx, wz);
