@@ -5,7 +5,9 @@ import { SoundClass } from './Blocks';
 
 export type SfxName =
   | 'pop' | 'hurt' | 'hit' | 'eat' | 'burp' | 'click' | 'level'
-  | 'explode' | 'bow' | 'snap' | 'fuse' | 'arrowHit';
+  | 'doorOpen' | 'doorClose'
+  | 'explode' | 'bow' | 'snap' | 'fuse' | 'arrowHit'
+  | 'thunder' | 'rain';
 
 interface AudioSettings { music: boolean; sound: boolean }
 
@@ -134,6 +136,20 @@ export class AudioEngine {
       case 'eat': this.noiseBurst(0.07, 1400, 0.25, 'bandpass'); break;
       case 'burp': this.tone(0.25, 220, 80, 0.3, 'sawtooth'); break;
       case 'click': this.tone(0.035, 850, 700, 0.18, 'square'); break;
+      case 'doorOpen':
+        // wooden latch + creak upward (MC-style)
+        this.tone(0.04, 520, 420, 0.14, 'square');
+        this.noiseBurst(0.14, 320, 0.28, 'bandpass', 900);
+        this.tone(0.16, 140, 240, 0.16, 'triangle');
+        this.tone(0.1, 220, 310, 0.1, 'sine', 0.05);
+        break;
+      case 'doorClose':
+        // soft thud + descending creak
+        this.noiseBurst(0.12, 480, 0.26, 'bandpass', 220);
+        this.tone(0.18, 210, 95, 0.18, 'triangle');
+        this.tone(0.08, 380, 260, 0.1, 'square', 0.04);
+        this.noiseBurst(0.06, 180, 0.14, 'lowpass', 90);
+        break;
       case 'level': this.tone(0.3, 520, 1040, 0.2, 'sine'); this.tone(0.3, 660, 1320, 0.15, 'sine', 0.08); break;
       case 'explode':
         this.noiseBurst(0.8, 350, 0.8, 'lowpass', 60);
@@ -150,6 +166,16 @@ export class AudioEngine {
         break;
       case 'fuse': this.noiseBurst(1.3, 3800, 0.22, 'highpass'); break;
       case 'arrowHit': this.tone(0.06, 950, 500, 0.2, 'triangle'); this.noiseBurst(0.05, 2000, 0.12, 'bandpass'); break;
+      case 'thunder':
+        // layered: low rumble + crackle, fading slowly
+        this.noiseBurst(2.0, 600, 0.6, 'lowpass', 80);
+        this.tone(1.8, 70, 38, 0.55, 'sine');
+        this.noiseBurst(0.5, 1800, 0.35, 'highpass');
+        break;
+      case 'rain':
+        // a soft hissing bed, very quiet
+        this.noiseBurst(2.0, 2600, 0.12, 'highpass');
+        break;
     }
   }
 

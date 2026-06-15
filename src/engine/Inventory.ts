@@ -135,6 +135,11 @@ const RECIPES: Recipe[] = [
   { shape: [[SA, SA], [SA, SA]], out: B.SANDSTONE, n: 1 },
   { shape: [[B.STONE, B.STONE], [B.STONE, B.STONE]], out: B.STONE_BRICKS, n: 4 },
   { shape: [[ST, ST], [ST, ST]], out: B.WOOL, n: 1 },
+  // buildable interactivity
+  { shape: [[P, P], [P, P], [P, P]], out: I.WOOD_DOOR, n: 3 },
+  { shape: [[P, P, P], [P, P, P], [0, 0, 0]], out: I.WOOD_DOOR, n: 3 },
+  { shape: [[P, P, P], [0, S, 0], [0, S, 0]], out: B.LADDER, n: 3 },
+  { shape: [[P, P, P], [P, 0, P], [P, P, P]], out: B.TRAPDOOR, n: 2 },
   // resource blocks (and back)
   { shape: [[FE, FE, FE], [FE, FE, FE], [FE, FE, FE]], out: B.IRON_BLOCK, n: 1 },
   { shape: [[AU, AU, AU], [AU, AU, AU], [AU, AU, AU]], out: B.GOLD_BLOCK, n: 1 },

@@ -9,6 +9,8 @@ import { def, hasDef } from './Blocks';
 const DAY_SKY = new THREE.Color(0x82b8ff);
 const NIGHT_SKY = new THREE.Color(0x0a0c1c);
 const DAWN_TINT = new THREE.Color(0xd99c66);
+const THUNDER_SKY = new THREE.Color(0x4a4f5a);
+const FLASH_WHITE = new THREE.Color(0xf4f4ff);
 
 // Chunk shader: vertex 'alight' = (sky-lit, torch-lit). Sky scales with the
 // day/night uniform; torch light is constant and slightly warm, so torch-lit
@@ -315,18 +317,26 @@ export class Renderer {
   /**
    * t in [0,1): 0 = sunrise, 0.25 = noon, 0.5 = sunset, 0.75 = midnight.
    * Returns the current light level in [0.16, 1].
+   * `weatherDark` (0..1) dims the sky for rain/thunder; `flash` (0..1) whites
+   * it out briefly on a lightning strike.
    */
-  updateEnvironment(t: number, camX: number, camZ: number, elapsed: number): number {
+  updateEnvironment(t: number, camX: number, camZ: number, elapsed: number,
+    weatherDark = 0, flash = 0): number {
     const ang = t * Math.PI * 2;
     const sunY = Math.sin(ang);
     const sunX = Math.cos(ang);
-    const light = Math.max(0.16, Math.min(1, sunY * 2.4 + 0.42));
+    let light = Math.max(0.16, Math.min(1, sunY * 2.4 + 0.42));
+    // precipitation dims the world
+    light = Math.max(0.1, light * (1 - weatherDark * 0.6));
     this.daylight = light;
 
     // sky + fog color, with a dawn/dusk tint
     const sky = NIGHT_SKY.clone().lerp(DAY_SKY, Math.max(0, Math.min(1, (light - 0.16) / 0.84)));
     const duskAmount = Math.max(0, 1 - Math.abs(sunY) * 5) * 0.45;
     sky.lerp(DAWN_TINT, duskAmount);
+    // weather grey-wash + lightning flash
+    if (weatherDark > 0) sky.lerp(THUNDER_SKY, weatherDark * 0.8);
+    if (flash > 0) sky.lerp(FLASH_WHITE, flash);
     (this.scene.background as THREE.Color).copy(sky);
     this.fog.color.copy(sky);
 
@@ -343,8 +353,8 @@ export class Renderer {
     this.sun.lookAt(this.camera.position);
     this.moon.position.set(camX - sunX * R, -sunY * R, camZ);
     this.moon.lookAt(this.camera.position);
-    this.sun.visible = sunY > -0.18;
-    this.moon.visible = sunY < 0.18;
+    this.sun.visible = sunY > -0.18 && weatherDark < 0.6;
+    this.moon.visible = sunY < 0.18 && weatherDark < 0.6;
 
     this.starsMat.opacity = Math.max(0, Math.min(1, (0.45 - light) * 3));
     this.stars.position.set(camX, 0, camZ);
@@ -358,6 +368,8 @@ export class Renderer {
       ((camX + elapsed * 1.4) % worldPerTile) / worldPerTile,
       (-camZ % worldPerTile) / worldPerTile,
     );
+    // clouds thicken + darken with weather
+    (this.clouds.material as THREE.MeshBasicMaterial).opacity = 0.6 + weatherDark * 0.35;
     return light;
   }
 

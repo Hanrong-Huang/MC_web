@@ -192,6 +192,23 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
           emitTorch(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z));
           continue;
         }
+        if (id === B.DOOR_LOWER || id === B.DOOR_UPPER) {
+          const st = world.doorStateAt(bx + x, y, bz + z);
+          const facing = st?.facing ?? 0;
+          const hingeRight = !!st?.hingeRight;
+          const swing = st?.swing ?? (st?.open ? 1 : 0);
+          emitDoor(solid, atlas, id, x, y, z, facing, hingeRight, swing, skyAt(x, y, z), torchAt(x, y, z));
+          continue;
+        }
+        if (id === B.LADDER) {
+          emitLadder(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z));
+          continue;
+        }
+        if (id === B.TRAPDOOR) {
+          const open = !!world.doorStates.get(`${bx + x},${y},${bz + z}`)?.open;
+          emitTrapdoor(solid, atlas, x, y, z, open, skyAt(x, y, z), torchAt(x, y, z));
+          continue;
+        }
         if (CROSS_BLOCKS.has(id)) {
           const tileName = def(id).faces!.sides;
           const tint = TINTED_TILES.has(tileName) ? tintAt(x, z) : null;
@@ -316,8 +333,7 @@ function emitCross(g: GeoBuilder, atlas: Atlas, id: number, x: number, y: number
 }
 
 /** Small free-standing torch model: a 2/16-wide column, 10/16 tall. */
-function emitTorch(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number, sky: number, torch: number): void {
-  const rect = atlas.rect('torch');
+function emitTorch(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number, sky: number, torch: number): void {  const rect = atlas.rect('torch');
   const du = rect.u1 - rect.u0, dv = rect.v1 - rect.v0;
   const lo = 7 / 16, hi = 9 / 16, top = 10 / 16;
   // uv sub-rect of the torch tile that contains the drawn torch
@@ -353,6 +369,169 @@ function emitTorch(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number,
   push(hi, top, hi, tu1, tv1);
   push(hi, top, lo, tu1, tv0);
   push(lo, top, lo, tu0, tv0);
+  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  g.vertCount += 4;
+}
+
+/** Door panels are thin slabs; geometry is computed in doorFootprints below. */
+const DOOR_INSET = 1 / 128; // keep the leaf off block walls to avoid z-fighting
+
+/** Closed/open panel footprints (BL=hinge-outer, then around the rectangle).
+ *  Closed: thin slab flush against the player-facing block edge, filling the
+ *  doorway (vanilla MC). Open: swung 90deg flat against the perpendicular wall
+ *  on the hinge side, thickness pointing into the room. Both stay in-bounds and
+ *  share the outer hinge corner (footprint[0]) so the swing pivots there. */
+function doorFootprints(
+  facing: number, hingeRight: boolean, t: number,
+): { closed: [number, number][]; open: [number, number][] } {
+  const e = DOOR_INSET;
+  const lo = e, hi = 1 - e;
+  switch (facing) {
+    case 0: // N=+z, flush at z=hi
+      return hingeRight
+        ? { closed: [[hi, hi], [lo, hi], [lo, hi - t], [hi, hi - t]],
+            open: [[hi, hi], [hi, lo], [hi - t, lo], [hi - t, hi]] }
+        : { closed: [[lo, hi], [hi, hi], [hi, hi - t], [lo, hi - t]],
+            open: [[lo, hi], [lo, lo], [lo + t, lo], [lo + t, hi]] };
+    case 2: // N=-z, flush at z=lo
+      return hingeRight
+        ? { closed: [[hi, lo], [lo, lo], [lo, lo + t], [hi, lo + t]],
+            open: [[hi, lo], [hi, hi], [hi - t, hi], [hi - t, lo]] }
+        : { closed: [[lo, lo], [hi, lo], [hi, lo + t], [lo, lo + t]],
+            open: [[lo, lo], [lo, hi], [lo + t, hi], [lo + t, lo]] };
+    case 1: // N=+x, flush at x=hi
+      return hingeRight
+        ? { closed: [[hi, lo], [hi, hi], [hi - t, hi], [hi - t, lo]],
+            open: [[hi, lo], [lo, lo], [lo, lo + t], [hi, lo + t]] }
+        : { closed: [[hi, hi], [hi, lo], [hi - t, lo], [hi - t, hi]],
+            open: [[hi, hi], [lo, hi], [lo, hi - t], [hi, hi - t]] };
+    default: // N=-x, flush at x=lo
+      return hingeRight
+        ? { closed: [[lo, hi], [lo, lo], [lo + t, lo], [lo + t, hi]],
+            open: [[lo, hi], [hi, hi], [hi, hi - t], [lo, hi - t]] }
+        : { closed: [[lo, lo], [lo, hi], [lo + t, hi], [lo + t, lo]],
+            open: [[lo, lo], [hi, lo], [hi, lo + t], [lo, lo + t]] };
+  }
+}
+
+/** Interpolate the leaf between closed and open. Corner-lerp with smoothstep:
+ *  the outer hinge corner is fixed and the thin slab stays inside the cell at
+ *  every angle, so it never clips neighbouring blocks. */
+function doorSwingFootprint(
+  facing: number, hingeRight: boolean, swing: number, t: number,
+): [number, number][] {
+  const { closed, open } = doorFootprints(facing, hingeRight, t);
+  if (swing <= 0) return closed;
+  if (swing >= 1) return open;
+  const s = swing * swing * (3 - 2 * swing);
+  return closed.map(([cx, cz], i) => {
+    const [ox, oz] = open[i];
+    return [cx + (ox - cx) * s, cz + (oz - cz) * s];
+  });
+}
+
+/** Door leaf hinged on a vertical edge; swing 0..1 rotates it 90deg inward.
+ *  Geometry stays inside the block cell so it never clips neighbours. */
+function emitDoor(
+  g: GeoBuilder, atlas: Atlas, id: number, x: number, y: number, z: number,
+  facing: number, hingeRight: boolean, swing: number, sky: number, torch: number,
+): void {
+  const rect = atlas.rect(id === B.DOOR_UPPER ? 'door_upper' : 'door_lower');
+  const t = 2 / 16;
+  const foot = doorSwingFootprint(facing, hingeRight, swing, t);
+  emitDoorPanel(g, x, y, z, foot, rect, sky, torch);
+}
+
+/** Textured door slab from four bottom xz corners (y spans 0..1 in the cell). */
+function emitDoorPanel(
+  g: GeoBuilder, bx: number, by: number, bz: number,
+  foot: [number, number][],
+  rect: { u0: number; u1: number; v0: number; v1: number },
+  sky: number, torch: number,
+): void {
+  const { u0, u1, v0, v1 } = rect;
+  const y0 = 0, y1 = 1;
+  const bot = foot.map(([px, pz]) => [px, y0, pz]);
+  const top = foot.map(([px, pz]) => [px, y1, pz]);
+  const pushQuad = (corners: number[][], us: number[], vs: number[]): void => {
+    const base = g.vertCount;
+    for (let i = 0; i < 4; i++) {
+      g.positions.push(bx + corners[i][0], by + corners[i][1], bz + corners[i][2]);
+      g.lights.push(sky, torch);
+      g.tints.push(1, 1, 1);
+      g.uvs.push(us[i], vs[i]);
+    }
+    g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    g.vertCount += 4;
+  };
+  const faceU = [u0, u1, u1, u0];
+  const faceV = [v1, v1, v0, v0];
+  const edgeU = [u0, u1, u1, u0];
+  const edgeV = [v1, v1, v0, v0];
+
+  // front/back: average the two side quads' winding from the footprint
+  pushQuad([bot[0], bot[1], top[1], top[0]], faceU, faceV);
+  pushQuad([bot[2], bot[3], top[3], top[2]], faceU, faceV);
+  pushQuad([bot[1], bot[2], top[2], top[1]], edgeU, edgeV);
+  pushQuad([bot[3], bot[0], top[0], top[3]], edgeU, edgeV);
+  pushQuad([bot[0], bot[1], bot[2], bot[3]], edgeU, edgeV);
+  pushQuad([top[2], top[1], top[0], top[3]], edgeU, edgeV);
+}
+
+/** Ladder: a flat panel against the back of the cell, 1/16 off the wall. */
+function emitLadder(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number, sky: number, torch: number): void {
+  const rect = atlas.rect('ladder');
+  const off = 2 / 16;
+  // emit against all four walls cheaply — the cull rules above already filter,
+  // and double-sided chunk material shows it from any side
+  const faces: number[][][] = [
+    // +z wall (ladder facing -z, climber between)
+    [[x + off, y, z + 1], [x + 1 - off, y, z + 1], [x + 1 - off, y + 1, z + 1], [x + off, y + 1, z + 1]],
+    // -z wall
+    [[x + 1 - off, y, z], [x + off, y, z], [x + off, y + 1, z], [x + 1 - off, y + 1, z]],
+    // +x wall
+    [[x + 1, y, z + 1 - off], [x + 1, y, z + off], [x + 1, y + 1, z + off], [x + 1, y + 1, z + 1 - off]],
+    // -x wall
+    [[x, y, z + off], [x, y, z + 1 - off], [x, y + 1, z + 1 - off], [x, y + 1, z + off]],
+  ];
+  for (const q of faces) {
+    const base = g.vertCount;
+    for (let i = 0; i < 4; i++) {
+      g.positions.push(q[i][0], q[i][1], q[i][2]);
+      g.lights.push(sky, torch);
+      g.tints.push(1, 1, 1);
+      g.uvs.push(i === 0 || i === 3 ? rect.u0 : rect.u1, i < 2 ? rect.v1 : rect.v0);
+    }
+    g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    g.vertCount += 4;
+  }
+}
+
+/** Trapdoor: flat panel flush with the floor when closed, upright when open. */
+function emitTrapdoor(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number, open: boolean, sky: number, torch: number): void {
+  const rect = atlas.rect('trapdoor');
+  const thick = 3 / 16;
+  const base = g.vertCount;
+  let corners: number[][];
+  if (open) {
+    // standing upright along +z edge
+    corners = [
+      [x + 0, y + 0, z + 1 - thick], [x + 1, y + 0, z + 1 - thick],
+      [x + 1, y + 1, z + 1 - thick], [x + 0, y + 1, z + 1 - thick],
+    ];
+  } else {
+    // flush with the cell top
+    corners = [
+      [x + 0, y + 1 - thick, z + 0], [x + 1, y + 1 - thick, z + 0],
+      [x + 1, y + 1 - thick, z + 1], [x + 0, y + 1 - thick, z + 1],
+    ];
+  }
+  for (let i = 0; i < 4; i++) {
+    g.positions.push(corners[i][0], corners[i][1], corners[i][2]);
+    g.lights.push(sky, torch);
+    g.tints.push(1, 1, 1);
+    g.uvs.push(i === 0 || i === 3 ? rect.u0 : rect.u1, i < 2 ? rect.v1 : rect.v0);
+  }
   g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
   g.vertCount += 4;
 }

@@ -48,6 +48,12 @@ export enum B {
   WHEAT_1 = 43,
   WHEAT_2 = 44,
   SAPLING = 45,
+  /** closed wooden door (lower half) */
+  DOOR_LOWER = 46,
+  /** closed wooden door (upper half) */
+  DOOR_UPPER = 47,
+  LADDER = 48,
+  TRAPDOOR = 49,
 }
 
 export enum I {
@@ -92,6 +98,7 @@ export enum I {
   WHEAT = 138,
   BREAD = 139,
   HOE = 140,
+  WOOD_DOOR = 141,
 }
 
 export type SoundClass = 'stone' | 'wood' | 'grass' | 'sand' | 'glass' | 'none';
@@ -353,6 +360,28 @@ blockDef({
   solid: false, opaque: false, occludes: false,
   faces: { top: 'sapling', bottom: 'sapling', sides: 'sapling' },
 });
+// door halves (lower + upper); collision is conditional on the open bit, handled in Physics
+blockDef({
+  id: B.DOOR_LOWER, name: 'oak_door_bottom', label: 'Wooden Door', hardness: 1, tool: 'axe', sound: 'wood', fuel: 10,
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'door_top', bottom: 'door_top', sides: 'door_lower', front: 'door_lower' },
+});
+blockDef({
+  id: B.DOOR_UPPER, name: 'oak_door_top', label: 'Wooden Door', hardness: 1, tool: 'axe', sound: 'wood', fuel: 10,
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'door_top', bottom: 'door_top', sides: 'door_upper', front: 'door_upper' },
+  drop: null, // only the lower half drops a door item
+});
+blockDef({
+  id: B.LADDER, name: 'ladder', label: 'Ladder', hardness: 0.4, tool: 'axe', sound: 'wood', fuel: 2,
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'ladder', bottom: 'ladder', sides: 'ladder', front: 'ladder' },
+});
+blockDef({
+  id: B.TRAPDOOR, name: 'oak_trapdoor', label: 'Wooden Trapdoor', hardness: 1, tool: 'axe', sound: 'wood', fuel: 10,
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'trapdoor', bottom: 'trapdoor', sides: 'trapdoor' },
+});
 
 // --- items -------------------------------------------------------------------
 
@@ -411,6 +440,8 @@ itemDef({
   id: I.HOE, name: 'wooden_hoe', label: 'Hoe', sprite: 'hoe', stack: 1,
   toolInfo: { kind: 'hoe', tier: 2, damage: 1 }, durability: 120,
 });
+// A door "item" places the lower half; the engine spawns the upper half above it.
+itemDef({ id: I.WOOD_DOOR, name: 'oak_door', label: 'Wooden Door', sprite: 'wood_door' });
 
 export function def(id: number): Def {
   const d = DEFS.get(id);
@@ -493,6 +524,7 @@ export const PLACEABLE: number[] = [
   B.POPPY, B.DANDELION, B.TALL_GRASS, B.CACTUS, B.SUGAR_CANE, B.SAPLING, B.FARMLAND,
   B.COAL_ORE, B.IRON_ORE, B.GOLD_ORE, B.DIAMOND_ORE,
   B.IRON_BLOCK, B.GOLD_BLOCK, B.DIAMOND_BLOCK, B.BEDROCK,
+  B.LADDER, B.TRAPDOOR,
 ];
 
 export const CREATIVE_ITEMS: number[] = [
@@ -505,5 +537,5 @@ export const CREATIVE_ITEMS: number[] = [
   I.DIAMOND_PICK, I.DIAMOND_AXE, I.DIAMOND_SHOVEL, I.DIAMOND_SWORD,
   I.PORKCHOP, I.COOKED_PORKCHOP, I.CHICKEN, I.COOKED_CHICKEN,
   I.MUTTON, I.COOKED_MUTTON, I.BEEF, I.COOKED_BEEF, I.ROTTEN_FLESH, I.APPLE,
-  I.SEEDS, I.WHEAT, I.BREAD, I.HOE,
+  I.SEEDS, I.WHEAT, I.BREAD, I.HOE, I.WOOD_DOOR,
 ];

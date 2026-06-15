@@ -16,6 +16,8 @@ import { FurnaceState, ChestState } from './engine/Inventory';
 import { buildChunkGeometry } from './engine/Mesher';
 import { chunkKey, CX, CZ } from './engine/Chunk';
 import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef } from './engine/Blocks';
+import { Weather } from './engine/Weather';
+import { AdvancementTracker } from './engine/Advancements';
 
 const DAY_LENGTH = 1200; // 20 real minutes
 const SAVE_VERSION = 2;
@@ -54,6 +56,10 @@ class Game {
   private supportQueue = new Set<string>();
   private autosaveT = 0;
   private saving = false;
+  private weather!: Weather;
+  private adv = new AdvancementTracker();
+  private rainSoundT = 0;
+  private survivedNight = false;
 
   constructor(app: App, slot: string, save: SaveState | null, fresh: { seed: number; mode: GameMode } | null) {
     this.app = app;
@@ -69,6 +75,18 @@ class Game {
     this.input = new Input(this.renderer.canvas);
     this.entities = new EntityManager(this.renderer.scene, this.world, this.atlas, this.audio);
     this.entities.setPlayer(this.player);
+    this.entities.onKill = (kind) => {
+      if (['zombie', 'skeleton', 'spider', 'creeper'].includes(kind)) this.adv.unlock('kill_mob');
+    };
+
+    this.weather = new Weather(this.renderer.scene, this.world, {
+      onStrike: (x, y, z) => this.onLightning(x, y, z),
+      isColdAt: (wx, wz) => this.world.generator.biomeAt(Math.floor(wx), Math.floor(wz)) === 'snow',
+    });
+    this.adv.onChange = () => {
+      let t: { id: string; label: string; icon: string } | null;
+      while ((t = this.adv.popToast())) this.hud.showAdvancementToast(t.icon, t.label);
+    };
 
     this.world.onChunkRemoved = (key) => this.renderer.removeChunk(key);
     this.world.onBlockChanged = (x, y, z, _oldId, newId) => {
@@ -91,7 +109,14 @@ class Game {
       igniteTnt: (x, y, z) => {
         this.world.setBlock(x, y, z, B.AIR);
         this.entities.spawnTnt(x, y, z);
+        this.adv.unlock('creeper');
       },
+      useDoor: (_x, _y, _z) => this.adv.unlock('door'),
+      onBreak: (id) => {
+        if (id === B.LOG || id === B.BIRCH_LOG || id === B.SPRUCE_LOG) this.adv.unlock('punch_wood');
+        if (id === B.DIAMOND_ORE) this.adv.unlock('diamonds');
+      },
+      onPlantSeed: () => this.adv.unlock('farm'),
       onDeath: () => this.onDeath(),
     });
 
@@ -101,6 +126,7 @@ class Game {
       this.player.inventory.load(save.inventory);
       this.dayTime = save.environment?.dayTime ?? 0.1;
       this.spawnPoint = save.spawn ?? null;
+      if (save.advancements) this.adv.load(save.advancements);
       for (const [k, v] of Object.entries(save.world ?? {})) {
         this.world.savedChunks.set(k, v);
       }
@@ -111,6 +137,14 @@ class Game {
         } else {
           this.world.blockEntities.set(k, FurnaceState.from(v as FurnaceSave));
         }
+      }
+      for (const [k, v] of Object.entries(save.doors ?? {})) {
+        this.world.doorStates.set(k, {
+          facing: (v.facing & 3) as 0 | 1 | 2 | 3,
+          open: !!v.open,
+          hingeRight: !!v.hingeRight,
+          swing: v.open ? 1 : 0,
+        });
       }
     } else {
       this.player.mode = fresh!.mode;
@@ -127,6 +161,14 @@ class Game {
 
     this.player.inventory.onChange = () => this.onInventoryChange();
     this.onInventoryChange();
+    this.adv.unlock('root');
+
+    this.hud.onCraft = (id) => {
+      if (id === B.TABLE) this.adv.unlock('planks');
+      if (id === I.STONE_PICK) this.adv.unlock('stone_age');
+      if (id === I.BOW) this.adv.unlock('bow');
+      if (id === I.BREAD) this.adv.unlock('bread');
+    };
 
     this.wireInput();
     this.hud.onDropLeftover = (id, count) => {
@@ -178,7 +220,14 @@ class Game {
     });
 
     this.input.onPointerLockChange = (locked) => {
-      if (!locked && this.state === 'playing') this.openPause();
+      if (!locked) {
+        if (this.hud.isAdvancementsOpen()) {
+          this.hud.hideAdvancements();
+          this.input.requestLock();
+          return;
+        }
+        if (this.state === 'playing') this.openPause();
+      }
     };
 
     this.input.onMouseDown = (button) => {
@@ -210,6 +259,14 @@ class Game {
             this.hud.toast(this.player.flying ? 'Flying enabled' : 'Flying disabled');
           }
           break;
+        case 'KeyL':
+          // advancement panel toggle
+          if (this.hud.isAdvancementsOpen()) this.hud.hideAdvancements();
+          else if (this.state === 'playing' || this.hud.isAdvancementsOpen()) {
+            this.input.exitLock();
+            this.hud.toggleAdvancements(this.adv.list());
+          }
+          break;
         case 'KeyE':
           if (this.state === 'playing' && this.input.pointerLocked) this.openInventory();
           else if (this.state === 'container') this.closeContainer();
@@ -220,6 +277,7 @@ class Game {
         case 'Escape':
           // with pointer lock active the browser eats Esc; this handles menus
           if (this.state === 'container') this.closeContainer();
+          else if (this.hud.isAdvancementsOpen()) this.hud.hideAdvancements();
           else if (this.state === 'paused') this.resume();
           break;
       }
@@ -298,6 +356,7 @@ class Game {
           this.rollLoot(st as ChestState);
           this.world.setBlock(x, y, z, B.CHEST);
           this.audio.play('level');
+          this.adv.unlock('dungeon');
         }
         this.world.blockEntities.set(key, st);
       }
@@ -357,6 +416,29 @@ class Game {
     } else {
       this.hud.toast('Spawn point set');
     }
+    this.adv.unlock('bed');
+  }
+
+  /** Lightning struck at (x,y,z): ignite TNT, scorch mobs, flash + thunder. */
+  private onLightning(x: number, y: number, z: number): void {
+    this.audio.play('thunder');
+    this.adv.unlock('thunder');
+    // ignite exposed TNT
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const bx = x + dx, by = y + dy, bz = z + dz;
+          if (this.world.getBlock(bx, by, bz) === B.TNT) {
+            this.world.setBlock(bx, by, bz, B.AIR);
+            this.entities.spawnTnt(bx, by, bz);
+          }
+        }
+      }
+    }
+    // visual: spark particles + a small flash burst at the strike point
+    this.entities.spawnBlockParticles(x, y - 1, z, B.TORCH, 14);
+    // damage surface entities caught in the bolt
+    this.entities.lightningDamage(x, y, z);
   }
 
   private closeContainer(): void {
@@ -422,6 +504,10 @@ class Game {
     for (const [k, v] of this.world.blockEntities) {
       if (!v.isEmpty()) beRec[k] = v.serialize();
     }
+    const doorRec: NonNullable<SaveState['doors']> = {};
+    for (const [k, v] of this.world.doorStates) {
+      doorRec[k] = { facing: v.facing, open: v.open, hingeRight: !!v.hingeRight };
+    }
     return {
       version: SAVE_VERSION,
       seed: this.world.seed,
@@ -430,7 +516,9 @@ class Game {
       inventory: this.player.inventory.serialize(),
       world: worldRec,
       blockEntities: beRec,
+      doors: doorRec,
       environment: { dayTime: this.dayTime },
+      advancements: this.adv.serialize(),
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
       lastPlayed: Date.now(),
     };
@@ -476,8 +564,20 @@ class Game {
 
       this.player.update(dt);
       this.world.update(this.player.pos.x, this.player.pos.z, 5);
-      this.processMeshing(5);
+      this.world.updateDoorSwings(dt);
+      this.processMeshing(6);
       this.entities.update(dt, this.elapsed, this.renderer.camera.quaternion);
+
+      // weather follows the player
+      const pp = this.player.pos;
+      this.weather.update(dt, pp.x, pp.y + this.player.eyeHeight(), pp.z);
+
+      // soft rain hiss loop while precipitating
+      const w = this.weather;
+      if (w.kind !== 'clear' && w.intensity > 0.3) {
+        this.rainSoundT -= dt;
+        if (this.rainSoundT <= 0) { this.rainSoundT = 1.6; this.audio.play('rain'); }
+      }
 
       this.tickAcc += dt;
       while (this.tickAcc >= 0.05) {
@@ -510,7 +610,11 @@ class Game {
       cam.updateProjectionMatrix();
     }
 
-    this.renderer.updateEnvironment(this.dayTime, cam.position.x, cam.position.z, this.elapsed);
+    this.renderer.updateEnvironment(
+      this.dayTime, cam.position.x, cam.position.z, this.elapsed,
+      this.weather.darkening() * this.weather.intensity,
+      this.weather.flashAmount(),
+    );
     this.renderer.updateHeld(dt, this.player.isMoving());
     this.hud.updateStats(this.player.hp, this.player.hunger, this.player.air, this.player.mode);
     if (this.state === 'container' && this.container?.kind === 'furnace') this.hud.updateFurnace();
@@ -521,6 +625,9 @@ class Game {
 
   private tick20(): void {
     const isNight = Math.sin(this.dayTime * Math.PI * 2) < -0.06;
+    // track surviving a full night
+    if (isNight) this.survivedNight = true;
+    else if (this.survivedNight) { this.survivedNight = false; this.adv.unlock('survive_night'); }
     this.player.tick(0.05);
     this.entities.tick(isNight);
 
@@ -530,7 +637,12 @@ class Game {
       const [x, y, z] = key.split(',').map(Number);
       const cur = this.world.getBlock(x, y, z);
       if (cur !== B.FURNACE && cur !== B.FURNACE_LIT) continue;
+      const outBefore = st.output?.count ?? 0;
       st.tick(0.05);
+      // advancement: first iron ingot smelted
+      if (st.output && st.output.id === I.IRON_INGOT && st.output.count > outBefore) {
+        this.adv.unlock('iron_age');
+      }
       const want = st.burning ? B.FURNACE_LIT : B.FURNACE;
       if (cur !== want) this.world.setBlock(x, y, z, want);
     }
@@ -703,6 +815,7 @@ class Game {
     this.input.exitLock();
     this.input.dispose();
     this.entities.clear();
+    this.weather.dispose();
     this.hud.hideGameUI();
     this.hud.hideLoading();
     this.renderer.dispose();

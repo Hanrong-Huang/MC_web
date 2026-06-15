@@ -3,9 +3,22 @@
 
 import { Chunk, chunkKey, CX, CZ, CY } from './Chunk';
 import { WorldGenerator } from './WorldGenerator';
-import { B, isSolid } from './Blocks';
+import { B, isSolid, def, hasDef } from './Blocks';
 import { BlockEntity } from './Inventory';
 import { rleDecode, rleEncode } from './Persistence';
+
+/** Cardinal facing for a placed door/trapdoor, in 90-degree steps.
+ *  For doors this is the direction the player was looking when placed. */
+export type DoorFacing = 0 | 1 | 2 | 3; // 0=-z, 1=-x, 2=+z, 3=+x
+/** Persistent state for a door (lower-half keyed). open bit + facing. */
+export interface DoorState {
+  facing: DoorFacing;
+  open: boolean;
+  /** hinge on the player's right when the door was placed */
+  hingeRight?: boolean;
+  /** 0 = fully closed, 1 = fully open (animated swing) */
+  swing?: number;
+}
 
 export interface RayHit {
   x: number; y: number; z: number;     // block coords
@@ -25,6 +38,8 @@ export class World {
   savedChunks = new Map<string, Uint8Array>();
   /** furnace/chest states keyed by "x,y,z" */
   blockEntities = new Map<string, BlockEntity>();
+  /** door states keyed by the lower-half "x,y,z" */
+  doorStates = new Map<string, DoorState>();
   onChunkRemoved: (key: string) => void = () => {};
   /** fired after every successful setBlock (gravity blocks, torch supports, ...) */
   onBlockChanged: (x: number, y: number, z: number, oldId: number, newId: number) => void = () => {};
@@ -124,6 +139,102 @@ export class World {
       }
     }
     return false;
+  }
+
+  // --- door state -----------------------------------------------------------
+
+  /** Get door state for a block that is part of a door (lower or upper half). */
+  doorStateAt(x: number, y: number, z: number): DoorState | undefined {
+    const here = this.doorStates.get(`${x},${y},${z}`);
+    if (here) return here;
+    const id = this.getBlock(x, y, z);
+    if (id === B.DOOR_UPPER) return this.doorStates.get(`${x},${y - 1},${z}`);
+    if (id === B.DOOR_LOWER) return this.doorStates.get(`${x},${y + 1},${z}`);
+    return undefined;
+  }
+
+  /** Toggle a door's or trapdoor's open state. Returns true if it toggled. */
+  toggleDoor(x: number, y: number, z: number): boolean {
+    let id = this.getBlock(x, y, z);
+    // trapdoor: keyed by its own position
+    if (id === B.TRAPDOOR) {
+      const key = `${x},${y},${z}`;
+      const st = this.doorStates.get(key) ?? { facing: 0 as DoorFacing, open: false };
+      st.open = !st.open;
+      this.doorStates.set(key, st);
+      this.markDirty(Math.floor(x / CX), Math.floor(z / CZ));
+      return true;
+    }
+    // tall door: lower half holds the state
+    let ly = y;
+    if (id === B.DOOR_UPPER) { ly = y - 1; id = this.getBlock(x, ly, z); }
+    if (id !== B.DOOR_LOWER) return false;
+    const key = `${x},${ly},${z}`;
+    const st = this.doorStates.get(key) ?? { facing: 0 as DoorFacing, open: false, swing: 0 };
+    st.open = !st.open;
+    if (st.swing === undefined) st.swing = st.open ? 0 : 1;
+    this.doorStates.set(key, st);
+    this.markDirty(Math.floor(x / CX), Math.floor(z / CZ));
+    // double doors swing together
+    const partner = this.doorPartner(x, ly, z, st);
+    if (partner && partner.st.open !== st.open) {
+      partner.st.open = st.open;
+      this.doorStates.set(partner.key, partner.st);
+      this.markDirty(Math.floor(partner.x / CX), Math.floor(partner.z / CZ));
+    }
+    return true;
+  }
+
+  /** Adjacent door forming a pair: same facing, opposite hinge, along the
+   *  door's width axis. Returns its lower-half key/state, or null. */
+  doorPartner(lx: number, ly: number, lz: number, st: DoorState): { key: string; x: number; z: number; st: DoorState } | null {
+    // width axis is perpendicular to the facing normal
+    const along = st.facing % 2 === 0 ? [[1, 0], [-1, 0]] : [[0, 1], [0, -1]];
+    for (const [dx, dz] of along) {
+      const nx = lx + dx, nz = lz + dz;
+      if (this.getBlock(nx, ly, nz) !== B.DOOR_LOWER) continue;
+      const ns = this.doorStates.get(`${nx},${ly},${nz}`);
+      if (ns && ns.facing === st.facing && !!ns.hingeRight !== !!st.hingeRight) {
+        return { key: `${nx},${ly},${nz}`, x: nx, z: nz, st: ns };
+      }
+    }
+    return null;
+  }
+
+  /** Animate door swings toward their open/closed target. Returns true if any moved. */
+  updateDoorSwings(dt: number): boolean {
+    const rate = 7; // ~0.14s for a full 90deg swing (MC-like snappy motion)
+    let changed = false;
+    for (const [key, st] of this.doorStates) {
+      const [wx, wy, wz] = key.split(',').map(Number);
+      if (this.getBlock(wx, wy, wz) !== B.DOOR_LOWER) continue;
+      const target = st.open ? 1 : 0;
+      const cur = st.swing ?? target;
+      if (Math.abs(cur - target) < 0.001) {
+        if (st.swing !== target) { st.swing = target; changed = true; }
+        continue;
+      }
+      const step = rate * dt;
+      const next = cur < target ? Math.min(target, cur + step) : Math.max(target, cur - step);
+      st.swing = Math.abs(next - target) < 0.001 ? target : next;
+      changed = true;
+      this.markDirty(Math.floor(wx / CX), Math.floor(wz / CZ));
+    }
+    return changed;
+  }
+
+  /** Open state for any door/trapdoor block (false when not a door). */
+  isTrapdoorOpen(x: number, y: number, z: number): boolean {
+    if (this.getBlock(x, y, z) !== B.TRAPDOOR) return false;
+    return this.doorStates.get(`${x},${y},${z}`)?.open ?? false;
+  }
+
+  /** Is this door block currently closed (i.e. should it block movement)? */
+  isDoorClosed(x: number, y: number, z: number): boolean {
+    const st = this.doorStateAt(x, y, z);
+    if (!st) return false;
+    const swing = st.swing ?? (st.open ? 1 : 0);
+    return swing < 0.5;
   }
 
   markDirty(cx: number, cz: number): void {

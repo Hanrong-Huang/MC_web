@@ -544,6 +544,82 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
       '.......T........', '................', '................', '................',
     ], { L: '#3f8a26', D: '#2f6b1e', T: '#6b522f' });
   },
+  ladder: (c, x, y) => {
+    c.clearRect(x, y, 16, 16);
+    // two side rails + rungs
+    const rail = '#6b522f', railDark = '#4a361e', rung = '#8a6a3a';
+    for (let py = 0; py < 16; py++) {
+      c.fillStyle = py % 2 === 0 ? rail : railDark;
+      c.fillRect(x, y + py, 2, 1); c.fillRect(x + 14, y + py, 2, 1);
+    }
+    for (const ry of [2, 7, 12]) {
+      c.fillStyle = rung; c.fillRect(x + 2, y + ry, 12, 2);
+      c.fillStyle = railDark; c.fillRect(x + 2, y + ry + 1, 12, 1);
+    }
+  },
+  door_lower: (c, x, y) => {
+    const rand = mulberry32(345);
+    for (let px = 0; px < 16; px++) {
+      for (let py = 0; py < 16; py++) {
+        const r = rand();
+        c.fillStyle = r < 0.8 ? '#9c7f4e' : r < 0.92 ? '#a88c57' : '#8a703f';
+        c.fillRect(x + px, y + py, 1, 1);
+      }
+    }
+    // frame + inset panels
+    c.fillStyle = '#5d4222';
+    c.fillRect(x, y, 16, 1); c.fillRect(x, y + 15, 16, 1);
+    c.fillRect(x + 1, y + 1, 1, 14); c.fillRect(x + 14, y + 1, 1, 14);
+    c.fillStyle = '#7a6238';
+    c.fillRect(x + 3, y + 3, 10, 4); c.fillRect(x + 3, y + 9, 10, 4);
+    c.fillStyle = '#b8945f';
+    c.fillRect(x + 3, y + 3, 10, 1); c.fillRect(x + 3, y + 9, 10, 1);
+    // iron handle
+    c.fillStyle = '#3f3f3f'; c.fillRect(x + 12, y + 8, 2, 2);
+  },
+  door_upper: (c, x, y) => {
+    const rand = mulberry32(345);
+    for (let px = 0; px < 16; px++) {
+      for (let py = 0; py < 16; py++) {
+        const r = rand();
+        c.fillStyle = r < 0.8 ? '#9c7f4e' : r < 0.92 ? '#a88c57' : '#8a703f';
+        c.fillRect(x + px, y + py, 1, 1);
+      }
+    }
+    c.fillStyle = '#5d4222';
+    c.fillRect(x, y, 16, 1); c.fillRect(x, y + 15, 16, 1);
+    c.fillRect(x + 1, y, 1, 16); c.fillRect(x + 14, y, 1, 16);
+    c.fillStyle = '#7a6238';
+    c.fillRect(x + 3, y + 2, 10, 4); c.fillRect(x + 3, y + 8, 10, 5);
+    c.fillStyle = '#b8945f';
+    c.fillRect(x + 3, y + 2, 10, 1); c.fillRect(x + 3, y + 8, 10, 1);
+    // glass pane
+    c.fillStyle = 'rgba(200,225,235,0.35)'; c.fillRect(x + 4, y + 9, 8, 3);
+  },
+  door_top: (c, x, y) => {
+    // thin cap shown at the seam between halves
+    c.fillStyle = '#5d4222'; c.fillRect(x, y, 16, 16);
+    c.fillStyle = '#3a2814'; c.fillRect(x, y, 16, 1);
+  },
+  trapdoor: (c, x, y) => {
+    const rand = mulberry32(346);
+    for (let px = 0; px < 16; px++) {
+      for (let py = 0; py < 16; py++) {
+        const r = rand();
+        c.fillStyle = r < 0.8 ? '#8a703f' : '#9c7f4e';
+        c.fillRect(x + px, y + py, 1, 1);
+      }
+    }
+    c.fillStyle = '#5d4222';
+    c.fillRect(x, y, 16, 1); c.fillRect(x, y + 15, 16, 1);
+    c.fillRect(x, y, 1, 16); c.fillRect(x + 15, y, 1, 16);
+    c.fillStyle = '#7a6238';
+    c.fillRect(x + 1, y + 4, 14, 1); c.fillRect(x + 1, y + 11, 14, 1);
+    // iron bolts
+    c.fillStyle = '#3f3f3f';
+    c.fillRect(x + 2, y + 2, 1, 1); c.fillRect(x + 13, y + 2, 1, 1);
+    c.fillRect(x + 2, y + 13, 1, 1); c.fillRect(x + 13, y + 13, 1, 1);
+  },
 };
 
 /** Stone base with colored ore blobs. */
@@ -792,6 +868,18 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     '..ORRRRRRRO.....', '...ORRRRRRO.....', '....ORROORO.....', '.....OO..O......',
     '................', '................', '................', '................',
   ], { O: '#4a1010', R: '#d83030', L: '#f4a0a0', H: '#5d8a2a' }),
+  wood_door: (c) => {
+    // tall door icon: draw two stacked panels
+    const rail = '#9c7f4e', dark = '#5d4222', light = '#b8945f', iron = '#3f3f3f';
+    const rows: string[] = [];
+    const map = 'OOOOOOOOOOOO....|OdddddddddO.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|OdddddddddO.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|Oddddddddd.O....|..........OO....|................';
+    const pal: Record<string, string> = { O: dark, d: rail, m: light };
+    for (const row of map.split('|')) {
+      rows.push(row.padEnd(16, '.'));
+    }
+    pixmap(c, 0, 0, rows, pal);
+    c.fillStyle = iron; c.fillRect(12, 8, 1, 1);
+  },
   porkchop: (c) => pixmap(c, 0, 0, [
     '................', '................', '....OOOO........', '...OPPPPO.......',
     '..OPPpppPO......', '..OPpppppPO.....', '..OPpppppPO.....', '...OPpppPPO.....',

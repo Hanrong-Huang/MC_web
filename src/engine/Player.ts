@@ -8,6 +8,7 @@ import { Renderer } from './Renderer';
 import { AudioEngine } from './Audio';
 import { moveEntity, hasSupport, inWater, eyeInWater, boxIntersectsBlock, Vec3 } from './Physics';
 import { B, I, def, hasDef, breakTime, attackDamage, isSolid, canHarvest, FLOOR_BLOCKS, SELF_STACKING } from './Blocks';
+import { DoorFacing } from './World';
 import { Inventory } from './Inventory';
 import type { EntityManager } from './EntityManager';
 import type { RayHit } from './World';
@@ -20,6 +21,7 @@ const SNEAK_SPEED = 1.295;
 const FLY_SPEED = WALK_SPEED * 2.5;     // creative flight: 2.5x multiplier
 const FLY_VERT = 7.5;
 const JUMP_VELOCITY = Math.sqrt(2 * 32 * 1.25); // exactly 1.25 blocks high
+const LADDER_SPEED = 3.4;
 const GRAVITY = 32;
 const TERMINAL = 78;
 const EYE_HEIGHT = 1.62;
@@ -37,6 +39,9 @@ export interface PlayerDeps {
   openContainer: (kind: 'table' | 'furnace' | 'chest', x: number, y: number, z: number) => void;
   useBed: (x: number, y: number, z: number) => void;
   igniteTnt: (x: number, y: number, z: number) => void;
+  useDoor: (x: number, y: number, z: number) => void;
+  onBreak: (blockId: number) => void;
+  onPlantSeed: () => void;
   onDeath: () => void;
 }
 
@@ -51,6 +56,8 @@ export class Player {
   sprinting = false;
   onGround = false;
   swimming = false;
+  /** true while the player's body overlaps a ladder block */
+  onLadder = false;
   hp = 20;
   hunger = 20;
   exhaustion = 0;
@@ -158,6 +165,20 @@ export class Player {
 
     const wasInWater = inWater(world, this.pos, BOX);
     this.swimming = wasInWater;
+    // ladder check: scan the body column for a ladder block
+    this.onLadder = false;
+    if (!this.flying) {
+      const hw = BOX.w / 2;
+      for (let by = Math.floor(this.pos.y); by <= Math.floor(this.pos.y + BOX.h); by++) {
+        for (let bz = Math.floor(this.pos.z - hw); bz <= Math.floor(this.pos.z + hw); bz++) {
+          for (let bx = Math.floor(this.pos.x - hw); bx <= Math.floor(this.pos.x + hw); bx++) {
+            if (world.getBlock(bx, by, bz) === B.LADDER) { this.onLadder = true; break; }
+          }
+          if (this.onLadder) break;
+        }
+        if (this.onLadder) break;
+      }
+    }
 
     // wish velocity in world space
     const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw);
@@ -188,6 +209,15 @@ export class Player {
       const targetVy = space ? 3.9 : -2.2;
       this.vel.y += (targetVy - this.vel.y) * Math.min(1, 5 * dt);
       this.fallDist = 0;
+    } else if (this.onLadder) {
+      // ladder: hold to climb up, sneak to descend, otherwise slow slide
+      let targetVy: number;
+      if (space) targetVy = LADDER_SPEED;
+      else if (this.sneakKeyDown()) targetVy = -LADDER_SPEED * 0.6;
+      else targetVy = Math.min(this.vel.y, -0.6); // gentle cling
+      this.vel.y += (targetVy - this.vel.y) * Math.min(1, 10 * dt);
+      this.fallDist = 0;
+      // no fall damage while on a ladder
     } else {
       this.vel.y -= GRAVITY * dt;
       if (this.vel.y < -TERMINAL) this.vel.y = -TERMINAL;
@@ -376,9 +406,29 @@ export class Player {
       world.blockEntities.delete(beKey);
     }
 
+    // doors: removing one half removes the other; drop a single door item
+    let doorDrop = false;
+    if (id === B.DOOR_LOWER) {
+      world.setBlock(x, y + 1, z, B.AIR);
+      world.doorStates.delete(`${x},${y},${z}`);
+      doorDrop = true;
+    } else if (id === B.DOOR_UPPER) {
+      world.setBlock(x, y - 1, z, B.AIR);
+      world.doorStates.delete(`${x},${y - 1},${z}`);
+      doorDrop = true;
+    } else if (id === B.TRAPDOOR) {
+      world.doorStates.delete(`${x},${y},${z}`);
+    }
+
     world.setBlock(x, y, z, B.AIR);
     audio.dig(def(id).sound, 1);
     entities.spawnBlockParticles(x, y, z, id, 12);
+    this.deps.onBreak(id);
+
+    if (doorDrop && withDrops && this.mode === 'survival') {
+      entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.WOOD_DOOR, 1);
+      return;
+    }
 
     if (withDrops && this.mode === 'survival') {
       if (def(id).hardness > 0) this.damageHeldTool(true);
@@ -495,6 +545,19 @@ export class Player {
         this.deps.igniteTnt(t.x, t.y, t.z);
         return;
       }
+      // doors + trapdoors toggle on use
+      if (t.id === B.DOOR_LOWER || t.id === B.DOOR_UPPER || t.id === B.TRAPDOOR) {
+        const wasOpen = t.id === B.TRAPDOOR
+          ? world.isTrapdoorOpen(t.x, t.y, t.z)
+          : !!world.doorStateAt(t.x, t.y, t.z)?.open;
+        if (world.toggleDoor(t.x, t.y, t.z) || t.id === B.TRAPDOOR) {
+          this.placeCooldown = 0.3;
+          this.deps.renderer.triggerSwing();
+          audio.play(wasOpen ? 'doorClose' : 'doorOpen');
+          this.deps.useDoor(t.x, t.y, t.z);
+          return;
+        }
+      }
     }
 
     // hoe: till grass/dirt into farmland
@@ -518,12 +581,49 @@ export class Player {
         this.deps.renderer.triggerSwing();
         audio.dig('grass', 0.6);
         if (this.mode === 'survival') this.inventory.consumeSelected();
+        this.deps.onPlantSeed();
       }
       return;
     }
 
     // placement
-    if (!this.target || !held || !heldDef?.block) return;
+    if (!this.target || !held) return;
+
+    // door item: place a 2-tall door; broad face points back toward the player
+    if (held.id === I.WOOD_DOOR) {
+      const px = this.target.x + this.target.nx;
+      const py = this.target.y + this.target.ny;
+      const pz = this.target.z + this.target.nz;
+      if (world.getBlock(px, py, pz) !== B.AIR) return;
+      if (world.getBlock(px, py + 1, pz) !== B.AIR) return; // need headroom
+      if (!isSolid(world.getBlock(px, py - 1, pz))) return; // needs a floor
+      // facing: 0=-z,1=-x,2=+z,3=+x — derived from the closest cardinal yaw
+      const yawDeg = ((this.yaw * 180 / Math.PI) % 360 + 360) % 360;
+      const facing = (Math.round(yawDeg / 90) % 4) as DoorFacing;
+      const rightX = Math.cos(this.yaw);
+      const rightZ = -Math.sin(this.yaw);
+      const offX = this.pos.x - (px + 0.5);
+      const offZ = this.pos.z - (pz + 0.5);
+      let hingeRight = offX * rightX + offZ * rightZ > 0;
+      // mirror an adjacent same-facing door so the two form a double door
+      const along = facing % 2 === 0 ? [[1, 0], [-1, 0]] : [[0, 1], [0, -1]];
+      for (const [dx, dz] of along) {
+        if (world.getBlock(px + dx, py, pz + dz) !== B.DOOR_LOWER) continue;
+        const ns = world.doorStates.get(`${px + dx},${py},${pz + dz}`);
+        if (ns && ns.facing === facing) { hingeRight = !ns.hingeRight; break; }
+      }
+      world.setBlock(px, py, pz, B.DOOR_LOWER);
+      world.setBlock(px, py + 1, pz, B.DOOR_UPPER);
+      world.doorStates.set(`${px},${py},${pz}`, { facing, open: false, hingeRight, swing: 0 });
+      this.placeCooldown = 0.3;
+      this.deps.renderer.triggerSwing();
+      audio.dig('wood', 0.8);
+      this.deps.useDoor(px, py, pz);
+      if (this.mode === 'survival') this.inventory.consumeSelected();
+      return;
+    }
+
+    if (!heldDef?.block) return;
     const px = this.target.x + this.target.nx;
     const py = this.target.y + this.target.ny;
     const pz = this.target.z + this.target.nz;
@@ -534,6 +634,18 @@ export class Player {
       const below = world.getBlock(px, py - 1, pz);
       const supported = isSolid(below) || (SELF_STACKING.has(held.id) && below === held.id);
       if (!supported) return;
+    }
+    // ladders must attach to a solid block on the targeted face
+    if (held.id === B.LADDER) {
+      const ax = this.target.x, ay = this.target.y, az = this.target.z;
+      if (!isSolid(world.getBlock(ax, ay, az))) return;
+    }
+    // trapdoors need solid ground or a solid neighbor to hinge on
+    if (held.id === B.TRAPDOOR) {
+      if (!isSolid(world.getBlock(px, py - 1, pz)) &&
+        !isSolid(world.getBlock(px - 1, py, pz)) && !isSolid(world.getBlock(px + 1, py, pz)) &&
+        !isSolid(world.getBlock(px, py, pz - 1)) && !isSolid(world.getBlock(px, py, pz + 1))) return;
+      world.doorStates.set(`${px},${py},${pz}`, { facing: 0, open: false });
     }
     // never place inside the player's own hitbox (solid blocks only)
     if (isSolid(held.id) && boxIntersectsBlock(this.pos, BOX, px, py, pz)) return;

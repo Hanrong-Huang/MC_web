@@ -261,3 +261,39 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 .death-title { color: #fff; font-size: 42px; text-shadow: 3px 3px #3f0000; margin-bottom: 24px; }
 
 .saving-note { color: #ddd; margin-top: 14px; font-size: 13px; text-shadow: 1px 1px #000; }
+
+/* --- Advancement toast (slides in from the right) -------------------------- */
+.adv-toast {
+  position: fixed; top: 28px; right: -340px; z-index: 60;
+  width: 300px; padding: 10px 14px;
+  background: linear-gradient(#3a3320, #2a2415);
+  border: 3px solid; border-color: #5a4a22 #1a1408 #1a1408 #5a4a22;
+  color: #ffd83d; font-family: 'Segoe UI', sans-serif;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.6);
+  transition: right 0.45s cubic-bezier(0.2, 0.9, 0.3, 1);
+  pointer-events: none;
+}
+.adv-toast.show { right: 24px; }
+.adv-top { font-size: 11px; color: #d8b649; letter-spacing: 0.5px; }
+.adv-body { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+.adv-icon { font-size: 26px; line-height: 1; }
+.adv-label { font-size: 15px; color: #fff; text-shadow: 1px 1px #000; }
+
+/* --- Advancement panel ----------------------------------------------------- */
+#adv-panel { z-index: 55; }
+#adv-panel .mc-panel { max-height: 80vh; overflow-y: auto; }
+.adv-list { display: flex; flex-direction: column; gap: 4px; max-width: 460px; }
+.adv-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 7px 10px; background: #555;
+  border: 2px solid; border-color: #373737 #fff #fff #373737;
+  opacity: 0.55;
+}
+.adv-row.done {
+  background: linear-gradient(#4a6f3a, #3a5530);
+  opacity: 1;
+}
+.adv-row-icon { font-size: 22px; width: 28px; text-align: center; }
+.adv-row-name { font-size: 14px; color: #fff; font-weight: 600; }
+.adv-row-desc { font-size: 11px; color: #d8d8d8; margin-top: 1px; }
+.adv-hint { color: #ddd; font-size: 12px; margin-top: 12px; text-align: center; }

@@ -92,6 +92,8 @@ export class EntityManager {
   private atlas: Atlas;
   private audio: AudioEngine;
   private player: Player | null = null;
+  /** fired when any mob dies (mobKind string) */
+  onKill: ((mobKind: string) => void) | null = null;
   private skinCache = new Map<string, THREE.Texture>();
   private particleMats = new Map<string, THREE.MeshBasicMaterial>();
   private spawnTick = 0;
@@ -219,19 +221,27 @@ export class EntityManager {
   /** MC-style block-break particles: textured flecks from the block's tile. */
   spawnBlockParticles(x: number, y: number, z: number, blockId: number, count: number): void {
     if (!hasDef(blockId) || !def(blockId).faces) return;
+    if (this.particleCount() >= 64) return;
     const tile = def(blockId).faces!.sides;
-    for (let i = 0; i < count; i++) {
+    const n = Math.min(count, 64 - this.particleCount());
+    for (let i = 0; i < n; i++) {
       this.makeParticle(tile,
         x + 0.2 + Math.random() * 0.6,
-        y + 0.2 + Math.random() * 0.6,
+        y + 0.15 + Math.random() * 0.35,
         z + 0.2 + Math.random() * 0.6,
         {
-          x: (Math.random() - 0.5) * 3.5,
-          y: 1.5 + Math.random() * 3,
-          z: (Math.random() - 0.5) * 3.5,
+          x: (Math.random() - 0.5) * 2.2,
+          y: 0.4 + Math.random() * 1.2,
+          z: (Math.random() - 0.5) * 2.2,
         },
-        0.35 + Math.random() * 0.45);
+        0.28 + Math.random() * 0.3);
     }
+  }
+
+  private particleCount(): number {
+    let n = 0;
+    for (const e of this.entities) if (e.kind === 'particle') n++;
+    return n;
   }
 
   /** Small puffs at the mined face while a block is being broken. */
@@ -270,6 +280,46 @@ export class EntityManager {
         0.5 + Math.random() * 0.4,
         -1.5); // smoke drifts upward
     }
+  }
+
+  /** A single glowing firefly mote — warm pixel that drifts + fades. */
+  spawnFirefly(x: number, y: number, z: number): void {
+    let mat = this.particleMats.get('firefly');
+    if (!mat) {
+      // bright yellow-green emissive fleck
+      const c = document.createElement('canvas');
+      c.width = 4; c.height = 4;
+      const ctx = c.getContext('2d')!;
+      ctx.fillStyle = '#d8f08a';
+      ctx.fillRect(0, 0, 4, 4);
+      const tex = new THREE.CanvasTexture(c);
+      tex.magFilter = THREE.NearestFilter;
+      tex.minFilter = THREE.NearestFilter;
+      mat = new THREE.MeshBasicMaterial({ map: tex, color: 0xd8f08a, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false });
+      this.particleMats.set('firefly', mat);
+    }
+    const geo = new THREE.PlaneGeometry(0.08, 0.08);
+    const mesh = new THREE.Group();
+    mesh.add(new THREE.Mesh(geo, mat));
+    const e = new Entity('particle', { x, y, z }, { w: 0.05, h: 0.05 }, mesh);
+    e.vel = {
+      x: (Math.random() - 0.5) * 0.5,
+      y: 0.2 + Math.random() * 0.4,
+      z: (Math.random() - 0.5) * 0.5,
+    };
+    e.maxLife = e.life = 2.5 + Math.random() * 2;
+    e.pGrav = -0.4; // drifts upward gently
+    this.entities.push(e);
+    this.scene.add(mesh);
+  }
+
+  /** A single falling leaf — drifts down with a side-to-side sway. */
+  spawnLeaf(x: number, y: number, z: number): void {
+    this.makeParticle('birch_leaves',
+      x, y, z,
+      { x: (Math.random() - 0.5) * 1.2, y: -0.8 - Math.random() * 0.6, z: (Math.random() - 0.5) * 1.2 },
+      3 + Math.random() * 2,
+      0.8);
   }
 
   // --- explosions -----------------------------------------------------------------
@@ -331,6 +381,31 @@ export class EntityManager {
       if (d < range) {
         this.hurt(e, Math.ceil((1 - d / range) * power * 7), e.pos.x - x, e.pos.z - z);
       }
+    }
+  }
+
+  /** Lightning strike: heavy damage to entities in a small radius + a flash. */
+  lightningDamage(x: number, y: number, z: number): void {
+    const range = 4;
+    const p = this.player;
+    if (p && !p.dead && p.mode === 'survival') {
+      const d = Math.hypot(p.pos.x - x, p.pos.y + 0.9 - y, p.pos.z - z);
+      if (d < range) {
+        p.damage(5);
+        p.applyKnockback(p.pos.x - x, p.pos.z - z, 6);
+      }
+    }
+    for (const e of this.entities) {
+      if (!this.isMob(e) || e.dead) continue;
+      const d = Math.hypot(e.pos.x - x, e.pos.y + e.box.h / 2 - y, e.pos.z - z);
+      if (d < range) this.hurt(e, 8, e.pos.x - x, e.pos.z - z);
+    }
+    // a quick flash poof
+    for (let i = 0; i < 14; i++) {
+      this.makeParticle('wool',
+        x + (Math.random() - 0.5) * 1.2, y + Math.random() * 2, z + (Math.random() - 0.5) * 1.2,
+        { x: (Math.random() - 0.5) * 3, y: 1 + Math.random() * 3, z: (Math.random() - 0.5) * 3 },
+        0.4 + Math.random() * 0.3, -2);
     }
   }
 
@@ -764,6 +839,7 @@ export class EntityManager {
       this.audio.play('pop');
       this.spawnPoof(e.pos.x, e.pos.y, e.pos.z);
       this.dropLoot(e);
+      this.onKill?.(e.kind as string);
     }
   }
 

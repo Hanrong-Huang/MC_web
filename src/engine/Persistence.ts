@@ -31,9 +31,13 @@ export interface SaveState {
   /** chunk key "cx,cz" -> RLE bytes */
   world: Record<string, Uint8Array>;
   blockEntities: Record<string, BlockEntitySave>;
+  /** door state keyed by lower-half "x,y,z" -> facing/open/hinge */
+  doors?: Record<string, { facing: number; open: boolean; hingeRight: boolean }>;
   environment: { dayTime: number };
   /** bed spawn point, if set */
   spawn?: { x: number; y: number; z: number };
+  /** unlocked advancement ids */
+  advancements?: string[];
   lastPlayed: number;
 }
 

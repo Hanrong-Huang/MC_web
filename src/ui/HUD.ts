@@ -81,6 +81,8 @@ export class HUD {
   private packHandler: (files: File[]) => void = () => {};
   /** main sets this: leftover items that can't return to the inventory drop here */
   onDropLeftover: (id: number, count: number) => void = () => {};
+  /** fired when the player takes a crafting result */
+  onCraft: (id: number) => void = () => {};
 
   constructor(root: HTMLElement, atlas: Atlas, audio: AudioEngine) {
     this.root = root;
@@ -215,7 +217,9 @@ export class HUD {
     help.innerHTML =
       'WASD move · double-W / Ctrl sprint · Shift sneak · Space jump<br>' +
       'LMB break / attack · RMB place / use / eat · E inventory · 1-9 + scroll hotbar<br>' +
-      'F or double-Space (creative) fly · F3 debug · Esc pause<br>' +
+      'F or double-Space (creative) fly · F3 debug · L advancements · Esc pause<br>' +
+      'Doors & trapdoors open on right-click · climb ladders with Space<br>' +
+      'Watch the sky: rain, snow & thunderstorms roll in — lightning can ignite TNT!<br>' +
       'Resource packs: pick an <i>unzipped</i> pack folder containing assets/minecraft/textures';
   }
 
@@ -232,6 +236,7 @@ export class HUD {
     this.deathEl.classList.add('hidden');
     this.containerEl.classList.add('hidden');
     this.cursorEl.classList.add('hidden');
+    this.hideAdvancements();
   }
 
   refreshHotbar(inv: Inventory, mode: GameMode): void {
@@ -298,10 +303,80 @@ export class HUD {
 
   toast(msg: string): void {
     this.toastEl.textContent = msg;
-    this.toastEl.classList.add('show');
+    this.toastEl.className = 'show plain';
     if (this.toastTimer) clearTimeout(this.toastTimer);
     this.toastTimer = setTimeout(() => this.toastEl.classList.remove('show'), 2600);
   }
+
+  // --- advancement toasts + panel ------------------------------------------
+
+  private advToastEl: HTMLElement | null = null;
+  private advToastQueue: { icon: string; label: string }[] = [];
+  private advToastTimer: ReturnType<typeof setTimeout> | null = null;
+  private advPanel: HTMLElement | null = null;
+
+  /** Queue an advancement unlock toast (slides in from the right). */
+  showAdvancementToast(icon: string, label: string): void {
+    this.advToastQueue.push({ icon, label });
+    if (!this.advToastTimer) this.advanceAdvancementToast();
+  }
+
+  private advanceAdvancementToast(): void {
+    const next = this.advToastQueue.shift();
+    if (!next) {
+      this.advToastTimer = null;
+      if (this.advToastEl) this.advToastEl.classList.remove('show');
+      return;
+    }
+    if (!this.advToastEl) {
+      this.advToastEl = el('div', 'adv-toast', this.root);
+    }
+    this.advToastEl.innerHTML = '';
+    const top = el('div', 'adv-top', this.advToastEl);
+    top.textContent = 'Advancement Made!';
+    const body = el('div', 'adv-body', this.advToastEl);
+    const ic = el('span', 'adv-icon', body);
+    ic.textContent = next.icon;
+    const lbl = el('span', 'adv-label', body);
+    lbl.textContent = next.label;
+    this.advToastEl.classList.add('show');
+    this.advToastTimer = setTimeout(() => {
+      if (this.advToastEl) this.advToastEl.classList.remove('show');
+      this.advToastTimer = setTimeout(() => this.advanceAdvancementToast(), 600);
+    }, 4000);
+  }
+
+  /** Toggle the advancement list panel. */
+  toggleAdvancements(list: { icon: string; label: string; desc: string; done: boolean }[]): void {
+    if (this.advPanel) { this.hideAdvancements(); return; }
+    this.advPanel = el('div', 'overlay', this.root);
+    this.advPanel.id = 'adv-panel';
+    const panel = el('div', 'mc-panel', this.advPanel);
+    const title = el('div', 'ctr-label', panel);
+    title.style.fontSize = '16px';
+    title.style.marginBottom = '12px';
+    const done = list.filter((a) => a.done).length;
+    title.textContent = `Advancements  (${done}/${list.length})`;
+    const listEl = el('div', 'adv-list', panel);
+    for (const a of list) {
+      const row = el('div', `adv-row${a.done ? ' done' : ''}`, listEl);
+      const ic = el('span', 'adv-row-icon', row);
+      ic.textContent = a.done ? a.icon : '🔒';
+      const text = el('div', 'adv-row-text', row);
+      const name = el('div', 'adv-row-name', text);
+      name.textContent = a.label;
+      const desc = el('div', 'adv-row-desc', text);
+      desc.textContent = a.desc;
+    }
+    const hint = el('div', 'adv-hint', panel);
+    hint.textContent = 'Press L to close';
+  }
+
+  hideAdvancements(): void {
+    if (this.advPanel) { this.advPanel.remove(); this.advPanel = null; }
+  }
+
+  isAdvancementsOpen(): boolean { return this.advPanel !== null; }
 
   showLoading(text: string): void {
     this.loadingEl.classList.remove('hidden');
@@ -602,6 +677,7 @@ export class HUD {
           }
         }
         this.audio.play('level');
+        this.onCraft(result.id);
         rerender();
       });
     }

@@ -2,7 +2,7 @@
 // Entities are positioned by the center of their feet (pos.y = bottom of AABB).
 
 import { World } from './World';
-import { B } from './Blocks';
+import { B, def, hasDef } from './Blocks';
 
 export interface Vec3 { x: number; y: number; z: number }
 export interface EntBox { w: number; h: number } // full width (x=z) and height
@@ -15,6 +15,18 @@ export interface MoveResult {
 }
 
 const EPS = 0.001;
+
+/** Is the block at this cell a barrier for movement? Includes closed doors and
+ *  closed trapdoors standing upright (not flush with the floor). */
+function blocksMovement(world: World, x: number, y: number, z: number): boolean {
+  const id = world.getBlock(x, y, z);
+  if (id !== B.AIR && id !== B.WATER && hasDef(id) && def(id).solid) return true;
+  // doors block while closed
+  if (id === B.DOOR_LOWER || id === B.DOOR_UPPER) {
+    return world.isDoorClosed(x, y, z);
+  }
+  return false;
+}
 
 function collideAxis(world: World, pos: Vec3, box: EntBox, axis: 'x' | 'y' | 'z', vel: Vec3): boolean {
   const hw = box.w / 2;
@@ -30,7 +42,7 @@ function collideAxis(world: World, pos: Vec3, box: EntBox, axis: 'x' | 'y' | 'z'
   for (let by = y0; by <= y1; by++) {
     for (let bz = z0; bz <= z1; bz++) {
       for (let bx = x0; bx <= x1; bx++) {
-        if (!world.isSolidAt(bx, by, bz)) continue;
+        if (!blocksMovement(world, bx, by, bz)) continue;
         // resolve along the moving axis
         if (axis === 'x') {
           if (vel.x > 0) pos.x = bx - hw - EPS;
@@ -109,7 +121,7 @@ export function hasSupport(world: World, pos: Vec3, box: EntBox, depth = 0.6): b
   for (let by = y0; by <= y1; by++) {
     for (let bz = z0; bz <= z1; bz++) {
       for (let bx = x0; bx <= x1; bx++) {
-        if (world.isSolidAt(bx, by, bz)) return true;
+        if (blocksMovement(world, bx, by, bz)) return true;
       }
     }
   }
