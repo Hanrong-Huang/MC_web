@@ -1272,6 +1272,18 @@ export class EntityManager {
     }
   }
 
+  /** Any living hostile mob within `r` blocks of (x,y,z)? Gates sleeping. */
+  hostileNear(x: number, y: number, z: number, r: number): boolean {
+    const r2 = r * r;
+    for (const e of this.entities) {
+      if (!this.isMob(e) || e.dead) continue;
+      if (!MOB_STATS[e.kind as MobKind].hostile) continue;
+      const dx = e.pos.x - x, dy = e.pos.y - y, dz = e.pos.z - z;
+      if (dx * dx + dy * dy + dz * dz <= r2) return true;
+    }
+    return false;
+  }
+
   /** Used to block placement inside mobs. */
   anyMobIntersecting(bx: number, by: number, bz: number): boolean {
     for (const e of this.entities) {

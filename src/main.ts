@@ -24,7 +24,7 @@ const DAY_LENGTH = 1200; // 20 real minutes
 const SAVE_VERSION = 2;
 const AUTOSAVE_SECONDS = 60;
 
-type GameUIState = 'loading' | 'playing' | 'paused' | 'container' | 'dead';
+type GameUIState = 'loading' | 'playing' | 'paused' | 'container' | 'dead' | 'sleeping';
 
 class Game {
   private app: App;
@@ -261,6 +261,12 @@ class Game {
       wall(bx, by + 1, bz + 1, 2);
       wall(bx, by + 1, bz - 1, 3);
       this.world.setBlock(bx, by + 2, bz, B.TORCH); // floor torch on top
+      // a reachable bed right in front for sleep testing
+      const bedX = Math.floor(p.x) + 1, bedY = Math.floor(p.y), bedZ = Math.floor(p.z);
+      this.world.setBlock(bedX, bedY - 1, bedZ, B.STONE);
+      this.world.setBlock(bedX, bedY, bedZ, B.BED);
+      this.world.setBlock(bedX, bedY + 1, bedZ, B.AIR);
+      this.world.setBlock(bedX, bedY + 2, bedZ, B.AIR);
     }
     this.hud.toast('Click to capture the mouse');
     this.lastFrame = performance.now();
@@ -484,19 +490,47 @@ class Game {
     }
   }
 
-  /** Right-clicking a bed: set the respawn point and skip the night. */
+  /** Right-clicking a bed: set the respawn point, and (at night, with no
+   *  monsters nearby) sleep through to morning with a fade transition. */
   private useBed(x: number, y: number, z: number): void {
     this.spawnPoint = { x: x + 0.5, y: y + 1, z: z + 0.5 };
-    this.nightsAwake = 0; // sleeping resets phantom insomnia
-    const sunHeight = Math.sin(this.dayTime * Math.PI * 2);
-    if (sunHeight < 0.05) {
-      this.dayTime = 0.02; // sleep through to sunrise
-      this.hud.toast('Good morning! Spawn point set.');
-      this.audio.play('level');
-    } else {
-      this.hud.toast('Spawn point set');
-    }
     this.adv.unlock('bed');
+    const isNight = Math.sin(this.dayTime * Math.PI * 2) < 0.0;
+    if (!isNight) {
+      this.hud.toast('You can only sleep at night. Spawn point set.');
+      return;
+    }
+    const p = this.player.pos;
+    if (this.entities.hostileNear(p.x, p.y + 1, p.z, 12)) {
+      this.hud.toast('You may not rest now; there are monsters nearby');
+      this.audio.play('fail');
+      return;
+    }
+    this.startSleep();
+  }
+
+  /** Fade to black, jump to dawn, then fade back in. */
+  private startSleep(): void {
+    if (this.state !== 'playing') return;
+    this.state = 'sleeping';
+    this.input.exitLock();
+    this.player.vel.x = 0; this.player.vel.z = 0;
+    this.hud.sleepFade(
+      () => {
+        if (this.disposed) return;
+        this.dayTime = 0.0; // sunrise
+        this.nightsAwake = 0; // sleeping clears phantom insomnia
+        this.wasNight = false;
+        this.survivedNight = false;
+        this.audio.play('level');
+      },
+      () => {
+        if (this.disposed) return;
+        this.state = 'playing';
+        this.hud.toast('Good morning');
+        this.input.requestLock();
+      },
+    );
   }
 
   /** Lightning struck at (x,y,z): ignite TNT, scorch mobs, flash + thunder. */

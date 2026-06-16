@@ -84,6 +84,7 @@ export class HUD {
   private cursorEl: HTMLElement;
   private vignette: HTMLElement;
   private lowhpEl!: HTMLElement;
+  private sleepEl!: HTMLElement;
   private packInput: HTMLInputElement;
 
   cursor: Slot = null;
@@ -131,6 +132,7 @@ export class HUD {
 
     this.lowhpEl = el('div', '', root); this.lowhpEl.id = 'lowhp';
     this.vignette = el('div', '', root); this.vignette.id = 'vignette';
+    this.sleepEl = el('div', '', root); this.sleepEl.id = 'sleep-fade';
     this.pauseEl = el('div', 'overlay hidden', root); this.pauseEl.id = 'pause-overlay';
     this.deathEl = el('div', 'overlay hidden', root); this.deathEl.id = 'death-overlay';
     this.containerEl = el('div', 'overlay hidden', root); this.containerEl.id = 'container-screen';
@@ -324,6 +326,19 @@ export class HUD {
     this.itemNameEl.classList.add('show');
     if (this.itemNameTimer) clearTimeout(this.itemNameTimer);
     this.itemNameTimer = setTimeout(() => this.itemNameEl.classList.remove('show'), 1400);
+  }
+
+  /** Black-screen sleep transition: fade to black, run `onDark` (skip to
+   *  morning) at the darkest point, then fade back in and run `onWake`. */
+  sleepFade(onDark: () => void, onWake: () => void): void {
+    this.sleepEl.classList.add('on');
+    window.setTimeout(() => {
+      onDark();
+      window.setTimeout(() => {
+        this.sleepEl.classList.remove('on');
+        window.setTimeout(onWake, 700);
+      }, 400);
+    }, 700);
   }
 
   setDebugVisible(v: boolean): void { this.debugEl.classList.toggle('hidden', !v); }
