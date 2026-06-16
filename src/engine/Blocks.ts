@@ -125,6 +125,9 @@ export enum I {
   VEGETABLE_STEW = 156,
   GOLDEN_CARROT = 157,
   BONE_MEAL = 158,
+  LEATHER = 159,
+  SADDLE = 160,
+  HORSE_ARMOR = 161,
 }
 
 /** extra block ids beyond the base range */
@@ -539,6 +542,9 @@ itemDef({ id: I.WOOD_DOOR, name: 'oak_door', label: 'Wooden Door', sprite: 'wood
 // new items
 itemDef({ id: I.BONE, name: 'bone', label: 'Bone', sprite: 'bone' });
 itemDef({ id: I.BONE_MEAL, name: 'bone_meal', label: 'Bone Meal', sprite: 'bone_meal' });
+itemDef({ id: I.LEATHER, name: 'leather', label: 'Leather', sprite: 'leather' });
+itemDef({ id: I.SADDLE, name: 'saddle', label: 'Saddle', sprite: 'saddle', stack: 1 });
+itemDef({ id: I.HORSE_ARMOR, name: 'iron_horse_armor', label: 'Iron Horse Armor', sprite: 'horse_armor', stack: 1 });
 itemDef({ id: I.EMERALD, name: 'emerald', label: 'Emerald', sprite: 'emerald' });
 itemDef({
   id: I.FISHING_ROD, name: 'fishing_rod', label: 'Fishing Rod', sprite: 'fishing_rod', stack: 1,
@@ -654,4 +660,5 @@ export const CREATIVE_ITEMS: number[] = [
   I.BEETROOT, I.BEETROOT_SEEDS, I.BOWL, I.BEETROOT_SOUP, I.VEGETABLE_STEW, I.GOLDEN_CARROT,
   I.HOE, I.WOOD_DOOR,
   I.BONE, I.BONE_MEAL, I.EMERALD, I.FISHING_ROD, I.RAW_FISH, I.COOKED_FISH, I.COMPASS, I.CLOCK,
+  I.LEATHER, I.SADDLE, I.HORSE_ARMOR,
 ];

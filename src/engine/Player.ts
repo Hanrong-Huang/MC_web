@@ -658,6 +658,18 @@ export class Player {
           return;
         }
         if (res === 'sit') { this.placeCooldown = 0.3; audio.play('click'); return; }
+        if (res === 'love') {
+          this.placeCooldown = 0.4;
+          if (this.mode === 'survival') this.inventory.consumeSelected(); // eat the food
+          audio.play('eat');
+          return;
+        }
+        if (res === 'saddle' || res === 'armor') {
+          this.placeCooldown = 0.4;
+          if (this.mode === 'survival') this.inventory.consumeSelected();
+          audio.play('level');
+          return;
+        }
         if (res === 'mount') {
           this.placeCooldown = 0.4;
           this.mount(hit.entity);

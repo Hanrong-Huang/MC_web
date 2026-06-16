@@ -2,7 +2,7 @@
 // clouds, stars, block outline + crack overlay, and the first-person held item.
 
 import * as THREE from 'three';
-import { Atlas } from './Textures';
+import { Atlas, extrudeSpriteGeometry } from './Textures';
 import { ChunkGeometry } from './Mesher';
 import { def, hasDef } from './Blocks';
 
@@ -123,6 +123,7 @@ export class Renderer {
   private bowArrow: THREE.Object3D | null = null;
   private heldId = -1;
   private swingT = 1; // 0..1, 1 = idle
+  private raiseT = 1; // 0..1, drives the raise-up when the held item changes
   private bowCharge = 0;
   private bobT = 0;
   private atlas: Atlas;
@@ -434,6 +435,7 @@ export class Renderer {
   setHeldItem(id: number): void {
     if (id === this.heldId) return;
     this.heldId = id;
+    this.raiseT = 0; // animate the new item up into view
     if (this.heldMesh) {
       this.heldGroup.remove(this.heldMesh);
       this.heldMesh.traverse((o) => {
@@ -483,16 +485,15 @@ export class Renderer {
       mesh.scale.setScalar(0.32);
       this.heldMesh = mesh;
     } else if (id !== 0 && hasDef(id) && def(id).sprite) {
-      // flat pixel sprite extruded look: textured plane
+      // pixel sprite extruded into a real 3D voxel model (Minecraft-style),
+      // so tools/items in hand read with depth instead of as a flat card.
       const sprite = this.atlas.sprite(def(id).sprite!);
-      const tex = new THREE.CanvasTexture(sprite!);
-      tex.magFilter = THREE.NearestFilter;
-      tex.minFilter = THREE.NearestFilter;
-      const mesh = new THREE.Mesh(
+      const mesh = sprite ? this.buildExtrudedItem(sprite) : new THREE.Mesh(
         new THREE.PlaneGeometry(0.5, 0.5),
-        new THREE.MeshBasicMaterial({ map: tex, transparent: true, alphaTest: 0.1, side: THREE.DoubleSide }),
+        new THREE.MeshBasicMaterial({ color: 0xff00ff }),
       );
-      mesh.rotation.y = Math.PI * 0.12;
+      // grip angle: lean the item like it's held in the fist
+      mesh.rotation.set(0.12, -0.2, -0.5);
       this.heldMesh = mesh;
       if (def(id).bow) {
         this.bowArrow = this.buildHeldArrow();
@@ -521,15 +522,19 @@ export class Renderer {
   /** Update held-item animation; `moving` drives view bob. */
   updateHeld(dt: number, moving: boolean): void {
     if (this.swingT < 1) this.swingT = Math.min(1, this.swingT + dt / 0.28);
+    if (this.raiseT < 1) this.raiseT = Math.min(1, this.raiseT + dt / 0.16);
     this.bobT += dt * (moving ? 7 : 2);
     const s = this.swingT;
     const swingAngle = Math.sin(Math.min(1, s) * Math.PI) * 1.1;
     const bob = moving ? Math.sin(this.bobT) * 0.012 : Math.sin(this.bobT) * 0.004;
+    // new item raises into view on a hotbar switch (smoothstep ease)
+    const rk = this.raiseT;
+    const lower = (1 - rk * rk * (3 - 2 * rk)) * 0.42;
     const drawingBow = this.bowCharge > 0.01 && this.heldId !== 0 && hasDef(this.heldId) && !!def(this.heldId).bow;
 
     if (drawingBow) {
       const pull = this.bowCharge;
-      this.heldGroup.position.set(0.30 - pull * 0.16, -0.26 + bob * 0.4, -0.68 - pull * 0.16);
+      this.heldGroup.position.set(0.30 - pull * 0.16, -0.26 + bob * 0.4 - lower, -0.68 - pull * 0.16);
       this.heldGroup.rotation.set(-0.18 - pull * 0.36, 0.05 + pull * 0.22, -0.45 - pull * 0.2);
       if (this.heldMesh) {
         this.heldMesh.scale.setScalar(1 + pull * 0.08);
@@ -552,13 +557,20 @@ export class Renderer {
 
     this.heldGroup.position.set(
       0.42 - swingAngle * 0.18,
-      -0.36 + bob - swingAngle * 0.10,
+      -0.36 + bob - swingAngle * 0.10 - lower,
       -0.62 + swingAngle * 0.08,
     );
     this.heldGroup.rotation.set(
       -swingAngle * 0.9 + bob * 2,
       0.25 + swingAngle * 0.5,
       swingAngle * 0.25,
+    );
+  }
+
+  private buildExtrudedItem(sprite: HTMLCanvasElement): THREE.Mesh {
+    return new THREE.Mesh(
+      extrudeSpriteGeometry(sprite, 0.5),
+      new THREE.MeshLambertMaterial({ vertexColors: true }),
     );
   }
 

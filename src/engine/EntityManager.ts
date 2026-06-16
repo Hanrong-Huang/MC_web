@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import { World } from './World';
 import { moveEntity, inWater, rayAABB, Vec3, MoveResult } from './Physics';
 import { B, I, def, hasDef, CROSS_BLOCKS } from './Blocks';
-import { Atlas } from './Textures';
+import { Atlas, extrudeSpriteGeometry } from './Textures';
 import { AudioEngine } from './Audio';
 import { SEA_LEVEL } from './WorldGenerator';
 import type { Player } from './Player';
@@ -34,6 +34,18 @@ const HORSE_COATS: [string, string, string][] = [
   ['#a06038', '#8a4f2c', '#e8d8b0'], // chestnut, flaxen mane
   ['#cfcfcf', '#bcbcbc', '#9a9a9a'], // white/grey
 ];
+/** Foods that put each animal into "love mode". Wolf/cat/horse must be tamed. */
+const BREED_FOOD: Partial<Record<MobKind, number[]>> = {
+  pig: [I.CARROT, I.POTATO, I.BEETROOT],
+  cow: [I.WHEAT],
+  sheep: [I.WHEAT],
+  chicken: [I.SEEDS, I.BEETROOT_SEEDS],
+  horse: [I.GOLDEN_CARROT, I.APPLE],
+  wolf: [I.BEEF, I.COOKED_BEEF, I.PORKCHOP, I.COOKED_PORKCHOP, I.CHICKEN, I.COOKED_CHICKEN, I.MUTTON, I.COOKED_MUTTON],
+  cat: [I.RAW_FISH, I.COOKED_FISH],
+};
+const BREED_NEEDS_TAME = new Set<MobKind>(['wolf', 'cat', 'horse']);
+
 /** Cat coat palettes: [body, speckle, belly]. */
 const CAT_COATS: [string, string, string][] = [
   ['#3a3530', '#2a2520', '#cfcabf'], // tuxedo
@@ -120,6 +132,17 @@ export class Entity {
   bucking = 0;
   /** restCooldown before the player can be bucked again, etc. */
   restT = 0;
+  saddled = false;
+  /** 0 = none, 1 = iron barding */
+  armorTier = 0;
+  // breeding fields
+  /** seconds left in "love mode" (looking for a mate) */
+  loveT = 0;
+  /** cooldown before this animal can breed again */
+  breedCooldown = 0;
+  /** baby animals are scaled down and grow up after growT seconds */
+  baby = false;
+  growT = 0;
   // villager fields
   trades: { give: number; giveCount: number; get: number; getCount: number; uses: number; max: number }[] = [];
   // phantom fields
@@ -147,6 +170,7 @@ export class EntityManager {
   /** fired when any mob dies (mobKind string) */
   onKill: ((mobKind: string) => void) | null = null;
   private skinCache = new Map<string, THREE.Texture>();
+  private shadowTex: THREE.CanvasTexture | null = null;
   private particleMats = new Map<string, THREE.MeshBasicMaterial>();
   private spawnTick = 0;
   mobsEnabled = true;
@@ -187,9 +211,34 @@ export class EntityManager {
     e.materials = mats;
     e.variant = variant;
     e.yaw = Math.random() * Math.PI * 2;
+    // soft contact shadow under grounded mobs (phantoms fly, so they get none)
+    if (kind !== 'phantom') mesh.add(this.makeShadow(stats.box.w));
     this.entities.push(e);
     this.scene.add(mesh);
     return e;
+  }
+
+  /** A soft round contact shadow plane, parented under a mob. */
+  private makeShadow(w: number): THREE.Mesh {
+    if (!this.shadowTex) {
+      const c = document.createElement('canvas');
+      c.width = 32; c.height = 32;
+      const ctx = c.getContext('2d')!;
+      const grad = ctx.createRadialGradient(16, 16, 1, 16, 16, 16);
+      grad.addColorStop(0, 'rgba(0,0,0,0.5)');
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, 32, 32);
+      this.shadowTex = new THREE.CanvasTexture(c);
+    }
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(w * 1.6, w * 1.6),
+      new THREE.MeshBasicMaterial({ map: this.shadowTex, transparent: true, depthWrite: false, opacity: 0.5 }),
+    );
+    m.rotation.x = -Math.PI / 2;
+    m.position.y = 0.02;
+    m.renderOrder = 1;
+    return m;
   }
 
   /** Spawn a phantom above the player (called when sleep has been skipped). */
@@ -864,6 +913,25 @@ export class EntityManager {
     }
   }
 
+  /** In love mode: find a nearby same-kind mate, spawn a baby, set cooldowns. */
+  private tryBreed(e: Entity): void {
+    if (e.loveT <= 0) return;
+    for (const m of this.entities) {
+      if (m === e || m.kind !== e.kind || m.baby || m.loveT <= 0) continue;
+      const dx = m.pos.x - e.pos.x, dz = m.pos.z - e.pos.z;
+      if (dx * dx + dz * dz > 6.25) continue; // within 2.5 blocks
+      e.loveT = 0; m.loveT = 0;
+      e.breedCooldown = 60; m.breedCooldown = 60;
+      const bx = (e.pos.x + m.pos.x) / 2, bz = (e.pos.z + m.pos.z) / 2;
+      const by = Math.max(e.pos.y, m.pos.y);
+      const baby = this.spawnBaby(e.kind as MobKind, bx, by, bz);
+      if (e.tamed && m.tamed) { baby.tamed = true; baby.ownerName = 'player'; }
+      this.spawnHearts(bx, by + 0.4, bz);
+      this.audio.play('pop');
+      return;
+    }
+  }
+
   /** Tamed wolf: bite nearby hostile mobs. */
   private wWolfCombat(e: Entity, dt: number): void {
     e.attackCooldown = Math.max(0, e.attackCooldown - dt);
@@ -938,6 +1006,18 @@ export class EntityManager {
 
     for (const e of this.entities) {
       if (!this.isMob(e)) continue;
+      // breeding + baby growth bookkeeping
+      if (e.breedCooldown > 0) e.breedCooldown = Math.max(0, e.breedCooldown - 0.05);
+      if (e.loveT > 0) {
+        e.loveT -= 0.05;
+        if (Math.random() < 0.25) this.spawnHearts(e.pos.x, e.pos.y + e.box.h, e.pos.z);
+        this.tryBreed(e);
+      }
+      if (e.baby && (e.growT -= 0.05) <= 0) {
+        e.baby = false;
+        e.mesh.scale.setScalar(1);
+        e.box = { ...MOB_STATS[e.kind as MobKind].box };
+      }
       e.stateTime -= 0.05;
       const stats = MOB_STATS[e.kind as MobKind];
       const d = Math.hypot(p.pos.x - e.pos.x, p.pos.z - e.pos.z);
@@ -1116,6 +1196,7 @@ export class EntityManager {
 
   hurt(e: Entity, dmg: number, kbX: number, kbZ: number): void {
     if (e.dead || !this.isMob(e)) return;
+    if (e.armorTier > 0) dmg *= 0.5; // iron horse barding halves damage
     e.hp -= dmg;
     e.hurtFlash = 0.35;
     if (e.kind === 'spider') e.angryT = 12;
@@ -1147,7 +1228,8 @@ export class EntityManager {
       case 'pig': at(I.PORKCHOP, 1, 2); break;
       case 'chicken': at(I.CHICKEN, 1, 1); at(I.FEATHER, 0, 2); break;
       case 'sheep': at(I.MUTTON, 1, 2); at(B.WOOL, 1, 1); break;
-      case 'cow': at(I.BEEF, 1, 2); break;
+      case 'cow': at(I.BEEF, 1, 2); at(I.LEATHER, 0, 2); break;
+      case 'horse': at(I.LEATHER, 0, 2); break;
       case 'zombie': at(I.ROTTEN_FLESH, 0, 2); break;
       case 'skeleton': at(I.ARROW, 0, 2); at(I.BONE, 0, 2); break;
       case 'spider': at(I.STRING, 0, 2); break;
@@ -1172,11 +1254,17 @@ export class EntityManager {
   }
 
   /** Right-click interaction with the targeted mob.
-   *  Returns 'tamed' | 'sit' | 'trade' | 'mount' | null. */
-  interactMob(e: Entity, heldId: number): 'tamed' | 'sit' | 'trade' | 'mount' | null {
+   *  Returns the interaction kind (the player consumes items / opens UI). */
+  interactMob(e: Entity, heldId: number):
+    'tamed' | 'sit' | 'trade' | 'mount' | 'love' | 'saddle' | 'armor' | null {
+    // feeding an adult its breeding food puts it into love mode
+    if (this.canBreed(e, heldId)) {
+      e.loveT = 22;
+      this.spawnHearts(e.pos.x, e.pos.y + e.box.h * 0.7, e.pos.z);
+      return 'love';
+    }
     if (e.kind === 'wolf') {
       if (heldId === I.BONE && !e.tamed) {
-        // ~1/3 chance per bone to tame
         if (Math.random() < 0.34) {
           e.tamed = true; e.ownerName = 'player';
           this.spawnHearts(e.pos.x, e.pos.y + 0.7, e.pos.z);
@@ -1200,7 +1288,9 @@ export class EntityManager {
       return null;
     }
     if (e.kind === 'horse') {
-      // mounting (and buck-to-tame) is driven by the player
+      // a tamed horse can be saddled / armored; otherwise right-click mounts
+      if (e.tamed && heldId === I.SADDLE && !e.saddled) { this.saddleHorse(e); return 'saddle'; }
+      if (e.tamed && heldId === I.HORSE_ARMOR && e.armorTier === 0) { this.armorHorse(e, 1); return 'armor'; }
       return 'mount';
     }
     if (e.kind === 'villager') {
@@ -1208,6 +1298,49 @@ export class EntityManager {
       return 'trade';
     }
     return null;
+  }
+
+  /** Is this animal a breedable adult and is `heldId` its food? */
+  private canBreed(e: Entity, heldId: number): boolean {
+    if (e.baby || e.loveT > 0 || e.breedCooldown > 0) return false;
+    const foods = BREED_FOOD[e.kind as MobKind];
+    if (!foods || !foods.includes(heldId)) return false;
+    if (BREED_NEEDS_TAME.has(e.kind as MobKind) && !e.tamed) return false;
+    return true;
+  }
+
+  /** Put a saddle on a tamed horse (visual + handled flag for a speed boost). */
+  private saddleHorse(e: Entity): void {
+    e.saddled = true;
+    const leather = new THREE.MeshLambertMaterial({ color: 0x5a3d22 });
+    const seat = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.14, 0.6), leather);
+    seat.position.set(0, 1.52, 0.15);
+    const knob = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.12, 0.12), leather);
+    knob.position.set(0, 1.62, -0.12);
+    e.mesh.add(seat, knob);
+    this.spawnHearts(e.pos.x, e.pos.y + 1.6, e.pos.z);
+  }
+
+  /** Fit iron barding on a tamed horse (visual + damage-resist flag). */
+  private armorHorse(e: Entity, tier: number): void {
+    e.armorTier = tier;
+    const iron = new THREE.MeshLambertMaterial({ color: 0xcfcfd6 });
+    const chest = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.5, 0.7), iron);
+    chest.position.set(0, 1.15, 0.18);
+    const neck = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.78, 0.42), iron);
+    neck.position.set(0, 1.46, -0.5); neck.rotation.x = 0.5;
+    e.mesh.add(chest, neck);
+    this.spawnHearts(e.pos.x, e.pos.y + 1.6, e.pos.z);
+  }
+
+  /** Spawn a baby animal (scaled down, grows up after a delay). */
+  spawnBaby(kind: MobKind, x: number, y: number, z: number): Entity {
+    const e = this.spawnMob(kind, x, y, z);
+    e.baby = true;
+    e.growT = 45;
+    e.mesh.scale.setScalar(0.55);
+    e.box = { w: e.box.w * 0.6, h: e.box.h * 0.6 };
+    return e;
   }
 
   // --- horse riding -----------------------------------------------------------
@@ -1260,7 +1393,7 @@ export class EntityManager {
     const len = Math.hypot(wishX, wishZ);
     if (len > 1) { wishX /= len; wishZ /= len; }
     if (len > 0.01) e.yaw = lookYaw;
-    const speed = e.moveSpeed * (fwd > 0 ? 2.4 : 1.5); // gallop forward
+    const speed = e.moveSpeed * (fwd > 0 ? 2.4 : 1.5) * (e.saddled ? 1.18 : 1); // saddle = faster gallop
     const res = this.applyGroundMove(e, dt, wishX, wishZ, speed);
     if (jump && e.onGround) e.vel.y = JUMP_V * 1.15;
     else if ((res.hitX || res.hitZ) && e.onGround && (wishX !== 0 || wishZ !== 0)) e.vel.y = JUMP_V;
@@ -1425,6 +1558,11 @@ export class EntityManager {
       const head = new THREE.Group();
       head.position.set(0, 0.62, -0.5);
       head.add(this.boxMesh(0.5, 0.5, 0.42, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
+      // protruding snout reads instantly as a pig
+      const pigSnoutM = this.mat(this.skin('pig_snout', '#c76b75', '#b85b65'), mats);
+      const pigSnout = this.boxMesh(0.26, 0.18, 0.1, pigSnoutM);
+      pigSnout.position.set(0, -0.05, -0.26);
+      head.add(pigSnout);
       const legs = [
         this.leg(0.18, 0.32, bodyM, -0.2, 0.32, -0.32),
         this.leg(0.18, 0.32, bodyM, 0.2, 0.32, -0.32),
@@ -1449,6 +1587,13 @@ export class EntityManager {
       const head = new THREE.Group();
       head.position.set(0, 0.72, -0.22);
       head.add(this.boxMesh(0.24, 0.32, 0.22, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
+      // beak (orange), comb + wattle (red) — classic chicken silhouette
+      const beakM = this.mat(this.skin('chk_beak', '#e8a33d', '#cf8f30'), mats);
+      const combM = this.mat(this.skin('chk_comb', '#c43030', '#a82424'), mats);
+      const beak = this.boxMesh(0.1, 0.08, 0.14, beakM); beak.position.set(0, -0.03, -0.16);
+      const comb = this.boxMesh(0.05, 0.1, 0.2, combM); comb.position.set(0, 0.2, 0.02);
+      const wattle = this.boxMesh(0.05, 0.09, 0.05, combM); wattle.position.set(0, -0.13, -0.11);
+      head.add(beak, comb, wattle);
       const legs = [
         this.leg(0.07, 0.26, legM, -0.09, 0.26, 0.02),
         this.leg(0.07, 0.26, legM, 0.09, 0.26, 0.02),
@@ -1457,7 +1602,10 @@ export class EntityManager {
       wingL.position.set(-0.21, 0.48, 0);
       const wingR = wingL.clone();
       wingR.position.x = 0.21;
-      g.add(body, head, wingL, wingR, ...legs);
+      // upright tail feathers
+      const tail = this.boxMesh(0.18, 0.24, 0.12, bodyM);
+      tail.position.set(0, 0.54, 0.28); tail.rotation.x = 0.6;
+      g.add(body, head, wingL, wingR, tail, ...legs);
       return { mesh: g, limbs: { legs, head }, mats };
     }
 
@@ -1503,7 +1651,16 @@ export class EntityManager {
       hornL.position.set(-0.26, 0.18, -0.05);
       const hornR = hornL.clone();
       hornR.position.x = 0.26;
-      head.add(hornL, hornR);
+      // pale muzzle on the face
+      const muzzleM = this.mat(this.skin('cow_muzzle', '#d8c8b8', '#c8b6a4'), mats);
+      const muzzle = this.boxMesh(0.3, 0.2, 0.1, muzzleM);
+      muzzle.position.set(0, -0.08, -0.22);
+      head.add(hornL, hornR, muzzle);
+      // small udder under the belly
+      const udderM = this.mat(this.skin('cow_udder', '#e8a0a8', '#d89098'), mats);
+      const udder = this.boxMesh(0.26, 0.14, 0.3, udderM);
+      udder.position.set(0, 0.5, 0.34);
+      g.add(udder);
       const legs = [
         this.leg(0.18, 0.6, bodyM, -0.22, 0.6, -0.32),
         this.leg(0.18, 0.6, bodyM, 0.22, 0.6, -0.32),
@@ -1871,15 +2028,14 @@ export class EntityManager {
     } else if (d.block && d.faces) {
       g.add(this.makeBlockMesh(itemId, 0.25));
     } else if (d.sprite) {
+      // dropped items tumble as real 3D voxel models
       const sprite = this.atlas.sprite(d.sprite);
-      const tex = new THREE.CanvasTexture(sprite!);
-      tex.magFilter = THREE.NearestFilter;
-      tex.minFilter = THREE.NearestFilter;
-      const m = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.35, 0.35),
-        new THREE.MeshBasicMaterial({ map: tex, transparent: true, alphaTest: 0.1, side: THREE.DoubleSide }),
-      );
-      g.add(m);
+      if (sprite) {
+        g.add(new THREE.Mesh(
+          extrudeSpriteGeometry(sprite, 0.34),
+          new THREE.MeshLambertMaterial({ vertexColors: true }),
+        ));
+      }
     }
     return g;
   }

@@ -124,6 +124,7 @@ const P = B.PLANKS, C = B.COBBLE, S = I.STICK;
 const FE = I.IRON_INGOT, AU = I.GOLD_INGOT, DI = I.DIAMOND;
 const W = B.WOOL, G = I.GUNPOWDER, SA = B.SAND, ST = I.STRING;
 const CA = I.CARROT, PO = I.POTATO, BE = I.BEETROOT, BO = I.BOWL;
+const LE = I.LEATHER;
 
 function toolRecipes(mat: number, pick: number, axe: number, shovel: number, sword: number): Recipe[] {
   const M = mat;
@@ -177,6 +178,10 @@ const RECIPES: Recipe[] = [
   { shape: [[0, FE, 0], [FE, FE, FE], [0, FE, 0]], out: I.COMPASS, n: 1 },
   // clock: gold ring with an iron core (redstone stand-in for the dial)
   { shape: [[0, AU, 0], [AU, FE, AU], [0, AU, 0]], out: I.CLOCK, n: 1 },
+  // saddle: leather seat with iron buckles
+  { shape: [[LE, LE, LE], [FE, 0, FE]], out: I.SADDLE, n: 1 },
+  // iron horse armor: iron barding around a leather lining
+  { shape: [[FE, 0, FE], [FE, LE, FE], [FE, FE, FE]], out: I.HORSE_ARMOR, n: 1 },
   // resource blocks (and back)
   { shape: [[FE, FE, FE], [FE, FE, FE], [FE, FE, FE]], out: B.IRON_BLOCK, n: 1 },
   { shape: [[AU, AU, AU], [AU, AU, AU], [AU, AU, AU]], out: B.GOLD_BLOCK, n: 1 },

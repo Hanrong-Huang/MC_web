@@ -65,6 +65,54 @@ function pixmap(ctx: Ctx, x0: number, y0: number, rows: string[], palette: Recor
   }
 }
 
+/**
+ * Extrude a pixel sprite (any NxM canvas) into a thin voxel slab with per-pixel
+ * vertex colors. Interior side faces are culled, so only the silhouette gets
+ * edges — the chunky Minecraft held-item / dropped-item look. Colors are
+ * linearized so MeshLambertMaterial output matches the source sprite.
+ */
+export function extrudeSpriteGeometry(sprite: HTMLCanvasElement, sizeAcross = 0.5): THREE.BufferGeometry {
+  const W = sprite.width, H = sprite.height;
+  const data = sprite.getContext('2d')!.getImageData(0, 0, W, H).data;
+  const solid = (x: number, y: number): boolean =>
+    x >= 0 && y >= 0 && x < W && y < H && data[(y * W + x) * 4 + 3] > 40;
+
+  const pos: number[] = [], norm: number[] = [], col: number[] = [];
+  const depth = 1.4;
+  const quad = (
+    a: number[], b: number[], c: number[], d: number[],
+    n: number[], r: number, g: number, bl: number,
+  ): void => {
+    for (const v of [a, b, c, a, c, d]) {
+      pos.push(v[0], v[1], v[2]); norm.push(n[0], n[1], n[2]); col.push(r, g, bl);
+    }
+  };
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (!solid(x, y)) continue;
+      const i = (y * W + x) * 4;
+      const r = (data[i] / 255) ** 2.2, g = (data[i + 1] / 255) ** 2.2, b = (data[i + 2] / 255) ** 2.2;
+      const x0 = x, x1 = x + 1;
+      const Y = H - 1 - y, y0 = Y, y1 = Y + 1;
+      const z0 = 0, z1 = depth;
+      quad([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0, 0, 1], r, g, b);
+      quad([x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [0, 0, -1], r, g, b);
+      if (!solid(x - 1, y)) quad([x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [-1, 0, 0], r, g, b);
+      if (!solid(x + 1, y)) quad([x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [1, 0, 0], r, g, b);
+      if (!solid(x, y - 1)) quad([x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0], [0, 1, 0], r, g, b);
+      if (!solid(x, y + 1)) quad([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0, -1, 0], r, g, b);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(norm, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  geo.translate(-W / 2, -H / 2, -depth / 2);
+  const s = sizeAcross / W;
+  geo.scale(s, s, s);
+  return geo;
+}
+
 const STONE_PAL = ['#747474', '#7d7d7d', '#868686', '#6b6b6b', '#909090'];
 const DIRT_PAL = ['#866043', '#79553a', '#96714f', '#6f4d34', '#8d6849'];
 const GRASS_PAL = ['#5d9b3d', '#65a843', '#549335', '#6fb04a', '#588f3a'];
@@ -839,11 +887,11 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     '....W.....W.....', '................', '................', '................',
   ], { W: '#eeeeee', w: '#bcbcbc' }),
   gunpowder: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '......g.g.......',
+    '.....gKgKg......', '....KKgKKKgK....', '...KKKKgKKKKK...', '...KgKKKKKKgK...',
+    '...KKKKgKKKKK...', '....KKKgKKKK....', '.....KKKKKK.....', '......KKK.......',
     '................', '................', '................', '................',
-    '......G.G.......', '....G.GGG.G.....', '...GGGgGGGG.....', '..GGgGGGGgGG....',
-    '..GGGGgGGGGG....', '...GGGGGgGG.....', '....GGGGGG......', '................',
-    '................', '................', '................', '................',
-  ], { G: '#5a5a5a', g: '#8a8a8a' }),
+  ], { K: '#383838', g: '#6e6e6e' }),
   arrow: (c) => pixmap(c, 0, 0, [
     '............OO..', '...........OWWO.', '..........OWWWO.', '..........OWWO..',
     '.........OHO....', '........OHO.....', '.......OHO......', '......OHO.......',
@@ -974,6 +1022,24 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     '..WWWWwWWWWW....', '...WWWWWwWW.....', '....WWWWWW......', '................',
     '................', '................', '................', '................',
   ], { W: '#ececec', w: '#c4c4c4' }),
+  leather: (c) => pixmap(c, 0, 0, [
+    '................', '................', '....OOOOOO......', '...OLLLLLLO.....',
+    '..OLLlLLLlLO....', '..OLLLLLLLLO....', '..OLlLLLLlLO....', '..OLLLLLLLLO....',
+    '..OLLlLLLLLO....', '...OLLLLLlO.....', '....OOOOOO......', '................',
+    '................', '................', '................', '................',
+  ], { O: '#5a3a1e', L: '#a06a3a', l: '#8a5a2e' }),
+  saddle: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '.....OOOOOO.....',
+    '....OBBBBBBO....', '...OBBBBBBBBO...', '..OBKBBBBKBBO...', '..OBBBBBBBBBO...',
+    '...OOBBBBBOO...', '.....O.OO.O.....', '....O...O..O....', '................',
+    '................', '................', '................', '................',
+  ], { O: '#3a2410', B: '#7a4a22', K: '#caa84a' }),
+  horse_armor: (c) => pixmap(c, 0, 0, [
+    '................', '......OOOO......', '.....OMMMMO.....', '....OMMmMMMO....',
+    '...OMMMMMMMO....', '...OMmMMMmMO....', '...OMMMMMMMO....', '....OMMMMMO....',
+    '....O.OMMO.O....', '......OMMO......', '.....OMMMMO.....', '......OOOO......',
+    '................', '................', '................', '................',
+  ], { O: '#3f3f47', M: '#cfcfd6', m: '#a8a8b0' }),
   emerald: (c) => pixmap(c, 0, 0, [
     '................', '................', '................', '.......O........',
     '......OGO.......', '.....OGGGO......', '....OGGGGGO.....', '....OGGGGGO.....',
@@ -1318,7 +1384,12 @@ export class Atlas {
     if (cached) return cached;
     const d = def(id);
     const [c, ctx] = makeCanvas(32, 32);
-    if (d.block && d.faces) {
+    if (d.block && d.faces && !d.solid) {
+      // non-cube decorations (torch, flowers, crops, cane, sapling, ladder,
+      // doors, water) read better as a flat tile than as an isometric cube
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(this.tileCanvas(d.faces.sides), 0, 0, 16, 16, 0, 0, 32, 32);
+    } else if (d.block && d.faces) {
       const top = this.tileCanvas(d.faces.top);
       const side = this.tileCanvas(d.faces.front ?? d.faces.sides);
       const side2 = this.tileCanvas(d.faces.sides);

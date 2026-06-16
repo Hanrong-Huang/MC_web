@@ -229,8 +229,15 @@ class Game {
       this.entities.spawnMob('horse', p.x + 3, p.y + 1, p.z);
       this.entities.spawnMob('wolf', p.x + 3, p.y + 1, p.z - 1.5);
       this.entities.spawnMob('cat', p.x + 3, p.y + 1, p.z + 1.5);
+      this.entities.spawnMob('pig', p.x + 2, p.y + 1, p.z - 2);
+      this.entities.spawnMob('chicken', p.x + 2, p.y + 1, p.z + 2);
+      this.entities.spawnMob('cow', p.x + 4, p.y + 1, p.z + 2);
       this.player.yaw = -Math.PI / 2; // look toward +x
       this.player.pitch = 0.2;
+      // stock the hotbar with held-item test pieces
+      const kit = [I.DIAMOND_SWORD, I.DIAMOND_PICK, I.DIAMOND_AXE, I.BOW, I.APPLE, I.BONE, I.FISHING_ROD];
+      for (let i = 0; i < kit.length; i++) this.player.inventory.slots[i] = { id: kit[i], count: 1 };
+      this.onInventoryChange();
     }
     this.hud.toast('Click to capture the mouse');
     this.lastFrame = performance.now();

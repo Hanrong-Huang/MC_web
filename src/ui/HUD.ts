@@ -83,6 +83,7 @@ export class HUD {
   private toastEl: HTMLElement;
   private cursorEl: HTMLElement;
   private vignette: HTMLElement;
+  private lowhpEl!: HTMLElement;
   private packInput: HTMLInputElement;
 
   cursor: Slot = null;
@@ -128,6 +129,7 @@ export class HUD {
     this.compassEl = el('div', 'compass-readout', this.minimapEl);
     this.clockEl = el('div', 'clock-readout', this.minimapEl);
 
+    this.lowhpEl = el('div', '', root); this.lowhpEl.id = 'lowhp';
     this.vignette = el('div', '', root); this.vignette.id = 'vignette';
     this.pauseEl = el('div', 'overlay hidden', root); this.pauseEl.id = 'pause-overlay';
     this.deathEl = el('div', 'overlay hidden', root); this.deathEl.id = 'death-overlay';
@@ -282,9 +284,14 @@ export class HUD {
   updateStats(hp: number, hunger: number, air: number, mode: GameMode): void {
     if (mode === 'creative') {
       this.statsEl.style.visibility = 'hidden';
+      this.lowhpEl.classList.remove('on');
+      this.hungerEl.classList.remove('shake');
       return;
     }
     this.statsEl.style.visibility = 'visible';
+    // low-health red pulse + starving hunger shake
+    this.lowhpEl.classList.toggle('on', hp > 0 && hp <= 6);
+    this.hungerEl.classList.toggle('shake', hunger > 0 && hunger <= 6);
     const key = `${hp}|${hunger}|${air}`;
     if (key === this.lastHearts) return;
     this.lastHearts = key;
