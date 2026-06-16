@@ -85,6 +85,11 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
   const solid = new GeoBuilder();
   const water = new GeoBuilder();
   const bx = chunk.cx * CX, bz = chunk.cz * CZ;
+  let maxY = 1;
+  for (let i = 0; i < chunk.heightmap.length; i++) {
+    if (chunk.heightmap[i] > maxY) maxY = chunk.heightmap[i];
+  }
+  maxY = Math.min(CY, maxY + 3);
 
   // cache the 3x3 chunk neighborhood for fast lookups
   const refs: (Chunk | undefined)[] = [];
@@ -182,7 +187,7 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
   };
 
   // --- geometry --------------------------------------------------------------
-  for (let y = 0; y < CY; y++) {
+  for (let y = 0; y < maxY; y++) {
     for (let z = 0; z < CZ; z++) {
       for (let x = 0; x < CX; x++) {
         const id = chunk.data[x | (z << 4) | (y << 8)];

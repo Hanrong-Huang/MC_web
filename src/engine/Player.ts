@@ -11,6 +11,7 @@ import { B, I, def, hasDef, breakTime, attackDamage, isSolid, canHarvest, FLOOR_
 import { DoorFacing } from './World';
 import { Inventory } from './Inventory';
 import type { EntityManager } from './EntityManager';
+import type { Entity } from './EntityManager';
 import type { RayHit } from './World';
 
 export type GameMode = 'survival' | 'creative';
@@ -37,11 +38,17 @@ export interface PlayerDeps {
   audio: AudioEngine;
   isUIOpen: () => boolean;
   openContainer: (kind: 'table' | 'furnace' | 'chest', x: number, y: number, z: number) => void;
+  openTrade: (villager: Entity) => void;
   useBed: (x: number, y: number, z: number) => void;
   igniteTnt: (x: number, y: number, z: number) => void;
   useDoor: (x: number, y: number, z: number) => void;
   onBreak: (blockId: number) => void;
   onPlantSeed: () => void;
+  /** Apply bone meal at a block; returns true if something grew. */
+  onBoneMeal: (x: number, y: number, z: number) => boolean;
+  onFish: (itemId: number) => void;
+  onTameWolf: () => void;
+  onTrade: () => void;
   onDeath: () => void;
 }
 
@@ -70,6 +77,11 @@ export class Player {
   breaking: { x: number; y: number; z: number; progress: number; time: number } | null = null;
   /** seconds the bow has been drawn; 0 = not drawing */
   bowCharge = 0;
+  /** active fishing bobber, if cast */
+  bobber: Entity | null = null;
+  /** the horse currently being ridden, if any */
+  riding: Entity | null = null;
+  private prevSneak = false;
 
   private deps!: PlayerDeps;
   private fallDist = 0;
@@ -85,6 +97,7 @@ export class Player {
   private airT = 0;
   private drownT = 0;
   private cactusT = 0;
+  private swimSoundT = 0;
 
   init(deps: PlayerDeps): void {
     this.deps = deps;
@@ -139,6 +152,9 @@ export class Player {
     this.attackCooldown = Math.max(0, this.attackCooldown - dt);
     this.placeCooldown = Math.max(0, this.placeCooldown - dt);
     this.hurtCooldown = Math.max(0, this.hurtCooldown - dt);
+
+    // riding a horse: the horse is driven instead of the player's own body
+    if (this.riding) { this.updateRiding(dt); return; }
 
     // movement intent
     let fwd = 0, strafe = 0;
@@ -231,6 +247,15 @@ export class Player {
     // integrate with collision
     const wasOnGround = this.onGround;
     const res = moveEntity(world, this.pos, this.vel, dt, BOX, this.sneaking, wasOnGround);
+    const inWaterNow = inWater(world, this.pos, BOX);
+    this.swimSoundT = Math.max(0, this.swimSoundT - dt);
+    if (!wasInWater && inWaterNow) {
+      this.deps.audio.play('splash');
+      this.swimSoundT = 0.45;
+    } else if (inWaterNow && this.swimSoundT <= 0 && Math.hypot(this.vel.x, this.vel.z) > 0.7) {
+      this.deps.audio.play('splash');
+      this.swimSoundT = 0.85;
+    }
     // climb out of water against a wall
     if (wasInWater && (res.hitX || res.hitZ) && space) this.vel.y = Math.max(this.vel.y, 4.5);
     this.onGround = res.onGround;
@@ -318,6 +343,72 @@ export class Player {
 
   private sneakKeyDown(): boolean {
     return this.deps.input.down('ShiftLeft') || this.deps.input.down('ShiftRight');
+  }
+
+  // --- horse riding ----------------------------------------------------------
+
+  /** Begin riding a horse (called from updateRightClick on a 'mount' result). */
+  mount(horse: Entity): void {
+    this.riding = horse;
+    this.prevSneak = true; // ignore the shift that may still be held from sneaking
+    this.deps.entities.mountHorse(horse);
+    this.deps.audio.play('mount');
+  }
+
+  isRiding(): boolean { return this.riding !== null; }
+
+  /** Drive the ridden horse from input and seat the camera on its back. */
+  private updateRiding(dt: number): void {
+    const { input, entities, renderer } = this.deps;
+    const horse = this.riding!;
+    if (horse.dead || horse.kind !== 'horse' || !horse.ridden) { this.dismount(false); return; }
+    this.target = null;
+    renderer.setOutline(null);
+    this.cancelBreaking();
+    this.bowCharge = 0;
+    const uiOpen = this.deps.isUIOpen() || this.dead;
+
+    let fwd = 0, strafe = 0, jump = false, dismount = false;
+    if (!uiOpen && input.pointerLocked) {
+      if (input.down('KeyW')) fwd += 1;
+      if (input.down('KeyS')) fwd -= 1;
+      if (input.down('KeyA')) strafe -= 1;
+      if (input.down('KeyD')) strafe += 1;
+      jump = input.down('Space');
+      const sneak = this.sneakKeyDown();
+      dismount = sneak && !this.prevSneak; // tap shift to dismount
+      this.prevSneak = sneak;
+    }
+
+    const thrown = entities.rideHorse(horse, dt, fwd, strafe, this.yaw, jump);
+
+    // seat the player on the horse's back so the camera rides along
+    this.pos.x = horse.pos.x;
+    this.pos.z = horse.pos.z;
+    this.pos.y = horse.pos.y + 0.9;
+    this.vel.x = horse.vel.x; this.vel.y = horse.vel.y; this.vel.z = horse.vel.z;
+    this.onGround = horse.onGround;
+    this.sprinting = false;
+    this.fallDist = 0; // the horse absorbs the fall
+
+    if (thrown) { this.dismount(true); return; }
+    if (dismount) this.dismount(true);
+  }
+
+  /** Stop riding; optionally step the player off to the side onto safe ground. */
+  dismount(stepOff: boolean): void {
+    const horse = this.riding;
+    this.riding = null;
+    this.prevSneak = false;
+    if (!horse) return;
+    this.deps.entities.dismountHorse(horse);
+    if (stepOff) {
+      // a side vector perpendicular to the look direction
+      this.pos.x = horse.pos.x + Math.cos(this.yaw) * 1.0;
+      this.pos.z = horse.pos.z - Math.sin(this.yaw) * 1.0;
+      this.pos.y = horse.pos.y + 0.2;
+      this.vel = { x: 0, y: 0, z: 0 };
+    }
   }
 
   isMoving(): boolean {
@@ -445,7 +536,9 @@ export class Player {
         return;
       }
       if (id === B.TALL_GRASS) {
-        if (Math.random() < 0.18) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.SEEDS, 1);
+        const r = Math.random();
+        if (r < 0.14) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.SEEDS, 1);
+        else if (r < 0.17) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.BEETROOT_SEEDS, 1);
         return;
       }
       if (id === B.WHEAT_0 || id === B.WHEAT_1) {
@@ -455,6 +548,31 @@ export class Player {
       if (id === B.WHEAT_2) {
         entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.WHEAT, 1);
         entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.SEEDS, 1 + Math.floor(Math.random() * 2));
+        return;
+      }
+      if (id === B.CARROT_0 || id === B.CARROT_1) {
+        entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.CARROT, 1);
+        return;
+      }
+      if (id === B.CARROT_2) {
+        entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.CARROT, 2 + Math.floor(Math.random() * 3));
+        return;
+      }
+      if (id === B.POTATO_0 || id === B.POTATO_1) {
+        entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.POTATO, 1);
+        return;
+      }
+      if (id === B.POTATO_2) {
+        entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.POTATO, 2 + Math.floor(Math.random() * 3));
+        return;
+      }
+      if (id === B.BEETROOT_0 || id === B.BEETROOT_1) {
+        entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.BEETROOT_SEEDS, 1);
+        return;
+      }
+      if (id === B.BEETROOT_2) {
+        entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.BEETROOT, 1);
+        entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.BEETROOT_SEEDS, 1 + Math.floor(Math.random() * 2));
         return;
       }
       const d = def(id);
@@ -500,14 +618,72 @@ export class Player {
       return;
     }
 
+    // fishing rod: right-click casts (or reels if already out)
+    if (heldDef?.id === I.FISHING_ROD) {
+      if (this.bobber && !this.bobber.dead) {
+        // reel in
+        const caught = this.deps.entities.reelBobber(this.bobber);
+        this.bobber = null;
+        this.placeCooldown = 0.3;
+        this.deps.renderer.triggerSwing();
+        if (caught) { this.damageHeldTool(); this.deps.onFish(caught); }
+      } else if (this.placeCooldown <= 0) {
+        // cast toward where the player is looking
+        const d = this.lookDir();
+        const ey = this.pos.y + this.eyeHeight();
+        this.bobber = this.deps.entities.castBobber(
+          this.pos.x + d.x * 0.4, ey + d.y * 0.4 - 0.05, this.pos.z + d.z * 0.4,
+          d.x, d.y, d.z,
+        );
+        this.placeCooldown = 0.3;
+        this.deps.renderer.triggerSwing();
+        audio.play('bow');
+      }
+      return;
+    }
+
+    // mob interaction: tame wolves / open villager trades (before generic use)
+    if (!this.sneaking && this.placeCooldown <= 0) {
+      const hit = this.deps.entities.raycastMobs(
+        this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z,
+        this.lookDir().x, this.lookDir().y, this.lookDir().z, 3.5,
+      );
+      if (hit && hit.dist < (this.target?.dist ?? 4.5)) {
+        const res = this.deps.entities.interactMob(hit.entity, held?.id ?? 0);
+        if (res === 'tamed') {
+          this.placeCooldown = 0.4;
+          if (this.mode === 'survival') this.inventory.consumeSelected(); // consume the bone
+          audio.play('level');
+          this.deps.onTameWolf();
+          return;
+        }
+        if (res === 'sit') { this.placeCooldown = 0.3; audio.play('click'); return; }
+        if (res === 'mount') {
+          this.placeCooldown = 0.4;
+          this.mount(hit.entity);
+          return;
+        }
+        if (res === 'trade') {
+          this.placeCooldown = 0.4;
+          this.deps.openTrade(hit.entity);
+          return;
+        }
+      }
+    }
+
     // eating
     if (this.mode === 'survival' && heldDef?.food && this.hunger < 20) {
       this.eatT += dt;
       this.chewT -= dt;
       if (this.chewT <= 0) { this.chewT = 0.25; audio.play('eat'); }
       if (this.eatT >= 1.6) {
+        const eaten = heldDef.id;
         this.hunger = Math.min(20, this.hunger + heldDef.food);
         this.inventory.consumeSelected();
+        if (eaten === I.BEETROOT_SOUP || eaten === I.VEGETABLE_STEW) {
+          const left = this.inventory.add(I.BOWL, 1);
+          if (left > 0) this.deps.entities.spawnDrop(this.pos.x, this.pos.y + 1, this.pos.z, I.BOWL, left);
+        }
         this.eatT = 0;
         audio.play('burp');
       }
@@ -572,11 +748,25 @@ export class Player {
       return;
     }
 
-    // seeds: plant wheat on farmland
-    if (this.target && held?.id === I.SEEDS) {
+    // bone meal: instantly grow the targeted crop, sapling, or grass tuft
+    if (this.target && held?.id === I.BONE_MEAL) {
+      if (this.deps.onBoneMeal(this.target.x, this.target.y, this.target.z)) {
+        this.placeCooldown = 0.2;
+        this.deps.renderer.triggerSwing();
+        audio.dig('grass', 0.5);
+        // green sparkle from the foliage tile
+        this.deps.entities.spawnBlockParticles(this.target.x, this.target.y, this.target.z, B.LEAVES, 8);
+        if (this.mode === 'survival') this.inventory.consumeSelected();
+      }
+      return;
+    }
+
+    // crops: plant wheat, carrots, potatoes, and beetroots on farmland
+    if (this.target && held && this.plantedCropFor(held.id) !== 0) {
+      const crop = this.plantedCropFor(held.id);
       if (this.target.id === B.FARMLAND && this.target.ny === 1 &&
         world.getBlock(this.target.x, this.target.y + 1, this.target.z) === B.AIR) {
-        world.setBlock(this.target.x, this.target.y + 1, this.target.z, B.WHEAT_0);
+        world.setBlock(this.target.x, this.target.y + 1, this.target.z, crop);
         this.placeCooldown = 0.22;
         this.deps.renderer.triggerSwing();
         audio.dig('grass', 0.6);
@@ -678,6 +868,14 @@ export class Player {
     this.damageHeldTool();
   }
 
+  private plantedCropFor(id: number): number {
+    if (id === I.SEEDS) return B.WHEAT_0;
+    if (id === I.CARROT) return B.CARROT_0;
+    if (id === I.POTATO) return B.POTATO_0;
+    if (id === I.BEETROOT_SEEDS) return B.BEETROOT_0;
+    return 0;
+  }
+
   /** Left mouse press: try attacking an entity first; swing regardless. */
   onLeftClick(): void {
     if (this.deps.isUIOpen() || this.dead || !this.deps.input.pointerLocked) return;
@@ -687,7 +885,7 @@ export class Player {
     const ey = this.pos.y + this.eyeHeight();
     const blockDist = this.target?.dist ?? Infinity;
     const hit = this.deps.entities.raycastMobs(this.pos.x, ey, this.pos.z, d.x, d.y, d.z, 3.5);
-    if (hit && hit.dist < blockDist) {
+    if (hit && hit.entity !== this.riding && hit.dist < blockDist) {
       this.attackCooldown = 0.5;
       this.deps.entities.hurt(hit.entity, attackDamage(this.heldId()), d.x, d.z);
       this.addExhaustion(0.1);
@@ -781,6 +979,7 @@ export class Player {
   }
 
   respawn(spawn: Vec3): void {
+    if (this.riding) this.dismount(false);
     this.pos = { ...spawn };
     this.vel = { x: 0, y: 0, z: 0 };
     this.hp = 20;

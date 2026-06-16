@@ -96,6 +96,12 @@ export class Renderer {
   waterMat: THREE.ShaderMaterial;
 
   private chunkMeshes = new Map<string, { solid?: THREE.Mesh; water?: THREE.Mesh }>();
+  // newly-streamed chunks fade in (opacity 0->1) so terrain eases into view at
+  // the fog edge instead of popping. Re-meshes of already-visible chunks (block
+  // edits) skip the fade. Each fading mesh gets a temporary material clone that
+  // is swapped back to the shared material once the fade completes.
+  private fading: { mesh: THREE.Mesh; clone: THREE.ShaderMaterial; base: THREE.ShaderMaterial; baseOpacity: number; t: number }[] = [];
+  private static readonly FADE_TIME = 0.55;
   private outline: THREE.LineSegments;
   private crackMesh: THREE.Mesh;
   private crackMat: THREE.MeshBasicMaterial;
@@ -114,8 +120,10 @@ export class Renderer {
   // held item
   private heldGroup = new THREE.Group();
   private heldMesh: THREE.Object3D | null = null;
+  private bowArrow: THREE.Object3D | null = null;
   private heldId = -1;
   private swingT = 1; // 0..1, 1 = idle
+  private bowCharge = 0;
   private bobT = 0;
   private atlas: Atlas;
   private heldLight: THREE.HemisphereLight;
@@ -259,13 +267,18 @@ export class Renderer {
 
   setViewDistance(chunks: number): void {
     const d = chunks * 16;
-    this.fog.near = Math.max(24, d - 36);
+    // a wider near..far band gives a gentler distance gradient so terrain
+    // dissolves into the sky rather than ending at a hard wall.
+    this.fog.near = Math.max(24, d - 52);
     this.fog.far = Math.max(48, d - 6);
   }
 
   // --- chunk meshes ---------------------------------------------------------
 
   setChunkGeometry(key: string, cx: number, cz: number, geo: ChunkGeometry): void {
+    // a fresh load (no existing mesh) fades in; a re-mesh after a block edit
+    // already has a mesh and should swap in instantly to avoid flicker.
+    const isNew = !this.chunkMeshes.has(key);
     this.removeChunk(key);
     const entry: { solid?: THREE.Mesh; water?: THREE.Mesh } = {};
     if (geo.solid) {
@@ -275,6 +288,7 @@ export class Renderer {
       m.updateMatrix();
       this.scene.add(m);
       entry.solid = m;
+      if (isNew) this.beginFade(m, this.solidMat, 1);
     }
     if (geo.water) {
       const m = new THREE.Mesh(geo.water, this.waterMat);
@@ -284,16 +298,58 @@ export class Renderer {
       m.renderOrder = 1;
       this.scene.add(m);
       entry.water = m;
+      if (isNew) this.beginFade(m, this.waterMat, 0.8);
     }
     this.chunkMeshes.set(key, entry);
+  }
+
+  /** Give a freshly-loaded chunk mesh a temporary transparent material clone
+   *  that ramps opacity 0 -> baseOpacity, then restores the shared material. */
+  private beginFade(mesh: THREE.Mesh, base: THREE.ShaderMaterial, baseOpacity: number): void {
+    const clone = base.clone();
+    clone.transparent = true;
+    clone.depthWrite = true; // still occlude so terrain behind doesn't bleed through
+    clone.uniforms.uOpacity.value = 0;
+    mesh.material = clone;
+    this.fading.push({ mesh, clone, base, baseOpacity, t: 0 });
+  }
+
+  /** Advance per-chunk fade-ins; called once per frame. */
+  updateChunkFades(dt: number): void {
+    if (this.fading.length === 0) return;
+    for (let i = this.fading.length - 1; i >= 0; i--) {
+      const f = this.fading[i];
+      f.t += dt / Renderer.FADE_TIME;
+      const k = Math.min(1, f.t);
+      const eased = k * k * (3 - 2 * k); // smoothstep
+      f.clone.uniforms.uOpacity.value = f.baseOpacity * eased;
+      // keep day/night + water-wave time in sync with the shared material
+      f.clone.uniforms.uDay.value = f.base.uniforms.uDay.value;
+      f.clone.uniforms.uTime.value = f.base.uniforms.uTime.value;
+      if (k >= 1) {
+        f.mesh.material = f.base;
+        f.clone.dispose();
+        this.fading.splice(i, 1);
+      }
+    }
   }
 
   removeChunk(key: string): void {
     const e = this.chunkMeshes.get(key);
     if (!e) return;
-    if (e.solid) { this.scene.remove(e.solid); e.solid.geometry.dispose(); }
-    if (e.water) { this.scene.remove(e.water); e.water.geometry.dispose(); }
+    if (e.solid) { this.endFade(e.solid); this.scene.remove(e.solid); e.solid.geometry.dispose(); }
+    if (e.water) { this.endFade(e.water); this.scene.remove(e.water); e.water.geometry.dispose(); }
     this.chunkMeshes.delete(key);
+  }
+
+  /** Drop any in-flight fade for a mesh that is being removed. */
+  private endFade(mesh: THREE.Mesh): void {
+    for (let i = this.fading.length - 1; i >= 0; i--) {
+      if (this.fading[i].mesh === mesh) {
+        this.fading[i].clone.dispose();
+        this.fading.splice(i, 1);
+      }
+    }
   }
 
   // --- highlight / cracks ---------------------------------------------------
@@ -386,6 +442,14 @@ export class Renderer {
       });
       this.heldMesh = null;
     }
+    if (this.bowArrow) {
+      this.heldGroup.remove(this.bowArrow);
+      this.bowArrow.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (m.geometry) m.geometry.dispose();
+      });
+      this.bowArrow = null;
+    }
     if (id !== 0 && hasDef(id) && def(id).block && !def(id).opaque && !def(id).solid) {
       // cutout decorations (torch): hold the flat tile, not a black cube
       const d = def(id);
@@ -430,6 +494,11 @@ export class Renderer {
       );
       mesh.rotation.y = Math.PI * 0.12;
       this.heldMesh = mesh;
+      if (def(id).bow) {
+        this.bowArrow = this.buildHeldArrow();
+        this.bowArrow.visible = false;
+        this.heldGroup.add(this.bowArrow);
+      }
     } else {
       // bare arm
       const armMat = new THREE.MeshLambertMaterial({ color: 0xd8a988 });
@@ -445,6 +514,10 @@ export class Renderer {
     this.swingT = 0;
   }
 
+  setBowCharge(charge: number): void {
+    this.bowCharge = Math.max(0, Math.min(1, charge));
+  }
+
   /** Update held-item animation; `moving` drives view bob. */
   updateHeld(dt: number, moving: boolean): void {
     if (this.swingT < 1) this.swingT = Math.min(1, this.swingT + dt / 0.28);
@@ -452,6 +525,30 @@ export class Renderer {
     const s = this.swingT;
     const swingAngle = Math.sin(Math.min(1, s) * Math.PI) * 1.1;
     const bob = moving ? Math.sin(this.bobT) * 0.012 : Math.sin(this.bobT) * 0.004;
+    const drawingBow = this.bowCharge > 0.01 && this.heldId !== 0 && hasDef(this.heldId) && !!def(this.heldId).bow;
+
+    if (drawingBow) {
+      const pull = this.bowCharge;
+      this.heldGroup.position.set(0.30 - pull * 0.16, -0.26 + bob * 0.4, -0.68 - pull * 0.16);
+      this.heldGroup.rotation.set(-0.18 - pull * 0.36, 0.05 + pull * 0.22, -0.45 - pull * 0.2);
+      if (this.heldMesh) {
+        this.heldMesh.scale.setScalar(1 + pull * 0.08);
+        this.heldMesh.rotation.z = -0.2 - pull * 0.35;
+      }
+      if (this.bowArrow) {
+        this.bowArrow.visible = true;
+        this.bowArrow.position.set(0.08, -0.03, 0.07 - pull * 0.22);
+        this.bowArrow.rotation.set(0, Math.PI * 0.5, 0);
+        this.bowArrow.scale.set(1, 1, 0.85 + pull * 0.25);
+      }
+      return;
+    }
+
+    if (this.bowArrow && this.heldMesh) {
+      this.heldMesh.scale.setScalar(1);
+      this.heldMesh.rotation.z = 0;
+    }
+    if (this.bowArrow) this.bowArrow.visible = false;
 
     this.heldGroup.position.set(
       0.42 - swingAngle * 0.18,
@@ -463,6 +560,23 @@ export class Renderer {
       0.25 + swingAngle * 0.5,
       swingAngle * 0.25,
     );
+  }
+
+  private buildHeldArrow(): THREE.Group {
+    const g = new THREE.Group();
+    const shaftMat = new THREE.MeshBasicMaterial({ color: 0x8a6232 });
+    const tipMat = new THREE.MeshBasicMaterial({ color: 0xd0d0d8 });
+    const featherMat = new THREE.MeshBasicMaterial({ color: 0xf0f0f0 });
+    const shaft = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.035, 0.52), shaftMat);
+    const tip = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.055, 0.09), tipMat);
+    tip.position.z = -0.3;
+    const featherA = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.018, 0.12), featherMat);
+    featherA.position.z = 0.28;
+    featherA.position.y = 0.045;
+    const featherB = featherA.clone();
+    featherB.position.y = -0.045;
+    g.add(shaft, tip, featherA, featherB);
+    return g;
   }
 
   // --- frame ----------------------------------------------------------------

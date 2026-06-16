@@ -18,6 +18,7 @@ import { chunkKey, CX, CZ } from './engine/Chunk';
 import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef } from './engine/Blocks';
 import { Weather } from './engine/Weather';
 import { AdvancementTracker } from './engine/Advancements';
+import type { Entity } from './engine/EntityManager';
 
 const DAY_LENGTH = 1200; // 20 real minutes
 const SAVE_VERSION = 2;
@@ -40,6 +41,7 @@ class Game {
   private state: GameUIState = 'loading';
   private container: ContainerView | null = null;
   private containerPos: string | null = null;
+  private tradeVillager: Entity | null = null;
   private dayTime = 0.1; // mid-morning, fully lit
   private tickAcc = 0;
   private elapsed = 0;
@@ -60,6 +62,11 @@ class Game {
   private adv = new AdvancementTracker();
   private rainSoundT = 0;
   private survivedNight = false;
+  private nightsAwake = 0;
+  private phantomSpawnT = 0;
+  private wasNight = false;
+  private minimapT = 0;
+  private wasRiding = false;
 
   constructor(app: App, slot: string, save: SaveState | null, fresh: { seed: number; mode: GameMode } | null) {
     this.app = app;
@@ -81,7 +88,10 @@ class Game {
 
     this.weather = new Weather(this.renderer.scene, this.world, {
       onStrike: (x, y, z) => this.onLightning(x, y, z),
-      isColdAt: (wx, wz) => this.world.generator.biomeAt(Math.floor(wx), Math.floor(wz)) === 'snow',
+      isColdAt: (wx, wz) => {
+        const biome = this.world.generator.biomeAt(Math.floor(wx), Math.floor(wz));
+        return biome === 'snow' || biome === 'taiga';
+      },
     });
     this.adv.onChange = () => {
       let t: { id: string; label: string; icon: string } | null;
@@ -105,6 +115,7 @@ class Game {
       audio: this.audio,
       isUIOpen: () => this.state !== 'playing',
       openContainer: (kind, x, y, z) => this.openBlockContainer(kind, x, y, z),
+      openTrade: (villager) => this.openTrade(villager),
       useBed: (x, y, z) => this.useBed(x, y, z),
       igniteTnt: (x, y, z) => {
         this.world.setBlock(x, y, z, B.AIR);
@@ -117,6 +128,10 @@ class Game {
         if (id === B.DIAMOND_ORE) this.adv.unlock('diamonds');
       },
       onPlantSeed: () => this.adv.unlock('farm'),
+      onBoneMeal: (x, y, z) => this.applyBoneMeal(x, y, z),
+      onFish: (id) => { if (id === I.RAW_FISH) this.adv.unlock('fish'); },
+      onTameWolf: () => this.adv.unlock('wolf'),
+      onTrade: () => this.adv.unlock('trade'),
       onDeath: () => this.onDeath(),
     });
 
@@ -169,6 +184,7 @@ class Game {
       if (id === I.BOW) this.adv.unlock('bow');
       if (id === I.BREAD) this.adv.unlock('bread');
     };
+    this.hud.onTrade = () => { this.adv.unlock('trade'); this.adv.unlock('village'); };
 
     this.wireInput();
     this.hud.onDropLeftover = (id, count) => {
@@ -206,6 +222,16 @@ class Game {
     this.hud.hideLoading();
     this.hud.showGameUI();
     this.state = 'playing';
+    // dev helper: #debugmobs drops a few tameable/rideable mobs at spawn and
+    // faces the player east toward the horse for screenshot testing
+    if (location.hash.includes('debugmobs')) {
+      const p = this.player.pos;
+      this.entities.spawnMob('horse', p.x + 3, p.y + 1, p.z);
+      this.entities.spawnMob('wolf', p.x + 3, p.y + 1, p.z - 1.5);
+      this.entities.spawnMob('cat', p.x + 3, p.y + 1, p.z + 1.5);
+      this.player.yaw = -Math.PI / 2; // look toward +x
+      this.player.pitch = 0.2;
+    }
     this.hud.toast('Click to capture the mouse');
     this.lastFrame = performance.now();
     this.loop(this.lastFrame);
@@ -338,6 +364,7 @@ class Game {
       craftGrid: kind === 'inventory' ? new Array(4).fill(null) : [],
       furnace: null,
       chest: null,
+      trades: [],
     };
     this.containerPos = null;
     this.state = 'container';
@@ -366,12 +393,30 @@ class Game {
         craftGrid: [],
         furnace: st.type === 'furnace' ? st : null,
         chest: st.type === 'chest' ? st : null,
+        trades: [],
       };
       this.containerPos = key;
     } else {
-      this.container = { kind: 'table', craftW: 3, craftGrid: new Array(9).fill(null), furnace: null, chest: null };
+      this.container = { kind: 'table', craftW: 3, craftGrid: new Array(9).fill(null), furnace: null, chest: null, trades: [] };
       this.containerPos = null;
     }
+    this.state = 'container';
+    this.input.exitLock();
+    this.hud.openContainer(this.container, this.player.inventory, this.player.mode);
+  }
+
+  /** Open the villager trade screen. Trades mutate the villager entity directly. */
+  private openTrade(villager: Entity): void {
+    this.container = {
+      kind: 'trade',
+      craftW: 0,
+      craftGrid: [],
+      furnace: null,
+      chest: null,
+      trades: villager.trades,
+    };
+    this.containerPos = null;
+    this.tradeVillager = villager;
     this.state = 'container';
     this.input.exitLock();
     this.hud.openContainer(this.container, this.player.inventory, this.player.mode);
@@ -385,6 +430,10 @@ class Game {
       [I.DIAMOND, 1, 1, 1],
       [I.APPLE, 1, 3, 4],
       [I.COOKED_BEEF, 1, 2, 2],
+      [I.CARROT, 2, 5, 3],
+      [I.POTATO, 2, 5, 3],
+      [I.BEETROOT_SEEDS, 1, 4, 2],
+      [I.BREAD, 1, 2, 2],
       [I.STRING, 1, 3, 2],
       [I.GUNPOWDER, 1, 3, 2],
       [I.ARROW, 2, 6, 3],
@@ -408,6 +457,7 @@ class Game {
   /** Right-clicking a bed: set the respawn point and skip the night. */
   private useBed(x: number, y: number, z: number): void {
     this.spawnPoint = { x: x + 0.5, y: y + 1, z: z + 0.5 };
+    this.nightsAwake = 0; // sleeping resets phantom insomnia
     const sunHeight = Math.sin(this.dayTime * Math.PI * 2);
     if (sunHeight < 0.05) {
       this.dayTime = 0.02; // sleep through to sunrise
@@ -487,7 +537,14 @@ class Game {
     const heldId = this.player.heldId();
     if (sel !== this.lastSelected || (heldId !== this.lastHeldId && heldId !== 0)) {
       if (heldId !== 0 && hasDef(heldId) && this.state !== 'container') {
-        this.hud.showItemName(def(heldId).label);
+        const hint =
+          heldId === I.COMPASS ? 'Compass - carry it to show heading on the minimap' :
+          heldId === I.CLOCK ? 'Clock - carry it to show world time' :
+          heldId === I.HOE ? 'Hoe - right-click dirt or grass to make farmland' :
+          heldId === I.SEEDS || heldId === I.CARROT || heldId === I.POTATO || heldId === I.BEETROOT_SEEDS
+            ? `${def(heldId).label} - plant on farmland` :
+            def(heldId).label;
+        this.hud.showItemName(hint);
       }
       this.lastSelected = sel;
       this.lastHeldId = heldId;
@@ -563,6 +620,11 @@ class Game {
       this.dayTime = (this.dayTime + dt / DAY_LENGTH) % 1;
 
       this.player.update(dt);
+      // mounting hint when the player climbs onto a horse
+      if (this.player.isRiding() !== this.wasRiding) {
+        this.wasRiding = this.player.isRiding();
+        if (this.wasRiding) this.hud.toast('Mounted — WASD to ride, Space to jump, Shift to dismount');
+      }
       this.world.update(this.player.pos.x, this.player.pos.z, 5);
       this.world.updateDoorSwings(dt);
       this.processMeshing(6);
@@ -572,11 +634,16 @@ class Game {
       const pp = this.player.pos;
       this.weather.update(dt, pp.x, pp.y + this.player.eyeHeight(), pp.z);
 
-      // soft rain hiss loop while precipitating
+      // layered rain/snow bed while precipitating
       const w = this.weather;
       if (w.kind !== 'clear' && w.intensity > 0.3) {
         this.rainSoundT -= dt;
-        if (this.rainSoundT <= 0) { this.rainSoundT = 1.6; this.audio.play('rain'); }
+        if (this.rainSoundT <= 0) {
+          this.rainSoundT = 1.45;
+          const biome = this.world.generator.biomeAt(Math.floor(pp.x), Math.floor(pp.z));
+          const cold = biome === 'snow' || biome === 'taiga';
+          this.audio.weatherLoop(cold ? 'snow' : w.kind, w.intensity, Math.sin(this.dayTime * Math.PI * 2) < -0.06);
+        }
       }
 
       this.tickAcc += dt;
@@ -615,9 +682,30 @@ class Game {
       this.weather.darkening() * this.weather.intensity,
       this.weather.flashAmount(),
     );
+    this.renderer.setBowCharge(Math.min(1, this.player.bowCharge / 0.9));
+    this.renderer.updateChunkFades(dt);
     this.renderer.updateHeld(dt, this.player.isMoving());
     this.hud.updateStats(this.player.hp, this.player.hunger, this.player.air, this.player.mode);
     if (this.state === 'container' && this.container?.kind === 'furnace') this.hud.updateFurnace();
+    // minimap redraw (throttled; block sampling is relatively expensive)
+    this.minimapT -= dt;
+    if (this.minimapT <= 0) {
+      this.minimapT = 0.22;
+      const p = this.player.pos;
+      this.hud.updateMinimap(
+        p.x, p.z, this.player.yaw,
+        (wx, wz) => {
+          // sample the highest non-air block at this column
+          const c = this.world.getChunk(Math.floor(wx / 16), Math.floor(wz / 16));
+          if (!c || !c.ready) return 0;
+          const h = c.heightmap[(wz & 15) * 16 + (wx & 15)];
+          return this.world.getBlock(wx, h - 1, wz);
+        },
+        this.dayTime,
+        this.player.inventory.count(I.COMPASS) > 0 || this.player.mode === 'creative',
+        this.player.inventory.count(I.CLOCK) > 0 || this.player.mode === 'creative',
+      );
+    }
     if (this.hud.isDebugVisible()) this.updateDebug();
 
     this.renderer.render(this.player.underwaterEye());
@@ -628,8 +716,33 @@ class Game {
     // track surviving a full night
     if (isNight) this.survivedNight = true;
     else if (this.survivedNight) { this.survivedNight = false; this.adv.unlock('survive_night'); }
+    // phantom insomnia: count a "night awake" on each dawn the player skipped sleep
+    if (this.wasNight && !isNight) {
+      this.nightsAwake++;
+      this.wasNight = false;
+    } else if (isNight) {
+      this.wasNight = true;
+    }
     this.player.tick(0.05);
     this.entities.tick(isNight);
+
+    // phantom spawns: 3+ nights without sleep, at night, survival mode
+    if (isNight && this.player.mode === 'survival' && this.nightsAwake >= 3) {
+      this.phantomSpawnT -= 0.05;
+      if (this.phantomSpawnT <= 0) {
+        this.phantomSpawnT = 30 + Math.random() * 30;
+        let phantoms = 0;
+        for (const e of this.entities.entities) if (e.kind === 'phantom') phantoms++;
+        if (phantoms < 4) {
+          const p = this.player.pos;
+          const ang = Math.random() * Math.PI * 2;
+          const r = 16 + Math.random() * 10;
+          this.entities.spawnPhantom(
+            p.x + Math.cos(ang) * r, p.y + 12 + Math.random() * 4, p.z + Math.sin(ang) * r,
+          );
+        }
+      }
+    }
 
     // furnaces tick wherever their chunk is loaded
     for (const [key, st] of this.world.blockEntities) {
@@ -705,9 +818,12 @@ class Game {
             if (Math.random() < 0.06) this.growTree(wx, hm, wz);
             continue;
           }
-          if (plant === B.WHEAT_0 || plant === B.WHEAT_1) {
+          if (plant === B.WHEAT_0 || plant === B.WHEAT_1 ||
+            plant === B.CARROT_0 || plant === B.CARROT_1 ||
+            plant === B.POTATO_0 || plant === B.POTATO_1 ||
+            plant === B.BEETROOT_0 || plant === B.BEETROOT_1) {
             if (Math.random() < 0.2 && this.world.getBlock(wx, hm - 1, wz) === B.FARMLAND) {
-              this.world.setBlock(wx, hm, wz, plant === B.WHEAT_0 ? B.WHEAT_1 : B.WHEAT_2);
+              this.world.setBlock(wx, hm, wz, this.nextCropStage(plant));
             }
             continue;
           }
@@ -731,6 +847,53 @@ class Game {
         }
       }
     }
+  }
+
+  private nextCropStage(id: number): number {
+    switch (id) {
+      case B.WHEAT_0: return B.WHEAT_1;
+      case B.WHEAT_1: return B.WHEAT_2;
+      case B.CARROT_0: return B.CARROT_1;
+      case B.CARROT_1: return B.CARROT_2;
+      case B.POTATO_0: return B.POTATO_1;
+      case B.POTATO_1: return B.POTATO_2;
+      case B.BEETROOT_0: return B.BEETROOT_1;
+      case B.BEETROOT_1: return B.BEETROOT_2;
+      default: return id;
+    }
+  }
+
+  /** Bone meal: instantly mature a crop, grow a sapling into a tree, or
+   *  scatter foliage on nearby grass. Returns true if anything changed. */
+  private applyBoneMeal(x: number, y: number, z: number): boolean {
+    const id = this.world.getBlock(x, y, z);
+    const grown: Record<number, number> = {
+      [B.WHEAT_0]: B.WHEAT_2, [B.WHEAT_1]: B.WHEAT_2,
+      [B.CARROT_0]: B.CARROT_2, [B.CARROT_1]: B.CARROT_2,
+      [B.POTATO_0]: B.POTATO_2, [B.POTATO_1]: B.POTATO_2,
+      [B.BEETROOT_0]: B.BEETROOT_2, [B.BEETROOT_1]: B.BEETROOT_2,
+    };
+    if (id in grown) {
+      this.world.setBlock(x, y, z, grown[id]);
+      return true;
+    }
+    if (id === B.SAPLING) { this.growTree(x, y, z); return true; }
+    // on a grass block: sprout tall grass + the occasional flower nearby
+    if (id === B.GRASS) {
+      let placed = 0;
+      for (let i = 0; i < 9; i++) {
+        const gx = x + ((Math.random() * 5) | 0) - 2;
+        const gz = z + ((Math.random() * 5) | 0) - 2;
+        if (this.world.getBlock(gx, y, gz) !== B.GRASS) continue;
+        if (this.world.getBlock(gx, y + 1, gz) !== B.AIR) continue;
+        const r = Math.random();
+        const plant = r < 0.72 ? B.TALL_GRASS : r < 0.86 ? B.POPPY : B.DANDELION;
+        this.world.setBlock(gx, y + 1, gz, plant);
+        placed++;
+      }
+      return placed > 0;
+    }
+    return false;
   }
 
   /** Grow a sapling into a biome-appropriate tree using live block writes. */

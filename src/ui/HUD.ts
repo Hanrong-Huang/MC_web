@@ -4,13 +4,19 @@
 // with full cursor-stack slot interactions.
 
 import { Atlas, drawHeart, drawShank, drawBubble } from '../engine/Textures';
-import { Inventory, Slot, matchRecipe, FurnaceState, ChestState, SMELT_TIME } from '../engine/Inventory';
-import { def, CREATIVE_ITEMS } from '../engine/Blocks';
+import { Inventory, Slot, matchRecipe, FurnaceState, ChestState, SMELT_TIME, allRecipes, RecipeView } from '../engine/Inventory';
+import { def, CREATIVE_ITEMS, I } from '../engine/Blocks';
 import { SaveSummary, SlotData } from '../engine/Persistence';
 import { AudioEngine } from '../engine/Audio';
 import type { GameMode } from '../engine/Player';
 
-export type ContainerKind = 'inventory' | 'table' | 'furnace' | 'chest' | 'creative';
+export type ContainerKind = 'inventory' | 'table' | 'furnace' | 'chest' | 'creative' | 'trade';
+
+export interface TradeOffer {
+  give: number; giveCount: number;
+  get: number; getCount: number;
+  uses: number; max: number;
+}
 
 export interface ContainerView {
   kind: ContainerKind;
@@ -18,6 +24,8 @@ export interface ContainerView {
   craftGrid: Slot[];
   furnace: FurnaceState | null;
   chest: ChestState | null;
+  /** villager trade offers (kind === 'trade') */
+  trades: TradeOffer[];
 }
 
 export interface MenuHandlers {
@@ -40,6 +48,7 @@ export interface PauseHandlers {
 }
 
 const SLOTS = ['World_1', 'World_2', 'World_3'];
+type RecipeFilter = 'all' | 'ready' | 'tools' | 'blocks' | 'food' | 'utility';
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, parent?: HTMLElement): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -63,6 +72,10 @@ export class HUD {
   private itemNameTimer: ReturnType<typeof setTimeout> | null = null;
   private statsEl: HTMLElement;
   private debugEl: HTMLElement;
+  private minimapEl: HTMLElement;
+  private minimapCanvas: HTMLCanvasElement;
+  private compassEl: HTMLElement;
+  private clockEl: HTMLElement;
   private pauseEl: HTMLElement;
   private deathEl: HTMLElement;
   private containerEl: HTMLElement;
@@ -77,12 +90,15 @@ export class HUD {
   private inv: Inventory | null = null;
   private furnaceSnapshot = '';
   private lastHearts = '';
+  private recipeFilter: RecipeFilter = 'all';
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private packHandler: (files: File[]) => void = () => {};
   /** main sets this: leftover items that can't return to the inventory drop here */
   onDropLeftover: (id: number, count: number) => void = () => {};
   /** fired when the player takes a crafting result */
   onCraft: (id: number) => void = () => {};
+  /** fired when the player completes a villager trade */
+  onTrade: () => void = () => {};
 
   constructor(root: HTMLElement, atlas: Atlas, audio: AudioEngine) {
     this.root = root;
@@ -102,6 +118,15 @@ export class HUD {
     this.airEl = el('div', '', this.statsEl); this.airEl.id = 'air';
     this.itemNameEl = el('div', '', this.hud); this.itemNameEl.id = 'item-name';
     this.debugEl = el('div', 'hidden', this.hud); this.debugEl.id = 'debug';
+
+    // minimap: small canvas top-right showing nearby terrain + facing arrow
+    this.minimapEl = el('div', 'minimap', this.hud);
+    this.minimapCanvas = el('canvas') as HTMLCanvasElement;
+    this.minimapCanvas.width = 96; this.minimapCanvas.height = 96;
+    this.minimapEl.appendChild(this.minimapCanvas);
+    // compass + clock readouts below the minimap
+    this.compassEl = el('div', 'compass-readout', this.minimapEl);
+    this.clockEl = el('div', 'clock-readout', this.minimapEl);
 
     this.vignette = el('div', '', root); this.vignette.id = 'vignette';
     this.pauseEl = el('div', 'overlay hidden', root); this.pauseEl.id = 'pause-overlay';
@@ -299,6 +324,77 @@ export class HUD {
 
   updateDebug(lines: string[]): void {
     this.debugEl.innerHTML = lines.map((l) => `<span>${l}</span>`).join('<br>');
+  }
+
+  /** Redraw the minimap: a top-down block sample around the player, a facing
+   *  arrow, and compass/clock text readouts. */
+  updateMinimap(
+    px: number, pz: number, yaw: number,
+    sample: (wx: number, wz: number) => number,
+    dayTime: number,
+    hasCompass: boolean, hasClock: boolean,
+  ): void {
+    const ctx = this.minimapCanvas.getContext('2d')!;
+    const W = 96, RADIUS = 48, SCALE = 2; // 1 pixel per 2 blocks -> 96-block view
+    ctx.clearRect(0, 0, W, W);
+    // color map for block ids
+    const color = (id: number): string => {
+      switch (id) {
+        case 0: return '#3a5a8a'; // air/water-ish (we sample surface, so treat as water)
+        case 10: return '#2f52a5'; // water
+        case 5: return '#dbd3a0'; // sand
+        case 14: return '#f4fcfc'; // snow
+        case 1: return '#5d9b3d'; // grass
+        case 2: return '#866043'; // dirt
+        case 3: case 4: return '#747474'; // stone/cobble
+        case 6: case 31: case 32: return '#5d4222'; // logs
+        case 8: case 33: case 34: return '#2f6b1e'; // leaves
+        default: return '#5a5a5a';
+      }
+    };
+    for (let py = 0; py < W; py++) {
+      for (let pxx = 0; pxx < W; pxx++) {
+        const wx = Math.floor(px + (pxx - RADIUS) * SCALE);
+        const wz = Math.floor(pz + (py - RADIUS) * SCALE);
+        ctx.fillStyle = color(sample(wx, wz));
+        ctx.fillRect(pxx, py, 1, 1);
+      }
+    }
+    // player arrow at center (pointing the look direction)
+    const ang = yaw; // player yaw; 0 = -z (north)
+    ctx.save();
+    ctx.translate(RADIUS, RADIUS);
+    ctx.rotate(-ang);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(0, -5); ctx.lineTo(3, 4); ctx.lineTo(-3, 4); ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    // frame
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 2;
+    ctx.strokeRect(1, 1, W - 2, W - 2);
+
+    // compass + clock text
+    if (hasCompass) {
+      const yawDeg = ((yaw * 180 / Math.PI) % 360 + 360) % 360;
+      const dirs = ['N', 'W', 'S', 'E'];
+      this.compassEl.textContent = `Compass ${dirs[Math.round(yawDeg / 90) % 4]}`;
+      this.compassEl.title = 'Compass: carry one to show your heading on the minimap';
+      this.compassEl.style.display = 'block';
+    } else {
+      this.compassEl.style.display = 'none';
+    }
+    if (hasClock) {
+      // dayTime: 0=sunrise, 0.25=noon, 0.5=sunset, 0.75=midnight
+      const hours = (dayTime * 24 + 6) % 24; // shift so sunrise ~6am
+      const h = Math.floor(hours);
+      const m = Math.floor((hours - h) * 60);
+      this.clockEl.textContent = `Clock ${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+      this.clockEl.title = 'Clock: carry one to show world time';
+      this.clockEl.style.display = 'block';
+    } else {
+      this.clockEl.style.display = 'none';
+    }
   }
 
   toast(msg: string): void {
@@ -615,6 +711,100 @@ export class HUD {
     });
   }
 
+  private recipeFitsGrid(r: RecipeView, craftW: number): boolean {
+    const h = r.shape.length;
+    const w = Math.max(...r.shape.map((row) => row.length));
+    return w <= craftW && h <= craftW;
+  }
+
+  private canFillRecipe(r: RecipeView, inv: Inventory, craftW: number): boolean {
+    return this.recipeFitsGrid(r, craftW) && r.counts.every((need) => inv.count(need.id) >= need.count);
+  }
+
+  private recipeCategory(r: RecipeView): Exclude<RecipeFilter, 'all' | 'ready'> {
+    const d = def(r.out);
+    if (d.toolInfo || d.bow || r.out === I.FISHING_ROD) return 'tools';
+    if (d.food) return 'food';
+    if (d.block || r.out === I.WOOD_DOOR) return 'blocks';
+    return 'utility';
+  }
+
+  private recipeVisible(r: RecipeView, inv: Inventory, craftW: number): boolean {
+    if (this.recipeFilter === 'all') return this.recipeFitsGrid(r, craftW);
+    if (this.recipeFilter === 'ready') return this.canFillRecipe(r, inv, craftW);
+    return this.recipeFitsGrid(r, craftW) && this.recipeCategory(r) === this.recipeFilter;
+  }
+
+  private recipeBlockedReason(r: RecipeView, inv: Inventory, craftW: number): string {
+    if (!this.recipeFitsGrid(r, craftW)) return 'Requires crafting table';
+    if (this.cursor) return 'Clear cursor first';
+    const missing = r.counts
+      .map((need) => ({ ...need, have: inv.count(need.id) }))
+      .filter((need) => need.have < need.count);
+    if (missing.length === 0) return 'Ready';
+    return `Missing ${missing.map((need) => `${need.count - need.have} ${def(need.id).label}`).join(', ')}`;
+  }
+
+  private takeFromInventory(inv: Inventory, id: number, count: number): boolean {
+    if (inv.count(id) < count) return false;
+    let need = count;
+    for (let i = 0; i < inv.slots.length && need > 0; i++) {
+      const s = inv.slots[i];
+      if (!s || s.id !== id) continue;
+      const take = Math.min(need, s.count);
+      s.count -= take;
+      need -= take;
+      if (s.count <= 0) inv.slots[i] = null;
+    }
+    return need === 0;
+  }
+
+  private returnCraftGrid(view: ContainerView, inv: Inventory): void {
+    for (let i = 0; i < view.craftGrid.length; i++) {
+      const s = view.craftGrid[i];
+      if (!s) continue;
+      const left = inv.add(s.id, s.count);
+      if (left > 0) this.onDropLeftover(s.id, left);
+      view.craftGrid[i] = null;
+    }
+  }
+
+  private fillRecipe(r: RecipeView, view: ContainerView, inv: Inventory): boolean {
+    if (this.cursor || !this.canFillRecipe(r, inv, view.craftW)) return false;
+    this.returnCraftGrid(view, inv);
+    if (!this.canFillRecipe(r, inv, view.craftW)) return false;
+    for (let y = 0; y < r.shape.length; y++) {
+      for (let x = 0; x < r.shape[y].length; x++) {
+        const id = r.shape[y][x];
+        if (id === 0) continue;
+        if (!this.takeFromInventory(inv, id, 1)) return false;
+        view.craftGrid[y * view.craftW + x] = { id, count: 1 };
+      }
+    }
+    inv.onChange();
+    return true;
+  }
+
+  private recipePatternEl(r: RecipeView, parent: HTMLElement): void {
+    const pattern = el('div', 'recipe-pattern', parent);
+    for (let y = 0; y < 3; y++) {
+      for (let x = 0; x < 3; x++) {
+        const id = r.shape[y]?.[x] ?? 0;
+        const p = el('div', `recipe-pip${id ? ' filled' : ''}`, pattern);
+        if (id) p.appendChild(this.iconCanvas({ id, count: 1 }));
+      }
+    }
+  }
+
+  private recipeNeedsEl(r: RecipeView, inv: Inventory, parent: HTMLElement): void {
+    const needs = el('div', 'recipe-needs', parent);
+    for (const need of r.counts) {
+      const have = inv.count(need.id);
+      const chip = el('span', have >= need.count ? 'need-ok' : 'need-miss', needs);
+      chip.textContent = `${have}/${need.count} ${def(need.id).label}`;
+    }
+  }
+
   private renderContainer(mode: GameMode): void {
     if (!this.view || !this.inv) return;
     const view = this.view;
@@ -630,7 +820,50 @@ export class HUD {
       view.kind === 'table' ? 'Crafting Table' :
       view.kind === 'furnace' ? 'Furnace' :
       view.kind === 'chest' ? 'Chest' :
+      view.kind === 'trade' ? 'Villager Trades' :
       view.kind === 'creative' ? 'Creative Inventory' : 'Inventory';
+
+    // --- trade section (villager) -------------------------------------------
+    if (view.kind === 'trade' && view.trades) {
+      const sec = el('div', 'ctr-section', panel);
+      const list = el('div', 'trade-list', sec);
+      for (let i = 0; i < view.trades.length; i++) {
+        const t = view.trades[i];
+        const lockedOut = t.uses >= t.max;
+        const canAfford = !lockedOut && inv.count(t.give) >= t.giveCount;
+        const row = el('div', `trade-row${lockedOut ? ' locked' : canAfford ? '' : ' poor'}`, list);
+        // give slot
+        const giveSlot = el('div', 'mc-slot', row);
+        giveSlot.appendChild(this.iconCanvas({ id: t.give, count: t.giveCount }));
+        const arrow = el('div', 'trade-arrow', row);
+        arrow.textContent = '→';
+        // get slot
+        const getSlot = el('div', 'mc-slot', row);
+        getSlot.appendChild(this.iconCanvas({ id: t.get, count: t.getCount }));
+        if (canAfford) {
+          row.style.cursor = 'pointer';
+          row.onclick = () => {
+            // perform the trade: remove give, add get
+            let need = t.giveCount;
+            for (let s = 0; s < inv.slots.length && need > 0; s++) {
+              const sl = inv.slots[s];
+              if (sl && sl.id === t.give) {
+                const take = Math.min(need, sl.count);
+                sl.count -= take; need -= take;
+                if (sl.count <= 0) inv.slots[s] = null;
+              }
+            }
+            inv.add(t.get, t.getCount);
+            t.uses++;
+            this.audio.play('level');
+            this.onTrade();
+            inv.onChange();
+            rerender();
+          };
+        }
+      }
+      // then fall through to render the player inventory below
+    }
 
     // --- chest section --------------------------------------------------------
     if (view.kind === 'chest' && view.chest) {
@@ -648,7 +881,8 @@ export class HUD {
 
     // --- crafting section ---------------------------------------------------
     if (view.kind === 'inventory' || view.kind === 'table') {
-      const sec = el('div', 'ctr-section ctr-flex', panel);
+      const craftArea = el('div', 'craft-area', panel);
+      const sec = el('div', 'ctr-section ctr-flex craft-main', craftArea);
       const grid = el('div', 'ctr-grid', sec);
       grid.style.gridTemplateColumns = `repeat(${view.craftW}, 48px)`;
       for (let i = 0; i < view.craftGrid.length; i++) {
@@ -676,10 +910,71 @@ export class HUD {
             if (s.count <= 0) view.craftGrid[i] = null;
           }
         }
-        this.audio.play('level');
+        this.audio.play('craft');
         this.onCraft(result.id);
         rerender();
       });
+
+      // --- recipe book sidebar: click a recipe to auto-fill the grid --------
+      const bookWrap = el('div', 'recipe-book', craftArea);
+      const bookTitle = el('div', 'ctr-label', bookWrap);
+      bookTitle.textContent = 'Recipe Book';
+      const filters = el('div', 'recipe-filters', bookWrap);
+      const filterLabels: { id: RecipeFilter; label: string }[] = [
+        { id: 'all', label: 'All' },
+        { id: 'ready', label: 'Ready' },
+        { id: 'tools', label: 'Tools' },
+        { id: 'blocks', label: 'Blocks' },
+        { id: 'food', label: 'Food' },
+        { id: 'utility', label: 'Utility' },
+      ];
+      for (const f of filterLabels) {
+        const b = el('button', `recipe-filter${this.recipeFilter === f.id ? ' on' : ''}`, filters);
+        b.textContent = f.label;
+        b.onclick = () => {
+          this.recipeFilter = f.id;
+          this.audio.play('select');
+          rerender();
+        };
+      }
+      const bookGrid = el('div', 'recipe-grid', bookWrap);
+      const recipes = allRecipes()
+        .filter((r) => this.recipeVisible(r, inv, view.craftW))
+        .sort((a, b) => {
+          const ar = this.canFillRecipe(a, inv, view.craftW) ? 0 : 1;
+          const br = this.canFillRecipe(b, inv, view.craftW) ? 0 : 1;
+          return ar - br || def(a.out).label.localeCompare(def(b.out).label);
+        });
+      if (recipes.length === 0) {
+        const empty = el('div', 'recipe-empty', bookGrid);
+        empty.textContent = this.recipeFilter === 'ready' ? 'No craftable recipes yet' : 'No recipes in this view';
+      }
+      for (const r of recipes) {
+        const canMake = this.canFillRecipe(r, inv, view.craftW);
+        const fits = this.recipeFitsGrid(r, view.craftW);
+        const cell = el('div', `recipe-card${canMake ? ' avail' : fits ? '' : ' locked'}`, bookGrid);
+        const out = el('div', 'recipe-out', cell);
+        out.appendChild(this.iconCanvas({ id: r.out, count: r.n }));
+        if (r.n > 1) {
+          const c = el('span', 'slot-count', out);
+          c.textContent = String(r.n);
+        }
+        this.recipePatternEl(r, cell);
+        const text = el('div', 'recipe-text', cell);
+        const name = el('div', 'recipe-name', text);
+        name.textContent = def(r.out).label;
+        this.recipeNeedsEl(r, inv, text);
+        cell.title = this.recipeBlockedReason(r, inv, view.craftW);
+        cell.onclick = (): void => {
+          if (this.fillRecipe(r, view, inv)) {
+            this.audio.play('select');
+          } else {
+            this.audio.play('fail');
+            this.toast(this.recipeBlockedReason(r, inv, view.craftW));
+          }
+          rerender();
+        };
+      }
     }
 
     // --- furnace section ------------------------------------------------------

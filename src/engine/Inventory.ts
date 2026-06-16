@@ -95,9 +95,35 @@ export class Inventory {
 
 interface Recipe { shape: number[][]; out: number; n: number }
 
+export interface RecipeView {
+  out: number;
+  n: number;
+  shape: number[][];
+  ingredients: number[];
+  counts: { id: number; count: number }[];
+}
+
+/** Read-only list of all recipes for the recipe-book UI. */
+export function allRecipes(): RecipeView[] {
+  return RECIPES.map((r) => {
+    const counts = new Map<number, number>();
+    for (const id of r.shape.flat()) {
+      if (id !== 0) counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    return {
+      out: r.out,
+      n: r.n,
+      shape: r.shape.map((row) => [...row]),
+      ingredients: [...counts.keys()],
+      counts: [...counts].map(([id, count]) => ({ id, count })),
+    };
+  });
+}
+
 const P = B.PLANKS, C = B.COBBLE, S = I.STICK;
 const FE = I.IRON_INGOT, AU = I.GOLD_INGOT, DI = I.DIAMOND;
 const W = B.WOOL, G = I.GUNPOWDER, SA = B.SAND, ST = I.STRING;
+const CA = I.CARROT, PO = I.POTATO, BE = I.BEETROOT, BO = I.BOWL;
 
 function toolRecipes(mat: number, pick: number, axe: number, shovel: number, sword: number): Recipe[] {
   const M = mat;
@@ -131,6 +157,11 @@ const RECIPES: Recipe[] = [
   // farming
   { shape: [[P, P], [0, S], [0, S]], out: I.HOE, n: 1 },
   { shape: [[I.WHEAT, I.WHEAT, I.WHEAT]], out: I.BREAD, n: 1 },
+  { shape: [[I.BONE]], out: I.BONE_MEAL, n: 3 },
+  { shape: [[P, 0, P], [0, P, 0]], out: I.BOWL, n: 4 },
+  { shape: [[BE, BE, BE], [0, BO, 0]], out: I.BEETROOT_SOUP, n: 1 },
+  { shape: [[CA, PO, BE], [0, BO, 0]], out: I.VEGETABLE_STEW, n: 1 },
+  { shape: [[AU, AU, AU], [AU, CA, AU], [AU, AU, AU]], out: I.GOLDEN_CARROT, n: 1 },
   // building materials
   { shape: [[SA, SA], [SA, SA]], out: B.SANDSTONE, n: 1 },
   { shape: [[B.STONE, B.STONE], [B.STONE, B.STONE]], out: B.STONE_BRICKS, n: 4 },
@@ -140,6 +171,12 @@ const RECIPES: Recipe[] = [
   { shape: [[P, P, P], [P, P, P], [0, 0, 0]], out: I.WOOD_DOOR, n: 3 },
   { shape: [[P, P, P], [0, S, 0], [0, S, 0]], out: B.LADDER, n: 3 },
   { shape: [[P, P, P], [P, 0, P], [P, P, P]], out: B.TRAPDOOR, n: 2 },
+  // tools & utilities
+  { shape: [[0, 0, S], [0, S, ST], [S, 0, 0]], out: I.FISHING_ROD, n: 1 },
+  // compass: 4 iron in a diamond around a central iron (dial)
+  { shape: [[0, FE, 0], [FE, FE, FE], [0, FE, 0]], out: I.COMPASS, n: 1 },
+  // clock: gold ring with an iron core (redstone stand-in for the dial)
+  { shape: [[0, AU, 0], [AU, FE, AU], [0, AU, 0]], out: I.CLOCK, n: 1 },
   // resource blocks (and back)
   { shape: [[FE, FE, FE], [FE, FE, FE], [FE, FE, FE]], out: B.IRON_BLOCK, n: 1 },
   { shape: [[AU, AU, AU], [AU, AU, AU], [AU, AU, AU]], out: B.GOLD_BLOCK, n: 1 },
@@ -209,6 +246,8 @@ const SMELT = new Map<number, number>([
   [I.CHICKEN, I.COOKED_CHICKEN],
   [I.MUTTON, I.COOKED_MUTTON],
   [I.BEEF, I.COOKED_BEEF],
+  [I.RAW_FISH, I.COOKED_FISH],
+  [I.POTATO, I.BAKED_POTATO],
 ]);
 
 export function smeltResult(id: number): number | undefined { return SMELT.get(id); }

@@ -54,6 +54,15 @@ export enum B {
   DOOR_UPPER = 47,
   LADDER = 48,
   TRAPDOOR = 49,
+  CARROT_0 = 51,
+  CARROT_1 = 52,
+  CARROT_2 = 53,
+  POTATO_0 = 54,
+  POTATO_1 = 55,
+  POTATO_2 = 56,
+  BEETROOT_0 = 57,
+  BEETROOT_1 = 58,
+  BEETROOT_2 = 59,
 }
 
 export enum I {
@@ -99,6 +108,28 @@ export enum I {
   BREAD = 139,
   HOE = 140,
   WOOD_DOOR = 141,
+  BONE = 142,
+  EMERALD = 143,
+  FISHING_ROD = 144,
+  RAW_FISH = 145,
+  COOKED_FISH = 146,
+  COMPASS = 147,
+  CLOCK = 148,
+  CARROT = 149,
+  POTATO = 150,
+  BAKED_POTATO = 151,
+  BEETROOT = 152,
+  BEETROOT_SEEDS = 153,
+  BOWL = 154,
+  BEETROOT_SOUP = 155,
+  VEGETABLE_STEW = 156,
+  GOLDEN_CARROT = 157,
+  BONE_MEAL = 158,
+}
+
+/** extra block ids beyond the base range */
+export enum B2 {
+  EMERALD_BLOCK = 50,
 }
 
 export type SoundClass = 'stone' | 'wood' | 'grass' | 'sand' | 'glass' | 'none';
@@ -356,6 +387,60 @@ blockDef({
   drop: null, // handled specially: wheat + seeds
 });
 blockDef({
+  id: B.CARROT_0, name: 'carrots_stage0', label: 'Carrots', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'carrot_0', bottom: 'carrot_0', sides: 'carrot_0' },
+  drop: null,
+});
+blockDef({
+  id: B.CARROT_1, name: 'carrots_stage1', label: 'Carrots', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'carrot_1', bottom: 'carrot_1', sides: 'carrot_1' },
+  drop: null,
+});
+blockDef({
+  id: B.CARROT_2, name: 'carrots_stage2', label: 'Carrots', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'carrot_2', bottom: 'carrot_2', sides: 'carrot_2' },
+  drop: null,
+});
+blockDef({
+  id: B.POTATO_0, name: 'potatoes_stage0', label: 'Potatoes', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'potato_0', bottom: 'potato_0', sides: 'potato_0' },
+  drop: null,
+});
+blockDef({
+  id: B.POTATO_1, name: 'potatoes_stage1', label: 'Potatoes', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'potato_1', bottom: 'potato_1', sides: 'potato_1' },
+  drop: null,
+});
+blockDef({
+  id: B.POTATO_2, name: 'potatoes_stage2', label: 'Potatoes', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'potato_2', bottom: 'potato_2', sides: 'potato_2' },
+  drop: null,
+});
+blockDef({
+  id: B.BEETROOT_0, name: 'beetroots_stage0', label: 'Beetroots', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'beetroot_0', bottom: 'beetroot_0', sides: 'beetroot_0' },
+  drop: null,
+});
+blockDef({
+  id: B.BEETROOT_1, name: 'beetroots_stage1', label: 'Beetroots', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'beetroot_1', bottom: 'beetroot_1', sides: 'beetroot_1' },
+  drop: null,
+});
+blockDef({
+  id: B.BEETROOT_2, name: 'beetroots_stage2', label: 'Beetroots', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'beetroot_2', bottom: 'beetroot_2', sides: 'beetroot_2' },
+  drop: null,
+});
+blockDef({
   id: B.SAPLING, name: 'oak_sapling', label: 'Sapling', hardness: 0, sound: 'grass',
   solid: false, opaque: false, occludes: false,
   faces: { top: 'sapling', bottom: 'sapling', sides: 'sapling' },
@@ -436,12 +521,33 @@ itemDef({ id: I.APPLE, name: 'apple', label: 'Apple', sprite: 'apple', food: 4 }
 itemDef({ id: I.SEEDS, name: 'wheat_seeds', label: 'Seeds', sprite: 'seeds' });
 itemDef({ id: I.WHEAT, name: 'wheat', label: 'Wheat', sprite: 'wheat' });
 itemDef({ id: I.BREAD, name: 'bread', label: 'Bread', sprite: 'bread', food: 5 });
+itemDef({ id: I.CARROT, name: 'carrot', label: 'Carrot', sprite: 'carrot', food: 3 });
+itemDef({ id: I.POTATO, name: 'potato', label: 'Potato', sprite: 'potato', food: 1 });
+itemDef({ id: I.BAKED_POTATO, name: 'baked_potato', label: 'Baked Potato', sprite: 'baked_potato', food: 5 });
+itemDef({ id: I.BEETROOT, name: 'beetroot', label: 'Beetroot', sprite: 'beetroot', food: 1 });
+itemDef({ id: I.BEETROOT_SEEDS, name: 'beetroot_seeds', label: 'Beetroot Seeds', sprite: 'beetroot_seeds' });
+itemDef({ id: I.BOWL, name: 'bowl', label: 'Bowl', sprite: 'bowl', stack: 16, fuel: 2 });
+itemDef({ id: I.BEETROOT_SOUP, name: 'beetroot_soup', label: 'Beetroot Soup', sprite: 'beetroot_soup', food: 6, stack: 1 });
+itemDef({ id: I.VEGETABLE_STEW, name: 'vegetable_stew', label: 'Vegetable Stew', sprite: 'vegetable_stew', food: 8, stack: 1 });
+itemDef({ id: I.GOLDEN_CARROT, name: 'golden_carrot', label: 'Golden Carrot', sprite: 'golden_carrot', food: 6 });
 itemDef({
   id: I.HOE, name: 'wooden_hoe', label: 'Hoe', sprite: 'hoe', stack: 1,
   toolInfo: { kind: 'hoe', tier: 2, damage: 1 }, durability: 120,
 });
 // A door "item" places the lower half; the engine spawns the upper half above it.
 itemDef({ id: I.WOOD_DOOR, name: 'oak_door', label: 'Wooden Door', sprite: 'wood_door' });
+// new items
+itemDef({ id: I.BONE, name: 'bone', label: 'Bone', sprite: 'bone' });
+itemDef({ id: I.BONE_MEAL, name: 'bone_meal', label: 'Bone Meal', sprite: 'bone_meal' });
+itemDef({ id: I.EMERALD, name: 'emerald', label: 'Emerald', sprite: 'emerald' });
+itemDef({
+  id: I.FISHING_ROD, name: 'fishing_rod', label: 'Fishing Rod', sprite: 'fishing_rod', stack: 1,
+  durability: 64,
+});
+itemDef({ id: I.RAW_FISH, name: 'cod', label: 'Raw Fish', sprite: 'raw_fish', food: 2 });
+itemDef({ id: I.COOKED_FISH, name: 'cooked_cod', label: 'Cooked Fish', sprite: 'cooked_fish', food: 5 });
+itemDef({ id: I.COMPASS, name: 'compass', label: 'Compass', sprite: 'compass', stack: 1 });
+itemDef({ id: I.CLOCK, name: 'clock', label: 'Clock', sprite: 'clock', stack: 1 });
 
 export function def(id: number): Def {
   const d = DEFS.get(id);
@@ -468,6 +574,9 @@ export const GRAVITY_BLOCKS = new Set<number>([B.SAND, B.GRAVEL]);
 export const CROSS_BLOCKS = new Set<number>([
   B.POPPY, B.DANDELION, B.TALL_GRASS, B.SUGAR_CANE,
   B.WHEAT_0, B.WHEAT_1, B.WHEAT_2, B.SAPLING,
+  B.CARROT_0, B.CARROT_1, B.CARROT_2,
+  B.POTATO_0, B.POTATO_1, B.POTATO_2,
+  B.BEETROOT_0, B.BEETROOT_1, B.BEETROOT_2,
 ]);
 
 /** Blocks that pop off when the block under them is removed.
@@ -475,12 +584,16 @@ export const CROSS_BLOCKS = new Set<number>([
 export const FLOOR_BLOCKS = new Set<number>([
   B.TORCH, B.POPPY, B.DANDELION, B.TALL_GRASS, B.SUGAR_CANE, B.CACTUS,
   B.WHEAT_0, B.WHEAT_1, B.WHEAT_2, B.SAPLING,
+  B.CARROT_0, B.CARROT_1, B.CARROT_2,
+  B.POTATO_0, B.POTATO_1, B.POTATO_2,
+  B.BEETROOT_0, B.BEETROOT_1, B.BEETROOT_2,
 ]);
 export const SELF_STACKING = new Set<number>([B.SUGAR_CANE, B.CACTUS]);
 
 /** Atlas tiles whose faces take the per-biome grass/foliage tint. */
 export const TINTED_TILES = new Set<string>([
   'grass_top', 'leaves', 'birch_leaves', 'tall_grass',
+  'carrot_0', 'carrot_1', 'potato_0', 'potato_1',
 ]);
 
 /** Can the held item harvest drops from this block (tool-tier gate)? */
@@ -537,5 +650,8 @@ export const CREATIVE_ITEMS: number[] = [
   I.DIAMOND_PICK, I.DIAMOND_AXE, I.DIAMOND_SHOVEL, I.DIAMOND_SWORD,
   I.PORKCHOP, I.COOKED_PORKCHOP, I.CHICKEN, I.COOKED_CHICKEN,
   I.MUTTON, I.COOKED_MUTTON, I.BEEF, I.COOKED_BEEF, I.ROTTEN_FLESH, I.APPLE,
-  I.SEEDS, I.WHEAT, I.BREAD, I.HOE, I.WOOD_DOOR,
+  I.SEEDS, I.WHEAT, I.BREAD, I.CARROT, I.POTATO, I.BAKED_POTATO,
+  I.BEETROOT, I.BEETROOT_SEEDS, I.BOWL, I.BEETROOT_SOUP, I.VEGETABLE_STEW, I.GOLDEN_CARROT,
+  I.HOE, I.WOOD_DOOR,
+  I.BONE, I.BONE_MEAL, I.EMERALD, I.FISHING_ROD, I.RAW_FISH, I.COOKED_FISH, I.COMPASS, I.CLOCK,
 ];

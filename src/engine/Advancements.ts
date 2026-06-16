@@ -30,7 +30,10 @@ export const ADVANCEMENTS: AdvancementDef[] = [
   { id: 'door', label: 'Knock Knock', desc: 'Place or open a wooden door', icon: '🚪', requires: ['planks'] },
   { id: 'thunder', label: 'Storm Chaser', desc: 'Witness a lightning strike', icon: '⚡', requires: ['root'] },
   { id: 'survive_night', label: 'Survivor', desc: 'Live through a full night', icon: '🌙', requires: ['root'] },
-  { id: 'fish', label: 'Catch of the Day', desc: 'Catch a fish (when fishing is added)', icon: '🐟', requires: ['root'] },
+  { id: 'fish', label: 'Catch of the Day', desc: 'Reel in a fish with a fishing rod', icon: '🐟', requires: ['root'] },
+  { id: 'wolf', label: 'Best Friends Forever', desc: 'Tame a wolf with bones', icon: '🐺', requires: ['root'] },
+  { id: 'trade', label: 'What a Deal!', desc: 'Trade with a villager', icon: '💱', requires: ['root'] },
+  { id: 'village', label: 'Civilization', desc: 'Discover a village', icon: '🏘️', requires: ['root'] },
 ];
 
 export class AdvancementTracker {

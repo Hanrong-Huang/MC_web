@@ -74,6 +74,25 @@ const LEAF_PAL = ['#2f6b1e', '#3f8a26', '#357a20', '#48962c'];
 const WATER_PAL = ['#2f52a5', '#3a61bf', '#345aae', '#3f6ad4'];
 const BEDROCK_PAL = ['#222222', '#393939', '#575757', '#777777', '#2e2e2e'];
 
+function cropTile(c: Ctx, x: number, y: number, seed: number, leaf: string, light: string, root: string, stage: 0 | 1 | 2): void {
+  c.clearRect(x, y, 16, 16);
+  const rand = mulberry32(seed);
+  const stems = stage === 0 ? [4, 8, 12] : [2, 5, 8, 11, 14];
+  for (const bx of stems) {
+    const h = (stage === 0 ? 3 : stage === 1 ? 6 : 9) + ((rand() * 3) | 0);
+    for (let j = 0; j < h; j++) {
+      c.fillStyle = j > h - 3 ? light : leaf;
+      c.fillRect(x + bx, y + 15 - j, 1, 1);
+      if (stage > 0 && j === ((h * 0.55) | 0)) c.fillRect(x + bx + 1, y + 15 - j, 1, 1);
+    }
+    if (stage === 2) {
+      c.fillStyle = root;
+      c.fillRect(x + bx - 1, y + 14, 2, 2);
+      if (rand() < 0.45) c.fillRect(x + bx + 1, y + 13, 1, 2);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tile painters
 // ---------------------------------------------------------------------------
@@ -535,6 +554,15 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
       c.fillRect(x + bx - 1 + ((rand() * 2) | 0), y + 16 - h, 2, 3);
     }
   },
+  carrot_0: (c, x, y) => cropTile(c, x, y, 472, '#4f8a2e', '#6fa838', '#d87825', 0),
+  carrot_1: (c, x, y) => cropTile(c, x, y, 473, '#4f8a2e', '#6fa838', '#d87825', 1),
+  carrot_2: (c, x, y) => cropTile(c, x, y, 474, '#5d9b33', '#7abf45', '#e8952f', 2),
+  potato_0: (c, x, y) => cropTile(c, x, y, 475, '#4d8a38', '#6aa84f', '#b68a45', 0),
+  potato_1: (c, x, y) => cropTile(c, x, y, 476, '#4d8a38', '#6aa84f', '#b68a45', 1),
+  potato_2: (c, x, y) => cropTile(c, x, y, 477, '#5a9a3a', '#7abf45', '#c9a05a', 2),
+  beetroot_0: (c, x, y) => cropTile(c, x, y, 478, '#4f8a33', '#6aa84f', '#8a1f45', 0),
+  beetroot_1: (c, x, y) => cropTile(c, x, y, 479, '#4f8a33', '#6aa84f', '#a42a55', 1),
+  beetroot_2: (c, x, y) => cropTile(c, x, y, 480, '#5d9b3d', '#7abf45', '#c03060', 2),
   sapling: (c, x, y) => {
     c.clearRect(x, y, 16, 16);
     pixmap(c, x, y, [
@@ -673,73 +701,73 @@ const IRONC = { M: '#d8d8d8', m: '#a8a8a8', H: '#8a6232', h: '#5d4222', O: '#241
 const DIAMONDC = { M: '#4aedd9', m: '#33c7c2', H: '#8a6232', h: '#5d4222', O: '#241b10' };
 
 const PICK_MAP = [
-  '....OOOOOOO.....',
-  '...OMMMMMMMO....',
-  '..OMmO...OMMO...',
-  '..OmO.....OMMO..',
-  '..OO...OO..OMO..',
-  '.......OHO..OO..',
-  '......OHhO...O..',
+  '................',
+  '....OOOOOOOO....',
+  '...OMMMMMMMMO...',
+  '..OMMMm..mMMMO..',
+  '..OMO......OMO..',
+  '........OHhO....',
+  '.......OHhO.....',
+  '......OHhO......',
   '.....OHhO.......',
   '....OHhO........',
   '...OHhO.........',
   '..OHhO..........',
   '.OHhO...........',
   '.OhO............',
-  '.OO.............',
   '................',
   '................',
 ];
 const AXE_MAP = [
-  '....OOOO........',
-  '...OMMMMO.......',
-  '..OMMmMMMO......',
-  '..OMmOOMMO......',
-  '..OmO.OMMO......',
-  '...O.OHhMO......',
-  '....OHhOO.......',
+  '................',
+  '.....OOOOO......',
+  '...OOMMMMMO.....',
+  '..OMMMMMMMMO....',
+  '..OMMMmMMMOO....',
+  '...OMMMOOHhO....',
+  '....OO..OHhO....',
+  '.......OHhO.....',
+  '......OHhO......',
+  '.....OHhO.......',
+  '....OHhO........',
   '...OHhO.........',
   '..OHhO..........',
-  '.OHhO...........',
   '.OhO............',
-  '.OO.............',
-  '................',
-  '................',
   '................',
   '................',
 ];
 const SHOVEL_MAP = [
-  '......OOO.......',
-  '.....OMMMO......',
-  '.....OMmMO......',
-  '.....OMmMO......',
-  '......OmO.......',
+  '................',
+  '......OOOO......',
+  '.....OMMMMO.....',
+  '.....OMmMMO.....',
+  '.....OMmMMO.....',
+  '......OmOO......',
+  '......OHhO......',
   '.....OHhO.......',
   '....OHhO........',
   '...OHhO.........',
   '..OHhO..........',
   '.OHhO...........',
   '.OhO............',
-  '.OO.............',
-  '................',
   '................',
   '................',
   '................',
 ];
 const SWORD_MAP = [
-  '..........OO....',
-  '.........OMMO...',
-  '........OMmMO...',
-  '.......OMmMO....',
-  '......OMmMO.....',
-  '.....OMmMO......',
-  '....OMmMO.......',
-  '..OOOmMO........',
-  '..OhOOO.........',
-  '.OHhO...........',
-  'OHhOhO..........',
-  'OhO.OO..........',
-  '.O..............',
+  '................',
+  '.......OO.......',
+  '......OMMO......',
+  '......OMmO......',
+  '......OMmO......',
+  '......OMmO......',
+  '......OMmO......',
+  '......OMmO......',
+  '....OOOMmOOO....',
+  '.....OOHhOO.....',
+  '......OHhO......',
+  '......OHhO......',
+  '.......OO.......',
   '................',
   '................',
   '................',
@@ -805,11 +833,11 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     '..OHO...........', '.OHO............', '................', '................',
   ], { O: '#5d5d6a', W: '#f4f4f8', H: '#c8a868' }),
   string: (c) => pixmap(c, 0, 0, [
-    '................', '....W...........', '....W...........', '.....W..........',
-    '.....W..........', '......W.........', '......W.........', '.......W........',
-    '.......W........', '........W.......', '........W.......', '.........W......',
-    '.........W......', '..........W.....', '..........W.....', '................',
-  ], { W: '#e8e8e8' }),
+    '................', '................', '.....wWWw.......', '....W....W......',
+    '...W.wWw..W.....', '...W.W.W..W.....', '...W.W.W..W.....', '...W.wWw..W.....',
+    '....W....W......', '.....wWWw.......', '......W.W.......', '.....W...W......',
+    '....W.....W.....', '................', '................', '................',
+  ], { W: '#eeeeee', w: '#bcbcbc' }),
   gunpowder: (c) => pixmap(c, 0, 0, [
     '................', '................', '................', '................',
     '......G.G.......', '....G.GGG.G.....', '...GGGgGGGG.....', '..GGgGGGGgGG....',
@@ -833,11 +861,11 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
   beef: (c) => meatSprite(c, '#b03a3a', '#d06868'),
   cooked_beef: (c) => meatSprite(c, '#6b3a1f', '#9c5a32'),
   seeds: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '.......g........',
+    '......gSg.......', '.....OSSO.......', '....OSSSSO......', '...OSsSSsSO.....',
+    '...OSSSSSSO.....', '....OSSSSO......', '.....OOOO.......', '................',
     '................', '................', '................', '................',
-    '.....G..G.......', '...G......G.....', '......G.........', '....G...G..G....',
-    '..G...G.........', '.....G....G.....', '...G....G.......', '................',
-    '................', '................', '................', '................',
-  ], { G: '#7aa83d' }),
+  ], { O: '#6b4a1e', S: '#d8c07a', s: '#b89a52', g: '#7aa83d' }),
   wheat: (c) => pixmap(c, 0, 0, [
     '................', '..........WW....', '.........WWW....', '........WWW.....',
     '.......WWWW.....', '......WWWW......', '......WWW.......', '.....WWWH.......',
@@ -850,11 +878,65 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     '..OBBBBBBBBBO...', '..OBBBBBBBBO....', '...OBBBBBBO.....', '....OOOOOO......',
     '................', '................', '................', '................',
   ], { O: '#4a2f14', B: '#9c6f3a', L: '#d8b070' }),
+  carrot: (c) => pixmap(c, 0, 0, [
+    '................', '......GG.G......', '.....GGGG.......', '......GG........',
+    '......OO........', '.....OLLO.......', '.....OLLO.......', '....OLLLO.......',
+    '....OLLLO.......', '...OLLLLO.......', '...OLLLLO.......', '..OLLLLO........',
+    '..OLLOO.........', '...OO...........', '................', '................',
+  ], { O: '#7a3a10', L: '#e88724', G: '#4f9a38' }),
+  golden_carrot: (c) => pixmap(c, 0, 0, [
+    '................', '......GG.G......', '.....GGGG.......', '......GG........',
+    '......OO........', '.....OLLO.......', '.....OLLO.......', '....OLLLO.......',
+    '....OLLLO.......', '...OLLLLO.......', '...OLLLLO.......', '..OLLLLO........',
+    '..OLLOO.........', '...OO...........', '................', '................',
+  ], { O: '#8a5a10', L: '#ffd83d', G: '#6fa838' }),
+  potato: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '.....OOOO.......',
+    '....OBBBBO......', '...OBBbBBBO.....', '...OBBBBBBO.....', '..OBBBbBBBBO....',
+    '..OBBBBBBBBO....', '...OBBBbBBO.....', '....OBBBBO......', '.....OOOO.......',
+    '................', '................', '................', '................',
+  ], { O: '#5d3a1f', B: '#b88a4a', b: '#8f6839' }),
+  baked_potato: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '.....OOOO.......',
+    '....OCCCCO......', '...OCCcCCCO.....', '...OCCCCCCO.....', '..OCCCcCCCCO....',
+    '..OCCCCCCCCO....', '...OCCCcCCO.....', '....OCCCCO......', '.....OOOO.......',
+    '................', '................', '................', '................',
+  ], { O: '#3a2010', C: '#d0a05a', c: '#f0c06a' }),
+  beetroot: (c) => pixmap(c, 0, 0, [
+    '................', '......GG........', '.....GGGG.......', '......GG........',
+    '.....ORRO.......', '....ORRRRO......', '...ORRLRRO......', '...ORRRRRO......',
+    '....ORRRO.......', '.....ORO........', '......O.........', '................',
+    '................', '................', '................', '................',
+  ], { O: '#3a0a18', R: '#a82048', L: '#d84a70', G: '#4f9a38' }),
+  beetroot_seeds: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '.......g........',
+    '......gSg.......', '.....OSSO.......', '....OSSSSO......', '...OSsSSsSO.....',
+    '...OSSSSSSO.....', '....OSSSSO......', '.....OOOO.......', '................',
+    '................', '................', '................', '................',
+  ], { O: '#5a1028', S: '#c83a5a', s: '#9c2848', g: '#7aa83d' }),
+  bowl: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '................',
+    '................', '..OOOOOOOOOO....', '..OHHHHHHHHO....', '...OHHHHHHO.....',
+    '...OHHHHHHO.....', '....OHHHHO......', '.....OOOO.......', '................',
+    '................', '................', '................', '................',
+  ], { O: '#4a2f14', H: '#9c6f3a' }),
+  beetroot_soup: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '................',
+    '..OOOOOOOOOO....', '..ORRRLRRRRO....', '..ORRRRRRRRO....', '...OHHHHHHO.....',
+    '...OHHHHHHO.....', '....OHHHHO......', '.....OOOO.......', '................',
+    '................', '................', '................', '................',
+  ], { O: '#4a2f14', H: '#9c6f3a', R: '#a82048', L: '#d84a70' }),
+  vegetable_stew: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '................',
+    '..OOOOOOOOOO....', '..OSCGCSPSSO....', '..OPSSBCSSSO....', '...OHHHHHHO.....',
+    '...OHHHHHHO.....', '....OHHHHO......', '.....OOOO.......', '................',
+    '................', '................', '................', '................',
+  ], { O: '#4a2f14', H: '#9c6f3a', S: '#b86a32', C: '#e88724', P: '#d0a05a', B: '#a82048', G: '#4f9a38' }),
   hoe: (c) => pixmap(c, 0, 0, [
-    '....OOOOO.......', '...OMMMMMO......', '...OOOOOMO......', '.......OHO......',
-    '......OHhO......', '......OHhO......', '.....OHhO.......', '.....OHhO.......',
-    '....OHhO........', '....OHhO........', '...OHhO.........', '...OhO..........',
-    '..OO............', '................', '................', '................',
+    '................', '....OOOOOO......', '...OMMMMMMO.....', '...OOOOOMMO.....',
+    '........OHhO....', '.......OHhO.....', '......OHhO......', '.....OHhO.......',
+    '....OHhO........', '...OHhO.........', '..OHhO..........', '.OHhO...........',
+    '.OhO............', '................', '................', '................',
   ], WOOD),
   rotten_flesh: (c) => pixmap(c, 0, 0, [
     '................', '................', '...OOO..OOO.....', '..ORRROORGRO....',
@@ -880,6 +962,44 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     pixmap(c, 0, 0, rows, pal);
     c.fillStyle = iron; c.fillRect(12, 8, 1, 1);
   },
+  bone: (c) => pixmap(c, 0, 0, [
+    '................', '............OO..', '...........OWWO.', '..........OWWWO.',
+    '.........OWWWWO.', '........OWWWWO..', '..OO..OOOWWWWO..', '.OWWOOOWWWWWO...',
+    '.OWWWWWWWWWO....', '..OWWWWWWWO.....', '...OWWWWWO......', '....OWWWO.......',
+    '....OWWO........', '.....OO.........', '................', '................',
+  ], { O: '#8a7a5a', W: '#e8e0c8' }),
+  bone_meal: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '................',
+    '......W.W.......', '....W.WWW.W.....', '...WWWwWWWW.....', '..WWwWWWWwWW....',
+    '..WWWWwWWWWW....', '...WWWWWwWW.....', '....WWWWWW......', '................',
+    '................', '................', '................', '................',
+  ], { W: '#ececec', w: '#c4c4c4' }),
+  emerald: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '.......O........',
+    '......OGO.......', '.....OGGGO......', '....OGGGGGO.....', '....OGGGGGO.....',
+    '....OGGGGGO.....', '.....OGGGGO.....', '......OGGO......', '.......OO.......',
+    '................', '................', '................', '................',
+  ], { O: '#0a3a2a', G: '#3fd878' }),
+  fishing_rod: (c) => pixmap(c, 0, 0, [
+    '............OO..', '...........OSO..', '..........OSSO..', '.........OSSSO..',
+    '........OSSSO...', '.......OSSSO....', '......OSSSO.....', '.....OSSSO......',
+    '....OSSSO.......', '...OSSSO........', '..OSSSO.........', '.OSSSO..........',
+    'OSSSO...........', 'OOO.............', '................', '................',
+  ], { O: '#5d4222', S: '#c8c8c8' }),
+  raw_fish: (c) => meatSprite(c, '#9ab8d8', '#c8dcef'),
+  cooked_fish: (c) => meatSprite(c, '#b5854a', '#d8a868'),
+  compass: (c) => pixmap(c, 0, 0, [
+    '................', '................', '.....OOOOO......', '....OBBBBBO.....',
+    '...OBeBBBBeO....', '..OBBPPPPPBBO...', '..OBePPRRPPeO...', '..OBBPRRRRPBO...',
+    '..OBPPRRRPPBO...', '..OBePPRRPPeO...', '..OBBPPPPPBeO...', '...OBeBBBBeO....',
+    '....OBBBBBO.....', '.....OOOOO......', '................', '................',
+  ], { O: '#5d4222', B: '#d8c898', e: '#b8a878', P: '#f0e8c8', R: '#d83030' }),
+  clock: (c) => pixmap(c, 0, 0, [
+    '................', '................', '.....OOOOO......', '....OGGGGGO.....',
+    '...OGWWWWWGO....', '..OGWWWWWWWGO...', '..OGWWNNNWWGO...', '..OGWWNWNWWGO...',
+    '..OGWWNNNWWGO...', '..OGWWWWWWWGO...', '...OGWWWWWGO....', '....OGGGGGO.....',
+    '.....OOOOO......', '................', '................', '................',
+  ], { O: '#5d4222', G: '#d8c898', W: '#f0e8c8', N: '#1a1a1a' }),
   porkchop: (c) => pixmap(c, 0, 0, [
     '................', '................', '....OOOO........', '...OPPPPO.......',
     '..OPPpppPO......', '..OPpppppPO.....', '..OPpppppPO.....', '...OPpppPPO.....',
@@ -1042,6 +1162,15 @@ const PACK_MAP: Record<string, PackEntry> = {
   wheat_0: { paths: ['block/wheat_stage1', 'block/wheat_stage_1'], kind: 'tile' },
   wheat_1: { paths: ['block/wheat_stage4', 'block/wheat_stage_4'], kind: 'tile' },
   wheat_2: { paths: ['block/wheat_stage7', 'block/wheat_stage_7'], kind: 'tile' },
+  carrot_0: { paths: ['block/carrots_stage1', 'block/carrots_stage_1'], kind: 'tile' },
+  carrot_1: { paths: ['block/carrots_stage4', 'block/carrots_stage_4'], kind: 'tile' },
+  carrot_2: { paths: ['block/carrots_stage7', 'block/carrots_stage_7'], kind: 'tile' },
+  potato_0: { paths: ['block/potatoes_stage1', 'block/potatoes_stage_1'], kind: 'tile' },
+  potato_1: { paths: ['block/potatoes_stage4', 'block/potatoes_stage_4'], kind: 'tile' },
+  potato_2: { paths: ['block/potatoes_stage7', 'block/potatoes_stage_7'], kind: 'tile' },
+  beetroot_0: { paths: ['block/beetroots_stage1', 'block/beetroots_stage_1'], kind: 'tile' },
+  beetroot_1: { paths: ['block/beetroots_stage2', 'block/beetroots_stage_2'], kind: 'tile' },
+  beetroot_2: { paths: ['block/beetroots_stage3', 'block/beetroots_stage_3'], kind: 'tile' },
   sapling: { paths: ['block/oak_sapling', 'block/sapling_oak'], kind: 'tile' },
   stick: { paths: ['item/stick'], kind: 'item' },
   coal: { paths: ['item/coal'], kind: 'item' },
@@ -1083,6 +1212,15 @@ const PACK_MAP: Record<string, PackEntry> = {
   seeds: { paths: ['item/wheat_seeds', 'item/seeds_wheat'], kind: 'item' },
   wheat: { paths: ['item/wheat'], kind: 'item' },
   bread: { paths: ['item/bread'], kind: 'item' },
+  carrot: { paths: ['item/carrot'], kind: 'item' },
+  golden_carrot: { paths: ['item/golden_carrot'], kind: 'item' },
+  potato: { paths: ['item/potato'], kind: 'item' },
+  baked_potato: { paths: ['item/baked_potato'], kind: 'item' },
+  beetroot: { paths: ['item/beetroot'], kind: 'item' },
+  beetroot_seeds: { paths: ['item/beetroot_seeds'], kind: 'item' },
+  bowl: { paths: ['item/bowl'], kind: 'item' },
+  beetroot_soup: { paths: ['item/beetroot_soup'], kind: 'item' },
+  vegetable_stew: { paths: ['item/suspicious_stew', 'item/mushroom_stew'], kind: 'item' },
   hoe: { paths: ['item/wooden_hoe', 'item/wood_hoe'], kind: 'item' },
 };
 for (let i = 0; i < 10; i++) {
