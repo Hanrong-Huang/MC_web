@@ -67,6 +67,7 @@ class Game {
   private wasNight = false;
   private minimapT = 0;
   private wasRiding = false;
+  private ambientPT = 0;
 
   constructor(app: App, slot: string, save: SaveState | null, fresh: { seed: number; mode: GameMode } | null) {
     this.app = app;
@@ -101,7 +102,14 @@ class Game {
     this.world.onChunkRemoved = (key) => this.renderer.removeChunk(key);
     this.world.onBlockChanged = (x, y, z, _oldId, newId) => {
       // a removed block exposes whatever sat on it; a placed gravity block may drop
-      if (newId === B.AIR) this.supportQueue.add(`${x},${y + 1},${z}`);
+      if (newId === B.AIR) {
+        this.supportQueue.add(`${x},${y + 1},${z}`);
+        // wall torches attached to the removed block must re-check support
+        this.supportQueue.add(`${x + 1},${y},${z}`);
+        this.supportQueue.add(`${x - 1},${y},${z}`);
+        this.supportQueue.add(`${x},${y},${z + 1}`);
+        this.supportQueue.add(`${x},${y},${z - 1}`);
+      }
       if (GRAVITY_BLOCKS.has(newId)) this.supportQueue.add(`${x},${y},${z}`);
       // covering grass smothers it
       if (newId !== B.AIR && def(newId).opaque) this.supportQueue.add(`${x},${y - 1},${z}`);
@@ -160,6 +168,9 @@ class Game {
           hingeRight: !!v.hingeRight,
           swing: v.open ? 1 : 0,
         });
+      }
+      for (const [k, v] of Object.entries(save.torches ?? {})) {
+        this.world.torchFacings.set(k, v as number);
       }
     } else {
       this.player.mode = fresh!.mode;
@@ -238,6 +249,18 @@ class Game {
       const kit = [I.DIAMOND_SWORD, I.DIAMOND_PICK, I.DIAMOND_AXE, I.BOW, I.APPLE, I.BONE, I.FISHING_ROD];
       for (let i = 0; i < kit.length; i++) this.player.inventory.slots[i] = { id: kit[i], count: 1 };
       this.onInventoryChange();
+      // wall + floor torch demo on a stone pillar
+      const bx = Math.floor(p.x) + 6, by = Math.floor(p.y), bz = Math.floor(p.z);
+      this.world.setBlock(bx, by, bz, B.STONE);
+      this.world.setBlock(bx, by + 1, bz, B.STONE);
+      const wall = (wx: number, wy: number, wz: number, facing: number): void => {
+        this.world.torchFacings.set(`${wx},${wy},${wz}`, facing);
+        this.world.setBlock(wx, wy, wz, B.TORCH);
+      };
+      wall(bx - 1, by + 1, bz, 1);
+      wall(bx, by + 1, bz + 1, 2);
+      wall(bx, by + 1, bz - 1, 3);
+      this.world.setBlock(bx, by + 2, bz, B.TORCH); // floor torch on top
     }
     this.hud.toast('Click to capture the mouse');
     this.lastFrame = performance.now();
@@ -572,6 +595,8 @@ class Game {
     for (const [k, v] of this.world.doorStates) {
       doorRec[k] = { facing: v.facing, open: v.open, hingeRight: !!v.hingeRight };
     }
+    const torchRec: NonNullable<SaveState['torches']> = {};
+    for (const [k, v] of this.world.torchFacings) torchRec[k] = v;
     return {
       version: SAVE_VERSION,
       seed: this.world.seed,
@@ -581,6 +606,7 @@ class Game {
       world: worldRec,
       blockEntities: beRec,
       doors: doorRec,
+      torches: torchRec,
       environment: { dayTime: this.dayTime },
       advancements: this.adv.serialize(),
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
@@ -659,6 +685,13 @@ class Game {
         this.tick20();
       }
       this.audio.ambientTick(dt, Math.sin(this.dayTime * Math.PI * 2) < -0.06);
+
+      // ambient particles: torch embers + night fireflies near the player
+      this.ambientPT -= dt;
+      if (this.ambientPT <= 0) {
+        this.ambientPT = 0.12;
+        this.emitAmbientParticles();
+      }
 
       this.autosaveT += dt;
       if (this.autosaveT >= AUTOSAVE_SECONDS) {
@@ -781,11 +814,22 @@ class Game {
             this.entities.spawnFallingBlock(x, y, z, id);
           }
         } else if (FLOOR_BLOCKS.has(id)) {
-          const below = this.world.getBlock(x, y - 1, z);
-          const supported = (hasDef(below) && below !== B.AIR && def(below).solid) ||
-            (SELF_STACKING.has(id) && below === id);
+          // wall torches are held by the block behind them; everything else
+          // (incl. floor torches) needs solid support directly below
+          const facing = id === B.TORCH ? this.world.torchFacings.get(key) : undefined;
+          let supported: boolean;
+          if (facing !== undefined) {
+            const wx = facing === 0 ? x - 1 : facing === 1 ? x + 1 : x;
+            const wz = facing === 2 ? z - 1 : facing === 3 ? z + 1 : z;
+            supported = this.world.isSolidAt(wx, y, wz);
+          } else {
+            const below = this.world.getBlock(x, y - 1, z);
+            supported = (hasDef(below) && below !== B.AIR && def(below).solid) ||
+              (SELF_STACKING.has(id) && below === id);
+          }
           if (!supported) {
             this.world.setBlock(x, y, z, B.AIR);
+            if (facing !== undefined) this.world.torchFacings.delete(key);
             const d = def(id);
             if (d.drop !== null) {
               const drop = d.drop ?? { id, min: 1, max: 1 };
@@ -867,6 +911,37 @@ class Game {
       case B.BEETROOT_0: return B.BEETROOT_1;
       case B.BEETROOT_1: return B.BEETROOT_2;
       default: return id;
+    }
+  }
+
+  /** Light ambient life: torch embers and night fireflies near the player. */
+  private emitAmbientParticles(): void {
+    const p = this.player.pos;
+    const pcx = Math.floor(p.x / CX), pcz = Math.floor(p.z / CZ);
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const c = this.world.getChunk(pcx + dx, pcz + dz);
+        if (!c || c.torches.size === 0 || Math.random() > 0.5) continue;
+        const arr = [...c.torches];
+        const idx = arr[(Math.random() * arr.length) | 0];
+        const tx = c.cx * CX + (idx & 15);
+        const tz = c.cz * CZ + ((idx >> 4) & 15);
+        const ty = idx >> 8;
+        if (Math.hypot(tx + 0.5 - p.x, tz + 0.5 - p.z) < 18) {
+          this.entities.spawnTorchFlame(tx + 0.5, ty + 0.62, tz + 0.5);
+        }
+      }
+    }
+    if (Math.sin(this.dayTime * Math.PI * 2) < -0.12 && Math.random() < 0.4) {
+      const fx = Math.floor(p.x + (Math.random() - 0.5) * 14);
+      const fz = Math.floor(p.z + (Math.random() - 0.5) * 14);
+      const c = this.world.getChunk(Math.floor(fx / CX), Math.floor(fz / CZ));
+      if (c && c.ready) {
+        const h = c.heightmap[(fz & 15) * 16 + (fx & 15)];
+        if (this.world.getBlock(fx, h - 1, fz) === B.GRASS) {
+          this.entities.spawnFirefly(fx + 0.5, h + 0.4 + Math.random() * 1.2, fz + 0.5);
+        }
+      }
     }
   }
 

@@ -194,7 +194,8 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
         if (id === B.AIR) continue;
 
         if (id === B.TORCH) {
-          emitTorch(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z));
+          const facing = world.torchFacings.get(`${bx + x},${y},${bz + z}`);
+          emitTorch(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), facing);
           continue;
         }
         if (id === B.DOOR_LOWER || id === B.DOOR_UPPER) {
@@ -337,26 +338,47 @@ function emitCross(g: GeoBuilder, atlas: Atlas, id: number, x: number, y: number
   }
 }
 
-/** Small free-standing torch model: a 2/16-wide column, 10/16 tall. */
-function emitTorch(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number, sky: number, torch: number): void {  const rect = atlas.rect('torch');
+/** Small torch model: a 2/16-wide column, 10/16 tall. With `facing` (0=+x,
+ *  1=-x, 2=+z, 3=-z) it becomes a wall torch — raised, leaned away from the
+ *  wall, and offset so its base sits against that wall face. */
+function emitTorch(
+  g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number,
+  sky: number, torch: number, facing?: number,
+): void {
+  const rect = atlas.rect('torch');
   const du = rect.u1 - rect.u0, dv = rect.v1 - rect.v0;
   const lo = 7 / 16, hi = 9 / 16, top = 10 / 16;
-  // uv sub-rect of the torch tile that contains the drawn torch
   const u0 = rect.u0 + 7 / 16 * du, u1 = rect.u0 + 9 / 16 * du;
   const vTop = rect.v0 + 6 / 16 * dv, vBottom = rect.v1;
+
+  // wall mounting: lean angle + anchor against the wall opposite `facing`
+  let wallX = 0, wallZ = 0, ax = 0.5, ay = 0, az = 0.5, sinL = 0, cosL = 1;
+  if (facing !== undefined) {
+    wallX = facing === 0 ? 1 : facing === 1 ? -1 : 0;
+    wallZ = facing === 2 ? 1 : facing === 3 ? -1 : 0;
+    const lean = 0.42; // radians the top tilts out into the room
+    sinL = Math.sin(lean); cosL = Math.cos(lean);
+    ax = 0.5 - wallX * 0.42; // base near the wall face
+    az = 0.5 - wallZ * 0.42;
+    ay = 0.22;               // raised up the wall
+  }
+  // transform a local column point (centered on x/z, height py) by the lean
+  const tx = (px: number, py: number): number => ax + (px - 0.5) + wallX * py * sinL;
+  const ty = (py: number): number => ay + py * cosL;
+  const tz = (pz: number, py: number): number => az + (pz - 0.5) + wallZ * py * sinL;
+
+  const push = (px: number, py: number, pz: number, u: number, v: number): void => {
+    g.positions.push(x + tx(px, py), y + ty(py), z + tz(pz, py));
+    g.lights.push(sky, Math.max(torch, 0.9)); // a torch always glows itself
+    g.tints.push(1, 1, 1);
+    g.uvs.push(u, v);
+  };
   const quads: number[][][] = [
-    // [4 corners] each [px,py,pz,u,v]
     [[hi, 0, hi], [hi, 0, lo], [hi, top, lo], [hi, top, hi]],   // +x
     [[lo, 0, lo], [lo, 0, hi], [lo, top, hi], [lo, top, lo]],   // -x
     [[lo, 0, hi], [hi, 0, hi], [hi, top, hi], [lo, top, hi]],   // +z
     [[hi, 0, lo], [lo, 0, lo], [lo, top, lo], [hi, top, lo]],   // -z
   ];
-  const push = (px: number, py: number, pz: number, u: number, v: number): void => {
-    g.positions.push(x + px, y + py, z + pz);
-    g.lights.push(sky, Math.max(torch, 0.9)); // a torch always glows itself
-    g.tints.push(1, 1, 1);
-    g.uvs.push(u, v);
-  };
   for (const q of quads) {
     const base = g.vertCount;
     push(q[0][0], q[0][1], q[0][2], u0, vBottom);
@@ -366,7 +388,7 @@ function emitTorch(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number,
     g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
     g.vertCount += 4;
   }
-  // tip
+  // tip (flame top)
   const base = g.vertCount;
   const tu0 = rect.u0 + 7 / 16 * du, tu1 = rect.u0 + 9 / 16 * du;
   const tv0 = rect.v0 + 6 / 16 * dv, tv1 = rect.v0 + 8 / 16 * dv;

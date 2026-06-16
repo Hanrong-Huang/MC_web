@@ -463,6 +463,37 @@ export class EntityManager {
     }
   }
 
+  /** A rising ember from a torch flame. */
+  spawnTorchFlame(x: number, y: number, z: number): void {
+    if (this.particleCount() >= 80) return;
+    let mat = this.particleMats.get('ember');
+    if (!mat) {
+      const c = document.createElement('canvas');
+      c.width = 4; c.height = 4;
+      const ctx = c.getContext('2d')!;
+      ctx.fillStyle = '#ffb24a';
+      ctx.fillRect(0, 0, 4, 4);
+      const tex = new THREE.CanvasTexture(c);
+      tex.magFilter = THREE.NearestFilter;
+      tex.minFilter = THREE.NearestFilter;
+      mat = new THREE.MeshBasicMaterial({
+        map: tex, color: 0xffc05a, transparent: true, opacity: 0.95,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      this.particleMats.set('ember', mat);
+    }
+    const mesh = new THREE.Group();
+    mesh.add(new THREE.Mesh(new THREE.PlaneGeometry(0.07, 0.07), mat));
+    const e = new Entity('particle',
+      { x: x + (Math.random() - 0.5) * 0.12, y, z: z + (Math.random() - 0.5) * 0.12 },
+      { w: 0.03, h: 0.03 }, mesh);
+    e.vel = { x: (Math.random() - 0.5) * 0.15, y: 0.4 + Math.random() * 0.35, z: (Math.random() - 0.5) * 0.15 };
+    e.maxLife = e.life = 0.5 + Math.random() * 0.4;
+    e.pGrav = -0.5; // drifts upward
+    this.entities.push(e);
+    this.scene.add(mesh);
+  }
+
   /** A single glowing firefly mote — warm pixel that drifts + fades. */
   spawnFirefly(x: number, y: number, z: number): void {
     let mat = this.particleMats.get('firefly');

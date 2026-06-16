@@ -40,6 +40,9 @@ export class World {
   blockEntities = new Map<string, BlockEntity>();
   /** door states keyed by the lower-half "x,y,z" */
   doorStates = new Map<string, DoorState>();
+  /** wall-torch facings keyed by "x,y,z": 0=+x,1=-x,2=+z,3=-z. Floor torches
+   *  are absent from this map. */
+  torchFacings = new Map<string, number>();
   onChunkRemoved: (key: string) => void = () => {};
   /** fired after every successful setBlock (gravity blocks, torch supports, ...) */
   onBlockChanged: (x: number, y: number, z: number, oldId: number, newId: number) => void = () => {};

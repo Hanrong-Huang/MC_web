@@ -485,6 +485,7 @@ export class Player {
     const { world, entities, audio } = this.deps;
     const id = world.getBlock(x, y, z);
     if (id === B.AIR || def(id).hardness < 0) return;
+    if (id === B.TORCH) world.torchFacings.delete(`${x},${y},${z}`);
 
     // container contents spill out
     const beKey = `${x},${y},${z}`;
@@ -831,6 +832,30 @@ export class Player {
     const pz = this.target.z + this.target.nz;
     const existing = world.getBlock(px, py, pz);
     if (existing !== B.AIR && existing !== B.WATER) return;
+
+    // torch: attach to a floor (clicked top face) or to a block wall (side face)
+    if (held.id === B.TORCH) {
+      const { nx, ny, nz } = this.target;
+      if (ny === 1 && isSolid(world.getBlock(px, py - 1, pz))) {
+        world.torchFacings.delete(`${px},${py},${pz}`); // floor torch
+      } else if ((nx !== 0 || nz !== 0) && isSolid(world.getBlock(this.target.x, this.target.y, this.target.z))) {
+        const facing = nx === 1 ? 0 : nx === -1 ? 1 : nz === 1 ? 2 : 3; // wall torch
+        world.torchFacings.set(`${px},${py},${pz}`, facing);
+      } else {
+        return; // no valid surface (e.g. a ceiling)
+      }
+      if (world.setBlock(px, py, pz, B.TORCH)) {
+        this.placeCooldown = 0.22;
+        this.deps.renderer.triggerSwing();
+        audio.dig('wood', 0.7);
+        if (this.mode === 'survival') this.inventory.consumeSelected();
+        else this.inventory.onChange();
+      } else {
+        world.torchFacings.delete(`${px},${py},${pz}`);
+      }
+      return;
+    }
+
     // plants/torches need a floor (cane and cactus may stack on themselves)
     if (FLOOR_BLOCKS.has(held.id)) {
       const below = world.getBlock(px, py - 1, pz);

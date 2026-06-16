@@ -33,6 +33,8 @@ export interface SaveState {
   blockEntities: Record<string, BlockEntitySave>;
   /** door state keyed by lower-half "x,y,z" -> facing/open/hinge */
   doors?: Record<string, { facing: number; open: boolean; hingeRight: boolean }>;
+  /** wall-torch facings keyed by "x,y,z" (0=+x,1=-x,2=+z,3=-z) */
+  torches?: Record<string, number>;
   environment: { dayTime: number };
   /** bed spawn point, if set */
   spawn?: { x: number; y: number; z: number };

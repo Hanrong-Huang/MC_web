@@ -482,7 +482,9 @@ export class Renderer {
       }
       uv.needsUpdate = true;
       const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: this.atlas.texture, alphaTest: 0.35 }));
-      mesh.scale.setScalar(0.32);
+      mesh.scale.setScalar(0.34);
+      // a slight 3/4 tilt so the top + two side faces all catch the light
+      mesh.rotation.set(-0.16, 0.5, 0);
       this.heldMesh = mesh;
     } else if (id !== 0 && hasDef(id) && def(id).sprite) {
       // pixel sprite extruded into a real 3D voxel model (Minecraft-style),
@@ -492,8 +494,8 @@ export class Renderer {
         new THREE.PlaneGeometry(0.5, 0.5),
         new THREE.MeshBasicMaterial({ color: 0xff00ff }),
       );
-      // grip angle: lean the item like it's held in the fist
-      mesh.rotation.set(0.12, -0.2, -0.5);
+      // grip angle: tools/items sit diagonally in the fist, head up + away
+      mesh.rotation.set(0.18, -0.35, -0.62);
       this.heldMesh = mesh;
       if (def(id).bow) {
         this.bowArrow = this.buildHeldArrow();
@@ -569,7 +571,7 @@ export class Renderer {
 
   private buildExtrudedItem(sprite: HTMLCanvasElement): THREE.Mesh {
     return new THREE.Mesh(
-      extrudeSpriteGeometry(sprite, 0.5),
+      extrudeSpriteGeometry(sprite, 0.56),
       new THREE.MeshLambertMaterial({ vertexColors: true }),
     );
   }
