@@ -19,7 +19,7 @@ await page.screenshot({ path: 'shot-menu.png' });
 
 // creative mode, World_2
 await page.locator('.mode-pick button', { hasText: 'Creative' }).click();
-await page.locator('.world-row', { hasText: 'World 2' }).locator('button', { hasText: 'Create' }).click();
+await page.locator('.create-btn').click();
 await page.waitForSelector('#loading.hidden', { timeout: 60000, state: 'attached' });
 await page.waitForTimeout(2500);
 

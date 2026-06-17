@@ -47,7 +47,6 @@ export interface PauseHandlers {
   onPack: (files: File[]) => void;
 }
 
-const SLOTS = ['World_1', 'World_2', 'World_3'];
 type RecipeFilter = 'all' | 'ready' | 'tools' | 'blocks' | 'food' | 'utility';
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, parent?: HTMLElement): HTMLElementTagNameMap[K] {
@@ -177,24 +176,31 @@ export class HUD {
     const sub = el('div', 'menu-sub', this.menu);
     sub.textContent = 'TypeScript + Three.js, from scratch!';
 
-    const byName = new Map(saves.map((s) => [s.slot, s]));
     const col = el('div', 'menu-col', this.menu);
 
-    // new-world options
+    // attach UI sounds: a soft tick on hover, a click on press
+    const wire = <T extends HTMLElement>(b: T): T => {
+      b.addEventListener('mouseenter', () => this.audio.play('select'));
+      b.addEventListener('mousedown', () => { this.audio.ensure(); this.audio.play('click'); });
+      return b;
+    };
+
+    // --- create a new world ---------------------------------------------------
     let mode: GameMode = 'survival';
-    const opts = el('div', 'menu-opts');
-    opts.append('Seed:');
-    const seedInput = el('input') as HTMLInputElement;
-    seedInput.type = 'text';
-    seedInput.placeholder = 'random';
-    opts.appendChild(seedInput);
-    const modePick = el('div', 'mode-pick', opts);
+    const create = el('div', 'menu-card', col);
+    const ch = el('div', 'card-head', create); ch.textContent = 'Create New World';
+    const used = new Set(saves.map((s) => s.slot));
+    let next = 1; while (used.has(`World ${next}`)) next++;
+    const nameInput = el('input', 'menu-input', create) as HTMLInputElement;
+    nameInput.type = 'text'; nameInput.maxLength = 32; nameInput.placeholder = `World name (e.g. World ${next})`;
+    const seedInput = el('input', 'menu-input', create) as HTMLInputElement;
+    seedInput.type = 'text'; seedInput.placeholder = 'Seed (leave blank for random)';
+    const modePick = el('div', 'mode-pick', create);
     const mkMode = (m: GameMode, label: string): HTMLButtonElement => {
-      const b = el('button', `mc-btn small${m === mode ? ' on' : ''}`, modePick);
+      const b = wire(el('button', `mc-btn small${m === mode ? ' on' : ''}`, modePick));
       b.textContent = label;
       b.onclick = () => {
         mode = m;
-        this.audio.play('click');
         modePick.querySelectorAll('.mc-btn').forEach((x) => x.classList.remove('on'));
         b.classList.add('on');
       };
@@ -202,45 +208,44 @@ export class HUD {
     };
     mkMode('survival', 'Survival');
     mkMode('creative', 'Creative');
+    const createBtn = wire(el('button', 'mc-btn create-btn', create));
+    createBtn.textContent = 'Create World';
+    createBtn.onclick = () => {
+      this.audio.ensure();
+      let name = nameInput.value.trim() || `World ${next}`;
+      if (used.has(name)) { let k = 2; while (used.has(`${name} (${k})`)) k++; name = `${name} (${k})`; }
+      const raw = seedInput.value.trim();
+      let seed: number;
+      if (!raw) seed = (Math.random() * 0x7fffffff) | 0;
+      else if (/^-?\d+$/.test(raw)) seed = parseInt(raw, 10) | 0;
+      else { seed = 0; for (const ch of raw) seed = (Math.imul(seed, 31) + ch.charCodeAt(0)) | 0; }
+      handlers.onPlay(name, { seed, mode });
+    };
 
-    for (const slot of SLOTS) {
-      const row = el('div', 'world-row', col);
-      const info = byName.get(slot);
-      const name = el('div', 'wname', row);
-      if (info) {
-        name.textContent = slot.replace('_', ' ');
-        const meta = el('span', 'wmeta', name);
-        meta.textContent = `${info.gameMode} · seed ${info.seed} · ${new Date(info.lastPlayed).toLocaleString()}`;
-        const play = el('button', 'mc-btn small', row);
-        play.textContent = 'Play';
-        play.onclick = () => { this.audio.ensure(); this.audio.play('click'); handlers.onPlay(slot, null); };
-        const del = el('button', 'mc-btn small danger', row);
-        del.textContent = 'Delete';
-        del.onclick = () => {
-          this.audio.play('click');
-          if (confirm(`Delete ${slot}?`)) handlers.onDelete(slot);
-        };
-      } else {
-        name.textContent = `${slot.replace('_', ' ')} — empty`;
-        const create = el('button', 'mc-btn small', row);
-        create.textContent = 'Create';
-        create.onclick = () => {
-          this.audio.ensure(); this.audio.play('click');
-          const raw = seedInput.value.trim();
-          let seed: number;
-          if (!raw) seed = (Math.random() * 0x7fffffff) | 0;
-          else if (/^-?\d+$/.test(raw)) seed = parseInt(raw, 10) | 0;
-          else { seed = 0; for (const ch of raw) seed = (Math.imul(seed, 31) + ch.charCodeAt(0)) | 0; }
-          handlers.onPlay(slot, { seed, mode });
-        };
-      }
+    // --- existing worlds ------------------------------------------------------
+    const listHead = el('div', 'card-head', col); listHead.textContent = 'Your Worlds';
+    const list = el('div', 'world-list', col);
+    const sorted = [...saves].sort((a, b) => b.lastPlayed - a.lastPlayed);
+    if (sorted.length === 0) {
+      el('div', 'world-empty', list).textContent = 'No worlds yet — create one above.';
     }
-
-    col.appendChild(opts);
+    for (const info of sorted) {
+      const row = el('div', 'world-row', list);
+      const name = el('div', 'wname', row);
+      name.textContent = info.slot;
+      const meta = el('span', 'wmeta', name);
+      meta.textContent = `${info.gameMode} · seed ${info.seed} · ${new Date(info.lastPlayed).toLocaleDateString()}`;
+      const play = wire(el('button', 'mc-btn small', row));
+      play.textContent = 'Play';
+      play.onclick = () => { this.audio.ensure(); handlers.onPlay(info.slot, null); };
+      const del = wire(el('button', 'mc-btn small danger', row));
+      del.textContent = 'Delete';
+      del.onclick = () => { if (confirm(`Delete "${info.slot}"? This cannot be undone.`)) handlers.onDelete(info.slot); };
+    }
 
     const packRow = el('div', 'menu-row', this.menu);
     packRow.style.marginTop = '14px';
-    const packBtn = el('button', 'mc-btn small', packRow);
+    const packBtn = wire(el('button', 'mc-btn small', packRow));
     packBtn.textContent = 'Load Resource Pack (folder)';
     packBtn.onclick = () => { this.packHandler = handlers.onPack; this.packInput.click(); };
 

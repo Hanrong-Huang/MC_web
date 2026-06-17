@@ -218,19 +218,45 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   image-rendering: pixelated;
 }
 .menu-title {
-  font-size: 52px; color: #fff; letter-spacing: 4px;
-  text-shadow: 4px 4px #1f1f1f, -1px -1px #5a5a5a;
+  font-size: 58px; color: #eafff0; letter-spacing: 5px;
+  text-shadow: 4px 4px #102015, -1px -1px #6fae7f, 0 0 22px rgba(95,200,130,0.35);
   margin-bottom: 6px; font-weight: bold;
 }
-.menu-sub { color: #ffe24a; font-size: 13px; margin-bottom: 26px; text-shadow: 2px 2px #1f1f1f; transform: rotate(-3deg); }
+.menu-sub { color: #ffe24a; font-size: 13px; margin-bottom: 22px; text-shadow: 2px 2px #1f1f1f; transform: rotate(-3deg); }
+.menu-col { min-width: 480px; }
+
+/* card panels (create form + world list) */
+.menu-card {
+  display: flex; flex-direction: column; gap: 8px;
+  background: rgba(0,0,0,0.5);
+  border: 2px solid #c3c8e8; border-right-color: #2a2f50; border-bottom-color: #2a2f50;
+  padding: 12px 14px;
+}
+.card-head {
+  color: #ffe24a; font-size: 13px; letter-spacing: 1px;
+  text-shadow: 1px 1px #000; margin: 6px 0 2px;
+}
+.menu-input {
+  background: #0c0c10; color: #fff; border: 2px solid #555;
+  border-top-color: #222; border-left-color: #222;
+  padding: 8px 10px; font-family: inherit; font-size: 13px; width: 100%; box-sizing: border-box;
+}
+.menu-input:focus { outline: none; border-color: #7faf7f; }
+.create-btn { margin-top: 4px; }
+.world-list {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 230px; overflow-y: auto; padding-right: 4px;
+}
+.world-empty { color: #9a9a9a; font-size: 13px; text-align: center; padding: 14px; font-style: italic; }
 .world-row {
   display: flex; align-items: center; gap: 8px;
-  background: rgba(0,0,0,0.45);
+  background: rgba(0,0,0,0.42);
   border: 2px solid #1f1f1f;
   padding: 8px 12px;
-  min-width: 460px;
   color: #eee;
+  transition: background 0.12s, border-color 0.12s;
 }
+.world-row:hover { background: rgba(40,55,40,0.5); border-color: #4d7a4d; }
 .world-row .wname { flex: 1; font-size: 15px; text-shadow: 1px 1px #000; }
 .world-row .wmeta { color: #9a9a9a; font-size: 11px; display: block; margin-top: 2px; }
 .menu-opts { margin-top: 16px; display: flex; gap: 10px; align-items: center; color: #ccc; font-size: 13px; text-shadow: 1px 1px #000; }

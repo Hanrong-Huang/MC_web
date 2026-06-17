@@ -16,7 +16,7 @@ page.on('pageerror', (e) => errors.push(`PAGEERROR: ${e.message}`));
 await page.goto('http://localhost:5199/#debugmobs');
 await page.waitForTimeout(1000);
 await page.locator('.mode-pick button', { hasText: 'Creative' }).click();
-await page.locator('.world-row', { hasText: 'World 3' }).locator('button', { hasText: 'Create' }).click();
+await page.locator('.create-btn').click();
 await page.waitForSelector('#loading.hidden', { timeout: 60000, state: 'attached' });
 await page.waitForTimeout(2000);
 await page.mouse.click(640, 360);

@@ -24,7 +24,7 @@ await page.goto('http://localhost:5199/');
 await page.waitForTimeout(1500);
 
 // Main menu should be visible: create World_1 in survival
-const create = page.locator('.world-row button', { hasText: 'Create' }).first();
+const create = page.locator('.create-btn');
 await create.waitFor({ timeout: 5000 });
 await create.click();
 

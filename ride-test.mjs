@@ -19,7 +19,7 @@ await page.waitForTimeout(1000);
 
 // creative, World 3
 await page.locator('.mode-pick button', { hasText: 'Creative' }).click();
-await page.locator('.world-row', { hasText: 'World 3' }).locator('button', { hasText: 'Create' }).click();
+await page.locator('.create-btn').click();
 await page.waitForSelector('#loading.hidden', { timeout: 60000, state: 'attached' });
 await page.waitForTimeout(2500);
 

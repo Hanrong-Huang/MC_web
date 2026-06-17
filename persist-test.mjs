@@ -16,7 +16,7 @@ page.on('pageerror', (e) => errors.push(`PAGEERROR: ${e.message}\n${e.stack}`));
 
 await page.goto('http://localhost:5195/');
 await page.waitForTimeout(1200);
-await page.locator('.world-row button', { hasText: 'Create' }).first().click();
+await page.locator('.create-btn').click();
 await page.waitForSelector('#loading.hidden', { timeout: 60000, state: 'attached' });
 await page.waitForTimeout(2000);
 
