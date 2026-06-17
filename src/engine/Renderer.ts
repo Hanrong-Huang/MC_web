@@ -101,7 +101,7 @@ export class Renderer {
   // edits) skip the fade. Each fading mesh gets a temporary material clone that
   // is swapped back to the shared material once the fade completes.
   private fading: { mesh: THREE.Mesh; clone: THREE.ShaderMaterial; base: THREE.ShaderMaterial; baseOpacity: number; t: number }[] = [];
-  private static readonly FADE_TIME = 0.55;
+  private static readonly FADE_TIME = 1.0;
   private outline: THREE.LineSegments;
   private crackMesh: THREE.Mesh;
   private crackMat: THREE.MeshBasicMaterial;
@@ -270,8 +270,8 @@ export class Renderer {
     const d = chunks * 16;
     // a wider near..far band gives a gentler distance gradient so terrain
     // dissolves into the sky rather than ending at a hard wall.
-    this.fog.near = Math.max(24, d - 52);
-    this.fog.far = Math.max(48, d - 6);
+    this.fog.near = Math.max(24, d - 62);
+    this.fog.far = Math.max(44, d - 8);
   }
 
   // --- chunk meshes ---------------------------------------------------------

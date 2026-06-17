@@ -701,7 +701,7 @@ class Game {
       }
       this.world.update(this.player.pos.x, this.player.pos.z, 5);
       this.world.updateDoorSwings(dt);
-      this.processMeshing(6);
+      this.processMeshing(8);
       this.entities.update(dt, this.elapsed, this.renderer.camera.quaternion);
 
       // weather follows the player
