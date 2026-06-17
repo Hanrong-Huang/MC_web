@@ -743,16 +743,17 @@ for (let stage = 0; stage < 10; stage++) {
 // Item sprites (16x16 pixel maps)
 // ---------------------------------------------------------------------------
 
-const WOOD = { M: '#9c7f4e', m: '#7a6238', H: '#8a6232', h: '#5d4222', O: '#241b10' };
-const STONEC = { M: '#8c8c8c', m: '#6b6b6b', H: '#8a6232', h: '#5d4222', O: '#241b10' };
-const IRONC = { M: '#d8d8d8', m: '#a8a8a8', H: '#8a6232', h: '#5d4222', O: '#241b10' };
-const DIAMONDC = { M: '#4aedd9', m: '#33c7c2', H: '#8a6232', h: '#5d4222', O: '#241b10' };
+// L = highlight, M = midtone, m = shadow, H/h = handle wood, O = outline
+const WOOD = { L: '#c2a36c', M: '#9c7f4e', m: '#7a6238', H: '#8a6232', h: '#5d4222', O: '#241b10' };
+const STONEC = { L: '#b0b0b0', M: '#8c8c8c', m: '#6b6b6b', H: '#8a6232', h: '#5d4222', O: '#241b10' };
+const IRONC = { L: '#f2f2f2', M: '#d8d8d8', m: '#a8a8a8', H: '#8a6232', h: '#5d4222', O: '#241b10' };
+const DIAMONDC = { L: '#86f7ea', M: '#4aedd9', m: '#33c7c2', H: '#8a6232', h: '#5d4222', O: '#241b10' };
 
 const PICK_MAP = [
   '................',
   '....OOOOOOOO....',
-  '...OMMMMMMMMO...',
-  '..OMMMm..mMMMO..',
+  '...OLLLMMMMMO...',
+  '..OLLMm..mMMMO..',
   '..OMO......OMO..',
   '........OHhO....',
   '.......OHhO.....',
@@ -769,9 +770,9 @@ const PICK_MAP = [
 const AXE_MAP = [
   '................',
   '.....OOOOO......',
-  '...OOMMMMMO.....',
-  '..OMMMMMMMMO....',
-  '..OMMMmMMMOO....',
+  '...OOLLMMMO.....',
+  '..OLLMMMMMMO....',
+  '..OLMMmMMMOO....',
   '...OMMMOOHhO....',
   '....OO..OHhO....',
   '.......OHhO.....',
@@ -787,8 +788,8 @@ const AXE_MAP = [
 const SHOVEL_MAP = [
   '................',
   '......OOOO......',
-  '.....OMMMMO.....',
-  '.....OMmMMO.....',
+  '.....OLLMMO.....',
+  '.....OLmMMO.....',
   '.....OMmMMO.....',
   '......OmOO......',
   '......OHhO......',
@@ -805,13 +806,13 @@ const SHOVEL_MAP = [
 const SWORD_MAP = [
   '................',
   '.......OO.......',
-  '......OMMO......',
-  '......OMmO......',
-  '......OMmO......',
-  '......OMmO......',
-  '......OMmO......',
-  '......OMmO......',
-  '....OOOMmOOO....',
+  '......OLMO......',
+  '......OLmO......',
+  '......OLmO......',
+  '......OLmO......',
+  '......OLmO......',
+  '......OLmO......',
+  '....OOOLmOOO....',
   '.....OOHhOO.....',
   '......OHhO......',
   '......OHhO......',

@@ -26,6 +26,13 @@ const MOB_KINDS = new Set<EntityKind>([
 const JUMP_V = Math.sqrt(2 * 32 * 1.25); // same 1.25-block hop as the player
 const GRAVITY = 32;
 
+/** "#rrggbb" -> [r,g,b]. */
+function hexRgb(h: string): [number, number, number] {
+  const n = parseInt(h.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+const clamp255 = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+
 /** Horse coat palettes: [body, speckle, mane/tail]. */
 const HORSE_COATS: [string, string, string][] = [
   ['#6b4a2b', '#5a3d22', '#2a1a0e'], // brown
@@ -1545,11 +1552,20 @@ export class EntityManager {
     const c = document.createElement('canvas');
     c.width = 8; c.height = 8;
     const ctx = c.getContext('2d')!;
+    const [br, bg, bb] = hexRgb(base);
+    const [sr, sg, sb] = hexRgb(speckle);
     let s = key.length * 1337 + 7;
     const rng = () => { s = (s * 16807) % 2147483647; return s / 2147483647; };
+    // Clean Minecraft-style skin: a flat base colour with gentle top-lit
+    // vertical shading and only sparse, low-contrast speckle for grain. This
+    // reads as a solid recognisable creature instead of TV-static noise.
     for (let y = 0; y < 8; y++) {
+      const shade = 1 + (3.5 - y) / 3.5 * 0.13; // lighter up top, darker low
       for (let x = 0; x < 8; x++) {
-        ctx.fillStyle = rng() < 0.25 ? speckle : base;
+        const speck = rng() < 0.12;
+        const f = shade * (1 + (rng() - 0.5) * 0.07);
+        const r = speck ? sr : br, gg = speck ? sg : bg, b = speck ? sb : bb;
+        ctx.fillStyle = `rgb(${clamp255(r * f)},${clamp255(gg * f)},${clamp255(b * f)})`;
         ctx.fillRect(x, y, 1, 1);
       }
     }
@@ -1687,6 +1703,11 @@ export class EntityManager {
       const hornM = this.mat(this.skin('cow_horn', '#e8e0d0', '#d4ccb8'), mats);
       const body = this.boxMesh(0.7, 0.65, 1.1, bodyM);
       body.position.set(0, 0.92, 0.05);
+      // white Holstein patches wrap the torso so it reads unmistakably as a cow
+      const patchM = this.mat(this.skin('cow_patch', '#ece6dc', '#dcd4c6'), mats);
+      const patchA = this.boxMesh(0.72, 0.36, 0.46, patchM); patchA.position.set(0, 1.04, -0.15);
+      const patchB = this.boxMesh(0.72, 0.3, 0.34, patchM); patchB.position.set(0, 0.74, 0.4);
+      g.add(patchA, patchB);
       const head = new THREE.Group();
       head.position.set(0, 1.1, -0.62);
       head.add(this.boxMesh(0.44, 0.44, 0.4, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
@@ -1855,29 +1876,40 @@ export class EntityManager {
     });
     const bodyM = this.mat(fur, mats);
     const faceM = this.mat(faceTex, mats);
+    const whiteM = this.mat(this.skin('wolf_white', '#eceae4', '#dcd9d0'), mats);
     const body = this.boxMesh(0.55, 0.42, 0.95, bodyM);
     body.position.set(0, 0.5, 0.05);
+    // pale chest/underside — the classic two-tone wolf coat
+    const chest = this.boxMesh(0.5, 0.26, 0.5, whiteM);
+    chest.position.set(0, 0.42, -0.18);
     const head = new THREE.Group();
     head.position.set(0, 0.55, -0.5);
     head.add(this.boxMesh(0.36, 0.36, 0.36, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
-    // ears
-    const earL = this.boxMesh(0.08, 0.12, 0.08, bodyM); earL.position.set(-0.1, 0.2, 0);
-    const earR = earL.clone(); earR.position.x = 0.1;
+    // white snout reads instantly as a dog/wolf
+    const snout = this.boxMesh(0.18, 0.16, 0.16, [whiteM, whiteM, whiteM, whiteM, whiteM, faceM]);
+    snout.position.set(0, -0.07, -0.2);
+    head.add(snout);
+    // upright pointed ears (angled outward)
+    const earL = this.boxMesh(0.09, 0.18, 0.06, bodyM);
+    earL.position.set(-0.11, 0.24, 0.02); earL.rotation.z = 0.2;
+    const earR = earL.clone(); earR.position.x = 0.11; earR.rotation.z = -0.2;
     head.add(earL, earR);
     const legs = [
-      this.leg(0.14, 0.32, bodyM, -0.18, 0.32, -0.3),
-      this.leg(0.14, 0.32, bodyM, 0.18, 0.32, -0.3),
-      this.leg(0.14, 0.32, bodyM, 0.18, 0.32, 0.35),
-      this.leg(0.14, 0.32, bodyM, -0.18, 0.32, 0.35),
+      this.leg(0.14, 0.32, whiteM, -0.18, 0.32, -0.3),
+      this.leg(0.14, 0.32, whiteM, 0.18, 0.32, -0.3),
+      this.leg(0.14, 0.32, whiteM, 0.18, 0.32, 0.35),
+      this.leg(0.14, 0.32, whiteM, -0.18, 0.32, 0.35),
     ];
-    // tail pivots at its base so it can wag
+    // tail pivots at its base so it can wag; pale tip
     const tail = new THREE.Group();
     tail.position.set(0, 0.56, 0.46);
     const tailM = this.boxMesh(0.12, 0.12, 0.4, bodyM);
     tailM.position.z = 0.2;
-    tail.add(tailM);
+    const tailTip = this.boxMesh(0.13, 0.13, 0.14, whiteM);
+    tailTip.position.z = 0.4;
+    tail.add(tailM, tailTip);
     tail.rotation.x = -0.5;
-    g.add(body, head, tail, ...legs);
+    g.add(body, head, chest, tail, ...legs);
     return { mesh: g, limbs: { legs, head, tail, body }, mats };
   }
 
