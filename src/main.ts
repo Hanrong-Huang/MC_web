@@ -13,6 +13,7 @@ import { AudioEngine } from './engine/Audio';
 import { HUD, ContainerView } from './ui/HUD';
 import { SaveDB, SaveState, ChestSave, FurnaceSave } from './engine/Persistence';
 import { FurnaceState, ChestState } from './engine/Inventory';
+import type { Slot } from './engine/Inventory';
 import { buildChunkGeometry } from './engine/Mesher';
 import { chunkKey, CX, CZ } from './engine/Chunk';
 import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef } from './engine/Blocks';
@@ -45,6 +46,7 @@ class Game {
   private dayTime = 0.1; // mid-morning, fully lit
   private tickAcc = 0;
   private waterTickAcc = 0;
+  private lavaTickAcc = 0;
   private elapsed = 0;
   private lastFrame = 0;
   private fps = 60;
@@ -114,6 +116,18 @@ class Game {
       if (GRAVITY_BLOCKS.has(newId)) this.supportQueue.add(`${x},${y},${z}`);
       // covering grass smothers it
       if (newId !== B.AIR && def(newId).opaque) this.supportQueue.add(`${x},${y - 1},${z}`);
+      // fluid reaction: water + lava neighbors -> obsidian / cobblestone
+      if (newId === B.WATER || newId === B.LAVA) {
+        for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+          const nb = this.world.getBlock(x + dx, y + dy, z + dz);
+          if (newId === B.WATER && nb === B.LAVA) {
+            // flowing water hitting lava: deep (y<11) -> obsidian, else cobble
+            this.world.setBlock(x + dx, y + dy, z + dz, y + dy < 11 ? B.OBSIDIAN : B.COBBLE);
+          } else if (newId === B.LAVA && nb === B.WATER) {
+            this.world.setBlock(x, y, z, y < 11 ? B.OBSIDIAN : B.COBBLE);
+          }
+        }
+      }
     };
 
     this.player.init({
@@ -175,6 +189,9 @@ class Game {
       }
       for (const [k, v] of Object.entries(save.water ?? {})) {
         this.world.waterLevels.set(k, v as number);
+      }
+      for (const [k, v] of Object.entries(save.lava ?? {})) {
+        this.world.lavaLevels.set(k, v as number);
       }
     } else {
       this.player.mode = fresh!.mode;
@@ -272,9 +289,59 @@ class Game {
       this.world.setBlock(bedX, bedY + 1, bedZ, B.AIR);
       this.world.setBlock(bedX, bedY + 2, bedZ, B.AIR);
     }
+    if (location.hash.includes('fluidtest')) this.setupFluidTestScene();
+    if (location.hash.includes('bowtest')) this.setupBowTest();
     this.hud.toast('Click to capture the mouse');
     this.lastFrame = performance.now();
     this.loop(this.lastFrame);
+  }
+
+  private setupFluidTestScene(): void {
+    this.dayTime = 0.25;
+    const ox = Math.floor(this.player.pos.x) + 4;
+    const oz = Math.floor(this.player.pos.z) - 6;
+    const y = Math.floor(this.player.pos.y) + 14;
+
+    for (let dx = -1; dx <= 15; dx++) {
+      for (let dz = -1; dz <= 11; dz++) {
+        for (let dy = -2; dy <= 8; dy++) this.world.setBlock(ox + dx, y + dy, oz + dz, B.AIR);
+      }
+    }
+    for (let dx = 0; dx <= 14; dx++) {
+      for (let dz = 0; dz <= 10; dz++) this.world.setBlock(ox + dx, y, oz + dz, B.STONE);
+    }
+
+    this.world.setBlock(ox + 4, y, oz + 5, B.AIR);
+    this.world.waterLevels.delete(`${ox + 3},${y + 1},${oz + 5}`);
+    this.world.setBlock(ox + 3, y + 1, oz + 5, B.WATER);
+
+    this.world.lavaLevels.delete(`${ox + 9},${y + 1},${oz + 3}`);
+    this.world.setBlock(ox + 9, y + 1, oz + 3, B.LAVA);
+
+    for (let i = 0; i < 120; i++) this.world.tickWater();
+    for (let i = 0; i < 120; i++) this.world.tickLava();
+    this.processMeshing(1000);
+
+    this.player.pos = { x: ox + 7.5, y: y + 6.2, z: oz + 13.5 };
+    this.player.vel = { x: 0, y: 0, z: 0 };
+    this.player.yaw = 0;
+    this.player.pitch = -0.48;
+    this.player.flying = true;
+    this.player.inventory.selected = 0;
+    this.player.inventory.slots[0] = null;
+    this.onInventoryChange();
+    document.body.dataset.fluidtest = 'ready';
+  }
+
+  private setupBowTest(): void {
+    this.player.mode = 'creative';
+    this.player.inventory.selected = 0;
+    this.player.inventory.slots[0] = { id: I.BOW, count: 1 };
+    this.player.inventory.slots[1] = { id: I.ARROW, count: 64 };
+    this.player.yaw = 0;
+    this.player.pitch = 0;
+    this.onInventoryChange();
+    document.body.dataset.bowtest = 'ready';
   }
 
   // --- input wiring --------------------------------------------------------------
@@ -569,6 +636,8 @@ class Game {
   }
 
   private onDeath(): void {
+    const deathPos = { ...this.player.pos };
+    this.dropPlayerInventory(deathPos);
     this.state = 'dead';
     this.input.exitLock();
     this.hud.showDeath(
@@ -581,6 +650,30 @@ class Game {
       },
       () => void this.saveAndQuit(),
     );
+  }
+
+  private dropPlayerInventory(pos: { x: number; y: number; z: number }): void {
+    const inv = this.player.inventory;
+    const dropSlot = (s: Slot): void => {
+      if (!s) return;
+      this.entities.spawnDrop(
+        pos.x + (Math.random() - 0.5) * 0.7,
+        pos.y + 0.8,
+        pos.z + (Math.random() - 0.5) * 0.7,
+        s.id,
+        s.count,
+        s.dur,
+      );
+    };
+    for (let i = 0; i < inv.slots.length; i++) {
+      dropSlot(inv.slots[i]);
+      inv.slots[i] = null;
+    }
+    for (let i = 0; i < inv.armor.length; i++) {
+      dropSlot(inv.armor[i]);
+      inv.armor[i] = null;
+    }
+    inv.onChange();
   }
 
   private async applyPack(files: File[]): Promise<void> {
@@ -637,6 +730,8 @@ class Game {
     for (const [k, v] of this.world.torchFacings) torchRec[k] = v;
     const waterRec: NonNullable<SaveState['water']> = {};
     for (const [k, v] of this.world.waterLevels) waterRec[k] = v;
+    const lavaRec: NonNullable<SaveState['lava']> = {};
+    for (const [k, v] of this.world.lavaLevels) lavaRec[k] = v;
     return {
       version: SAVE_VERSION,
       seed: this.world.seed,
@@ -648,6 +743,7 @@ class Game {
       doors: doorRec,
       torches: torchRec,
       water: waterRec,
+      lava: lavaRec,
       environment: { dayTime: this.dayTime },
       advancements: this.adv.serialize(),
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
@@ -694,6 +790,7 @@ class Game {
       this.dayTime = (this.dayTime + dt / DAY_LENGTH) % 1;
 
       this.player.update(dt);
+      if (location.hash.includes('bowtest')) this.player.bowCharge = 0.9;
       // mounting hint when the player climbs onto a horse
       if (this.player.isRiding() !== this.wasRiding) {
         this.wasRiding = this.player.isRiding();
@@ -708,15 +805,27 @@ class Game {
       const pp = this.player.pos;
       this.weather.update(dt, pp.x, pp.y + this.player.eyeHeight(), pp.z);
 
-      // layered rain/snow bed while precipitating
+      // continuous rain bed driven by weather state (snow uses wind gusts)
       const w = this.weather;
-      if (w.kind !== 'clear' && w.intensity > 0.3) {
+      const biome = this.world.generator.biomeAt(Math.floor(pp.x), Math.floor(pp.z));
+      const cold = biome === 'snow' || biome === 'taiga';
+      if (w.kind !== 'clear' && w.intensity > 0.25 && !cold) {
+        // fade the bed toward the target volume; cheap to call each frame
         this.rainSoundT -= dt;
         if (this.rainSoundT <= 0) {
-          this.rainSoundT = 1.45;
-          const biome = this.world.generator.biomeAt(Math.floor(pp.x), Math.floor(pp.z));
-          const cold = biome === 'snow' || biome === 'taiga';
-          this.audio.weatherLoop(cold ? 'snow' : w.kind, w.intensity, Math.sin(this.dayTime * Math.PI * 2) < -0.06);
+          this.rainSoundT = 2.0;
+          this.audio.setRain(w.kind === 'thunder' ? 'thunder' : 'rain', w.intensity);
+        }
+      } else {
+        // clear or snow: ensure the rain bed is off
+        this.rainSoundT -= dt;
+        if (this.rainSoundT <= 0) {
+          this.rainSoundT = 2.0;
+          this.audio.setRain('off');
+          // snow gets occasional soft wind gusts instead
+          if (w.kind !== 'clear' && w.intensity > 0.25 && cold) {
+            this.audio.weatherLoop('snow', w.intensity, Math.sin(this.dayTime * Math.PI * 2) < -0.06);
+          }
         }
       }
 
@@ -887,8 +996,9 @@ class Game {
     }
 
     this.randomTicks();
-    // flowing water settles at ~5 Hz (every 4th logic tick), MC-style
+    // Water settles at ~5 Hz; lava uses the same rules but moves slower.
     if (++this.waterTickAcc >= 4) { this.waterTickAcc = 0; this.world.tickWater(); }
+    if (++this.lavaTickAcc >= 12) { this.lavaTickAcc = 0; this.world.tickLava(); }
   }
 
   /** MC-style random ticks at the surface: saplings grow, wheat advances,
@@ -1102,6 +1212,7 @@ class Game {
     cancelAnimationFrame(this.raf);
     this.input.exitLock();
     this.input.dispose();
+    this.audio.setRain('off');
     this.entities.clear();
     this.weather.dispose();
     this.hud.hideGameUI();

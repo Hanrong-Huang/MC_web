@@ -121,6 +121,8 @@ export class Renderer {
   private heldGroup = new THREE.Group();
   private heldMesh: THREE.Object3D | null = null;
   private bowArrow: THREE.Object3D | null = null;
+  /** resting rotation for the current held sprite (tools differ from the bow) */
+  private heldIdleRot = new THREE.Euler(0.18, -0.35, -0.62);
   private heldId = -1;
   private swingT = 1; // 0..1, 1 = idle
   private raiseT = 1; // 0..1, drives the raise-up when the held item changes
@@ -446,6 +448,7 @@ export class Renderer {
     }
     if (this.bowArrow) {
       this.heldGroup.remove(this.bowArrow);
+      this.overlayScene.remove(this.bowArrow);
       this.bowArrow.traverse((o) => {
         const m = o as THREE.Mesh;
         if (m.geometry) m.geometry.dispose();
@@ -494,13 +497,17 @@ export class Renderer {
         new THREE.PlaneGeometry(0.5, 0.5),
         new THREE.MeshBasicMaterial({ color: 0xff00ff }),
       );
-      // grip angle: tools/items sit diagonally in the fist, head up + away
-      mesh.rotation.set(0.18, -0.35, -0.62);
+      // grip angle: tools/items sit diagonally in the fist, head up + away.
+      // the bow is held upright (limbs vertical, string toward the player) so it
+      // reads as a bow rather than a stick lying across the hand.
+      this.heldIdleRot.set(0.18, -0.35, -0.62);
+      if (def(id).bow) this.heldIdleRot.set(0.05, 0.45, 0.12);
+      mesh.rotation.copy(this.heldIdleRot);
       this.heldMesh = mesh;
       if (def(id).bow) {
         this.bowArrow = this.buildHeldArrow();
         this.bowArrow.visible = false;
-        this.heldGroup.add(this.bowArrow);
+        this.overlayScene.add(this.bowArrow);
       }
     } else {
       // bare arm
@@ -536,24 +543,27 @@ export class Renderer {
 
     if (drawingBow) {
       const pull = this.bowCharge;
-      this.heldGroup.position.set(0.30 - pull * 0.16, -0.26 + bob * 0.4 - lower, -0.68 - pull * 0.16);
-      this.heldGroup.rotation.set(-0.18 - pull * 0.36, 0.05 + pull * 0.22, -0.45 - pull * 0.2);
+      this.heldGroup.position.set(0.30 - pull * 0.02, -0.30 + bob * 0.14 - lower, -0.74 - pull * 0.03);
+      this.heldGroup.rotation.set(-0.06 - pull * 0.05, 0.05, -0.04);
       if (this.heldMesh) {
-        this.heldMesh.scale.setScalar(1 + pull * 0.08);
-        this.heldMesh.rotation.z = -0.2 - pull * 0.35;
+        // keep the bow upright (matching the idle pose) while the string draws back
+        this.heldMesh.scale.setScalar(1.0 + pull * 0.06);
+        this.heldMesh.rotation.set(0.05, 0.62, 0.10);
       }
       if (this.bowArrow) {
+        // arrow nocked across the bow, pointing forward at the crosshair; it
+        // slides back toward the player as the draw deepens
         this.bowArrow.visible = true;
-        this.bowArrow.position.set(0.08, -0.03, 0.07 - pull * 0.22);
+        this.bowArrow.position.set(0.0, -0.02, -0.74 + pull * 0.14);
         this.bowArrow.rotation.set(0, Math.PI * 0.5, 0);
-        this.bowArrow.scale.set(1, 1, 0.85 + pull * 0.25);
+        this.bowArrow.scale.set(0.85, 0.85, 1.0);
       }
       return;
     }
 
     if (this.bowArrow && this.heldMesh) {
       this.heldMesh.scale.setScalar(1);
-      this.heldMesh.rotation.z = 0;
+      this.heldMesh.rotation.copy(this.heldIdleRot);
     }
     if (this.bowArrow) this.bowArrow.visible = false;
 
@@ -580,15 +590,15 @@ export class Renderer {
     const g = new THREE.Group();
     const shaftMat = new THREE.MeshBasicMaterial({ color: 0x8a6232 });
     const tipMat = new THREE.MeshBasicMaterial({ color: 0xd0d0d8 });
-    const featherMat = new THREE.MeshBasicMaterial({ color: 0xf0f0f0 });
-    const shaft = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.035, 0.52), shaftMat);
-    const tip = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.055, 0.09), tipMat);
-    tip.position.z = -0.3;
-    const featherA = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.018, 0.12), featherMat);
-    featherA.position.z = 0.28;
-    featherA.position.y = 0.045;
+    const featherMat = new THREE.MeshBasicMaterial({ color: 0xf6f6f6 });
+    const shaft = new THREE.Mesh(new THREE.BoxGeometry(0.020, 0.020, 0.40), shaftMat);
+    const tip = new THREE.Mesh(new THREE.BoxGeometry(0.038, 0.038, 0.07), tipMat);
+    tip.position.z = -0.24;
+    const featherA = new THREE.Mesh(new THREE.BoxGeometry(0.074, 0.016, 0.10), featherMat);
+    featherA.position.z = 0.23;
+    featherA.position.y = 0.040;
     const featherB = featherA.clone();
-    featherB.position.y = -0.045;
+    featherB.position.y = -0.040;
     g.add(shaft, tip, featherA, featherB);
     return g;
   }

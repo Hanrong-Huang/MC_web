@@ -97,6 +97,7 @@ export class Player {
   private airT = 0;
   private drownT = 0;
   private cactusT = 0;
+  private lavaT = 0;
   private swimSoundT = 0;
 
   init(deps: PlayerDeps): void {
@@ -166,7 +167,7 @@ export class Player {
       if (input.down('KeyA')) strafe -= 1;
       if (input.down('KeyD')) strafe += 1;
       space = input.down('Space');
-      this.sneaking = (input.down('ShiftLeft') || input.down('ShiftRight')) && !this.flying;
+      this.sneaking = (input.down('ControlLeft') || input.down('ControlRight')) && !this.flying;
     }
 
     // sprint upkeep
@@ -174,7 +175,7 @@ export class Player {
       const canSprint = fwd > 0 && !this.sneaking && (this.mode === 'creative' || this.hunger > 6);
       if (!canSprint) this.sprinting = false;
     }
-    if ((input.down('ControlLeft') || input.down('ControlRight')) && fwd > 0 && !this.sneaking &&
+    if ((input.down('ShiftLeft') || input.down('ShiftRight')) && fwd > 0 && !this.sneaking &&
       (this.mode === 'creative' || this.hunger > 6)) {
       this.sprinting = true;
     }
@@ -321,6 +322,34 @@ export class Player {
       }
     }
 
+    // lava contact: heavy damage over time + fire particles
+    this.lavaT -= dt;
+    if (this.mode === 'survival' && this.lavaT <= 0) {
+      const hw = BOX.w / 2;
+      const x0 = Math.floor(this.pos.x - hw), x1 = Math.floor(this.pos.x + hw);
+      const y0 = Math.floor(this.pos.y), y1 = Math.floor(this.pos.y + BOX.h);
+      const z0 = Math.floor(this.pos.z - hw), z1 = Math.floor(this.pos.z + hw);
+      let inLava = false;
+      for (let by = y0; by <= y1 && !inLava; by++) {
+        for (let bz = z0; bz <= z1 && !inLava; bz++) {
+          for (let bx = x0; bx <= x1 && !inLava; bx++) {
+            if (world.getBlock(bx, by, bz) === B.LAVA) inLava = true;
+          }
+        }
+      }
+      if (inLava) {
+        this.lavaT = 0.5;
+        this.damage(3);
+        // rising embers around the player
+        const px = this.pos.x, py = this.pos.y + 0.5, pz = this.pos.z;
+        for (let i = 0; i < 4; i++) {
+          this.deps.entities.spawnBlockParticles(
+            Math.floor(px), Math.floor(py), Math.floor(pz), B.LAVA, 1,
+          );
+        }
+      }
+    }
+
     // void rescue: respawn-style safety net if the player escapes the world floor
     if (this.pos.y < -16) {
       if (this.mode === 'survival') this.damage(4);
@@ -348,7 +377,7 @@ export class Player {
   }
 
   private sneakKeyDown(): boolean {
-    return this.deps.input.down('ShiftLeft') || this.deps.input.down('ShiftRight');
+    return this.deps.input.down('ControlLeft') || this.deps.input.down('ControlRight');
   }
 
   /** Is there a single-block ledge in the wish direction we can hop onto? */
@@ -708,6 +737,48 @@ export class Player {
     return true;
   }
 
+  /** Empty bucket: scoop a lava source block. */
+  private tryScoopLava(): boolean {
+    const world = this.deps.world;
+    const d = this.lookDir();
+    const ex = this.pos.x, ey = this.pos.y + this.eyeHeight(), ez = this.pos.z;
+    for (let t = 0; t <= 5; t += 0.1) {
+      const bx = Math.floor(ex + d.x * t), by = Math.floor(ey + d.y * t), bz = Math.floor(ez + d.z * t);
+      const id = world.getBlock(bx, by, bz);
+      if (id === B.LAVA) {
+        if (world.lavaLevel(bx, by, bz) !== 0) continue; // only full sources scoop
+        world.setBlock(bx, by, bz, B.AIR);
+        world.lavaLevels.delete(`${bx},${by},${bz}`);
+        this.swapHeldBucket(I.LAVA_BUCKET);
+        this.placeCooldown = 0.3;
+        this.deps.renderer.triggerSwing();
+        this.deps.audio.play('splash');
+        return true;
+      }
+      if (id !== B.AIR && id !== B.WATER) return false;
+    }
+    return false;
+  }
+
+  /** Lava bucket: pour a source against the targeted face. */
+  private tryPlaceLava(): boolean {
+    if (!this.target) return false;
+    const world = this.deps.world;
+    const t = this.target;
+    const px = t.x + t.nx, py = t.y + t.ny, pz = t.z + t.nz;
+    const dst = world.getBlock(px, py, pz);
+    if (dst !== B.AIR && dst !== B.LAVA) return false;
+    world.lavaLevels.delete(`${px},${py},${pz}`); // absent = a permanent source
+    if (!world.setBlock(px, py, pz, B.LAVA)) return false;
+    world.scheduleLava(px, py, pz);
+    // setBlock already fired the water+lava reaction via onBlockChanged
+    this.swapHeldBucket(I.BUCKET);
+    this.placeCooldown = 0.3;
+    this.deps.renderer.triggerSwing();
+    this.deps.audio.play('splash');
+    return true;
+  }
+
   // --- right click: interact / eat / place ------------------------------------
 
   private updateRightClick(dt: number): void {
@@ -820,9 +891,11 @@ export class Player {
 
     if (this.placeCooldown > 0) return;
 
-    // bucket: scoop a water source (empty) or pour a source (full)
+    // bucket: scoop a water/lava source (empty) or pour a source (full)
     if (held?.id === I.BUCKET && this.tryScoopWater()) return;
+    if (held?.id === I.BUCKET && this.tryScoopLava()) return;
     if (held?.id === I.WATER_BUCKET && this.tryPlaceWater()) return;
+    if (held?.id === I.LAVA_BUCKET && this.tryPlaceLava()) return;
 
     // interactive blocks
     if (this.target && !this.sneaking) {

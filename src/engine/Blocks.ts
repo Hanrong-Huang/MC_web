@@ -63,6 +63,8 @@ export enum B {
   BEETROOT_0 = 57,
   BEETROOT_1 = 58,
   BEETROOT_2 = 59,
+  LAVA = 60,
+  OBSIDIAN = 62,
 }
 
 export enum I {
@@ -142,6 +144,7 @@ export enum I {
   DIAMOND_BOOTS = 173,
   BUCKET = 174,
   WATER_BUCKET = 175,
+  LAVA_BUCKET = 176,
 }
 
 /** Wearable-armor slot index: 0 head, 1 chest, 2 legs, 3 feet. */
@@ -246,6 +249,16 @@ blockDef({
   solid: false, opaque: false, liquid: true, occludes: false,
   faces: { top: 'water', bottom: 'water', sides: 'water' },
   drop: null,
+});
+blockDef({
+  id: B.LAVA, name: 'lava', label: 'Lava', hardness: -1, sound: 'none',
+  solid: false, opaque: false, liquid: true, occludes: false,
+  faces: { top: 'lava', bottom: 'lava', sides: 'lava' },
+  drop: null,
+});
+blockDef({
+  id: B.OBSIDIAN, name: 'obsidian', label: 'Obsidian', hardness: 9, tool: 'pickaxe', minTier: 8, sound: 'stone',
+  faces: { top: 'obsidian', bottom: 'obsidian', sides: 'obsidian' },
 });
 blockDef({
   id: B.TABLE, name: 'crafting_table', label: 'Crafting Table', hardness: 2.5, tool: 'axe', sound: 'wood', fuel: 15,
@@ -593,6 +606,7 @@ armorDef(I.DIAMOND_BOOTS, 'diamond_boots', 'Diamond Boots', 'diamond_boots', ARM
 
 itemDef({ id: I.BUCKET, name: 'bucket', label: 'Bucket', sprite: 'bucket', stack: 16 });
 itemDef({ id: I.WATER_BUCKET, name: 'water_bucket', label: 'Water Bucket', sprite: 'water_bucket', stack: 1 });
+itemDef({ id: I.LAVA_BUCKET, name: 'lava_bucket', label: 'Lava Bucket', sprite: 'lava_bucket', stack: 1 });
 
 export function def(id: number): Def {
   const d = DEFS.get(id);
@@ -604,7 +618,7 @@ export function allDefs(): Def[] { return [...DEFS.values()]; }
 
 export function isSolid(id: number): boolean { return id !== B.AIR && def(id).solid; }
 export function isOpaque(id: number): boolean { return id !== B.AIR && def(id).opaque; }
-export function isLiquid(id: number): boolean { return id === B.WATER; }
+export function isLiquid(id: number): boolean { return id === B.WATER || id === B.LAVA; }
 export function occludes(id: number): boolean { return id !== B.AIR && def(id).occludes; }
 
 /** Fast lookup table for the light flood fill (1 = blocks light). */
@@ -682,7 +696,7 @@ export const PLACEABLE: number[] = [
   B.POPPY, B.DANDELION, B.TALL_GRASS, B.CACTUS, B.SUGAR_CANE, B.SAPLING, B.FARMLAND,
   B.COAL_ORE, B.IRON_ORE, B.GOLD_ORE, B.DIAMOND_ORE,
   B.IRON_BLOCK, B.GOLD_BLOCK, B.DIAMOND_BLOCK, B.BEDROCK,
-  B.LADDER, B.TRAPDOOR,
+  B.LADDER, B.TRAPDOOR, B.OBSIDIAN,
 ];
 
 export const CREATIVE_ITEMS: number[] = [
@@ -703,5 +717,5 @@ export const CREATIVE_ITEMS: number[] = [
   I.LEATHER_HELMET, I.LEATHER_CHEST, I.LEATHER_LEGS, I.LEATHER_BOOTS,
   I.IRON_HELMET, I.IRON_CHEST, I.IRON_LEGS, I.IRON_BOOTS,
   I.DIAMOND_HELMET, I.DIAMOND_CHEST, I.DIAMOND_LEGS, I.DIAMOND_BOOTS,
-  I.BUCKET, I.WATER_BUCKET,
+  I.BUCKET, I.WATER_BUCKET, I.LAVA_BUCKET,
 ];

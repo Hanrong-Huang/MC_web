@@ -190,7 +190,9 @@ export class WorldGenerator {
           let id: number;
           if (y === 0) id = B.BEDROCK;
           else if (y > 3 && y <= caveCeil && this.isCave(wx, y, wz)) {
-            chunk.setRaw(x, y, z, B.AIR);
+            // deep caves below y=8 flood with lava; above that they stay airy
+            if (y <= 8) chunk.setRaw(x, y, z, B.LAVA);
+            else chunk.setRaw(x, y, z, B.AIR);
             continue;
           } else if (y < h - 3) {
             id = B.STONE;
@@ -201,6 +203,8 @@ export class WorldGenerator {
             else if (y <= 30 && r >= 0.01 && r < 0.0135) id = B.GOLD_ORE;
             else if (y <= 54 && r >= 0.02 && r < 0.028) id = B.IRON_ORE;
             else if (y <= 96 && r >= 0.03 && r < 0.04) id = B.COAL_ORE;
+            // rare isolated lava pockets in the deep stone
+            else if (y <= 12 && hash3(this.seed ^ 0x1a7a, wx, y, wz) < 0.004) id = B.LAVA;
           } else if (y < h) {
             id = biome === 'desert' || beach ? B.SAND : B.DIRT;
             if (biome === 'mountains' && y > h - 3 && h > 74) id = B.STONE;

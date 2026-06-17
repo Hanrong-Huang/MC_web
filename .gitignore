@@ -10,3 +10,8 @@ t.mjs
 water-t.mjs
 shot-*.png
 smoke-*.png
+
+# fluid/bow test artifacts
+*-t.mjs
+bow-test.png
+fluid-test.png

@@ -8,7 +8,7 @@ import { def } from './Blocks';
 
 const TILE = 16;
 const COLS = 8;
-const ROWS = 8;
+const ROWS = 16;
 
 type Ctx = CanvasRenderingContext2D;
 
@@ -120,6 +120,8 @@ const SAND_PAL = ['#dbd3a0', '#d7cf9c', '#e2daa8', '#cfc795', '#e8e0b3'];
 const SNOW_PAL = ['#f4fcfc', '#eef7f7', '#fdffff', '#e8f2f2'];
 const LEAF_PAL = ['#2f6b1e', '#3f8a26', '#357a20', '#48962c'];
 const WATER_PAL = ['#2f52a5', '#3a61bf', '#345aae', '#3f6ad4'];
+const LAVA_PAL = ['#d83415', '#e85a1f', '#f08a2a', '#c4240a', '#ff8c1a'];
+const OBSIDIAN_PAL = ['#0e0a14', '#15101e', '#1c1428', '#241a30', '#0a0710'];
 const BEDROCK_PAL = ['#222222', '#393939', '#575757', '#777777', '#2e2e2e'];
 
 function cropTile(c: Ctx, x: number, y: number, seed: number, leaf: string, light: string, root: string, stage: 0 | 1 | 2): void {
@@ -163,6 +165,29 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
     const img = c.getImageData(x, y, TILE, TILE);
     for (let i = 3; i < img.data.length; i += 4) img.data[i] = 200;
     c.putImageData(img, x, y);
+  },
+  lava: (c, x, y) => {
+    noiseFill(c, x, y, LAVA_PAL, 1099, 1);
+    // bright crusty veins for a molten look
+    const rand = mulberry32(2199);
+    for (let i = 0; i < 14; i++) {
+      const bx = (rand() * 14) | 0, by = (rand() * 14) | 0;
+      c.fillStyle = rand() < 0.5 ? '#ffd23d' : '#ffae2a';
+      c.fillRect(x + bx, y + by, 2, 1);
+    }
+    // fully opaque
+    const img = c.getImageData(x, y, TILE, TILE);
+    for (let i = 3; i < img.data.length; i += 4) img.data[i] = 255;
+    c.putImageData(img, x, y);
+  },
+  obsidian: (c, x, y) => {
+    noiseFill(c, x, y, OBSIDIAN_PAL, 1199, 1);
+    // a few purple specular flecks
+    const rand = mulberry32(2299);
+    for (let i = 0; i < 6; i++) {
+      c.fillStyle = '#5a3a6a';
+      c.fillRect(x + ((rand() * 15) | 0), y + ((rand() * 15) | 0), 1, 1);
+    }
   },
   bedrock: (c, x, y) => noiseFill(c, x, y, BEDROCK_PAL, 108, 1),
   grass_side: (c, x, y) => {
@@ -936,10 +961,29 @@ const WATER_BUCKET_MAP = [
   '................',
   '................',
 ];
+const LAVA_BUCKET_MAP = [
+  '................',
+  '..OOOOOOOOOO....',
+  '..OLLLLLLLLO....',
+  '...OLLLLLLO.....',
+  '...OLlLLLLO.....',
+  '...OLLLLLLO.....',
+  '...OMMMMMMO.....',
+  '...OMMMMMMO.....',
+  '....OMMMMO......',
+  '....OOOOOO......',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
 
 const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
   bucket: (c) => pixmap(c, 0, 0, BUCKET_MAP, BUCKETC),
   water_bucket: (c) => pixmap(c, 0, 0, WATER_BUCKET_MAP, BUCKETC),
+  lava_bucket: (c) => pixmap(c, 0, 0, LAVA_BUCKET_MAP, { ...BUCKETC, L: '#d83415', l: '#ffd23d', M: '#8a1f0a' }),
   leather_helmet: (c) => pixmap(c, 0, 0, HELMET_MAP, LEATHERAC),
   leather_chest: (c) => pixmap(c, 0, 0, CHEST_MAP, LEATHERAC),
   leather_legs: (c) => pixmap(c, 0, 0, LEGS_MAP, LEATHERAC),
@@ -1342,6 +1386,8 @@ const PACK_MAP: Record<string, PackEntry> = {
   leaves: { paths: ['block/oak_leaves', 'block/leaves_oak'], tint: '#59ae30', kind: 'tile' },
   glass: { paths: ['block/glass'], kind: 'tile' },
   water: { paths: ['block/water_still'], tint: '#3f76e4', kind: 'tile' },
+  lava: { paths: ['block/lava_still', 'block/lava'], kind: 'tile' },
+  obsidian: { paths: ['block/obsidian'], kind: 'tile' },
   table_top: { paths: ['block/crafting_table_top'], kind: 'tile' },
   table_side: { paths: ['block/crafting_table_side'], kind: 'tile' },
   table_front: { paths: ['block/crafting_table_front'], kind: 'tile' },
@@ -1567,6 +1613,23 @@ export class Atlas {
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(s, 0, 0, 16, 16, 0, 0, 32, 32);
       }
+    }
+    // fallback: if nothing was drawn (transparent canvas), stamp a visible
+    // placeholder so the slot is never mysteriously blank in the creative panel
+    const img = ctx.getImageData(0, 0, 32, 32).data;
+    let anyPixel = false;
+    for (let i = 3; i < img.length; i += 4) { if (img[i] > 8) { anyPixel = true; break; } }
+    if (!anyPixel) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.filter = 'none';
+      ctx.fillStyle = '#3a3a3a';
+      ctx.fillRect(2, 2, 28, 28);
+      ctx.fillStyle = '#8a8a8a';
+      ctx.fillRect(8, 8, 16, 16);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 20px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('?', 16, 17);
     }
     this.iconCache.set(id, c);
     return c;

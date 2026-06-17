@@ -20,8 +20,8 @@ npm run dev        # open the printed localhost URL
 | Input | Action |
 |---|---|
 | WASD / mouse | Move / look (click the canvas to capture the mouse) |
-| Double-W or Ctrl | Sprint (5.612 m/s, widened FOV) |
-| Shift | Sneak (1.295 m/s, can't fall off edges) — descend while flying |
+| Double-W or Shift | Sprint (5.612 m/s, widened FOV) |
+| Ctrl | Sneak (1.295 m/s, can't fall off edges) — descend while flying |
 | Space | Jump (1.25 blocks) — ascend while flying |
 | F, or double-Space in creative | Toggle flight (2.5x speed) |
 | Left click | Break blocks (hold; per-block times + crack overlay) / attack mobs |

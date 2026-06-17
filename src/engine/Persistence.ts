@@ -37,6 +37,8 @@ export interface SaveState {
   torches?: Record<string, number>;
   /** flowing-water levels keyed by "x,y,z" (0=source, 1..7=flowing) */
   water?: Record<string, number>;
+  /** flowing-lava levels keyed by "x,y,z" (0=source, 1..3=flowing) */
+  lava?: Record<string, number>;
   environment: { dayTime: number };
   /** bed spawn point, if set */
   spawn?: { x: number; y: number; z: number };

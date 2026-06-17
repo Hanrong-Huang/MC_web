@@ -251,7 +251,7 @@ export class HUD {
 
     const help = el('div', 'menu-help', this.menu);
     help.innerHTML =
-      'WASD move · double-W / Ctrl sprint · Shift sneak · Space jump<br>' +
+      'WASD move · double-W / Shift sprint · Ctrl sneak · Space jump<br>' +
       'LMB break / attack · RMB place / use / eat · E inventory · 1-9 + scroll hotbar<br>' +
       'F or double-Space (creative) fly · F3 debug · L advancements · Esc pause<br>' +
       'Doors & trapdoors open on right-click · climb ladders with Space<br>' +

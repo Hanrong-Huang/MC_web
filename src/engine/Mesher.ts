@@ -16,6 +16,8 @@ const FACE_NORMALS = [
 
 // per-face shading: top 100%, bottom 50%, z (north/south) 80%, x (east/west) 60%
 const FACE_SHADE = [0.6, 0.6, 1.0, 0.5, 0.8, 0.8];
+const LIQUID_SOURCE_HEIGHT = 14 / 16;
+const LIQUID_EDGE_HEIGHT = 8 / 16;
 
 // origin + tangent axes with u x v = normal (CCW winding seen from outside)
 const FACE_GEO: { o: number[]; u: number[]; v: number[] }[] = [
@@ -112,6 +114,28 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
       return c.data[(x & 15) | ((z & 15) << 4) | (y << 8)];
     }
     return world.getBlockForMesh(bx + x, y, bz + z);
+  };
+  const liquidCellHeight = (id: number, x: number, y: number, z: number): number => {
+    if (get(x, y, z) !== id) return 0;
+    if (get(x, y + 1, z) === id) return 1;
+    const wx = bx + x, wz = bz + z;
+    const level = id === B.LAVA ? world.lavaLevel(wx, y, wz) : world.waterLevel(wx, y, wz);
+    const maxLevel = id === B.LAVA ? 3 : 7;
+    if (level <= 0) return LIQUID_SOURCE_HEIGHT;
+    return LIQUID_SOURCE_HEIGHT - (LIQUID_SOURCE_HEIGHT - LIQUID_EDGE_HEIGHT) * Math.min(1, level / maxLevel);
+  };
+  const liquidCornerHeight = (id: number, x: number, y: number, z: number, px: number, pz: number): number => {
+    const sx = px < 0.5 ? -1 : 1;
+    const sz = pz < 0.5 ? -1 : 1;
+    let sum = 0;
+    let n = 0;
+    for (const [dx, dz] of [[0, 0], [sx, 0], [0, sz], [sx, sz]]) {
+      const h = liquidCellHeight(id, x + dx, y, z + dz);
+      if (h <= 0) continue;
+      sum += h;
+      n++;
+    }
+    return n > 0 ? sum / n : LIQUID_EDGE_HEIGHT;
   };
   const skyAt = (x: number, y: number, z: number): number => {
     if (y >= CY) return 1;
@@ -224,16 +248,18 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
 
         const d = def(id);
         const isWater = id === B.WATER;
-        const target = isWater ? water : solid;
-        const waterTopOpen = isWater && get(x, y + 1, z) !== B.WATER;
+        const isLava = id === B.LAVA;
+        const isLiquid = isWater || isLava;
+        const target = isLiquid ? water : solid;
+        const waterTopOpen = isLiquid && get(x, y + 1, z) !== id;
 
         for (let face = 0; face < 6; face++) {
           const n = FACE_NORMALS[face];
           const nb = get(x + n[0], y + n[1], z + n[2]);
 
           // culling rules
-          if (isWater) {
-            if (nb === B.WATER) continue;
+          if (isLiquid) {
+            if (nb === id) continue;
             if (isOpaque(nb)) continue;
             if (nb !== B.AIR && nb !== B.LEAVES && nb !== B.TORCH && face !== 2) continue;
           } else if (d.opaque) {
@@ -257,7 +283,7 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
             let px = geo.o[0] + a * geo.u[0] + b * geo.v[0];
             let py = geo.o[1] + a * geo.u[1] + b * geo.v[1];
             let pz = geo.o[2] + a * geo.u[2] + b * geo.v[2];
-            if (waterTopOpen && py === 1) py = 0.875; // water surface sits at 14/16
+            if (waterTopOpen && py === 1) py = liquidCornerHeight(id, x, y, z, px, pz);
 
             // AO + smooth light sampled in the cell layer in front of the face
             const cx0 = x + n[0], cy0 = y + n[1], cz0 = z + n[2];
@@ -266,7 +292,7 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
             const s1 = occ(cx0 + su[0], cy0 + su[1], cz0 + su[2]);
             const s2 = occ(cx0 + sv[0], cy0 + sv[1], cz0 + sv[2]);
             const sc = occ(cx0 + su[0] + sv[0], cy0 + su[1] + sv[1], cz0 + su[2] + sv[2]);
-            const aoLevel = isWater ? 3 : s1 && s2 ? 0 : 3 - (s1 + s2 + sc);
+            const aoLevel = isLiquid ? 3 : s1 && s2 ? 0 : 3 - (s1 + s2 + sc);
             aos.push(aoLevel);
 
             const sky = (

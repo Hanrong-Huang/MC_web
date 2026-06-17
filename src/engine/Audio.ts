@@ -22,6 +22,11 @@ export class AudioEngine {
   private ambientT = 22;
   private musicT = 6;        // seconds until the next generated piece
   private settings: AudioSettings = { music: true, sound: true };
+  // continuous rain bed: a persistent looping noise source we fade in/out
+  private rainSrc: AudioBufferSourceNode | null = null;
+  private rainGain: GainNode | null = null;
+  private rainFilter: BiquadFilterNode | null = null;
+  private rainState: 'off' | 'rain' | 'thunder' = 'off';
 
   constructor() {
     try {
@@ -110,15 +115,38 @@ export class AudioEngine {
     osc.stop(t + dur + 0.02);
   }
 
-  /** Dig/place sound for a block sound class. */
+  /** Dig/place sound for a block sound class — MC-style layered hits. */
   dig(cls: SoundClass, vol: number): void {
     this.ensure();
     switch (cls) {
-      case 'stone': this.noiseBurst(0.14, 900, 0.5 * vol, 'lowpass', 300); break;
-      case 'wood': this.noiseBurst(0.12, 700, 0.4 * vol, 'lowpass', 250); this.tone(0.08, 180, 120, 0.12 * vol, 'square'); break;
-      case 'grass': this.noiseBurst(0.12, 2200, 0.3 * vol, 'bandpass', 900); break;
-      case 'sand': this.noiseBurst(0.16, 3200, 0.25 * vol, 'highpass'); break;
-      case 'glass': this.noiseBurst(0.2, 4200, 0.35 * vol, 'highpass'); this.tone(0.14, 1900, 800, 0.1 * vol, 'triangle'); break;
+      case 'stone':
+        // crisp double-tap: body thud + gritty scrape
+        this.noiseBurst(0.09, 1100, 0.45 * vol, 'lowpass', 400);
+        this.noiseBurst(0.06, 2600, 0.18 * vol, 'bandpass', 1400);
+        this.tone(0.05, 140, 90, 0.1 * vol, 'sine');
+        break;
+      case 'wood':
+        // hollow knock + woody body
+        this.noiseBurst(0.08, 800, 0.36 * vol, 'lowpass', 300);
+        this.tone(0.07, 200, 130, 0.14 * vol, 'triangle');
+        this.tone(0.05, 95, 70, 0.08 * vol, 'sine');
+        break;
+      case 'grass':
+        // soft squelch
+        this.noiseBurst(0.1, 1800, 0.26 * vol, 'bandpass', 700);
+        this.noiseBurst(0.05, 600, 0.1 * vol, 'lowpass', 250);
+        break;
+      case 'sand':
+        // gritty crunch
+        this.noiseBurst(0.14, 3000, 0.22 * vol, 'highpass', 1200);
+        this.noiseBurst(0.06, 1400, 0.1 * vol, 'bandpass');
+        break;
+      case 'glass':
+        // bright shatter
+        this.noiseBurst(0.18, 4400, 0.32 * vol, 'highpass');
+        this.tone(0.12, 2100, 900, 0.1 * vol, 'triangle');
+        this.tone(0.08, 3200, 1600, 0.05 * vol, 'sine');
+        break;
       case 'none': break;
     }
   }
@@ -200,8 +228,67 @@ export class AudioEngine {
         this.noiseBurst(0.5, 1800, 0.35, 'highpass');
         break;
       case 'rain':
-        this.weatherLoop('rain', 0.55, false, false);
+        // legacy single-shot; the continuous bed is driven by setRain()
+        this.setRain('rain', 0.5);
         break;
+    }
+  }
+
+  /** Drive the continuous rain bed. Call with kind='off' to stop. The bed
+   *  is a single looping filtered-noise source that fades in/out smoothly,
+   *  much softer and less choppy than per-burst noise. */
+  setRain(kind: 'off' | 'rain' | 'thunder', intensity = 0.6): void {
+    this.ensure();
+    if (!this.ctx || !this.sfx || !this.noiseBuf) return;
+    const k = Math.max(0, Math.min(1, intensity));
+    // stop the bed when weather clears
+    if (kind === 'off') {
+      if (this.rainGain && this.ctx) {
+        const t = this.ctx.currentTime;
+        this.rainGain.gain.cancelScheduledValues(t);
+        this.rainGain.gain.setValueAtTime(this.rainGain.gain.value, t);
+        this.rainGain.gain.linearRampToValueAtTime(0, t + 1.5);
+      }
+      const src = this.rainSrc;
+      if (src) setTimeout(() => { try { src.stop(); } catch { /* already */ } }, 1600);
+      this.rainSrc = null;
+      this.rainState = 'off';
+      return;
+    }
+    // (re)create the bed if it's not running or the character changed
+    if (!this.rainSrc || this.rainState === 'off') {
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.noiseBuf;
+      src.loop = true;
+      src.playbackRate.value = 0.6;
+      // two stacked filters for a softer "shhh" character
+      const hp = this.ctx.createBiquadFilter();
+      hp.type = 'highpass'; hp.frequency.value = 1400;
+      const lp = this.ctx.createBiquadFilter();
+      lp.type = 'lowpass'; lp.frequency.value = 6000;
+      const g = this.ctx.createGain();
+      g.gain.value = 0;
+      src.connect(hp).connect(lp).connect(g).connect(this.sfx);
+      src.start();
+      this.rainSrc = src;
+      this.rainFilter = lp;
+      this.rainGain = g;
+      this.rainState = kind;
+    }
+    this.rainState = kind;
+    // fade to target volume
+    if (this.rainGain && this.ctx) {
+      const t = this.ctx.currentTime;
+      const target = kind === 'thunder' ? 0.07 * k : 0.05 * k;
+      this.rainGain.gain.cancelScheduledValues(t);
+      this.rainGain.gain.setValueAtTime(this.rainGain.gain.value, t);
+      this.rainGain.gain.linearRampToValueAtTime(target, t + 1.2);
+    }
+    // a few sparse "plink" drips layered on top for texture
+    const drips = 1 + Math.floor(k * 3);
+    for (let i = 0; i < drips; i++) {
+      const when = 0.1 + Math.random() * 1.4;
+      this.tone(0.03 + Math.random() * 0.03, 700 + Math.random() * 900, 280 + Math.random() * 300, 0.012 * k, 'sine', when);
     }
   }
 
@@ -364,9 +451,14 @@ export class AudioEngine {
       this.padAt(tBar, chordRoot * 0.5, 0.045, barLen * 1.15);
       this.padAt(tBar, chordRoot * Math.pow(2, third / 12) * 0.5, 0.032, barLen * 1.15);
       this.padAt(tBar, chordRoot * Math.pow(2, 7 / 12) * 0.5, 0.028, barLen * 1.15);
-      // soft bass pulse
+      // soft bass pulse — warm and low, MC-style drone
       this.pianoNote(tBar, chordRoot * 0.25, 0.05, 2.6);
       if (Math.random() < 0.36) this.pianoNote(tBar + barLen * 0.5, chordRoot * 0.5, 0.034, 2.0);
+      // occasional high sparkle bell for the airy MC ambience
+      if (bar % 2 === 1 && Math.random() < 0.3) {
+        const deg = pent[(Math.random() * pent.length) | 0];
+        this.bellNote(tBar + barLen * 0.25, root * 8 * Math.pow(2, deg / 12), 0.012, 3.5);
+      }
       // sparse, repeated pentatonic motifs with enough silence to feel exploratory.
       const beats = isNight ? [0, 0.375, 0.75] : [0, 0.25, 0.5, 0.75];
       for (let i = 0; i < beats.length; i++) {
@@ -387,43 +479,66 @@ export class AudioEngine {
     return bars * barLen;
   }
 
-  /** Piano-ish voice: three decaying partials through a soft lowpass. */
+  /** Rhodes-piano-ish voice: fundamental + slightly detuned octave + warm 2nd
+   *  harmonic, through a soft lowpass with a gentle "hammer" attack. This is
+   *  closer to C418's electric-piano timbre than a raw sine. */
   private pianoNote(when: number, freq: number, vol: number, decay: number): void {
     if (!this.ctx || !this.musicBus) return;
     const filter = this.ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = 2600;
+    // filter opens slightly on the attack for a "ting" then settles
+    filter.frequency.setValueAtTime(1800, when);
+    filter.frequency.linearRampToValueAtTime(2400, when + 0.02);
+    filter.frequency.exponentialRampToValueAtTime(900, when + decay * 0.6);
+    filter.Q.value = 0.4;
     filter.connect(this.musicBus);
-    const partials: [number, number][] = [[1, 1], [2, 0.32], [3, 0.1]];
-    for (const [mult, pv] of partials) {
+    // warmer partial blend: fundamental, detuned sub, octave, 2nd harmonic
+    const partials: [number, number, OscillatorType, number][] = [
+      [1, 1.0, 'sine', 0],
+      [1, 0.18, 'sine', -3.5],     // subtle detune for chorus warmth
+      [2, 0.3, 'sine', 0],
+      [3, 0.06, 'triangle', 0],
+    ];
+    for (const [mult, pv, type, detune] of partials) {
       const osc = this.ctx.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.value = freq * mult * (1 + (Math.random() - 0.5) * 0.0015);
+      osc.type = type;
+      osc.frequency.value = freq * mult * (1 + (Math.random() - 0.5) * 0.001);
+      osc.detune.value = detune;
       const g = this.ctx.createGain();
+      // soft hammer attack: quick but not instantaneous
       g.gain.setValueAtTime(0.0001, when);
-      g.gain.linearRampToValueAtTime(vol * pv, when + 0.012);
-      g.gain.exponentialRampToValueAtTime(0.0005, when + decay);
+      g.gain.linearRampToValueAtTime(vol * pv, when + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0004, when + decay);
       osc.connect(g).connect(filter);
       osc.start(when);
       osc.stop(when + decay + 0.05);
     }
   }
 
+  /** Warm sustained pad: two slightly detuned triangle/sawtooth oscillators
+   *  through a slowly-opening lowpass, for a soft string-pad swell. */
   private padAt(when: number, freq: number, vol: number, dur: number): void {
     if (!this.ctx || !this.musicBus) return;
-    const osc = this.ctx.createOscillator();
-    osc.type = 'triangle';
-    osc.frequency.value = freq;
     const filter = this.ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = 900;
+    filter.frequency.setValueAtTime(500, when);
+    filter.frequency.linearRampToValueAtTime(1100, when + dur * 0.4);
+    filter.frequency.linearRampToValueAtTime(600, when + dur);
+    filter.Q.value = 0.6;
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(0.0001, when);
-    g.gain.linearRampToValueAtTime(vol, when + dur * 0.35);
+    g.gain.linearRampToValueAtTime(vol, when + dur * 0.32);
     g.gain.linearRampToValueAtTime(0.0001, when + dur);
-    osc.connect(filter).connect(g).connect(this.musicBus);
-    osc.start(when);
-    osc.stop(when + dur + 0.05);
+    filter.connect(g).connect(this.musicBus);
+    for (const [type, detune, pv] of [['triangle', 0, 1], ['triangle', 5, 0.6], ['sawtooth', -4, 0.18]] as [OscillatorType, number, number][]) {
+      const osc = this.ctx.createOscillator();
+      osc.type = type;
+      osc.frequency.value = freq;
+      osc.detune.value = detune;
+      osc.connect(filter);
+      osc.start(when);
+      osc.stop(when + dur + 0.05);
+    }
   }
 
   private bellNote(when: number, freq: number, vol: number, decay: number): void {

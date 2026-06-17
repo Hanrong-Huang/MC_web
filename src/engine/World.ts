@@ -110,10 +110,14 @@ export class World {
       if (lz === 0) this.markDirty(cx, cz - 1);
       if (lz === 15) this.markDirty(cx, cz + 1);
     }
+    if (oldId === B.WATER && id !== B.WATER) this.waterLevels.delete(`${wx},${wy},${wz}`);
+    if (oldId === B.LAVA && id !== B.LAVA) this.lavaLevels.delete(`${wx},${wy},${wz}`);
     this.onBlockChanged(wx, wy, wz, oldId, id);
-    // water flow: re-check this cell + neighbors when the edit exposes air or
-    // touches water (breaking a block under/next to water makes it flow in)
-    if (id === B.AIR || id === B.WATER || oldId === B.WATER) this.scheduleAround(wx, wy, wz);
+    // Fluid flow: re-check this cell + neighbors when an edit exposes air or
+    // touches a fluid. Breaking a block beside/under fluid should start flow;
+    // placing a solid in fluid should make the old flow recede.
+    if (id === B.AIR || oldId === B.AIR || id === B.WATER || oldId === B.WATER) this.scheduleAroundFluid(B.WATER, wx, wy, wz);
+    if (id === B.AIR || oldId === B.AIR || id === B.LAVA || oldId === B.LAVA) this.scheduleAroundFluid(B.LAVA, wx, wy, wz);
     return true;
   }
 
@@ -243,46 +247,82 @@ export class World {
     return swing < 0.5;
   }
 
-  // --- flowing water ---------------------------------------------------------
-  // Levels: 0 = source (or fed from directly above), 1..7 = flowing (7 = thinnest,
-  // farthest from a source). Generated ocean water is absent from the map and so
-  // reads as a source. Flowing cells we create are tracked here and recede when
-  // they lose their connection back to a source.
+  // --- flowing fluids --------------------------------------------------------
+  // Levels: 0 = source (or fed from directly above), 1..N = flowing. Generated
+  // ocean/lava and bucket sources are absent from their maps and read as source.
+  // Flowing cells are tracked and recede when they lose connection to a source.
   waterLevels = new Map<string, number>();
+  lavaLevels = new Map<string, number>();
   private waterQueue: string[] = [];
   private waterQueued = new Set<string>();
+  private lavaQueue: string[] = [];
+  private lavaQueued = new Set<string>();
   private static readonly MAX_WATER_LEVEL = 7;
+  private static readonly MAX_LAVA_LEVEL = 3;
+  private static readonly NO_FLUID = 99;
+  private static readonly DIRS: readonly (readonly [number, number])[] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 
   /** Queue a cell for a water-flow re-evaluation on the next water tick. */
   scheduleWater(x: number, y: number, z: number): void {
-    if (y < 0 || y >= CY) return;
-    const key = `${x},${y},${z}`;
-    if (this.waterQueued.has(key)) return;
-    this.waterQueued.add(key);
-    this.waterQueue.push(key);
+    this.scheduleFluid(B.WATER, x, y, z);
   }
 
-  private scheduleAround(x: number, y: number, z: number): void {
-    this.scheduleWater(x, y, z);
-    this.scheduleWater(x, y - 1, z); this.scheduleWater(x, y + 1, z);
-    this.scheduleWater(x + 1, y, z); this.scheduleWater(x - 1, y, z);
-    this.scheduleWater(x, y, z + 1); this.scheduleWater(x, y, z - 1);
+  /** Queue a cell for a lava-flow re-evaluation on the next lava tick. */
+  scheduleLava(x: number, y: number, z: number): void {
+    this.scheduleFluid(B.LAVA, x, y, z);
+  }
+
+  private scheduleFluid(fluid: number, x: number, y: number, z: number): void {
+    if (y < 0 || y >= CY) return;
+    const key = `${x},${y},${z}`;
+    const queue = fluid === B.LAVA ? this.lavaQueue : this.waterQueue;
+    const queued = fluid === B.LAVA ? this.lavaQueued : this.waterQueued;
+    if (queued.has(key)) return;
+    queued.add(key);
+    queue.push(key);
+  }
+
+  private scheduleAroundFluid(fluid: number, x: number, y: number, z: number): void {
+    this.scheduleFluid(fluid, x, y, z);
+    this.scheduleFluid(fluid, x, y - 1, z); this.scheduleFluid(fluid, x, y + 1, z);
+    this.scheduleFluid(fluid, x + 1, y, z); this.scheduleFluid(fluid, x - 1, y, z);
+    this.scheduleFluid(fluid, x, y, z + 1); this.scheduleFluid(fluid, x, y, z - 1);
   }
 
   /** Water level at a cell (0 = source/fed-from-above). Assumes water present. */
   waterLevel(x: number, y: number, z: number): number {
-    if (this.getBlock(x, y + 1, z) === B.WATER) return 0; // fed from the column above
-    return this.waterLevels.get(`${x},${y},${z}`) ?? 0; // absent = generated/placed source
+    return this.fluidLevel(B.WATER, x, y, z);
+  }
+
+  /** Lava level at a cell (0 = source/fed-from-above). Assumes lava present. */
+  lavaLevel(x: number, y: number, z: number): number {
+    return this.fluidLevel(B.LAVA, x, y, z);
+  }
+
+  private fluidLevel(fluid: number, x: number, y: number, z: number): number {
+    if (this.getBlock(x, y + 1, z) === fluid) return 0; // fed from the column above
+    return this.levelsFor(fluid).get(`${x},${y},${z}`) ?? 0;
   }
 
   /** Advance queued water cells with a per-tick op budget (rest carries over). */
   tickWater(maxOps = 800): void {
+    this.tickFluid(B.WATER, maxOps);
+  }
+
+  /** Advance queued lava cells with a per-tick op budget (rest carries over). */
+  tickLava(maxOps = 300): void {
+    this.tickFluid(B.LAVA, maxOps);
+  }
+
+  private tickFluid(fluid: number, maxOps: number): void {
+    const queue = fluid === B.LAVA ? this.lavaQueue : this.waterQueue;
+    const queued = fluid === B.LAVA ? this.lavaQueued : this.waterQueued;
     let ops = 0;
-    while (this.waterQueue.length && ops < maxOps) {
-      const key = this.waterQueue.shift()!;
-      this.waterQueued.delete(key);
+    while (queue.length && ops < maxOps) {
+      const key = queue.shift()!;
+      queued.delete(key);
       const c = key.split(',');
-      this.updateWaterCell(+c[0], +c[1], +c[2]);
+      this.updateFluidCell(fluid, +c[0], +c[1], +c[2]);
       ops++;
     }
   }
@@ -293,54 +333,158 @@ export class World {
    * other cell takes (best feeding neighbour + 1), or empties if nothing feeds
    * it. This converges cleanly for both spreading and receding.
    */
-  private updateWaterCell(x: number, y: number, z: number): void {
+  private updateFluidCell(fluid: number, x: number, y: number, z: number): void {
     const key = `${x},${y},${z}`;
+    const levels = this.levelsFor(fluid);
+    const maxLevel = fluid === B.LAVA ? World.MAX_LAVA_LEVEL : World.MAX_WATER_LEVEL;
     const id = this.getBlock(x, y, z);
-    const isWater = id === B.WATER;
-    const permanent = isWater && !this.waterLevels.has(key); // generated ocean / bucket source
+    const isFluid = id === fluid;
+    let permanent = isFluid && !levels.has(key); // generated / bucket source
+
+    // Minecraft contact reaction: lava meeting water hardens into rock — a lava
+    // source becomes obsidian, flowing lava becomes cobblestone.
+    if (fluid === B.LAVA && isFluid && this.touchesBlock(B.WATER, x, y, z)) {
+      this.setBlock(x, y, z, permanent ? B.OBSIDIAN : B.COBBLE);
+      return;
+    }
+
+    // Minecraft infinite water: a cell flanked by 2+ source blocks turns into a
+    // source itself (the 2x2 water-bucket trick).
+    if (fluid === B.WATER && !permanent && (isFluid || id === B.AIR) &&
+      this.countSourceNeighbours(x, y, z) >= 2) {
+      if (id === B.AIR && !this.setBlock(x, y, z, B.WATER)) return;
+      levels.delete(key); // absent from the map = permanent source
+      permanent = true;
+      this.scheduleAroundFluid(B.WATER, x, y, z);
+    }
 
     let target: number;
-    if (permanent || this.getBlock(x, y + 1, z) === B.WATER) {
+    if (permanent || this.getBlock(x, y + 1, z) === fluid) {
       target = 0;
     } else {
-      target = 8; // 8 = "no water here"
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      target = World.NO_FLUID;
+      for (const [dx, dz] of World.DIRS) {
         const nx = x + dx, nz = z + dz;
-        if (this.getBlock(nx, y, nz) !== B.WATER) continue;
-        // a neighbour draining straight down (and not a source) can't feed sideways
-        if (this.getBlock(nx, y - 1, nz) === B.AIR && this.waterLevels.has(`${nx},${y},${nz}`)) continue;
-        target = Math.min(target, this.waterLevel(nx, y, nz) + 1);
+        if (this.getBlock(nx, y, nz) !== fluid) continue;
+        if (!this.canFeedFrom(fluid, nx, y, nz, x, z, levels)) continue;
+        target = Math.min(target, this.fluidLevel(fluid, nx, y, nz) + 1);
       }
     }
 
     if (!permanent) {
-      if (target > World.MAX_WATER_LEVEL) {
-        if (isWater && this.setBlock(x, y, z, B.AIR)) {
-          this.waterLevels.delete(key);
-          this.scheduleAround(x, y, z);
+      if (target > maxLevel) {
+        if (isFluid && this.setBlock(x, y, z, B.AIR)) {
+          levels.delete(key);
+          this.scheduleAroundFluid(fluid, x, y, z);
         }
         return;
       }
-      if (!isWater) {
-        if (!this.setBlock(x, y, z, B.WATER)) return;
-        this.waterLevels.set(key, target);
-        this.scheduleAround(x, y, z);
-      } else if (this.waterLevels.get(key) !== target) {
-        this.waterLevels.set(key, target);
-        this.scheduleAround(x, y, z);
+      if (!isFluid) {
+        if (id !== B.AIR) return;
+        if (!this.setBlock(x, y, z, fluid)) return;
+        levels.set(key, target);
+        this.scheduleAroundFluid(fluid, x, y, z);
+      } else if (levels.get(key) !== target) {
+        levels.set(key, target);
+        this.scheduleAroundFluid(fluid, x, y, z);
       }
     }
 
-    // propagate: fall straight down if possible, else spread to flat neighbours
+    // Minecraft-like flow priority: fall straight down first. Otherwise, if any
+    // horizontal direction reaches a drop within the search range, feed only the
+    // shortest downhill direction(s) instead of fanning across flat ground.
     if (this.getBlock(x, y - 1, z) === B.AIR) {
-      this.scheduleWater(x, y - 1, z);
+      this.scheduleFluid(fluid, x, y - 1, z);
       return;
     }
-    if (target < World.MAX_WATER_LEVEL) {
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        if (this.getBlock(x + dx, y, z + dz) === B.AIR) this.scheduleWater(x + dx, y, z + dz);
+    if (target < maxLevel) {
+      const preferred = this.preferredFlowDirs(fluid, x, y, z);
+      if (preferred) {
+        for (const [dx, dz] of preferred) {
+          this.scheduleFluid(fluid, x + dx, y, z + dz);
+        }
+        return;
+      }
+      for (const [dx, dz] of World.DIRS) {
+        if (this.getBlock(x + dx, y, z + dz) === B.AIR) this.scheduleFluid(fluid, x + dx, y, z + dz);
       }
     }
+  }
+
+  private levelsFor(fluid: number): Map<string, number> {
+    return fluid === B.LAVA ? this.lavaLevels : this.waterLevels;
+  }
+
+  /** Is any of the 6 neighbouring cells the given block? */
+  private touchesBlock(target: number, x: number, y: number, z: number): boolean {
+    return this.getBlock(x + 1, y, z) === target || this.getBlock(x - 1, y, z) === target ||
+      this.getBlock(x, y, z + 1) === target || this.getBlock(x, y, z - 1) === target ||
+      this.getBlock(x, y + 1, z) === target || this.getBlock(x, y - 1, z) === target;
+  }
+
+  /** Count horizontally-adjacent water *source* blocks (for infinite sources). */
+  private countSourceNeighbours(x: number, y: number, z: number): number {
+    let n = 0;
+    for (const [dx, dz] of World.DIRS) {
+      const nx = x + dx, nz = z + dz;
+      if (this.getBlock(nx, y, nz) === B.WATER && !this.waterLevels.has(`${nx},${y},${nz}`) &&
+        this.getBlock(nx, y + 1, nz) !== B.WATER) n++;
+    }
+    return n;
+  }
+
+  private canFeedFrom(fluid: number, fromX: number, y: number, fromZ: number, toX: number, toZ: number,
+    levels: Map<string, number>): boolean {
+    // A falling non-source column feeds downward only.
+    if (this.getBlock(fromX, y - 1, fromZ) === B.AIR && levels.has(`${fromX},${y},${fromZ}`)) return false;
+
+    const preferred = this.preferredFlowDirs(fluid, fromX, y, fromZ);
+    if (preferred) return preferred.some(([dx, dz]) => fromX + dx === toX && fromZ + dz === toZ);
+    return this.getBlock(toX, y, toZ) === B.AIR || this.getBlock(toX, y, toZ) === fluid;
+  }
+
+  private preferredFlowDirs(fluid: number, x: number, y: number, z: number): (readonly [number, number])[] | null {
+    const maxDepth = fluid === B.LAVA ? 2 : 4;
+    let best = World.NO_FLUID;
+    const dirs: (readonly [number, number])[] = [];
+    for (const [dx, dz] of World.DIRS) {
+      const nx = x + dx, nz = z + dz;
+      if (!this.canFluidOccupy(fluid, nx, y, nz)) continue;
+      const dist = this.flowDistanceToDrop(fluid, nx, y, nz, -dx, -dz, 0, maxDepth);
+      if (dist >= best) {
+        if (dist === best && dist < World.NO_FLUID) dirs.push([dx, dz]);
+        continue;
+      }
+      best = dist;
+      dirs.length = 0;
+      if (dist < World.NO_FLUID) dirs.push([dx, dz]);
+    }
+    return dirs.length ? dirs : null;
+  }
+
+  private flowDistanceToDrop(fluid: number, x: number, y: number, z: number, backX: number, backZ: number,
+    depth: number, maxDepth: number): number {
+    if (this.canFluidFallInto(fluid, x, y - 1, z)) return depth;
+    if (depth >= maxDepth) return World.NO_FLUID;
+
+    let best = World.NO_FLUID;
+    for (const [dx, dz] of World.DIRS) {
+      if (dx === backX && dz === backZ) continue;
+      const nx = x + dx, nz = z + dz;
+      if (!this.canFluidOccupy(fluid, nx, y, nz)) continue;
+      best = Math.min(best, this.flowDistanceToDrop(fluid, nx, y, nz, -dx, -dz, depth + 1, maxDepth));
+    }
+    return best;
+  }
+
+  private canFluidOccupy(fluid: number, x: number, y: number, z: number): boolean {
+    const id = this.getBlock(x, y, z);
+    return id === B.AIR || id === fluid;
+  }
+
+  private canFluidFallInto(fluid: number, x: number, y: number, z: number): boolean {
+    const id = this.getBlock(x, y, z);
+    return id === B.AIR || id === fluid;
   }
 
   markDirty(cx: number, cz: number): void {

@@ -665,7 +665,7 @@ export class EntityManager {
       e.vel.y += dy * pull;
       e.vel.z += dz * pull;
       if (dist < 0.6) {
-        const leftover = p.inventory.add(e.itemId, e.count);
+        const leftover = this.pickupDrop(e);
         if (leftover <= 0) {
           e.dead = true;
           this.audio.play('pop');
@@ -684,6 +684,22 @@ export class EntityManager {
 
     e.mesh.position.set(e.pos.x, e.pos.y + 0.12 + Math.sin(elapsed * 2 + e.age) * 0.05, e.pos.z);
     e.mesh.rotation.y = elapsed * 1.4;
+  }
+
+  private pickupDrop(e: Entity): number {
+    const inv = this.player!.inventory;
+    if (e.dmg > 0) {
+      let left = e.count;
+      for (let i = 0; i < inv.slots.length && left > 0; i++) {
+        if (!inv.slots[i]) {
+          inv.slots[i] = { id: e.itemId, count: 1, dur: e.dmg };
+          left--;
+        }
+      }
+      if (left !== e.count) inv.onChange();
+      return left;
+    }
+    return inv.add(e.itemId, e.count);
   }
 
   private updateArrow(e: Entity, dt: number): void {
