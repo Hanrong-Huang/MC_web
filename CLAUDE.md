@@ -73,7 +73,10 @@ When adding a feature, prefer adding/extending a `.mjs` harness and capturing a 
 
 ## Current status (2026-06)
 
-Feature-complete sandbox (see `README.md`). Recent polish passes: chunk fade-in, 3D extruded held/dropped items, wall-mounted torches, ambient particles (torch embers, fireflies), mob shadows, breeding + babies, horse riding (saddle/armor), wolf/cat taming, bed sleep-to-morning with a fade transition and a "monsters nearby" guard, and a recognizability pass on mob silhouettes (clean skins, cow Holstein patches, wolf two-tone coat) + beveled tool/weapon sprite shading.
+Feature-complete sandbox (see `README.md`). Recent polish passes: chunk fade-in, 3D extruded held/dropped items, wall-mounted torches, ambient particles, mob shadows, breeding + babies, horse riding, wolf/cat taming, bed sleep-to-morning, mob-silhouette recognizability pass + beveled tool/weapon sprites. Newest additions:
+- **Player armor** (`Blocks.ts` `armor` field, `Inventory.armor[4]`, `Player.equipArmor/damageArmor`): 12 pieces (leather/iron/diamond × helmet/chest/legs/boots), 4%/point damage reduction (cap 80%), durability, HUD armor bar, inventory armor column, right-click to equip.
+- **Flowing water** (`World.ts` `waterLevels` + `tickWater`, a pull-model cellular automaton ticked ~5 Hz from `main.tick20`): sources spread/recede; absent-from-map water = permanent source. **Bucket** (`Player.tryScoopWater/tryPlaceWater`) scoops/pours sources. Swimming hops you onto 1-block ledges; touching water cancels fall damage.
+- **Title screen**: unlimited named worlds (IndexedDB keyed by name) with create/delete + UI sounds.
 
 ## Directions for further improvement
 
@@ -84,6 +87,7 @@ Backlog ideas, roughly highest-value first — confirm scope with the user befor
 - **World depth**: villages with villager trading UI, mineshafts/ravines, more biomes (jungle, mesa, swamp), structures with loot tables.
 - **Redstone-lite**: levers/buttons/doors wiring, pressure plates (doors already exist).
 - **Decoration**: item frames, paintings, signs, banners — all paintable with the existing procedural pipeline.
-- **Combat/progression**: armor for the player, enchanting-lite, hunger-tuned regen, more hostile variety.
+- **Combat/progression**: enchanting-lite, hunger-tuned regen, more hostile variety (player armor now exists).
+- **Lava + buckets**: a lava fluid reusing the water automaton, lava bucket, water+lava → stone/obsidian.
 - **UX**: crafting recipe book/search, achievements UI polish (`Advancements.ts` exists), controller/touch input.
 - **Tech debt**: `EntityManager.ts` (2.1k lines) and `main.ts` (1.2k) are large — consider splitting mob definitions and the game-state machine into their own modules when next touching them.
