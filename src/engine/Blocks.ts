@@ -140,6 +140,8 @@ export enum I {
   DIAMOND_CHEST = 171,
   DIAMOND_LEGS = 172,
   DIAMOND_BOOTS = 173,
+  BUCKET = 174,
+  WATER_BUCKET = 175,
 }
 
 /** Wearable-armor slot index: 0 head, 1 chest, 2 legs, 3 feet. */
@@ -589,6 +591,9 @@ armorDef(I.DIAMOND_CHEST, 'diamond_chestplate', 'Diamond Chestplate', 'diamond_c
 armorDef(I.DIAMOND_LEGS, 'diamond_leggings', 'Diamond Leggings', 'diamond_legs', ARMOR_LEGS, 6, 495);
 armorDef(I.DIAMOND_BOOTS, 'diamond_boots', 'Diamond Boots', 'diamond_boots', ARMOR_FEET, 3, 429);
 
+itemDef({ id: I.BUCKET, name: 'bucket', label: 'Bucket', sprite: 'bucket', stack: 16 });
+itemDef({ id: I.WATER_BUCKET, name: 'water_bucket', label: 'Water Bucket', sprite: 'water_bucket', stack: 1 });
+
 export function def(id: number): Def {
   const d = DEFS.get(id);
   if (!d) throw new Error(`Unknown id ${id}`);
@@ -698,4 +703,5 @@ export const CREATIVE_ITEMS: number[] = [
   I.LEATHER_HELMET, I.LEATHER_CHEST, I.LEATHER_LEGS, I.LEATHER_BOOTS,
   I.IRON_HELMET, I.IRON_CHEST, I.IRON_LEGS, I.IRON_BOOTS,
   I.DIAMOND_HELMET, I.DIAMOND_CHEST, I.DIAMOND_LEGS, I.DIAMOND_BOOTS,
+  I.BUCKET, I.WATER_BUCKET,
 ];

@@ -248,6 +248,8 @@ export class Player {
     const wasOnGround = this.onGround;
     const res = moveEntity(world, this.pos, this.vel, dt, BOX, this.sneaking, wasOnGround);
     const inWaterNow = inWater(world, this.pos, BOX);
+    // touching water cancels accumulated fall distance (no fall damage into water)
+    if (inWaterNow) this.fallDist = 0;
     this.swimSoundT = Math.max(0, this.swimSoundT - dt);
     if (!wasInWater && inWaterNow) {
       this.deps.audio.play('splash');
@@ -256,12 +258,16 @@ export class Player {
       this.deps.audio.play('splash');
       this.swimSoundT = 0.85;
     }
-    // climb out of water against a wall
-    if (wasInWater && (res.hitX || res.hitZ) && space) this.vel.y = Math.max(this.vel.y, 4.5);
+    // climb out of water: swimming into a 1-block ledge hops you up onto it (so you
+    // don't get stuck bobbing), and holding jump against any wall pushes upward.
+    if (wasInWater && (res.hitX || res.hitZ)) {
+      if (this.canStepUp(world, wx, wz)) this.vel.y = Math.max(this.vel.y, JUMP_VELOCITY);
+      else if (space) this.vel.y = Math.max(this.vel.y, 5.0);
+    }
     this.onGround = res.onGround;
 
     // fall damage + landing dust on hard impacts
-    if (!this.flying && !wasInWater) {
+    if (!this.flying && !wasInWater && !inWaterNow) {
       if (this.vel.y < 0) this.fallDist += -this.vel.y * dt;
       if (this.onGround && this.fallDist > 0) {
         if (this.fallDist > 2.5) {
@@ -343,6 +349,21 @@ export class Player {
 
   private sneakKeyDown(): boolean {
     return this.deps.input.down('ShiftLeft') || this.deps.input.down('ShiftRight');
+  }
+
+  /** Is there a single-block ledge in the wish direction we can hop onto? */
+  private canStepUp(world: World, wx: number, wz: number): boolean {
+    if (Math.hypot(wx, wz) < 0.1) return false;
+    const solid = (id: number): boolean =>
+      id !== B.AIR && id !== B.WATER && hasDef(id) && def(id).solid;
+    const hw = BOX.w / 2;
+    // sample the cell just ahead on the dominant axis at foot level
+    const fx = Math.floor(this.pos.x + (Math.abs(wx) > Math.abs(wz) ? Math.sign(wx) * (hw + 0.3) : 0));
+    const fz = Math.floor(this.pos.z + (Math.abs(wz) >= Math.abs(wx) ? Math.sign(wz) * (hw + 0.3) : 0));
+    const feetY = Math.floor(this.pos.y + 0.1);
+    return solid(world.getBlock(fx, feetY, fz)) &&
+      !solid(world.getBlock(fx, feetY + 1, fz)) &&
+      !solid(world.getBlock(fx, feetY + 2, fz));
   }
 
   // --- horse riding ----------------------------------------------------------
@@ -630,6 +651,63 @@ export class Player {
     if (changed) this.inventory.onChange();
   }
 
+  /** Replace one held bucket with its filled/empty counterpart. */
+  private swapHeldBucket(toId: number): void {
+    if (this.mode === 'creative') return; // creative keeps an endless supply
+    const sel = this.inventory.selected;
+    const s = this.inventory.slots[sel];
+    if (!s) return;
+    if (s.count <= 1) {
+      this.inventory.slots[sel] = { id: toId, count: 1 };
+    } else {
+      s.count--;
+      const left = this.inventory.add(toId, 1);
+      if (left > 0) this.deps.entities.spawnDrop(this.pos.x, this.pos.y + 1, this.pos.z, toId, left);
+    }
+    this.inventory.onChange();
+  }
+
+  /** Empty bucket: scoop the first full water source along the view ray. */
+  private tryScoopWater(): boolean {
+    const world = this.deps.world;
+    const d = this.lookDir();
+    const ex = this.pos.x, ey = this.pos.y + this.eyeHeight(), ez = this.pos.z;
+    for (let t = 0; t <= 5; t += 0.1) {
+      const bx = Math.floor(ex + d.x * t), by = Math.floor(ey + d.y * t), bz = Math.floor(ez + d.z * t);
+      const id = world.getBlock(bx, by, bz);
+      if (id === B.WATER) {
+        if (world.waterLevel(bx, by, bz) !== 0) continue; // only full sources scoop
+        world.setBlock(bx, by, bz, B.AIR);
+        world.waterLevels.delete(`${bx},${by},${bz}`);
+        this.swapHeldBucket(I.WATER_BUCKET);
+        this.placeCooldown = 0.3;
+        this.deps.renderer.triggerSwing();
+        this.deps.audio.play('splash');
+        return true;
+      }
+      if (id !== B.AIR) return false; // hit something solid first
+    }
+    return false;
+  }
+
+  /** Water bucket: pour a source against the targeted face. */
+  private tryPlaceWater(): boolean {
+    if (!this.target) return false;
+    const world = this.deps.world;
+    const t = this.target;
+    const px = t.x + t.nx, py = t.y + t.ny, pz = t.z + t.nz;
+    const dst = world.getBlock(px, py, pz);
+    if (dst !== B.AIR && dst !== B.WATER) return false;
+    world.waterLevels.delete(`${px},${py},${pz}`); // absent = a permanent source
+    if (!world.setBlock(px, py, pz, B.WATER)) return false;
+    world.scheduleWater(px, py, pz);
+    this.swapHeldBucket(I.BUCKET);
+    this.placeCooldown = 0.3;
+    this.deps.renderer.triggerSwing();
+    this.deps.audio.play('splash');
+    return true;
+  }
+
   // --- right click: interact / eat / place ------------------------------------
 
   private updateRightClick(dt: number): void {
@@ -741,6 +819,10 @@ export class Player {
     this.eatT = 0;
 
     if (this.placeCooldown > 0) return;
+
+    // bucket: scoop a water source (empty) or pour a source (full)
+    if (held?.id === I.BUCKET && this.tryScoopWater()) return;
+    if (held?.id === I.WATER_BUCKET && this.tryPlaceWater()) return;
 
     // interactive blocks
     if (this.target && !this.sneaking) {

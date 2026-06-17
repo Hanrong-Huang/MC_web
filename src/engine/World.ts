@@ -111,6 +111,9 @@ export class World {
       if (lz === 15) this.markDirty(cx, cz + 1);
     }
     this.onBlockChanged(wx, wy, wz, oldId, id);
+    // water flow: re-check this cell + neighbors when the edit exposes air or
+    // touches water (breaking a block under/next to water makes it flow in)
+    if (id === B.AIR || id === B.WATER || oldId === B.WATER) this.scheduleAround(wx, wy, wz);
     return true;
   }
 
@@ -238,6 +241,106 @@ export class World {
     if (!st) return false;
     const swing = st.swing ?? (st.open ? 1 : 0);
     return swing < 0.5;
+  }
+
+  // --- flowing water ---------------------------------------------------------
+  // Levels: 0 = source (or fed from directly above), 1..7 = flowing (7 = thinnest,
+  // farthest from a source). Generated ocean water is absent from the map and so
+  // reads as a source. Flowing cells we create are tracked here and recede when
+  // they lose their connection back to a source.
+  waterLevels = new Map<string, number>();
+  private waterQueue: string[] = [];
+  private waterQueued = new Set<string>();
+  private static readonly MAX_WATER_LEVEL = 7;
+
+  /** Queue a cell for a water-flow re-evaluation on the next water tick. */
+  scheduleWater(x: number, y: number, z: number): void {
+    if (y < 0 || y >= CY) return;
+    const key = `${x},${y},${z}`;
+    if (this.waterQueued.has(key)) return;
+    this.waterQueued.add(key);
+    this.waterQueue.push(key);
+  }
+
+  private scheduleAround(x: number, y: number, z: number): void {
+    this.scheduleWater(x, y, z);
+    this.scheduleWater(x, y - 1, z); this.scheduleWater(x, y + 1, z);
+    this.scheduleWater(x + 1, y, z); this.scheduleWater(x - 1, y, z);
+    this.scheduleWater(x, y, z + 1); this.scheduleWater(x, y, z - 1);
+  }
+
+  /** Water level at a cell (0 = source/fed-from-above). Assumes water present. */
+  waterLevel(x: number, y: number, z: number): number {
+    if (this.getBlock(x, y + 1, z) === B.WATER) return 0; // fed from the column above
+    return this.waterLevels.get(`${x},${y},${z}`) ?? 0; // absent = generated/placed source
+  }
+
+  /** Advance queued water cells with a per-tick op budget (rest carries over). */
+  tickWater(maxOps = 800): void {
+    let ops = 0;
+    while (this.waterQueue.length && ops < maxOps) {
+      const key = this.waterQueue.shift()!;
+      this.waterQueued.delete(key);
+      const c = key.split(',');
+      this.updateWaterCell(+c[0], +c[1], +c[2]);
+      ops++;
+    }
+  }
+
+  /**
+   * Re-derive one cell's water level purely from its neighbours (a "pull"
+   * automaton): a permanent source or a cell fed from above stays at 0; any
+   * other cell takes (best feeding neighbour + 1), or empties if nothing feeds
+   * it. This converges cleanly for both spreading and receding.
+   */
+  private updateWaterCell(x: number, y: number, z: number): void {
+    const key = `${x},${y},${z}`;
+    const id = this.getBlock(x, y, z);
+    const isWater = id === B.WATER;
+    const permanent = isWater && !this.waterLevels.has(key); // generated ocean / bucket source
+
+    let target: number;
+    if (permanent || this.getBlock(x, y + 1, z) === B.WATER) {
+      target = 0;
+    } else {
+      target = 8; // 8 = "no water here"
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + dx, nz = z + dz;
+        if (this.getBlock(nx, y, nz) !== B.WATER) continue;
+        // a neighbour draining straight down (and not a source) can't feed sideways
+        if (this.getBlock(nx, y - 1, nz) === B.AIR && this.waterLevels.has(`${nx},${y},${nz}`)) continue;
+        target = Math.min(target, this.waterLevel(nx, y, nz) + 1);
+      }
+    }
+
+    if (!permanent) {
+      if (target > World.MAX_WATER_LEVEL) {
+        if (isWater && this.setBlock(x, y, z, B.AIR)) {
+          this.waterLevels.delete(key);
+          this.scheduleAround(x, y, z);
+        }
+        return;
+      }
+      if (!isWater) {
+        if (!this.setBlock(x, y, z, B.WATER)) return;
+        this.waterLevels.set(key, target);
+        this.scheduleAround(x, y, z);
+      } else if (this.waterLevels.get(key) !== target) {
+        this.waterLevels.set(key, target);
+        this.scheduleAround(x, y, z);
+      }
+    }
+
+    // propagate: fall straight down if possible, else spread to flat neighbours
+    if (this.getBlock(x, y - 1, z) === B.AIR) {
+      this.scheduleWater(x, y - 1, z);
+      return;
+    }
+    if (target < World.MAX_WATER_LEVEL) {
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        if (this.getBlock(x + dx, y, z + dz) === B.AIR) this.scheduleWater(x + dx, y, z + dz);
+      }
+    }
   }
 
   markDirty(cx: number, cz: number): void {

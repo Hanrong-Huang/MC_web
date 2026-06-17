@@ -899,7 +899,47 @@ const BOOTS_MAP = [
   '................',
 ];
 
+const BUCKETC = { O: '#3a3a3a', M: '#b8b8b8', m: '#8c8c8c', W: '#3a6df0', w: '#2a55c8' };
+const BUCKET_MAP = [
+  '................',
+  '..OOOOOOOOOO....',
+  '..OMMMMMMMMO....',
+  '...OMMMMMMO.....',
+  '...OMmMMMMO.....',
+  '...OMMMMMMO.....',
+  '...OMMMMMMO.....',
+  '...OMMMMMMO.....',
+  '....OMMMMO......',
+  '....OOOOOO......',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+const WATER_BUCKET_MAP = [
+  '................',
+  '..OOOOOOOOOO....',
+  '..OWWWWWWWWO....',
+  '...OWWWWWWO.....',
+  '...OWwWWWWO.....',
+  '...OWWWWWWO.....',
+  '...OMMMMMMO.....',
+  '...OMMMMMMO.....',
+  '....OMMMMO......',
+  '....OOOOOO......',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
 const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
+  bucket: (c) => pixmap(c, 0, 0, BUCKET_MAP, BUCKETC),
+  water_bucket: (c) => pixmap(c, 0, 0, WATER_BUCKET_MAP, BUCKETC),
   leather_helmet: (c) => pixmap(c, 0, 0, HELMET_MAP, LEATHERAC),
   leather_chest: (c) => pixmap(c, 0, 0, CHEST_MAP, LEATHERAC),
   leather_legs: (c) => pixmap(c, 0, 0, LEGS_MAP, LEATHERAC),

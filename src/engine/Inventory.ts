@@ -208,6 +208,8 @@ const RECIPES: Recipe[] = [
   { shape: [[0, FE, 0], [FE, FE, FE], [0, FE, 0]], out: I.COMPASS, n: 1 },
   // clock: gold ring with an iron core (redstone stand-in for the dial)
   { shape: [[0, AU, 0], [AU, FE, AU], [0, AU, 0]], out: I.CLOCK, n: 1 },
+  // bucket: three iron in a V
+  { shape: [[FE, 0, FE], [0, FE, 0]], out: I.BUCKET, n: 1 },
   // saddle: leather seat with iron buckles
   { shape: [[LE, LE, LE], [FE, 0, FE]], out: I.SADDLE, n: 1 },
   // iron horse armor: iron barding around a leather lining

@@ -44,6 +44,7 @@ class Game {
   private tradeVillager: Entity | null = null;
   private dayTime = 0.1; // mid-morning, fully lit
   private tickAcc = 0;
+  private waterTickAcc = 0;
   private elapsed = 0;
   private lastFrame = 0;
   private fps = 60;
@@ -171,6 +172,9 @@ class Game {
       }
       for (const [k, v] of Object.entries(save.torches ?? {})) {
         this.world.torchFacings.set(k, v as number);
+      }
+      for (const [k, v] of Object.entries(save.water ?? {})) {
+        this.world.waterLevels.set(k, v as number);
       }
     } else {
       this.player.mode = fresh!.mode;
@@ -631,6 +635,8 @@ class Game {
     }
     const torchRec: NonNullable<SaveState['torches']> = {};
     for (const [k, v] of this.world.torchFacings) torchRec[k] = v;
+    const waterRec: NonNullable<SaveState['water']> = {};
+    for (const [k, v] of this.world.waterLevels) waterRec[k] = v;
     return {
       version: SAVE_VERSION,
       seed: this.world.seed,
@@ -641,6 +647,7 @@ class Game {
       blockEntities: beRec,
       doors: doorRec,
       torches: torchRec,
+      water: waterRec,
       environment: { dayTime: this.dayTime },
       advancements: this.adv.serialize(),
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
@@ -880,6 +887,8 @@ class Game {
     }
 
     this.randomTicks();
+    // flowing water settles at ~5 Hz (every 4th logic tick), MC-style
+    if (++this.waterTickAcc >= 4) { this.waterTickAcc = 0; this.world.tickWater(); }
   }
 
   /** MC-style random ticks at the surface: saplings grow, wheat advances,
