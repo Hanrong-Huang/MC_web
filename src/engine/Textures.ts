@@ -822,7 +822,96 @@ const SWORD_MAP = [
   '................',
 ];
 
+// Armor: O = outline, M = main metal/leather, m = shade
+const LEATHERAC = { O: '#2a1810', M: '#7a4a28', m: '#5d3820' };
+const IRONAC = { O: '#3a3a3a', M: '#cacaca', m: '#9a9a9a' };
+const DIAMONDAC = { O: '#1d4a47', M: '#5be0d4', m: '#3fbdb4' };
+const HELMET_MAP = [
+  '................',
+  '................',
+  '.....OOOOOO.....',
+  '...OOMMMMMMOO...',
+  '..OMMMMMMMMMMO..',
+  '..OMMMMMMMMMMO..',
+  '..OMmMMMMMMmMO..',
+  '..OMMMMMMMMMMO..',
+  '..OMMOOOOOOMMO..',
+  '..OMMO....OMMO..',
+  '..OOO......OOO..',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+const CHEST_MAP = [
+  '................',
+  '...OO......OO...',
+  '..OMMMM..MMMMO..',
+  '..OMMMMMMMMMMO..',
+  '..OMMMMMMMMMMO..',
+  '..OMmMMMMMMmMO..',
+  '..OMMMMMMMMMMO..',
+  '..OMMMMMMMMMMO..',
+  '..OMMMMMMMMMMO..',
+  '..OMMMMMMMMMMO..',
+  '..OMMMMMMMMMMO..',
+  '..OOMMMMMMMMOO..',
+  '...OOOOOOOOOO...',
+  '................',
+  '................',
+  '................',
+];
+const LEGS_MAP = [
+  '................',
+  '................',
+  '..OOOOOOOOOOOO..',
+  '..OMMMMMMMMMMO..',
+  '..OMmMMMMMMmMO..',
+  '..OMMMO..OMMMO..',
+  '..OMMMO..OMMMO..',
+  '..OMMMO..OMMMO..',
+  '..OMMMO..OMMMO..',
+  '..OMMMO..OMMMO..',
+  '..OMMMO..OMMMO..',
+  '..OMMMO..OMMMO..',
+  '..OOOOO..OOOOO..',
+  '................',
+  '................',
+  '................',
+];
+const BOOTS_MAP = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '..OOO....OOO....',
+  '..OMO....OMO....',
+  '..OMO....OMO....',
+  '..OMOOO..OMOOO..',
+  '..OMMMO..OMMMO..',
+  '..OOOOO..OOOOO..',
+  '................',
+  '................',
+];
+
 const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
+  leather_helmet: (c) => pixmap(c, 0, 0, HELMET_MAP, LEATHERAC),
+  leather_chest: (c) => pixmap(c, 0, 0, CHEST_MAP, LEATHERAC),
+  leather_legs: (c) => pixmap(c, 0, 0, LEGS_MAP, LEATHERAC),
+  leather_boots: (c) => pixmap(c, 0, 0, BOOTS_MAP, LEATHERAC),
+  iron_helmet: (c) => pixmap(c, 0, 0, HELMET_MAP, IRONAC),
+  iron_chest: (c) => pixmap(c, 0, 0, CHEST_MAP, IRONAC),
+  iron_legs: (c) => pixmap(c, 0, 0, LEGS_MAP, IRONAC),
+  iron_boots: (c) => pixmap(c, 0, 0, BOOTS_MAP, IRONAC),
+  diamond_helmet: (c) => pixmap(c, 0, 0, HELMET_MAP, DIAMONDAC),
+  diamond_chest: (c) => pixmap(c, 0, 0, CHEST_MAP, DIAMONDAC),
+  diamond_legs: (c) => pixmap(c, 0, 0, LEGS_MAP, DIAMONDAC),
+  diamond_boots: (c) => pixmap(c, 0, 0, BOOTS_MAP, DIAMONDAC),
   stick: (c) => pixmap(c, 0, 0, [
     '................', '................', '..........OO....', '.........OHhO...',
     '........OHhO....', '.......OHhO.....', '......OHhO......', '.....OHhO.......',
@@ -1137,6 +1226,31 @@ export function drawHeart(kind: 'full' | 'half' | 'empty'): HTMLCanvasElement {
     pixmap(hctx, 0, 0, HEART_MAP, empty);
     ctx.clearRect(4, 0, 4, 7);
     ctx.drawImage(h, 4, 0, 4, 7, 4, 0, 4, 7);
+  }
+  return c;
+}
+
+const ARMOR_ICON_MAP = [
+  'OO.....OO',
+  'OMOOOOOMO',
+  'OMMMMMMMO',
+  'OMMMMMMMO',
+  '.OMMMMMO.',
+  '.OMMMMMO.',
+  '.OMMMMMO.',
+  '..OMMMO..',
+  '...OOO...',
+];
+export function drawArmor(kind: 'full' | 'half' | 'empty'): HTMLCanvasElement {
+  const [c, ctx] = makeCanvas(9, 9);
+  const full = { O: '#0a0a14', M: '#dadae8', m: '#9a9ab0' };
+  const empty = { O: '#0a0a14', M: '#23232e', m: '#191922' };
+  pixmap(ctx, 0, 0, ARMOR_ICON_MAP, kind === 'empty' ? empty : full);
+  if (kind === 'half') {
+    const [h, hctx] = makeCanvas(9, 9);
+    pixmap(hctx, 0, 0, ARMOR_ICON_MAP, empty);
+    ctx.clearRect(5, 0, 4, 9);
+    ctx.drawImage(h, 5, 0, 4, 9, 5, 0, 4, 9);
   }
   return c;
 }

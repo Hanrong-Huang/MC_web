@@ -11,10 +11,19 @@ export const INV_SIZE = 36; // 9 hotbar + 27 main
 
 export class Inventory {
   slots: Slot[] = new Array(INV_SIZE).fill(null);
+  /** worn armor by slot: 0 head, 1 chest, 2 legs, 3 feet */
+  armor: Slot[] = new Array(4).fill(null);
   selected = 0;
   onChange: () => void = () => {};
 
   getSelected(): Slot { return this.slots[this.selected]; }
+
+  /** Total armor defense points across worn pieces (2 points = one armor icon). */
+  armorPoints(): number {
+    let n = 0;
+    for (const s of this.armor) if (s) n += def(s.id).armor?.points ?? 0;
+    return n;
+  }
 
   /** Add items; returns the count that did not fit. */
   add(id: number, count: number): number {
@@ -68,20 +77,28 @@ export class Inventory {
     return n;
   }
 
-  serialize(): { slots: Slot[]; selected: number } {
+  serialize(): { slots: Slot[]; selected: number; armor?: Slot[] } {
     return {
       slots: this.slots.map((s) => (s ? { ...s } : null)),
+      armor: this.armor.map((s) => (s ? { ...s } : null)),
       selected: this.selected,
     };
   }
 
-  load(data: { slots: Slot[]; selected: number } | undefined): void {
+  load(data: { slots: Slot[]; selected: number; armor?: Slot[] } | undefined): void {
     if (!data) return;
     this.slots = new Array(INV_SIZE).fill(null);
     for (let i = 0; i < Math.min(INV_SIZE, data.slots.length); i++) {
       const s = data.slots[i];
       if (s && hasDef(s.id) && s.count > 0) {
         this.slots[i] = { id: s.id, count: s.count, ...(s.dur !== undefined ? { dur: s.dur } : {}) };
+      }
+    }
+    this.armor = new Array(4).fill(null);
+    for (let i = 0; i < 4 && data.armor && i < data.armor.length; i++) {
+      const s = data.armor[i];
+      if (s && hasDef(s.id) && def(s.id).armor) {
+        this.armor[i] = { id: s.id, count: 1, ...(s.dur !== undefined ? { dur: s.dur } : {}) };
       }
     }
     this.selected = Math.max(0, Math.min(8, data.selected | 0));
@@ -136,6 +153,16 @@ function toolRecipes(mat: number, pick: number, axe: number, shovel: number, swo
   ];
 }
 
+function armorRecipes(mat: number, helmet: number, chest: number, legs: number, boots: number): Recipe[] {
+  const M = mat;
+  return [
+    { shape: [[M, M, M], [M, 0, M]], out: helmet, n: 1 },
+    { shape: [[M, 0, M], [M, M, M], [M, M, M]], out: chest, n: 1 },
+    { shape: [[M, M, M], [M, 0, M], [M, 0, M]], out: legs, n: 1 },
+    { shape: [[M, 0, M], [M, 0, M]], out: boots, n: 1 },
+  ];
+}
+
 const RECIPES: Recipe[] = [
   { shape: [[B.LOG]], out: B.PLANKS, n: 4 },
   { shape: [[B.BIRCH_LOG]], out: B.PLANKS, n: 4 },
@@ -148,6 +175,9 @@ const RECIPES: Recipe[] = [
   ...toolRecipes(C, I.STONE_PICK, I.STONE_AXE, I.STONE_SHOVEL, I.STONE_SWORD),
   ...toolRecipes(FE, I.IRON_PICK, I.IRON_AXE, I.IRON_SHOVEL, I.IRON_SWORD),
   ...toolRecipes(DI, I.DIAMOND_PICK, I.DIAMOND_AXE, I.DIAMOND_SHOVEL, I.DIAMOND_SWORD),
+  ...armorRecipes(LE, I.LEATHER_HELMET, I.LEATHER_CHEST, I.LEATHER_LEGS, I.LEATHER_BOOTS),
+  ...armorRecipes(FE, I.IRON_HELMET, I.IRON_CHEST, I.IRON_LEGS, I.IRON_BOOTS),
+  ...armorRecipes(DI, I.DIAMOND_HELMET, I.DIAMOND_CHEST, I.DIAMOND_LEGS, I.DIAMOND_BOOTS),
   // light + utility
   { shape: [[I.COAL], [S]], out: B.TORCH, n: 4 },
   { shape: [[G, SA, G], [SA, G, SA], [G, SA, G]], out: B.TNT, n: 1 },

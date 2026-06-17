@@ -3,7 +3,7 @@
 // screens (player 2x2 crafting, 3x3 crafting table, furnace, creative panel)
 // with full cursor-stack slot interactions.
 
-import { Atlas, drawHeart, drawShank, drawBubble } from '../engine/Textures';
+import { Atlas, drawHeart, drawShank, drawBubble, drawArmor } from '../engine/Textures';
 import { Inventory, Slot, matchRecipe, FurnaceState, ChestState, SMELT_TIME, allRecipes, RecipeView } from '../engine/Inventory';
 import { def, CREATIVE_ITEMS, I } from '../engine/Blocks';
 import { SaveSummary, SlotData } from '../engine/Persistence';
@@ -65,6 +65,7 @@ export class HUD {
   private menu: HTMLElement;
   private hud: HTMLElement;
   private hotbarEl: HTMLElement;
+  private armorEl: HTMLElement;
   private heartsEl: HTMLElement;
   private hungerEl: HTMLElement;
   private airEl!: HTMLElement;
@@ -115,6 +116,7 @@ export class HUD {
     const cross = el('div', '', this.hud); cross.id = 'crosshair';
     this.hotbarEl = el('div', '', this.hud); this.hotbarEl.id = 'hotbar';
     this.statsEl = el('div', '', this.hud); this.statsEl.id = 'stats';
+    this.armorEl = el('div', '', this.statsEl); this.armorEl.id = 'armor-bar';
     this.heartsEl = el('div', '', this.statsEl); this.heartsEl.id = 'hearts';
     this.hungerEl = el('div', '', this.statsEl); this.hungerEl.id = 'hunger';
     this.airEl = el('div', '', this.statsEl); this.airEl.id = 'air';
@@ -283,7 +285,7 @@ export class HUD {
     }
   }
 
-  updateStats(hp: number, hunger: number, air: number, mode: GameMode): void {
+  updateStats(hp: number, hunger: number, air: number, mode: GameMode, armor = 0): void {
     if (mode === 'creative') {
       this.statsEl.style.visibility = 'hidden';
       this.lowhpEl.classList.remove('on');
@@ -294,12 +296,22 @@ export class HUD {
     // low-health red pulse + starving hunger shake
     this.lowhpEl.classList.toggle('on', hp > 0 && hp <= 6);
     this.hungerEl.classList.toggle('shake', hunger > 0 && hunger <= 6);
-    const key = `${hp}|${hunger}|${air}`;
+    const key = `${hp}|${hunger}|${air}|${armor}`;
     if (key === this.lastHearts) return;
     this.lastHearts = key;
+    this.armorEl.innerHTML = '';
     this.heartsEl.innerHTML = '';
     this.hungerEl.innerHTML = '';
     this.airEl.innerHTML = '';
+    // armor bar (only shown when wearing armor); each icon = 2 defense points
+    if (armor > 0) {
+      for (let i = 0; i < 10; i++) {
+        const av = armor - i * 2;
+        const icon = drawArmor(av >= 2 ? 'full' : av === 1 ? 'half' : 'empty');
+        icon.className = 'stat-icon';
+        this.armorEl.appendChild(icon);
+      }
+    }
     for (let i = 0; i < 10; i++) {
       const hv = hp - i * 2;
       const heart = drawHeart(hv >= 2 ? 'full' : hv === 1 ? 'half' : 'empty');
@@ -717,6 +729,22 @@ export class HUD {
     }
   }
 
+  /** Equip/unequip via the inventory armor column; only the matching piece fits. */
+  private clickArmorSlot(inv: Inventory, i: number, btn: number): void {
+    void btn;
+    const cur = inv.armor[i];
+    if (this.cursor) {
+      const a = def(this.cursor.id).armor;
+      if (!a || a.slot !== i || this.cursor.count !== 1) return;
+      inv.armor[i] = { id: this.cursor.id, count: 1, ...(this.cursor.dur !== undefined ? { dur: this.cursor.dur } : {}) };
+      this.cursor = cur ?? null;
+    } else if (cur) {
+      this.cursor = cur;
+      inv.armor[i] = null;
+    }
+    inv.onChange();
+  }
+
   private slotEl(parent: HTMLElement, item: Slot, onClick: (button: number) => void): void {
     const s = el('div', 'mc-slot', parent);
     if (item) {
@@ -904,6 +932,16 @@ export class HUD {
     // --- crafting section ---------------------------------------------------
     if (view.kind === 'inventory' || view.kind === 'table') {
       const craftArea = el('div', 'craft-area', panel);
+      // worn-armor column (player inventory only): click to equip/unequip
+      if (view.kind === 'inventory') {
+        const armorCol = el('div', 'ctr-section armor-col', craftArea);
+        for (let i = 0; i < 4; i++) {
+          this.slotEl(armorCol, inv.armor[i], (btn) => {
+            this.clickArmorSlot(inv, i, btn);
+            rerender();
+          });
+        }
+      }
       const sec = el('div', 'ctr-section ctr-flex craft-main', craftArea);
       const grid = el('div', 'ctr-grid', sec);
       grid.style.gridTemplateColumns = `repeat(${view.craftW}, 48px)`;

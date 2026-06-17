@@ -128,7 +128,22 @@ export enum I {
   LEATHER = 159,
   SADDLE = 160,
   HORSE_ARMOR = 161,
+  LEATHER_HELMET = 162,
+  LEATHER_CHEST = 163,
+  LEATHER_LEGS = 164,
+  LEATHER_BOOTS = 165,
+  IRON_HELMET = 166,
+  IRON_CHEST = 167,
+  IRON_LEGS = 168,
+  IRON_BOOTS = 169,
+  DIAMOND_HELMET = 170,
+  DIAMOND_CHEST = 171,
+  DIAMOND_LEGS = 172,
+  DIAMOND_BOOTS = 173,
 }
+
+/** Wearable-armor slot index: 0 head, 1 chest, 2 legs, 3 feet. */
+export const ARMOR_HEAD = 0, ARMOR_CHEST = 1, ARMOR_LEGS = 2, ARMOR_FEET = 3;
 
 /** extra block ids beyond the base range */
 export enum B2 {
@@ -158,6 +173,8 @@ export interface Def {
   toolInfo?: { kind: ToolKind; tier: number; damage: number };
   durability?: number;   // for tools and bows
   bow?: boolean;
+  /** wearable armor: slot index (0 head … 3 feet) + defense points (2 = one armor icon) */
+  armor?: { slot: number; points: number };
   food?: number;         // hunger points restored
   fuel?: number;         // burn seconds in a furnace
   stack: number;
@@ -555,6 +572,23 @@ itemDef({ id: I.COOKED_FISH, name: 'cooked_cod', label: 'Cooked Fish', sprite: '
 itemDef({ id: I.COMPASS, name: 'compass', label: 'Compass', sprite: 'compass', stack: 1 });
 itemDef({ id: I.CLOCK, name: 'clock', label: 'Clock', sprite: 'clock', stack: 1 });
 
+// wearable armor — points are MC values (2 points = one armor icon)
+function armorDef(id: number, name: string, label: string, sprite: string, slot: number, points: number, durability: number): void {
+  itemDef({ id, name, label, sprite, stack: 1, durability, armor: { slot, points } });
+}
+armorDef(I.LEATHER_HELMET, 'leather_helmet', 'Leather Cap', 'leather_helmet', ARMOR_HEAD, 1, 55);
+armorDef(I.LEATHER_CHEST, 'leather_chestplate', 'Leather Tunic', 'leather_chest', ARMOR_CHEST, 3, 80);
+armorDef(I.LEATHER_LEGS, 'leather_leggings', 'Leather Pants', 'leather_legs', ARMOR_LEGS, 2, 75);
+armorDef(I.LEATHER_BOOTS, 'leather_boots', 'Leather Boots', 'leather_boots', ARMOR_FEET, 1, 65);
+armorDef(I.IRON_HELMET, 'iron_helmet', 'Iron Helmet', 'iron_helmet', ARMOR_HEAD, 2, 165);
+armorDef(I.IRON_CHEST, 'iron_chestplate', 'Iron Chestplate', 'iron_chest', ARMOR_CHEST, 6, 240);
+armorDef(I.IRON_LEGS, 'iron_leggings', 'Iron Leggings', 'iron_legs', ARMOR_LEGS, 5, 225);
+armorDef(I.IRON_BOOTS, 'iron_boots', 'Iron Boots', 'iron_boots', ARMOR_FEET, 2, 195);
+armorDef(I.DIAMOND_HELMET, 'diamond_helmet', 'Diamond Helmet', 'diamond_helmet', ARMOR_HEAD, 3, 363);
+armorDef(I.DIAMOND_CHEST, 'diamond_chestplate', 'Diamond Chestplate', 'diamond_chest', ARMOR_CHEST, 8, 528);
+armorDef(I.DIAMOND_LEGS, 'diamond_leggings', 'Diamond Leggings', 'diamond_legs', ARMOR_LEGS, 6, 495);
+armorDef(I.DIAMOND_BOOTS, 'diamond_boots', 'Diamond Boots', 'diamond_boots', ARMOR_FEET, 3, 429);
+
 export function def(id: number): Def {
   const d = DEFS.get(id);
   if (!d) throw new Error(`Unknown id ${id}`);
@@ -661,4 +695,7 @@ export const CREATIVE_ITEMS: number[] = [
   I.HOE, I.WOOD_DOOR,
   I.BONE, I.BONE_MEAL, I.EMERALD, I.FISHING_ROD, I.RAW_FISH, I.COOKED_FISH, I.COMPASS, I.CLOCK,
   I.LEATHER, I.SADDLE, I.HORSE_ARMOR,
+  I.LEATHER_HELMET, I.LEATHER_CHEST, I.LEATHER_LEGS, I.LEATHER_BOOTS,
+  I.IRON_HELMET, I.IRON_CHEST, I.IRON_LEGS, I.IRON_BOOTS,
+  I.DIAMOND_HELMET, I.DIAMOND_CHEST, I.DIAMOND_LEGS, I.DIAMOND_BOOTS,
 ];

@@ -117,6 +117,11 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 }
 #hearts, #hunger { display: flex; gap: 1px; }
 #hunger { flex-direction: row-reverse; }
+#armor-bar {
+  display: flex; gap: 1px;
+  position: absolute; left: 0; top: -19px;
+}
+.armor-col { display: flex; flex-direction: column; gap: 4px; margin-right: 8px; }
 #air {
   display: flex; gap: 1px; flex-direction: row-reverse;
   position: absolute; right: 0; top: -19px;

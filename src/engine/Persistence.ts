@@ -27,7 +27,7 @@ export interface SaveState {
     health: number; hunger: number;
     flying: boolean;
   };
-  inventory: { slots: MaybeSlot[]; selected: number };
+  inventory: { slots: MaybeSlot[]; selected: number; armor?: MaybeSlot[] };
   /** chunk key "cx,cz" -> RLE bytes */
   world: Record<string, Uint8Array>;
   blockEntities: Record<string, BlockEntitySave>;

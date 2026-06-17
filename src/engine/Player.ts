@@ -600,6 +600,36 @@ export class Player {
     this.inventory.onChange();
   }
 
+  /** Equip the held armor piece, swapping any currently-worn piece back to the slot. */
+  private equipArmor(): void {
+    const sel = this.inventory.selected;
+    const held = this.inventory.slots[sel];
+    const a = held ? def(held.id).armor : null;
+    if (!held || !a) return;
+    const prev = this.inventory.armor[a.slot];
+    this.inventory.armor[a.slot] = { id: held.id, count: 1, dur: held.dur };
+    if (this.mode !== 'creative') this.inventory.slots[sel] = prev ?? null;
+    this.placeCooldown = 0.35;
+    this.deps.renderer.triggerSwing();
+    this.deps.audio.play('level');
+    this.inventory.onChange();
+  }
+
+  /** Wear down each worn armor piece by one point; pieces snap at zero. */
+  private damageArmor(): void {
+    let changed = false;
+    for (let i = 0; i < this.inventory.armor.length; i++) {
+      const s = this.inventory.armor[i];
+      if (!s) continue;
+      const max = def(s.id).durability ?? 0;
+      if (!max) continue;
+      s.dur = (s.dur ?? max) - 1;
+      if (s.dur <= 0) { this.inventory.armor[i] = null; this.deps.audio.play('snap'); }
+      changed = true;
+    }
+    if (changed) this.inventory.onChange();
+  }
+
   // --- right click: interact / eat / place ------------------------------------
 
   private updateRightClick(dt: number): void {
@@ -682,6 +712,12 @@ export class Player {
           return;
         }
       }
+    }
+
+    // equip wearable armor onto the body (right-click swaps with the worn piece)
+    if (heldDef?.armor && this.placeCooldown <= 0) {
+      this.equipArmor();
+      return;
     }
 
     // eating
@@ -996,6 +1032,13 @@ export class Player {
     if (this.mode === 'creative' || this.dead) return;
     if (this.hurtCooldown > 0) return;
     this.hurtCooldown = 0.5;
+    // armor absorbs a share of the blow (MC: 4% per defense point, capped at 80%)
+    // and each worn piece loses a point of durability.
+    const ap = this.inventory.armorPoints();
+    if (ap > 0) {
+      amount = Math.max(0, Math.round(amount * (1 - Math.min(20, ap) * 0.04)));
+      this.damageArmor();
+    }
     this.hp = Math.max(0, this.hp - amount);
     this.deps.audio.play('hurt');
     document.getElementById('vignette')?.classList.remove('flash');

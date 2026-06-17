@@ -759,7 +759,7 @@ class Game {
     this.renderer.setBowCharge(Math.min(1, this.player.bowCharge / 0.9));
     this.renderer.updateChunkFades(dt);
     this.renderer.updateHeld(dt, this.player.isMoving());
-    this.hud.updateStats(this.player.hp, this.player.hunger, this.player.air, this.player.mode);
+    this.hud.updateStats(this.player.hp, this.player.hunger, this.player.air, this.player.mode, this.player.inventory.armorPoints());
     if (this.state === 'container' && this.container?.kind === 'furnace') this.hud.updateFurnace();
     // minimap redraw (throttled; block sampling is relatively expensive)
     this.minimapT -= dt;
