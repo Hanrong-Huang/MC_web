@@ -69,6 +69,8 @@ interface LimbSet {
   tail?: THREE.Object3D;
   /** group bobbed gently while idle (body breathing) */
   body?: THREE.Object3D;
+  /** ear groups (wolf, cat) for occasional twitches */
+  ears?: THREE.Object3D[];
 }
 
 interface MobStats {
@@ -950,16 +952,42 @@ export class EntityManager {
     if (e.limbs.arms) {
       for (const a of e.limbs.arms) a.rotation.x = -Math.PI / 2 + Math.sin(e.walkCycle * 0.5) * 0.1;
     }
-    if (e.limbs.head && (e.state === 'chase' || e.state === 'fuse' || e.kind === 'wolf' || e.kind === 'cat')) {
+    // Head look-tracking: hostiles in pursuit lock on; every other mob with a
+    // head glances at the player when they're close, then relaxes to neutral.
+    // Both pitch and yaw are eased so the motion looks alive, not snappy.
+    if (e.limbs.head) {
       const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
-      const dy = (p.pos.y + 1.6) - (e.pos.y + e.box.h * 0.9);
-      e.limbs.head.rotation.x = Math.atan2(dy, Math.hypot(dx, dz)) * 0.7;
+      const distH = Math.hypot(dx, dz);
+      const aggro = e.state === 'chase' || e.state === 'fuse';
+      const watch = aggro || (distH < 8 && e.state !== 'flee');
+      let tx = 0, ty = 0;
+      if (watch) {
+        const dy = (p.pos.y + 1.6) - (e.pos.y + e.box.h * 0.9);
+        tx = Math.atan2(dy, distH) * 0.7;
+        ty = Math.atan2(-dx, -dz) - e.yaw;
+        ty = Math.atan2(Math.sin(ty), Math.cos(ty));      // wrap to [-π,π]
+        ty = Math.max(-0.7, Math.min(0.7, ty));            // no head-spinning past the shoulder
+      }
+      const k = Math.min(1, (watch ? 6 : 3) * dt);
+      e.limbs.head.rotation.x += (tx - e.limbs.head.rotation.x) * k;
+      e.limbs.head.rotation.y += (ty - e.limbs.head.rotation.y) * k;
+    }
+    // sparse ear flicks for wolves/cats — small life-signs while idle
+    if (e.limbs.ears) {
+      const f = Math.sin(e.age * 2.3) * Math.sin(e.age * 0.71 + 1.3);
+      const tw = Math.max(0, f - 0.82) * 2.4;
+      for (const ear of e.limbs.ears) ear.rotation.x = -tw;
     }
     // tail sway: a happy tamed wolf wags fast; others drift gently + with stride
     if (e.limbs.tail) {
       let amp = 0.22, rate = 3.5;
       if (e.kind === 'wolf' && e.tamed) { amp = 0.6; rate = 14; }
       e.limbs.tail.rotation.y = Math.sin(e.age * rate) * amp + swing * 0.35;
+      // wolves hold the tail high when tamed/happy, low otherwise
+      if (e.kind === 'wolf') {
+        const raised = e.tamed ? -0.4 : 0.55;
+        e.limbs.tail.rotation.x += (raised - e.limbs.tail.rotation.x) * Math.min(1, 4 * dt);
+      }
     }
     // idle breathing: subtle body bob that fades out once moving
     if (e.limbs.body) {
@@ -1885,48 +1913,66 @@ export class EntityManager {
     }
 
   if (kind === 'wolf') {
-    const fur = this.skin('wolf', '#a8a8a8', '#8c8c8c');
-    const faceTex = this.skin('wolf_face', '#a8a8a8', '#8c8c8c', (ctx) => {
-      ctx.fillStyle = '#d85a2a'; ctx.fillRect(2, 2, 1, 1); ctx.fillRect(5, 2, 1, 1);
-      ctx.fillStyle = '#1a1a1a'; ctx.fillRect(3, 4, 2, 1);
+    const fur = this.skin('wolf', '#9a9a9a', '#818181');
+    const faceTex = this.skin('wolf_face', '#9a9a9a', '#818181', (ctx) => {
+      // dark brow over angled amber eyes + a black nose-bridge line — alert canine look
+      ctx.fillStyle = '#222'; ctx.fillRect(1, 2, 2, 1); ctx.fillRect(5, 2, 2, 1);
+      ctx.fillStyle = '#d8801f'; ctx.fillRect(2, 3, 1, 1); ctx.fillRect(5, 3, 1, 1);
+      ctx.fillStyle = '#181818'; ctx.fillRect(3, 4, 2, 1);
     });
     const bodyM = this.mat(fur, mats);
     const faceM = this.mat(faceTex, mats);
-    const whiteM = this.mat(this.skin('wolf_white', '#eceae4', '#dcd9d0'), mats);
-    const body = this.boxMesh(0.55, 0.42, 0.95, bodyM);
+    const whiteM = this.mat(this.skin('wolf_white', '#ece9e2', '#dbd7cd'), mats);
+    const noseM = this.mat(this.skin('wolf_nose', '#262626', '#1a1a1a'), mats);
+    // narrower, lower-slung body — wolves are lean, not chunky
+    const body = this.boxMesh(0.48, 0.42, 0.92, bodyM);
     body.position.set(0, 0.5, 0.05);
     // pale chest/underside — the classic two-tone wolf coat
-    const chest = this.boxMesh(0.5, 0.26, 0.5, whiteM);
-    chest.position.set(0, 0.42, -0.18);
+    const chest = this.boxMesh(0.44, 0.3, 0.46, whiteM);
+    chest.position.set(0, 0.4, -0.16);
     const head = new THREE.Group();
-    head.position.set(0, 0.55, -0.5);
-    head.add(this.boxMesh(0.36, 0.36, 0.36, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
-    // white snout reads instantly as a dog/wolf
-    const snout = this.boxMesh(0.18, 0.16, 0.16, [whiteM, whiteM, whiteM, whiteM, whiteM, faceM]);
-    snout.position.set(0, -0.07, -0.2);
+    head.position.set(0, 0.6, -0.5);
+    // boxy forward-set head, a touch wider than tall
+    head.add(this.boxMesh(0.38, 0.34, 0.32, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
+    // long pale muzzle — the single strongest "this is a canine" cue
+    const snout = this.boxMesh(0.2, 0.15, 0.24, [whiteM, whiteM, whiteM, whiteM, whiteM, faceM]);
+    snout.position.set(0, -0.08, -0.26);
     head.add(snout);
-    // upright pointed ears (angled outward)
-    const earL = this.boxMesh(0.09, 0.18, 0.06, bodyM);
-    earL.position.set(-0.11, 0.24, 0.02); earL.rotation.z = 0.2;
-    const earR = earL.clone(); earR.position.x = 0.11; earR.rotation.z = -0.2;
-    head.add(earL, earR);
+    // black nose tip on the end of the muzzle
+    const nose = this.boxMesh(0.1, 0.08, 0.05, noseM);
+    nose.position.set(0, -0.04, -0.4);
+    head.add(nose);
+    // short, forward, *tapered* triangular ears (base + smaller tip) so they read
+    // as pointed wolf ears instead of tall floppy rabbit ears
+    const ears: THREE.Object3D[] = [];
+    for (const sx of [-1, 1]) {
+      const ear = new THREE.Group();
+      ear.position.set(sx * 0.11, 0.17, -0.03);
+      ear.rotation.z = sx * -0.1;
+      const base = this.boxMesh(0.12, 0.1, 0.06, bodyM);
+      const tip = this.boxMesh(0.07, 0.08, 0.06, bodyM);
+      tip.position.y = 0.09;
+      ear.add(base, tip);
+      head.add(ear);
+      ears.push(ear);
+    }
     const legs = [
-      this.leg(0.14, 0.32, whiteM, -0.18, 0.32, -0.3),
-      this.leg(0.14, 0.32, whiteM, 0.18, 0.32, -0.3),
-      this.leg(0.14, 0.32, whiteM, 0.18, 0.32, 0.35),
-      this.leg(0.14, 0.32, whiteM, -0.18, 0.32, 0.35),
+      this.leg(0.14, 0.32, bodyM, -0.17, 0.32, -0.3),
+      this.leg(0.14, 0.32, bodyM, 0.17, 0.32, -0.3),
+      this.leg(0.14, 0.32, bodyM, 0.17, 0.32, 0.35),
+      this.leg(0.14, 0.32, bodyM, -0.17, 0.32, 0.35),
     ];
-    // tail pivots at its base so it can wag; pale tip
+    // bushy tail pivoting at its base so it can wag; pale tip
     const tail = new THREE.Group();
     tail.position.set(0, 0.56, 0.46);
-    const tailM = this.boxMesh(0.12, 0.12, 0.4, bodyM);
+    const tailM = this.boxMesh(0.15, 0.15, 0.4, bodyM);
     tailM.position.z = 0.2;
     const tailTip = this.boxMesh(0.13, 0.13, 0.14, whiteM);
-    tailTip.position.z = 0.4;
+    tailTip.position.z = 0.42;
     tail.add(tailM, tailTip);
-    tail.rotation.x = -0.5;
+    tail.rotation.x = 0.55; // droops down-and-back; a happy tamed wolf raises it (see animateMob)
     g.add(body, head, chest, tail, ...legs);
-    return { mesh: g, limbs: { legs, head, tail, body }, mats };
+    return { mesh: g, limbs: { legs, head, tail, body, ears }, mats };
   }
 
   if (kind === 'villager') {
@@ -2032,9 +2078,18 @@ export class EntityManager {
     const head = new THREE.Group();
     head.position.set(0, 0.44, -0.32);
     head.add(this.boxMesh(0.27, 0.25, 0.24, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
-    const earL = this.boxMesh(0.08, 0.1, 0.05, bodyM); earL.position.set(-0.08, 0.17, 0.02);
-    const earR = earL.clone(); earR.position.x = 0.08;
-    head.add(earL, earR);
+    // tall, tapered, forward-set ears — the unmistakable cat triangle
+    const ears: THREE.Object3D[] = [];
+    for (const sx of [-1, 1]) {
+      const ear = new THREE.Group();
+      ear.position.set(sx * 0.08, 0.13, -0.02);
+      const base = this.boxMesh(0.09, 0.07, 0.05, bodyM);
+      const tip = this.boxMesh(0.05, 0.06, 0.05, bodyM);
+      tip.position.y = 0.06;
+      ear.add(base, tip);
+      head.add(ear);
+      ears.push(ear);
+    }
 
     const legs = [
       this.leg(0.08, 0.3, legM, -0.1, 0.3, -0.18),
@@ -2052,7 +2107,7 @@ export class EntityManager {
     tail.rotation.x = 0.5;
 
     g.add(body, head, tail, ...legs);
-    return { mesh: g, limbs: { legs, head, tail, body }, mats };
+    return { mesh: g, limbs: { legs, head, tail, body, ears }, mats };
   }
 
   // phantom: a small flying mob with two angular wings

@@ -27,6 +27,8 @@ export class AudioEngine {
   private rainGain: GainNode | null = null;
   private rainFilter: BiquadFilterNode | null = null;
   private rainState: 'off' | 'rain' | 'thunder' = 'off';
+  // held so the reverb/delay send chain isn't garbage-collected mid-session
+  private musicFx: AudioNode[] = [];
 
   constructor() {
     try {
@@ -70,7 +72,28 @@ export class AudioEngine {
       this.sfx.connect(this.master);
       this.musicBus = this.ctx.createGain();
       this.musicBus.gain.value = this.settings.music ? 1 : 0;
+      // dry path
       this.musicBus.connect(this.master);
+      // Spacious reverb send — the single biggest factor in the airy C418 vibe.
+      // Impulse is procedurally generated decaying noise (no asset).
+      const reverb = this.ctx.createConvolver();
+      reverb.buffer = this.makeImpulse(3.0, 2.4);
+      const revGain = this.ctx.createGain();
+      revGain.gain.value = 0.28;
+      this.musicBus.connect(reverb).connect(revGain).connect(this.master);
+      // Soft feedback delay for the sparkle echoes; its output is also reverbed
+      // so trailing notes dissolve into the space rather than repeating dryly.
+      const delay = this.ctx.createDelay(1.0);
+      delay.delayTime.value = 0.4;
+      const fb = this.ctx.createGain();
+      fb.gain.value = 0.3;
+      const delayGain = this.ctx.createGain();
+      delayGain.gain.value = 0.22;
+      this.musicBus.connect(delay);
+      delay.connect(fb).connect(delay);
+      delay.connect(delayGain).connect(this.master);
+      delay.connect(reverb);
+      this.musicFx = [reverb, revGain, delay, fb, delayGain];
       const len = this.ctx.sampleRate;
       this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
       const data = this.noiseBuf.getChannelData(0);
@@ -444,16 +467,34 @@ export class AudioEngine {
       pent[(Math.random() * pent.length) | 0],
     ];
 
+    // arpeggio runs in alternating stretches so the piece breathes: a couple of
+    // flowing bars, then space. The 7th gives the wistful C418 jazz colour.
+    const seventh = isNight ? 10 : 11;
+    let arpRun = false;
     for (let bar = 0; bar < bars; bar++) {
       const tBar = t0 + bar * barLen;
       const chordRoot = root * Math.pow(2, progression[bar % progression.length] / 12);
-      // pad: root + third + fifth, swelling under everything
+      // pad: root + third + fifth (+ occasional 7th colour), swelling under everything
       this.padAt(tBar, chordRoot * 0.5, 0.045, barLen * 1.15);
       this.padAt(tBar, chordRoot * Math.pow(2, third / 12) * 0.5, 0.032, barLen * 1.15);
       this.padAt(tBar, chordRoot * Math.pow(2, 7 / 12) * 0.5, 0.028, barLen * 1.15);
+      if (Math.random() < 0.5) this.padAt(tBar, chordRoot * Math.pow(2, seventh / 12) * 0.5, 0.018, barLen * 1.05);
       // soft bass pulse — warm and low, MC-style drone
       this.pianoNote(tBar, chordRoot * 0.25, 0.05, 2.6);
       if (Math.random() < 0.36) this.pianoNote(tBar + barLen * 0.5, chordRoot * 0.5, 0.034, 2.0);
+      // flowing broken-chord arpeggio in roughly half the bars, panning gently L↔R
+      arpRun = bar === 0 ? Math.random() < 0.5 : (Math.random() < 0.72 ? arpRun : !arpRun);
+      if (arpRun) {
+        const arpDeg = [0, third, 7, 12, seventh, 12, 7, third];
+        const steps = isNight ? 6 : 8;
+        for (let i = 0; i < steps; i++) {
+          const deg = arpDeg[i % arpDeg.length];
+          const freq = chordRoot * Math.pow(2, deg / 12);
+          const when = tBar + (i / steps) * barLen + (Math.random() - 0.5) * 0.015;
+          const pan = Math.sin((i / steps) * Math.PI * 2) * 0.5;
+          this.arpNote(when, freq, 0.02, barLen / steps + 0.5, pan);
+        }
+      }
       // occasional high sparkle bell for the airy MC ambience
       if (bar % 2 === 1 && Math.random() < 0.3) {
         const deg = pent[(Math.random() * pent.length) | 0];
@@ -538,6 +579,44 @@ export class AudioEngine {
       osc.connect(filter);
       osc.start(when);
       osc.stop(when + dur + 0.05);
+    }
+  }
+
+  /** Procedural reverb impulse: stereo decaying noise. */
+  private makeImpulse(dur: number, decay: number): AudioBuffer {
+    const ctx = this.ctx!;
+    const len = Math.floor(ctx.sampleRate * dur);
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+    }
+    return buf;
+  }
+
+  /** Gentle plucked arpeggio voice with stereo placement — adds the flowing
+   *  broken-chord motion under C418-style pieces without crowding the melody. */
+  private arpNote(when: number, freq: number, vol: number, decay: number, pan: number): void {
+    if (!this.ctx || !this.musicBus) return;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(2600, when);
+    filter.frequency.exponentialRampToValueAtTime(800, when + decay);
+    filter.Q.value = 0.3;
+    const panner = this.ctx.createStereoPanner();
+    panner.pan.value = Math.max(-1, Math.min(1, pan));
+    filter.connect(panner).connect(this.musicBus);
+    for (const [mult, pv, type] of [[1, 1, 'triangle'], [2, 0.16, 'sine']] as [number, number, OscillatorType][]) {
+      const osc = this.ctx.createOscillator();
+      osc.type = type;
+      osc.frequency.value = freq * mult;
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.linearRampToValueAtTime(vol * pv, when + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0004, when + decay);
+      osc.connect(g).connect(filter);
+      osc.start(when);
+      osc.stop(when + decay + 0.05);
     }
   }
 

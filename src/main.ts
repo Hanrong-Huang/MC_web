@@ -257,6 +257,7 @@ class Game {
     // dev helper: #debugmobs drops a few tameable/rideable mobs at spawn and
     // faces the player east toward the horse for screenshot testing
     if (location.hash.includes('debugmobs')) {
+      (window as unknown as { __game: unknown }).__game = this; // dev: lets screenshot harnesses frame mobs
       const p = this.player.pos;
       this.entities.spawnMob('horse', p.x + 3, p.y + 1, p.z);
       this.entities.spawnMob('wolf', p.x + 3, p.y + 1, p.z - 1.5);
