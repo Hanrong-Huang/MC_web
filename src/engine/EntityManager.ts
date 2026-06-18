@@ -1580,6 +1580,36 @@ export class EntityManager {
     }
   }
 
+  /** Gold sparkle burst for a critical hit. */
+  spawnCritParticles(x: number, y: number, z: number): void {
+    let mat = this.particleMats.get('crit');
+    if (!mat) {
+      const c = document.createElement('canvas');
+      c.width = 6; c.height = 6;
+      const ctx = c.getContext('2d')!;
+      ctx.clearRect(0, 0, 6, 6);
+      ctx.fillStyle = '#ffd24a';
+      ctx.fillRect(2, 0, 2, 6); ctx.fillRect(0, 2, 6, 2); // a small spark/plus
+      const tex = new THREE.CanvasTexture(c);
+      tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter;
+      mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
+      this.particleMats.set('crit', mat);
+    }
+    for (let i = 0; i < 8; i++) {
+      const mesh = new THREE.Group();
+      mesh.add(new THREE.Mesh(new THREE.PlaneGeometry(0.14, 0.14), mat));
+      const e = new Entity('particle',
+        { x: x + (Math.random() - 0.5) * 0.4, y: y + (Math.random() - 0.5) * 0.4, z: z + (Math.random() - 0.5) * 0.4 },
+        { w: 0.04, h: 0.04 }, mesh);
+      const a = Math.random() * Math.PI * 2, sp = 0.7 + Math.random() * 0.9;
+      e.vel = { x: Math.cos(a) * sp, y: 0.5 + Math.random() * 0.6, z: Math.sin(a) * sp };
+      e.maxLife = e.life = 0.4 + Math.random() * 0.25;
+      e.pGrav = 8; // arc up then fall back
+      this.entities.push(e);
+      this.scene.add(mesh);
+    }
+  }
+
   /** Generate 3–4 randomized emerald trades for a villager. */
   private rollVillagerTrades(e: Entity): void {
     // [give item/count] -> [get item/count]

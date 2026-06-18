@@ -1281,7 +1281,15 @@ export class Player {
     const hit = this.deps.entities.raycastMobs(this.pos.x, ey, this.pos.z, d.x, d.y, d.z, 3.5);
     if (hit && hit.entity !== this.riding && hit.dist < blockDist) {
       this.attackCooldown = 0.5;
-      this.deps.entities.hurt(hit.entity, attackDamage(this.heldId()), d.x, d.z);
+      let dmg = attackDamage(this.heldId());
+      // critical hit: striking while falling (mid-air, descending) deals +50%
+      const crit = !this.onGround && this.vel.y < -0.15 && !this.flying && !this.onLadder;
+      if (crit) {
+        dmg = Math.ceil(dmg * 1.5);
+        const en = hit.entity;
+        this.deps.entities.spawnCritParticles(en.pos.x, en.pos.y + en.box.h * 0.6, en.pos.z);
+      }
+      this.deps.entities.hurt(hit.entity, dmg, d.x, d.z);
       this.addExhaustion(0.1);
       this.damageHeldTool();
     }
