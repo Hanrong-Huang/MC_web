@@ -3,8 +3,32 @@
 
 import * as THREE from 'three';
 import { Atlas, extrudeSpriteGeometry } from './Textures';
-import { ChunkGeometry } from './Mesher';
+import type { ChunkMeshData, GeoArrays } from './Mesher';
 import { def, hasDef } from './Blocks';
+
+export interface ChunkGeometry {
+  solid: THREE.BufferGeometry | null;
+  water: THREE.BufferGeometry | null;
+}
+
+/** Build a THREE.BufferGeometry from raw mesher arrays (main thread only). */
+export function geometryFromArrays(a: GeoArrays): THREE.BufferGeometry {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(a.positions, 3));
+  g.setAttribute('alight', new THREE.BufferAttribute(a.lights, 2));
+  g.setAttribute('atint', new THREE.BufferAttribute(a.tints, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(a.uvs, 2));
+  g.setIndex(new THREE.BufferAttribute(a.indices, 1));
+  g.computeBoundingSphere();
+  return g;
+}
+
+export function chunkGeometryFromArrays(d: ChunkMeshData): ChunkGeometry {
+  return {
+    solid: d.solid ? geometryFromArrays(d.solid) : null,
+    water: d.water ? geometryFromArrays(d.water) : null,
+  };
+}
 
 const DAY_SKY = new THREE.Color(0x82b8ff);
 const NIGHT_SKY = new THREE.Color(0x0a0c1c);

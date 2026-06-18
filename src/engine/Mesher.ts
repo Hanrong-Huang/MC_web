@@ -3,11 +3,46 @@
 // Each vertex carries a 2-channel "alight" attribute: x = sky-lit component
 // (scaled by the day/night uniform in the shader), y = torch-lit component.
 
-import * as THREE from 'three';
-import { World } from './World';
-import { Chunk, CX, CZ, CY } from './Chunk';
+import { CX, CZ, CY } from './Chunk';
 import { B, def, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES } from './Blocks';
-import { Atlas, UVRect } from './Textures';
+import type { UVRect } from './Textures';
+
+// Minimal structural views of world/chunk/atlas so the mesher is pure logic and
+// can run either on the main thread (real World/Chunk/Atlas) or in a Web Worker
+// (lightweight shims rebuilt from a serialized snapshot). No THREE here, so the
+// worker bundle stays small.
+interface ReadMap<T> { get(key: string): T | undefined; }
+export interface MeshChunk {
+  cx: number; cz: number;
+  ready: boolean;
+  data: Uint8Array;
+  heightmap: ArrayLike<number>;
+  skyLight(lx: number, y: number, lz: number): number;
+  torches: Set<number>;
+  glowers: Set<number>;
+}
+export interface MeshDoor { facing: number; hingeRight?: boolean; swing?: number; open?: boolean; }
+export interface MeshRedstone { active?: boolean; facing?: number; }
+export interface MeshWorld {
+  getChunk(cx: number, cz: number): MeshChunk | undefined;
+  getBlockForMesh(wx: number, wy: number, wz: number): number;
+  lavaLevel(wx: number, wy: number, wz: number): number;
+  waterLevel(wx: number, wy: number, wz: number): number;
+  doorStateAt(wx: number, wy: number, wz: number): MeshDoor | undefined;
+  doorStates: ReadMap<MeshDoor>;
+  torchFacings: ReadMap<number>;
+  redstoneStates: ReadMap<MeshRedstone>;
+  redstonePower: ReadMap<number>;
+  generator: { grassTint(wx: number, wz: number, out: { r: number; g: number; b: number }): void };
+}
+export interface MeshAtlas { rect(name: string): UVRect; }
+
+/** Raw geometry arrays for one material (solid or water) — transferable to/from a worker. */
+export interface GeoArrays {
+  positions: Float32Array; lights: Float32Array; tints: Float32Array;
+  uvs: Float32Array; indices: Uint32Array;
+}
+export interface ChunkMeshData { solid: GeoArrays | null; water: GeoArrays | null; }
 
 // face order: +x, -x, +y, -y, +z, -z
 const FACE_NORMALS = [
@@ -93,16 +128,15 @@ class GeoBuilder {
     this.indices = p.indices; this.indices.length = 0;
   }
 
-  build(): THREE.BufferGeometry | null {
+  build(): GeoArrays | null {
     if (this.vertCount === 0) return null;
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(this.positions, 3));
-    g.setAttribute('alight', new THREE.Float32BufferAttribute(this.lights, 2));
-    g.setAttribute('atint', new THREE.Float32BufferAttribute(this.tints, 3));
-    g.setAttribute('uv', new THREE.Float32BufferAttribute(this.uvs, 2));
-    g.setIndex(this.indices);
-    g.computeBoundingSphere();
-    return g;
+    return {
+      positions: new Float32Array(this.positions),
+      lights: new Float32Array(this.lights),
+      tints: new Float32Array(this.tints),
+      uvs: new Float32Array(this.uvs),
+      indices: new Uint32Array(this.indices),
+    };
   }
 }
 
@@ -111,12 +145,7 @@ const TINT_CACHE = new Float32Array(256 * 3);
 const TINT_SET = new Uint8Array(256);
 const tintScratch = { r: 1, g: 1, b: 1 };
 
-export interface ChunkGeometry {
-  solid: THREE.BufferGeometry | null;
-  water: THREE.BufferGeometry | null;
-}
-
-export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): ChunkGeometry {
+export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: MeshAtlas): ChunkMeshData {
   const solid = new GeoBuilder(0);
   const water = new GeoBuilder(1);
   const bx = chunk.cx * CX, bz = chunk.cz * CZ;
@@ -127,14 +156,14 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
   maxY = Math.min(CY, maxY + 3);
 
   // cache the 3x3 chunk neighborhood for fast lookups
-  const refs: (Chunk | undefined)[] = [];
+  const refs: (MeshChunk | undefined)[] = [];
   for (let cz = -1; cz <= 1; cz++) {
     for (let cx = -1; cx <= 1; cx++) {
       const c = world.getChunk(chunk.cx + cx, chunk.cz + cz);
       refs.push(c && c.ready ? c : undefined);
     }
   }
-  const chunkAt = (rx: number, rz: number): Chunk | undefined =>
+  const chunkAt = (rx: number, rz: number): MeshChunk | undefined =>
     refs[(rx >> 4) + 1 + ((rz >> 4) + 1) * 3];
 
   // local getter with cross-chunk fallback (region coords; outside region -> world)
@@ -199,7 +228,7 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
     REGION.fill(0);
     let qHead = 0, qTail = 0;
     const push = (idx: number) => { QUEUE[qTail++ % QUEUE.length] = idx; };
-    const seed = (c: Chunk, packed: number, level: number): void => {
+    const seed = (c: MeshChunk, packed: number, level: number): void => {
       const ox = c.cx * CX - bx, oz = c.cz * CZ - bz;
       const rx = ox + (packed & 15), rz = oz + ((packed >> 4) & 15), ry = packed >> 8;
       if (rx < RX0 || rx > RX1 || rz < RX0 || rz > RX1) return;
@@ -395,7 +424,7 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
 
 /** Crossed billboards for plants (flowers, grass, sugar cane). Both windings
  *  are emitted so the front-face-culled chunk material shows them from any side. */
-function emitCross(g: GeoBuilder, atlas: Atlas, id: number, x: number, y: number, z: number, sky: number, torch: number, tint: Float32Array | null): void {
+function emitCross(g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: number, z: number, sky: number, torch: number, tint: Float32Array | null): void {
   const rect = atlas.rect(def(id).faces!.sides);
   const a = 0.146, b = 0.854; // ~ MC's sqrt(2)/2-inset diagonal
   const planes: [number, number, number, number][] = [
@@ -427,7 +456,7 @@ function emitCross(g: GeoBuilder, atlas: Atlas, id: number, x: number, y: number
  *  1=-x, 2=+z, 3=-z) it becomes a wall torch — raised, leaned away from the
  *  wall, and offset so its base sits against that wall face. */
 function emitTorch(
-  g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number,
+  g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number,
   sky: number, torch: number, facing?: number,
 ): void {
   const rect = atlas.rect('torch');
@@ -545,7 +574,7 @@ function doorSwingFootprint(
 /** Door leaf hinged on a vertical edge; swing 0..1 rotates it 90deg inward.
  *  Geometry stays inside the block cell so it never clips neighbours. */
 function emitDoor(
-  g: GeoBuilder, atlas: Atlas, id: number, x: number, y: number, z: number,
+  g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: number, z: number,
   facing: number, hingeRight: boolean, swing: number, sky: number, torch: number,
 ): void {
   const rect = atlas.rect(id === B.DOOR_UPPER ? 'door_upper' : 'door_lower');
@@ -591,7 +620,7 @@ function emitDoorPanel(
 }
 
 /** Ladder: a flat panel against the back of the cell, 1/16 off the wall. */
-function emitLadder(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number, sky: number, torch: number): void {
+function emitLadder(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number): void {
   const rect = atlas.rect('ladder');
   const off = 2 / 16;
   // emit against all four walls cheaply — the cull rules above already filter,
@@ -620,7 +649,7 @@ function emitLadder(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number
 }
 
 /** Trapdoor: flat panel flush with the floor when closed, upright when open. */
-function emitTrapdoor(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number, open: boolean, sky: number, torch: number): void {
+function emitTrapdoor(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, open: boolean, sky: number, torch: number): void {
   const rect = atlas.rect('trapdoor');
   const thick = 3 / 16;
   const base = g.vertCount;
@@ -715,13 +744,13 @@ function emitBox(
   g.vertCount += 4;
 }
 
-function emitPressurePlate(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean): void {
+function emitPressurePlate(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean): void {
   const rect = atlas.rect('planks');
   const h = active ? 0.03 : 0.08;
   emitBox(g, rect, x, y, z, 0.0625, 0.9375, 0, h, 0.0625, 0.9375, sky, torch);
 }
 
-function emitLever(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean, facing: number): void {
+function emitLever(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean, facing: number): void {
   const stoneRect = atlas.rect('cobble');
   let bx0 = 0.25, bx1 = 0.75, by0 = 0, by1 = 0.18, bz0 = 0.25, bz1 = 0.75;
   if (facing === 0) {
@@ -753,7 +782,7 @@ function emitLever(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number,
   emitBox(g, woodRect, x, y, z, sx0, sx1, sy0, sy1, sz0, sz1, sky, torch);
 }
 
-function emitButton(g: GeoBuilder, atlas: Atlas, id: number, x: number, y: number, z: number, sky: number, torch: number, active: boolean, facing: number): void {
+function emitButton(g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: number, z: number, sky: number, torch: number, active: boolean, facing: number): void {
   const tileName = id === B.WOODEN_BUTTON ? 'planks' : 'stone';
   const rect = atlas.rect(tileName);
   const depth = active ? 0.08 : 0.16;
@@ -774,7 +803,7 @@ function emitButton(g: GeoBuilder, atlas: Atlas, id: number, x: number, y: numbe
   emitBox(g, rect, x, y, z, x0, x1, y0, y1, z0, z1, sky, torch);
 }
 
-function emitRedstoneWire(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number, sky: number, torch: number, power: number): void {
+function emitRedstoneWire(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number, power: number): void {
   const rect = atlas.rect('redstone_dust');
   const base = g.vertCount;
   const r = 0.3 + 0.7 * (power / 15);

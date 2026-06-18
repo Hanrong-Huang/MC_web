@@ -18,6 +18,7 @@ import { FurnaceState, ChestState } from './engine/Inventory';
 import type { BlockEntity } from './engine/Inventory';
 import type { Slot } from './engine/Inventory';
 import { buildChunkGeometry } from './engine/Mesher';
+import { chunkGeometryFromArrays } from './engine/Renderer';
 import { chunkKey, CX, CZ } from './engine/Chunk';
 import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef } from './engine/Blocks';
 import { Weather } from './engine/Weather';
@@ -1446,9 +1447,9 @@ class Game {
       }
       if (!this.world.neighborsReady(cx, cz)) continue; // wait for neighbors
       const m0 = performance.now();
-      const geo = buildChunkGeometry(this.world, chunk, this.atlas);
+      const arrays = buildChunkGeometry(this.world, chunk, this.atlas);
       this.meshMs = this.meshMs * 0.9 + (performance.now() - m0) * 0.1;
-      this.renderer.setChunkGeometry(job.key, cx, cz, geo);
+      this.renderer.setChunkGeometry(job.key, cx, cz, chunkGeometryFromArrays(arrays));
       chunk.dirty = false;
       this.world.dirtySet.delete(job.key);
       meshed++;
