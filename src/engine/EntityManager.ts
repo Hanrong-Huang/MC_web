@@ -1002,7 +1002,7 @@ export class EntityManager {
       e.limbs.tail.rotation.y = Math.sin(e.age * rate) * amp + swing * 0.35;
       // wolves hold the tail high when tamed/happy, low otherwise
       if (e.kind === 'wolf') {
-        const raised = e.tamed ? -0.4 : 0.55;
+        const raised = e.tamed ? -0.4 : 0.9;
         e.limbs.tail.rotation.x += (raised - e.limbs.tail.rotation.x) * Math.min(1, 4 * dt);
       }
     }
@@ -1995,17 +1995,20 @@ export class EntityManager {
     // pale chest/underside — the classic two-tone wolf coat
     const chest = this.boxMesh(0.44, 0.3, 0.46, whiteM);
     chest.position.set(0, 0.4, -0.16);
+    // a short fur neck so the head sits proud of the shoulders (alert wolf)
+    const neck = this.boxMesh(0.3, 0.26, 0.22, bodyM);
+    neck.position.set(0, 0.6, -0.38);
     const head = new THREE.Group();
-    head.position.set(0, 0.6, -0.5);
+    head.position.set(0, 0.72, -0.52);
     // boxy forward-set head, a touch wider than tall
     head.add(this.boxMesh(0.38, 0.34, 0.32, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
     // long pale muzzle — the single strongest "this is a canine" cue
-    const snout = this.boxMesh(0.2, 0.15, 0.24, [whiteM, whiteM, whiteM, whiteM, whiteM, faceM]);
-    snout.position.set(0, -0.08, -0.26);
+    const snout = this.boxMesh(0.22, 0.16, 0.3, [whiteM, whiteM, whiteM, whiteM, whiteM, faceM]);
+    snout.position.set(0, -0.09, -0.28);
     head.add(snout);
     // black nose tip on the end of the muzzle
     const nose = this.boxMesh(0.1, 0.08, 0.05, noseM);
-    nose.position.set(0, -0.04, -0.4);
+    nose.position.set(0, -0.05, -0.45);
     head.add(nose);
     // short, forward, *tapered* triangular ears (base + smaller tip) so they read
     // as pointed wolf ears instead of tall floppy rabbit ears
@@ -2027,16 +2030,17 @@ export class EntityManager {
       this.leg(0.14, 0.32, bodyM, 0.17, 0.32, 0.35),
       this.leg(0.14, 0.32, bodyM, -0.17, 0.32, 0.35),
     ];
-    // bushy tail pivoting at its base so it can wag; pale tip
+    // bushy tail pivoting at its base; shorter + thicker so it reads as fur, not
+    // a plank, and hangs steeply down-back at rest
     const tail = new THREE.Group();
-    tail.position.set(0, 0.56, 0.46);
-    const tailM = this.boxMesh(0.15, 0.15, 0.4, bodyM);
-    tailM.position.z = 0.2;
-    const tailTip = this.boxMesh(0.13, 0.13, 0.14, whiteM);
-    tailTip.position.z = 0.42;
+    tail.position.set(0, 0.58, 0.46);
+    const tailM = this.boxMesh(0.17, 0.17, 0.3, bodyM);
+    tailM.position.z = 0.15;
+    const tailTip = this.boxMesh(0.14, 0.14, 0.12, whiteM);
+    tailTip.position.z = 0.32;
     tail.add(tailM, tailTip);
-    tail.rotation.x = 0.55; // droops down-and-back; a happy tamed wolf raises it (see animateMob)
-    g.add(body, head, chest, tail, ...legs);
+    tail.rotation.x = 0.9; // hangs down-and-back; a happy tamed wolf raises it (see animateMob)
+    g.add(body, neck, head, chest, tail, ...legs);
     return { mesh: g, limbs: { legs, head, tail, body, ears }, mats };
   }
 
@@ -2090,10 +2094,10 @@ export class EntityManager {
 
     // body group (bobs gently while idle); holds torso + neck + mane
     const body = new THREE.Group();
-    const torso = this.boxMesh(0.7, 0.6, 1.25, bodyM);
-    torso.position.set(0, 1.15, 0.1);
-    const neck = this.boxMesh(0.34, 0.72, 0.36, bodyM);
-    neck.position.set(0, 1.46, -0.5); neck.rotation.x = 0.5;
+    const torso = this.boxMesh(0.8, 0.7, 1.3, bodyM);
+    torso.position.set(0, 1.12, 0.1);
+    const neck = this.boxMesh(0.38, 0.72, 0.4, bodyM);
+    neck.position.set(0, 1.46, -0.52); neck.rotation.x = 0.5;
     const maneStrip = this.boxMesh(0.1, 0.74, 0.16, maneM);
     maneStrip.position.set(0, 1.5, -0.42); maneStrip.rotation.x = 0.5;
     body.add(torso, neck, maneStrip);
@@ -2110,19 +2114,20 @@ export class EntityManager {
     const forelock = this.boxMesh(0.16, 0.12, 0.1, maneM); forelock.position.set(0, 0.26, -0.02);
     head.add(headBox, snout, earL, earR, forelock);
 
+    // stocky legs (thick, not stilts) reaching the ground from the wider barrel
     const legs = [
-      this.leg(0.18, 0.9, bodyM, -0.26, 0.9, -0.42),
-      this.leg(0.18, 0.9, bodyM, 0.26, 0.9, -0.42),
-      this.leg(0.18, 0.9, bodyM, 0.26, 0.9, 0.52),
-      this.leg(0.18, 0.9, bodyM, -0.26, 0.9, 0.52),
+      this.leg(0.26, 0.78, bodyM, -0.27, 0.78, -0.42),
+      this.leg(0.26, 0.78, bodyM, 0.27, 0.78, -0.42),
+      this.leg(0.26, 0.78, bodyM, 0.27, 0.78, 0.52),
+      this.leg(0.26, 0.78, bodyM, -0.27, 0.78, 0.52),
     ];
 
     const tail = new THREE.Group();
-    tail.position.set(0, 1.32, 0.72);
-    const tailM = this.boxMesh(0.13, 0.6, 0.13, maneM);
+    tail.position.set(0, 1.3, 0.72);
+    const tailM = this.boxMesh(0.16, 0.6, 0.16, maneM);
     tailM.position.y = -0.28;
     tail.add(tailM);
-    tail.rotation.x = -0.35;
+    tail.rotation.x = -0.25;
 
     g.add(body, head, tail, ...legs);
     return { mesh: g, limbs: { legs, head, tail, body }, mats };
@@ -2161,10 +2166,10 @@ export class EntityManager {
     }
 
     const legs = [
-      this.leg(0.08, 0.3, legM, -0.1, 0.3, -0.18),
-      this.leg(0.08, 0.3, legM, 0.1, 0.3, -0.18),
-      this.leg(0.08, 0.3, legM, 0.1, 0.3, 0.24),
-      this.leg(0.08, 0.3, legM, -0.1, 0.3, 0.24),
+      this.leg(0.1, 0.3, legM, -0.1, 0.3, -0.18),
+      this.leg(0.1, 0.3, legM, 0.1, 0.3, -0.18),
+      this.leg(0.1, 0.3, legM, 0.1, 0.3, 0.24),
+      this.leg(0.1, 0.3, legM, -0.1, 0.3, 0.24),
     ];
 
     // upright tail with a slight curl
