@@ -3,7 +3,7 @@
 // pockets, deterministic cross-chunk trees, and a structure pass (lone huts)
 // written directly into chunk byte arrays with clipping.
 
-import { Simplex2, Simplex3, hash2, hash3 } from './Noise';
+import { Simplex2, Simplex3, hash2, hash3, mulberry32 } from './Noise';
 import { Chunk, CX, CZ, CY } from './Chunk';
 import { B } from './Blocks';
 
@@ -13,6 +13,7 @@ export type BiomeId = 'plains' | 'forest' | 'desert' | 'snow' | 'taiga' | 'swamp
 
 export class WorldGenerator {
   readonly seed: number;
+  dimension: 'overworld' | 'nether' = 'overworld';
   private hills: Simplex2;
   private continent: Simplex2;
   private ridge: Simplex2;
@@ -175,6 +176,68 @@ export class WorldGenerator {
   generate(chunk: Chunk): void {
     const bx = chunk.cx * CX;
     const bz = chunk.cz * CZ;
+
+    if (this.dimension === 'nether') {
+      const randSeed = this.seed ^ 0x6e74;
+      for (let z = 0; z < CZ; z++) {
+        for (let x = 0; x < CX; x++) {
+          const wx = bx + x, wz = bz + z;
+          
+          chunk.setRaw(x, 0, z, B.BEDROCK);
+          chunk.setRaw(x, 127, z, B.BEDROCK);
+          
+          for (let y = 1; y < 127; y++) {
+            const n = this.cave1.noise(wx * 0.024, y * 0.04, wz * 0.024) +
+                      this.cave2.noise(wx * 0.04, y * 0.024, wz * 0.04) * 0.5;
+            
+            const distToCenter = Math.abs(y - 64) / 64;
+            const threshold = -0.1 + distToCenter * 0.6;
+            
+            let id = B.AIR;
+            if (n > threshold) {
+              id = B.NETHERRACK;
+              const r = hash3(this.seed ^ 0x111, wx, y, wz);
+              if (r < 0.012) {
+                id = B.QUARTZ_ORE;
+              }
+            } else {
+              if (y <= 32) {
+                id = B.LAVA;
+              } else if (y >= 33 && y <= 36) {
+                const sandNoise = this.hills.noise(wx * 0.05, wz * 0.05);
+                if (sandNoise > 0.35) {
+                  id = B.SOUL_SAND;
+                }
+              }
+            }
+            chunk.setRaw(x, y, z, id);
+          }
+        }
+      }
+      
+      const rand = mulberry32(chunk.cx * 1000 + chunk.cz + this.seed);
+      for (let z = 1; z < CZ - 1; z++) {
+        for (let x = 1; x < CX - 1; x++) {
+          if (rand() < 0.025) {
+            for (let y = 115; y >= 60; y--) {
+              if (chunk.get(x, y, z) === B.NETHERRACK && chunk.get(x, y - 1, z) === B.AIR) {
+                chunk.setRaw(x, y - 1, z, B.GLOWSTONE);
+                if (rand() < 0.5) chunk.setRaw(x - 1, y - 1, z, B.GLOWSTONE);
+                if (rand() < 0.5) chunk.setRaw(x + 1, y - 1, z, B.GLOWSTONE);
+                if (rand() < 0.5) chunk.setRaw(x, y - 1, z + 1, B.GLOWSTONE);
+                if (rand() < 0.5) chunk.setRaw(x, y - 2, z, B.GLOWSTONE);
+                break;
+              }
+            }
+          }
+        }
+      }
+      chunk.computeHeightmap(); // mark ready like the overworld path does at the end
+      chunk.scanTorches();
+      chunk.ready = true;
+      chunk.dirty = true;
+      return;
+    }
 
     // --- terrain columns -------------------------------------------------
     for (let z = 0; z < CZ; z++) {

@@ -50,6 +50,8 @@ export interface PlayerDeps {
   onTameWolf: () => void;
   onTrade: () => void;
   onDeath: () => void;
+  onTeleport: () => void;
+  onRedstoneUpdate: (x: number, y: number, z: number) => void;
 }
 
 export class Player {
@@ -99,6 +101,9 @@ export class Player {
   private cactusT = 0;
   private lavaT = 0;
   private swimSoundT = 0;
+
+  portalTimer = 0;
+  portalCooldown = 0;
 
   init(deps: PlayerDeps): void {
     this.deps = deps;
@@ -210,6 +215,11 @@ export class Player {
     else if (this.sprinting) speed = SPRINT_SPEED;
     else speed = WALK_SPEED;
     if (wasInWater && !this.flying) speed *= 0.5;
+
+    const underFeet = world.getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y - 0.1), Math.floor(this.pos.z));
+    if (underFeet === B.SOUL_SAND && !this.flying) {
+      speed *= 0.4;
+    }
 
     // snappy acceleration with slight air control
     const accelK = this.flying ? 9 : this.onGround ? 16 : wasInWater ? 7 : 4.2;
@@ -348,6 +358,35 @@ export class Player {
           );
         }
       }
+    }
+
+    // portal detection
+    let inPortal = false;
+    if (this.portalCooldown > 0) {
+      this.portalCooldown -= dt;
+    } else {
+      const hw = BOX.w / 2;
+      const x0 = Math.floor(this.pos.x - hw), x1 = Math.floor(this.pos.x + hw);
+      const y0 = Math.floor(this.pos.y), y1 = Math.floor(this.pos.y + BOX.h);
+      const z0 = Math.floor(this.pos.z - hw), z1 = Math.floor(this.pos.z + hw);
+      for (let by = y0; by <= y1 && !inPortal; by++) {
+        for (let bz = z0; bz <= z1 && !inPortal; bz++) {
+          for (let bx = x0; bx <= x1 && !inPortal; bx++) {
+            if (world.getBlock(bx, by, bz) === B.PORTAL) inPortal = true;
+          }
+        }
+      }
+    }
+
+    if (inPortal) {
+      this.portalTimer += dt;
+      if (this.portalTimer >= 1.5) {
+        this.portalTimer = 0;
+        this.portalCooldown = 4.0;
+        if (this.deps.onTeleport) this.deps.onTeleport();
+      }
+    } else {
+      this.portalTimer = Math.max(0, this.portalTimer - dt * 2.0);
     }
 
     // void rescue: respawn-style safety net if the player escapes the world floor
@@ -779,6 +818,59 @@ export class Player {
     return true;
   }
 
+  /** Light a Nether portal: from the air block where ignition starts, flood the
+   *  enclosed air pocket within a vertical obsidian frame (either the XY or ZY
+   *  plane) and fill it with portal blocks. Returns false if no valid frame. */
+  private tryIgnitePortal(sx: number, sy: number, sz: number): boolean {
+    const world = this.deps.world;
+    if (world.getBlock(sx, sy, sz) !== B.AIR) return false;
+    // a portal lies in one vertical plane; try axis-along-X (constant z) then
+    // axis-along-Z (constant x). The first plane that forms a closed obsidian
+    // frame around the seed air pocket wins.
+    for (const plane of ['x', 'z'] as const) {
+      const cells = this.collectPortalInterior(sx, sy, sz, plane);
+      if (cells) {
+        for (const [cx, cy, cz] of cells) world.setBlock(cx, cy, cz, B.PORTAL);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Flood-fill the air pocket containing (sx,sy,sz) restricted to one vertical
+   *  plane. Valid only if the pocket is small and every planar edge neighbour is
+   *  obsidian (a sealed frame). Returns the interior cells, or null. */
+  private collectPortalInterior(
+    sx: number, sy: number, sz: number, plane: 'x' | 'z',
+  ): [number, number, number][] | null {
+    const world = this.deps.world;
+    const seen = new Set<string>();
+    const cells: [number, number, number][] = [];
+    const stack: [number, number, number][] = [[sx, sy, sz]];
+    // planar neighbour offsets: vertical + one horizontal axis
+    const offs: [number, number, number][] = plane === 'x'
+      ? [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0]]
+      : [[0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]];
+    while (stack.length) {
+      const [x, y, z] = stack.pop()!;
+      const key = `${x},${y},${z}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (cells.length > 30) return null; // bigger than any sane frame -> not enclosed
+      cells.push([x, y, z]);
+      for (const [dx, dy, dz] of offs) {
+        const nx = x + dx, ny = y + dy, nz = z + dz;
+        const nid = world.getBlock(nx, ny, nz);
+        if (nid === B.AIR) {
+          stack.push([nx, ny, nz]);
+        } else if (nid !== B.OBSIDIAN) {
+          return null; // leaked into a non-obsidian boundary -> open frame
+        }
+      }
+    }
+    return cells.length > 0 ? cells : null;
+  }
+
   // --- right click: interact / eat / place ------------------------------------
 
   private updateRightClick(dt: number): void {
@@ -920,6 +1012,33 @@ export class Player {
         this.deps.useBed(t.x, t.y, t.z);
         return;
       }
+      if (t.id === B.LEVER) {
+        const key = `${t.x},${t.y},${t.z}`;
+        const state = world.redstoneStates.get(key) ?? { active: false };
+        state.active = !state.active;
+        world.redstoneStates.set(key, state);
+        this.placeCooldown = 0.25;
+        this.deps.renderer.triggerSwing();
+        audio.play('click');
+        this.deps.onRedstoneUpdate(t.x, t.y, t.z);
+        world.markDirty(Math.floor(t.x / 16), Math.floor(t.z / 16));
+        return;
+      }
+      if (t.id === B.WOODEN_BUTTON || t.id === B.STONE_BUTTON) {
+        const key = `${t.x},${t.y},${t.z}`;
+        const state = world.redstoneStates.get(key) ?? { active: false };
+        if (!state.active) {
+          state.active = true;
+          state.ticksLeft = 20;
+          world.redstoneStates.set(key, state);
+          this.placeCooldown = 0.25;
+          this.deps.renderer.triggerSwing();
+          audio.play('click');
+          this.deps.onRedstoneUpdate(t.x, t.y, t.z);
+          world.markDirty(Math.floor(t.x / 16), Math.floor(t.z / 16));
+        }
+        return;
+      }
       if (t.id === B.TNT) {
         this.placeCooldown = 0.4;
         this.deps.igniteTnt(t.x, t.y, t.z);
@@ -938,6 +1057,20 @@ export class Player {
           return;
         }
       }
+    }
+
+    // flint & steel: ignite an obsidian frame into a Nether portal
+    if (this.target && held?.id === I.FLINT_AND_STEEL) {
+      this.placeCooldown = 0.3;
+      this.deps.renderer.triggerSwing();
+      const t = this.target;
+      if (this.tryIgnitePortal(t.x + t.nx, t.y + t.ny, t.z + t.nz)) {
+        audio.play('fuse');
+        this.damageHeldTool();
+      } else {
+        audio.play('fail');
+      }
+      return;
     }
 
     // hoe: till grass/dirt into farmland
@@ -1047,29 +1180,53 @@ export class Player {
       return;
     }
 
+    let placeId = held.id;
+    if (held.id === I.REDSTONE) placeId = B.REDSTONE_WIRE;
+
     // plants/torches need a floor (cane and cactus may stack on themselves)
-    if (FLOOR_BLOCKS.has(held.id)) {
+    if (FLOOR_BLOCKS.has(placeId)) {
       const below = world.getBlock(px, py - 1, pz);
-      const supported = isSolid(below) || (SELF_STACKING.has(held.id) && below === held.id);
+      const supported = isSolid(below) || (SELF_STACKING.has(placeId) && below === placeId);
       if (!supported) return;
     }
     // ladders must attach to a solid block on the targeted face
-    if (held.id === B.LADDER) {
+    if (placeId === B.LADDER) {
       const ax = this.target.x, ay = this.target.y, az = this.target.z;
       if (!isSolid(world.getBlock(ax, ay, az))) return;
     }
     // trapdoors need solid ground or a solid neighbor to hinge on
-    if (held.id === B.TRAPDOOR) {
+    if (placeId === B.TRAPDOOR) {
       if (!isSolid(world.getBlock(px, py - 1, pz)) &&
         !isSolid(world.getBlock(px - 1, py, pz)) && !isSolid(world.getBlock(px + 1, py, pz)) &&
         !isSolid(world.getBlock(px, py, pz - 1)) && !isSolid(world.getBlock(px, py, pz + 1))) return;
       world.doorStates.set(`${px},${py},${pz}`, { facing: 0, open: false });
     }
     // never place inside the player's own hitbox (solid blocks only)
-    if (isSolid(held.id) && boxIntersectsBlock(this.pos, BOX, px, py, pz)) return;
-    if (isSolid(held.id) && this.deps.entities.anyMobIntersecting(px, py, pz)) return;
+    if (isSolid(placeId) && boxIntersectsBlock(this.pos, BOX, px, py, pz)) return;
+    if (isSolid(placeId) && this.deps.entities.anyMobIntersecting(px, py, pz)) return;
 
-    if (world.setBlock(px, py, pz, held.id)) {
+    if (world.setBlock(px, py, pz, placeId)) {
+      if (placeId === B.LEVER || placeId === B.WOODEN_BUTTON || placeId === B.STONE_BUTTON || placeId === B.PRESSURE_PLATE) {
+        const facing = this.target.ny === -1 ? 0 : this.target.ny === 1 ? 1 : this.target.nz === -1 ? 2 : this.target.nz === 1 ? 3 : this.target.nx === -1 ? 4 : 5;
+        world.redstoneStates.set(`${px},${py},${pz}`, { active: false, facing });
+        this.deps.onRedstoneUpdate(px, py, pz);
+      } else if (placeId === B.PISTON || placeId === B.STICKY_PISTON) {
+        const d = this.lookDir();
+        let facing = 2;
+        if (Math.abs(d.y) > 0.7) {
+          facing = d.y > 0 ? 1 : 0;
+        } else {
+          if (Math.abs(d.x) > Math.abs(d.z)) {
+            facing = d.x > 0 ? 5 : 4;
+          } else {
+            facing = d.z > 0 ? 3 : 2;
+          }
+        }
+        world.pistonFacings.set(`${px},${py},${pz}`, facing);
+        this.deps.onRedstoneUpdate(px, py, pz);
+      } else if (placeId === B.REDSTONE_WIRE || placeId === B.REDSTONE_LAMP) {
+        this.deps.onRedstoneUpdate(px, py, pz);
+      }
       this.placeCooldown = 0.22;
       this.deps.renderer.triggerSwing();
       audio.dig(heldDef.sound, 0.8);

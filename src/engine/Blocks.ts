@@ -65,6 +65,21 @@ export enum B {
   BEETROOT_2 = 59,
   LAVA = 60,
   OBSIDIAN = 62,
+  PORTAL = 63,
+  NETHERRACK = 64,
+  GLOWSTONE = 65,
+  SOUL_SAND = 66,
+  QUARTZ_ORE = 67,
+  REDSTONE_WIRE = 68,
+  REDSTONE_LAMP = 69,
+  REDSTONE_LAMP_LIT = 70,
+  LEVER = 71,
+  WOODEN_BUTTON = 72,
+  STONE_BUTTON = 73,
+  PISTON = 74,
+  STICKY_PISTON = 75,
+  PRESSURE_PLATE = 76,
+  PISTON_HEAD = 77,
 }
 
 export enum I {
@@ -145,6 +160,9 @@ export enum I {
   BUCKET = 174,
   WATER_BUCKET = 175,
   LAVA_BUCKET = 176,
+  FLINT_AND_STEEL = 177,
+  QUARTZ = 178,
+  REDSTONE = 179,
 }
 
 /** Wearable-armor slot index: 0 head, 1 chest, 2 legs, 3 feet. */
@@ -608,6 +626,79 @@ itemDef({ id: I.BUCKET, name: 'bucket', label: 'Bucket', sprite: 'bucket', stack
 itemDef({ id: I.WATER_BUCKET, name: 'water_bucket', label: 'Water Bucket', sprite: 'water_bucket', stack: 1 });
 itemDef({ id: I.LAVA_BUCKET, name: 'lava_bucket', label: 'Lava Bucket', sprite: 'lava_bucket', stack: 1 });
 
+blockDef({
+  id: B.PORTAL, name: 'portal', label: 'Hell Gate Portal', hardness: -1, sound: 'glass',
+  faces: { top: 'portal', bottom: 'portal', sides: 'portal' },
+  solid: false, opaque: false, occludes: false
+});
+blockDef({
+  id: B.NETHERRACK, name: 'netherrack', label: 'Netherrack', hardness: 0.4, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  faces: { top: 'netherrack', bottom: 'netherrack', sides: 'netherrack' }
+});
+blockDef({
+  id: B.GLOWSTONE, name: 'glowstone', label: 'Glowstone', hardness: 0.3, sound: 'glass',
+  faces: { top: 'glowstone', bottom: 'glowstone', sides: 'glowstone' }
+});
+blockDef({
+  id: B.SOUL_SAND, name: 'soul_sand', label: 'Soul Sand', hardness: 0.5, tool: 'shovel', sound: 'sand',
+  faces: { top: 'soul_sand', bottom: 'soul_sand', sides: 'soul_sand' }
+});
+blockDef({
+  id: B.QUARTZ_ORE, name: 'nether_quartz_ore', label: 'Nether Quartz Ore', hardness: 2.0, tool: 'pickaxe', minTier: 4, sound: 'stone',
+  faces: { top: 'nether_quartz_ore', bottom: 'nether_quartz_ore', sides: 'nether_quartz_ore' },
+  drop: { id: I.QUARTZ, min: 1, max: 1 }
+});
+blockDef({
+  id: B.REDSTONE_WIRE, name: 'redstone_dust', label: 'Redstone Dust', hardness: 0, sound: 'stone',
+  faces: { top: 'redstone_dust', bottom: 'redstone_dust', sides: 'redstone_dust' },
+  solid: false, opaque: false, occludes: false
+});
+blockDef({
+  id: B.REDSTONE_LAMP, name: 'redstone_lamp', label: 'Redstone Lamp', hardness: 0.3, sound: 'glass',
+  faces: { top: 'redstone_lamp', bottom: 'redstone_lamp', sides: 'redstone_lamp' }
+});
+blockDef({
+  id: B.REDSTONE_LAMP_LIT, name: 'redstone_lamp_lit', label: 'Redstone Lamp Lit', hardness: 0.3, sound: 'glass',
+  faces: { top: 'redstone_lamp_lit', bottom: 'redstone_lamp_lit', sides: 'redstone_lamp_lit' }
+});
+blockDef({
+  id: B.LEVER, name: 'lever', label: 'Lever', hardness: 0.5, sound: 'wood',
+  faces: { top: 'lever', bottom: 'lever', sides: 'lever' },
+  solid: false, opaque: false, occludes: false
+});
+blockDef({
+  id: B.WOODEN_BUTTON, name: 'wooden_button', label: 'Wooden Button', hardness: 0.5, sound: 'wood',
+  faces: { top: 'planks', bottom: 'planks', sides: 'planks' },
+  solid: false, opaque: false, occludes: false
+});
+blockDef({
+  id: B.STONE_BUTTON, name: 'stone_button', label: 'Stone Button', hardness: 0.5, sound: 'stone',
+  faces: { top: 'stone', bottom: 'stone', sides: 'stone' },
+  solid: false, opaque: false, occludes: false
+});
+blockDef({
+  id: B.PISTON, name: 'piston', label: 'Piston', hardness: 1.5, tool: 'pickaxe', sound: 'stone',
+  faces: { top: 'piston_top', bottom: 'piston_bottom', sides: 'piston_side' }
+});
+blockDef({
+  id: B.STICKY_PISTON, name: 'sticky_piston', label: 'Sticky Piston', hardness: 1.5, tool: 'pickaxe', sound: 'stone',
+  faces: { top: 'piston_top_sticky', bottom: 'piston_bottom', sides: 'piston_side' }
+});
+blockDef({
+  id: B.PRESSURE_PLATE, name: 'pressure_plate', label: 'Pressure Plate', hardness: 0.5, sound: 'wood',
+  faces: { top: 'planks', bottom: 'planks', sides: 'planks' },
+  solid: false, opaque: false, occludes: false
+});
+blockDef({
+  id: B.PISTON_HEAD, name: 'piston_head', label: 'Piston Head', hardness: 1.5, sound: 'stone',
+  faces: { top: 'piston_top', bottom: 'piston_bottom', sides: 'piston_side' },
+  solid: true, opaque: false, occludes: false
+});
+
+itemDef({ id: I.FLINT_AND_STEEL, name: 'flint_and_steel', label: 'Flint and Steel', sprite: 'flint_and_steel', stack: 1 });
+itemDef({ id: I.QUARTZ, name: 'quartz', label: 'Nether Quartz', sprite: 'quartz', stack: 64 });
+itemDef({ id: I.REDSTONE, name: 'redstone', label: 'Redstone Dust', sprite: 'redstone', stack: 64 });
+
 export function def(id: number): Def {
   const d = DEFS.get(id);
   if (!d) throw new Error(`Unknown id ${id}`);
@@ -646,6 +737,7 @@ export const FLOOR_BLOCKS = new Set<number>([
   B.CARROT_0, B.CARROT_1, B.CARROT_2,
   B.POTATO_0, B.POTATO_1, B.POTATO_2,
   B.BEETROOT_0, B.BEETROOT_1, B.BEETROOT_2,
+  B.REDSTONE_WIRE, B.PRESSURE_PLATE, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
 ]);
 export const SELF_STACKING = new Set<number>([B.SUGAR_CANE, B.CACTUS]);
 
@@ -697,6 +789,9 @@ export const PLACEABLE: number[] = [
   B.COAL_ORE, B.IRON_ORE, B.GOLD_ORE, B.DIAMOND_ORE,
   B.IRON_BLOCK, B.GOLD_BLOCK, B.DIAMOND_BLOCK, B.BEDROCK,
   B.LADDER, B.TRAPDOOR, B.OBSIDIAN,
+  B.PORTAL, B.NETHERRACK, B.GLOWSTONE, B.SOUL_SAND, B.QUARTZ_ORE,
+  B.REDSTONE_WIRE, B.REDSTONE_LAMP, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
+  B.PISTON, B.STICKY_PISTON, B.PRESSURE_PLATE,
 ];
 
 export const CREATIVE_ITEMS: number[] = [
@@ -718,4 +813,5 @@ export const CREATIVE_ITEMS: number[] = [
   I.IRON_HELMET, I.IRON_CHEST, I.IRON_LEGS, I.IRON_BOOTS,
   I.DIAMOND_HELMET, I.DIAMOND_CHEST, I.DIAMOND_LEGS, I.DIAMOND_BOOTS,
   I.BUCKET, I.WATER_BUCKET, I.LAVA_BUCKET,
+  I.FLINT_AND_STEEL, I.QUARTZ, I.REDSTONE,
 ];

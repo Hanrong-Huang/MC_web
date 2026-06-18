@@ -189,6 +189,101 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
       c.fillRect(x + ((rand() * 15) | 0), y + ((rand() * 15) | 0), 1, 1);
     }
   },
+  portal: (c, x, y) => {
+    const pal = ['#4a0e4e', '#3b0066', '#5d1a70', '#8c2bb0', '#6f0c8a'];
+    noiseFill(c, x, y, pal, 7001, 1);
+    const img = c.getImageData(x, y, TILE, TILE);
+    for (let i = 3; i < img.data.length; i += 4) img.data[i] = 160; // translucent
+    c.putImageData(img, x, y);
+  },
+  netherrack: (c, x, y) => {
+    const pal = ['#571616', '#400a0a', '#6d1f1f', '#4d1010', '#5c1414'];
+    noiseFill(c, x, y, pal, 7002, 1);
+    const rand = mulberry32(7003);
+    for (let i = 0; i < 15; i++) {
+      c.fillStyle = '#220000';
+      c.fillRect(x + ((rand() * 15) | 0), y + ((rand() * 15) | 0), 1, 1);
+    }
+  },
+  glowstone: (c, x, y) => {
+    const pal = ['#8f6a2b', '#b38e4b', '#d9af5d', '#ffdb8a', '#caa254'];
+    noiseFill(c, x, y, pal, 7004, 1);
+    const rand = mulberry32(7005);
+    for (let i = 0; i < 10; i++) {
+      c.fillStyle = '#ffffff';
+      c.fillRect(x + ((rand() * 14) | 0), y + ((rand() * 14) | 0), 2, 1);
+    }
+  },
+  soul_sand: (c, x, y) => {
+    const pal = ['#3d2c20', '#302218', '#453225', '#2b1e15'];
+    noiseFill(c, x, y, pal, 7006, 1);
+    c.fillStyle = '#1c130c';
+    c.fillRect(x + 2, y + 2, 2, 2); c.fillRect(x + 12, y + 2, 2, 2);
+    c.fillRect(x + 6, y + 10, 4, 3);
+  },
+  nether_quartz_ore: (c, x, y) => {
+    const pal = ['#571616', '#400a0a', '#6d1f1f', '#4d1010', '#5c1414'];
+    noiseFill(c, x, y, pal, 7007, 1);
+    const rand = mulberry32(7008);
+    for (let i = 0; i < 6; i++) {
+      c.fillStyle = rand() < 0.3 ? '#ffffff' : '#eae5e8';
+      const bx = (rand() * 13) | 0, by = (rand() * 13) | 0;
+      c.fillRect(x + bx, y + by, 3, 2);
+    }
+  },
+  redstone_dust: (c, x, y) => {
+    c.clearRect(x, y, 16, 16);
+    const rand = mulberry32(7009);
+    for (let i = 0; i < 12; i++) {
+      c.fillStyle = rand() < 0.5 ? '#b80c0c' : '#ff3333';
+      c.fillRect(x + ((rand() * 14) | 0) + 1, y + ((rand() * 14) | 0) + 1, 1, 1);
+    }
+  },
+  redstone_lamp: (c, x, y) => {
+    const pal = ['#2b1810', '#3d2419', '#1f0f0a'];
+    noiseFill(c, x, y, pal, 7010, 1);
+    c.strokeStyle = '#0f0502';
+    c.lineWidth = 1;
+    c.strokeRect(x + 0.5, y + 0.5, 15, 15);
+  },
+  redstone_lamp_lit: (c, x, y) => {
+    const pal = ['#b84218', '#d65b27', '#e37546'];
+    noiseFill(c, x, y, pal, 7011, 1);
+    c.strokeStyle = '#2b1810';
+    c.lineWidth = 1;
+    c.strokeRect(x + 0.5, y + 0.5, 15, 15);
+  },
+  lever: (c, x, y) => {
+    c.clearRect(x, y, 16, 16);
+    c.fillStyle = '#555555';
+    c.fillRect(x + 4, y + 10, 8, 4);
+    c.fillStyle = '#8b5a2b';
+    c.fillRect(x + 7, y + 4, 2, 6);
+    c.fillStyle = '#222222';
+    c.fillRect(x + 6, y + 2, 4, 2);
+  },
+  piston_top: (c, x, y) => {
+    const pal = ['#8f6442', '#7a5130', '#a07450'];
+    noiseFill(c, x, y, pal, 7012, 1);
+    c.fillStyle = '#cfcfcf'; c.fillRect(x + 6, y + 6, 4, 4);
+    c.fillStyle = '#555555'; c.fillRect(x + 5, y + 5, 6, 1); c.fillRect(x + 5, y + 10, 6, 1);
+  },
+  piston_top_sticky: (c, x, y) => {
+    const pal = ['#8f6442', '#7a5130', '#a07450'];
+    noiseFill(c, x, y, pal, 7012, 1);
+    c.fillStyle = '#61b038';
+    c.fillRect(x + 3, y + 3, 3, 2); c.fillRect(x + 8, y + 6, 5, 4); c.fillRect(x + 4, y + 11, 4, 2);
+  },
+  piston_bottom: (c, x, y) => {
+    noiseFill(c, x, y, STONE_PAL, 7013, 1);
+  },
+  piston_side: (c, x, y) => {
+    noiseFill(c, x, y, STONE_PAL, 7014, 1);
+    c.fillStyle = '#7a5130';
+    c.fillRect(x, y, 16, 4);
+    c.fillStyle = '#8f6442';
+    c.fillRect(x, y + 1, 16, 2);
+  },
   bedrock: (c, x, y) => noiseFill(c, x, y, BEDROCK_PAL, 108, 1),
   grass_side: (c, x, y) => {
     noiseFill(c, x, y, DIRT_PAL, 109, 1);
@@ -1024,6 +1119,60 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
   diamond_axe: (c) => pixmap(c, 0, 0, AXE_MAP, DIAMONDC),
   diamond_shovel: (c) => pixmap(c, 0, 0, SHOVEL_MAP, DIAMONDC),
   diamond_sword: (c) => pixmap(c, 0, 0, SWORD_MAP, DIAMONDC),
+  flint_and_steel: (c) => pixmap(c, 0, 0, [
+    '................',
+    '......OOO.......',
+    '.....OLLLO......',
+    '.....OLOOO......',
+    '.....OLO........',
+    '....OLLO........',
+    '....OHhO........',
+    '...OHhO.........',
+    '..OHhO..........',
+    '..OhO...........',
+    '..OO............',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................'
+  ], { O: '#3a3a3a', L: '#cacaca', H: '#5d3820', h: '#8a4f2c' }),
+  quartz: (c) => pixmap(c, 0, 0, [
+    '................',
+    '......OO........',
+    '.....OLLQ.......',
+    '....OLQQQO......',
+    '....OQQQQQO.....',
+    '....OQQQQQO.....',
+    '.....OQQQO......',
+    '......OOO.......',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................'
+  ], { O: '#9c9297', L: '#ffffff', Q: '#eae5e8' }),
+  redstone: (c) => pixmap(c, 0, 0, [
+    '................',
+    '................',
+    '................',
+    '................',
+    '......OO........',
+    '.....ORRO.......',
+    '....ORRRRO......',
+    '....ORRRRO......',
+    '....ORRRRO......',
+    '....OORROO......',
+    '.....OOO........',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................'
+  ], { O: '#8a0c0c', R: '#ff2424' }),
   iron_ingot: (c) => pixmap(c, 0, 0, [
     '................', '................', '................', '................',
     '................', '....OOOOOOO.....', '...OLLLLLLMO....', '..OLLMMMMMMMO...',
@@ -1439,6 +1588,19 @@ const PACK_MAP: Record<string, PackEntry> = {
   beetroot_1: { paths: ['block/beetroots_stage2', 'block/beetroots_stage_2'], kind: 'tile' },
   beetroot_2: { paths: ['block/beetroots_stage3', 'block/beetroots_stage_3'], kind: 'tile' },
   sapling: { paths: ['block/oak_sapling', 'block/sapling_oak'], kind: 'tile' },
+  portal: { paths: ['block/nether_portal'], kind: 'tile' },
+  netherrack: { paths: ['block/netherrack'], kind: 'tile' },
+  glowstone: { paths: ['block/glowstone'], kind: 'tile' },
+  soul_sand: { paths: ['block/soul_sand'], kind: 'tile' },
+  nether_quartz_ore: { paths: ['block/nether_quartz_ore'], kind: 'tile' },
+  redstone_dust: { paths: ['block/redstone_dust_line'], kind: 'tile' },
+  redstone_lamp: { paths: ['block/redstone_lamp'], kind: 'tile' },
+  lever: { paths: ['block/lever'], kind: 'tile' },
+  piston_top: { paths: ['block/piston_top'], kind: 'tile' },
+  piston_top_sticky: { paths: ['block/piston_top_sticky'], kind: 'tile' },
+  piston_bottom: { paths: ['block/piston_bottom'], kind: 'tile' },
+  piston_side: { paths: ['block/piston_side'], kind: 'tile' },
+  pressure_plate: { paths: ['block/oak_pressure_plate'], kind: 'tile' },
   stick: { paths: ['item/stick'], kind: 'item' },
   coal: { paths: ['item/coal'], kind: 'item' },
   wood_pickaxe: { paths: ['item/wooden_pickaxe', 'item/wood_pickaxe'], kind: 'item' },
@@ -1489,6 +1651,9 @@ const PACK_MAP: Record<string, PackEntry> = {
   beetroot_soup: { paths: ['item/beetroot_soup'], kind: 'item' },
   vegetable_stew: { paths: ['item/suspicious_stew', 'item/mushroom_stew'], kind: 'item' },
   hoe: { paths: ['item/wooden_hoe', 'item/wood_hoe'], kind: 'item' },
+  flint_and_steel: { paths: ['item/flint_and_steel'], kind: 'item' },
+  quartz: { paths: ['item/quartz'], kind: 'item' },
+  redstone: { paths: ['item/redstone_dust', 'item/redstone'], kind: 'item' },
 };
 for (let i = 0; i < 10; i++) {
   PACK_MAP[`crack_${i}`] = { paths: [`block/destroy_stage_${i}`], kind: 'crack' };
@@ -1594,6 +1759,17 @@ export class Atlas {
       const top = this.tileCanvas(d.faces.top);
       const side = this.tileCanvas(d.faces.front ?? d.faces.sides);
       const side2 = this.tileCanvas(d.faces.sides);
+      
+      // Draw a soft isometric block shadow
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+      ctx.beginPath();
+      ctx.moveTo(16, 29);
+      ctx.lineTo(29, 22.5);
+      ctx.lineTo(16, 16);
+      ctx.lineTo(3, 22.5);
+      ctx.closePath();
+      ctx.fill();
+
       // top face
       ctx.setTransform(0.93, 0.47, -0.93, 0.47, 16, 0.6);
       ctx.drawImage(top, 0, 0, 16, 16, 0, 0, 16, 16);

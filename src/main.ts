@@ -5,6 +5,7 @@
 import './style.css';
 import { Atlas } from './engine/Textures';
 import { World } from './engine/World';
+import type { DoorState } from './engine/World';
 import { Renderer } from './engine/Renderer';
 import { Player, GameMode } from './engine/Player';
 import { Input } from './engine/Input';
@@ -12,7 +13,9 @@ import { EntityManager } from './engine/EntityManager';
 import { AudioEngine } from './engine/Audio';
 import { HUD, ContainerView } from './ui/HUD';
 import { SaveDB, SaveState, ChestSave, FurnaceSave } from './engine/Persistence';
+import type { BlockEntitySave } from './engine/Persistence';
 import { FurnaceState, ChestState } from './engine/Inventory';
+import type { BlockEntity } from './engine/Inventory';
 import type { Slot } from './engine/Inventory';
 import { buildChunkGeometry } from './engine/Mesher';
 import { chunkKey, CX, CZ } from './engine/Chunk';
@@ -128,11 +131,38 @@ class Game {
           }
         }
       }
+
+      const REDSTONE_IDS = new Set<number>([
+        B.REDSTONE_WIRE, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
+        B.PRESSURE_PLATE, B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT,
+        B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD
+      ]);
+      const isRedstoneRelated = (bx: number, by: number, bz: number) => {
+        if (REDSTONE_IDS.has(this.world.getBlock(bx, by, bz))) return true;
+        for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+          if (REDSTONE_IDS.has(this.world.getBlock(bx + dx, by + dy, bz + dz))) return true;
+        }
+        return false;
+      };
+      if ((_oldId === B.PISTON || _oldId === B.STICKY_PISTON) && newId === B.AIR) {
+        const facing = this.world.pistonFacings.get(`${x},${y},${z}`);
+        if (facing !== undefined) {
+          const [dx, dy, dz] = this.getFacingVector(facing);
+          if (this.world.getBlock(x + dx, y + dy, z + dz) === B.PISTON_HEAD) {
+            this.world.setBlock(x + dx, y + dy, z + dz, B.AIR);
+          }
+        }
+      }
+
+      if (isRedstoneRelated(x, y, z)) {
+        this.triggerRedstoneUpdate(x, y, z);
+      }
     };
 
     this.player.init({
       world: this.world,
       input: this.input,
+      onRedstoneUpdate: (x, y, z) => this.triggerRedstoneUpdate(x, y, z),
       renderer: this.renderer,
       entities: this.entities,
       audio: this.audio,
@@ -156,6 +186,7 @@ class Game {
       onTameWolf: () => this.adv.unlock('wolf'),
       onTrade: () => this.adv.unlock('trade'),
       onDeath: () => this.onDeath(),
+      onTeleport: () => this.teleportPlayerDimension(),
     });
 
     if (save) {
@@ -165,33 +196,68 @@ class Game {
       this.dayTime = save.environment?.dayTime ?? 0.1;
       this.spawnPoint = save.spawn ?? null;
       if (save.advancements) this.adv.load(save.advancements);
-      for (const [k, v] of Object.entries(save.world ?? {})) {
-        this.world.savedChunks.set(k, v);
-      }
+      
+      const ow = this.world.dimData.overworld;
+      for (const [k, v] of Object.entries(save.world ?? {})) ow.savedChunks.set(k, v);
       for (const [k, v] of Object.entries(save.blockEntities ?? {})) {
-        // v1 saves had untagged furnace states
         if ((v as ChestSave).type === 'chest') {
-          this.world.blockEntities.set(k, ChestState.from(v as ChestSave));
+          ow.blockEntities.set(k, ChestState.from(v as ChestSave));
         } else {
-          this.world.blockEntities.set(k, FurnaceState.from(v as FurnaceSave));
+          ow.blockEntities.set(k, FurnaceState.from(v as FurnaceSave));
         }
       }
       for (const [k, v] of Object.entries(save.doors ?? {})) {
-        this.world.doorStates.set(k, {
+        ow.doorStates.set(k, {
           facing: (v.facing & 3) as 0 | 1 | 2 | 3,
           open: !!v.open,
           hingeRight: !!v.hingeRight,
           swing: v.open ? 1 : 0,
         });
       }
-      for (const [k, v] of Object.entries(save.torches ?? {})) {
-        this.world.torchFacings.set(k, v as number);
+      for (const [k, v] of Object.entries(save.torches ?? {})) ow.torchFacings.set(k, v as number);
+      for (const [k, v] of Object.entries(save.water ?? {})) ow.waterLevels.set(k, v as number);
+      for (const [k, v] of Object.entries(save.lava ?? {})) ow.lavaLevels.set(k, v as number);
+      for (const [k, v] of Object.entries(save.redstonePower ?? {})) ow.redstonePower.set(k, v as number);
+      for (const [k, v] of Object.entries(save.redstoneStates ?? {})) ow.redstoneStates.set(k, v as any);
+      for (const [k, v] of Object.entries(save.pistonFacings ?? {})) ow.pistonFacings.set(k, v as number);
+
+      const ne = this.world.dimData.nether;
+      for (const [k, v] of Object.entries(save.worldNether ?? {})) ne.savedChunks.set(k, v);
+      for (const [k, v] of Object.entries(save.blockEntitiesNether ?? {})) {
+        if ((v as ChestSave).type === 'chest') {
+          ne.blockEntities.set(k, ChestState.from(v as ChestSave));
+        } else {
+          ne.blockEntities.set(k, FurnaceState.from(v as FurnaceSave));
+        }
       }
-      for (const [k, v] of Object.entries(save.water ?? {})) {
-        this.world.waterLevels.set(k, v as number);
+      for (const [k, v] of Object.entries(save.doorsNether ?? {})) {
+        ne.doorStates.set(k, {
+          facing: (v.facing & 3) as 0 | 1 | 2 | 3,
+          open: !!v.open,
+          hingeRight: !!v.hingeRight,
+          swing: v.open ? 1 : 0,
+        });
       }
-      for (const [k, v] of Object.entries(save.lava ?? {})) {
-        this.world.lavaLevels.set(k, v as number);
+      for (const [k, v] of Object.entries(save.torchesNether ?? {})) ne.torchFacings.set(k, v as number);
+      for (const [k, v] of Object.entries(save.waterNether ?? {})) ne.waterLevels.set(k, v as number);
+      for (const [k, v] of Object.entries(save.lavaNether ?? {})) ne.lavaLevels.set(k, v as number);
+      for (const [k, v] of Object.entries(save.redstonePowerNether ?? {})) ne.redstonePower.set(k, v as number);
+      for (const [k, v] of Object.entries(save.redstoneStatesNether ?? {})) ne.redstoneStates.set(k, v as any);
+      for (const [k, v] of Object.entries(save.pistonFacingsNether ?? {})) ne.pistonFacings.set(k, v as number);
+
+      if (save.dimension === 'nether') {
+        this.world.dimension = 'nether';
+        this.world.generator.dimension = 'nether';
+        this.world.savedChunks = ne.savedChunks;
+        this.world.blockEntities = ne.blockEntities;
+        this.world.doorStates = ne.doorStates;
+        this.world.torchFacings = ne.torchFacings;
+        this.world.waterLevels = ne.waterLevels;
+        this.world.lavaLevels = ne.lavaLevels;
+        this.world.redstonePower = ne.redstonePower;
+        this.world.redstoneStates = ne.redstoneStates;
+        this.world.pistonFacings = ne.pistonFacings;
+        this.world.redstoneBlocks = ne.redstoneBlocks;
       }
     } else {
       this.player.mode = fresh!.mode;
@@ -257,7 +323,8 @@ class Game {
     // dev helper: #debugmobs drops a few tameable/rideable mobs at spawn and
     // faces the player east toward the horse for screenshot testing
     if (location.hash.includes('debugmobs')) {
-      (window as unknown as { __game: unknown }).__game = this; // dev: lets screenshot harnesses frame mobs
+      (window as unknown as { __game: unknown; __B: unknown }).__game = this; // dev: lets screenshot harnesses frame mobs
+      (window as unknown as { __B: unknown }).__B = B; // dev: block-id enum for headless feature tests
       const p = this.player.pos;
       this.entities.spawnMob('horse', p.x + 3, p.y + 1, p.z);
       this.entities.spawnMob('wolf', p.x + 3, p.y + 1, p.z - 1.5);
@@ -653,6 +720,101 @@ class Game {
     );
   }
 
+  private teleportPlayerDimension(): void {
+    const currentDim = this.world.dimension;
+    const targetDim = currentDim === 'overworld' ? 'nether' : 'overworld';
+    
+    let tx = this.player.pos.x;
+    let tz = this.player.pos.z;
+    if (targetDim === 'nether') {
+      tx /= 8;
+      tz /= 8;
+    } else {
+      tx *= 8;
+      tz *= 8;
+    }
+    tx = Math.floor(tx);
+    tz = Math.floor(tz);
+    
+    let ty = targetDim === 'nether' ? 42 : 68;
+    
+    this.audio.play('explode');
+    this.world.switchDimension(targetDim);
+    // switchDimension clears all chunks; force-generate the landing area now so
+    // the portal search sees real terrain and the platform's setBlock calls land
+    // on ready chunks (otherwise the player free-falls into ungenerated space).
+    const tcx = Math.floor(tx / CX), tcz = Math.floor(tz / CZ);
+    for (let dcz = -1; dcz <= 1; dcz++) {
+      for (let dcx = -1; dcx <= 1; dcx++) this.world.ensureChunk(tcx + dcx, tcz + dcz);
+    }
+
+    let foundPortal = false;
+    outerSearch:
+    for (let dy = -6; dy <= 6; dy++) {
+      for (let dz = -6; dz <= 6; dz++) {
+        for (let dx = -6; dx <= 6; dx++) {
+          if (this.world.getBlock(tx + dx, ty + dy, tz + dz) === B.PORTAL) {
+            tx += dx;
+            ty += dy;
+            tz += dz;
+            foundPortal = true;
+            break outerSearch;
+          }
+        }
+      }
+    }
+    
+    if (!foundPortal) {
+      const px = Math.floor(tx);
+      const py = Math.floor(ty);
+      const pz = Math.floor(tz);
+      
+      for (let dx = -1; dx <= 2; dx++) {
+        this.world.setBlock(px + dx, py - 1, pz, B.OBSIDIAN);
+        this.world.setBlock(px + dx, py + 4, pz, B.OBSIDIAN);
+      }
+      for (let dy = 0; dy <= 3; dy++) {
+        this.world.setBlock(px - 1, py + dy, pz, B.OBSIDIAN);
+        this.world.setBlock(px + 2, py + dy, pz, B.OBSIDIAN);
+      }
+      for (let dy = 0; dy <= 3; dy++) {
+        this.world.setBlock(px, py + dy, pz, B.PORTAL);
+        this.world.setBlock(px + 1, py + dy, pz, B.PORTAL);
+      }
+      
+      for (let dx = -2; dx <= 3; dx++) {
+        for (let dz = -2; dz <= 2; dz++) {
+          const bid = this.world.getBlock(px + dx, py - 2, pz + dz);
+          if (bid === B.AIR || bid === B.LAVA || bid === B.WATER) {
+            this.world.setBlock(px + dx, py - 2, pz + dz, targetDim === 'nether' ? B.NETHERRACK : B.STONE);
+          }
+        }
+      }
+    }
+    
+    // Stand the player one block in front (+z) of the portal on a cleared,
+    // solid floor — never *inside* a portal block, or they'd bounce straight
+    // back once the cooldown expires. Portals in this game are constant-z.
+    const sx = Math.floor(tx), sy = Math.floor(ty), sz = Math.floor(tz) + 1;
+    const ground = targetDim === 'nether' ? B.NETHERRACK : B.STONE;
+    for (let dx = 0; dx <= 1; dx++) {
+      for (let dy = 0; dy <= 1; dy++) this.world.setBlock(sx + dx, sy + dy, sz, B.AIR);
+      const below = this.world.getBlock(sx + dx, sy - 1, sz);
+      if (below === B.AIR || below === B.LAVA || below === B.WATER) {
+        this.world.setBlock(sx + dx, sy - 1, sz, ground);
+      }
+    }
+    this.player.pos = { x: sx + 0.5, y: sy + 0.5, z: sz + 0.5 };
+    this.player.vel = { x: 0, y: 0, z: 0 };
+    this.player.portalCooldown = 4.0; // grace period to step away from the portal
+
+    if (targetDim === 'nether') {
+      this.adv.unlock('thunder');
+    }
+    
+    this.hud.toast(`Entered the ${targetDim === 'nether' ? 'Nether (Hell Map)' : 'Overworld'}`);
+  }
+
   private dropPlayerInventory(pos: { x: number; y: number; z: number }): void {
     const inv = this.player.inventory;
     const dropSlot = (s: Slot): void => {
@@ -717,34 +879,60 @@ class Game {
 
   private buildSave(): SaveState {
     this.world.stashModified();
-    const worldRec: Record<string, Uint8Array> = {};
-    for (const [k, v] of this.world.savedChunks) worldRec[k] = v;
-    const beRec: SaveState['blockEntities'] = {};
-    for (const [k, v] of this.world.blockEntities) {
-      if (!v.isEmpty()) beRec[k] = v.serialize();
-    }
-    const doorRec: NonNullable<SaveState['doors']> = {};
-    for (const [k, v] of this.world.doorStates) {
-      doorRec[k] = { facing: v.facing, open: v.open, hingeRight: !!v.hingeRight };
-    }
-    const torchRec: NonNullable<SaveState['torches']> = {};
-    for (const [k, v] of this.world.torchFacings) torchRec[k] = v;
-    const waterRec: NonNullable<SaveState['water']> = {};
-    for (const [k, v] of this.world.waterLevels) waterRec[k] = v;
-    const lavaRec: NonNullable<SaveState['lava']> = {};
-    for (const [k, v] of this.world.lavaLevels) lavaRec[k] = v;
+
+    const serializeBEs = (beMap: Map<string, BlockEntity>) => {
+      const rec: Record<string, BlockEntitySave> = {};
+      for (const [k, v] of beMap) {
+        if (!v.isEmpty()) rec[k] = v.serialize();
+      }
+      return rec;
+    };
+
+    const serializeDoors = (doorMap: Map<string, DoorState>) => {
+      const rec: Record<string, { facing: number; open: boolean; hingeRight: boolean }> = {};
+      for (const [k, v] of doorMap) {
+        rec[k] = { facing: v.facing, open: v.open, hingeRight: !!v.hingeRight };
+      }
+      return rec;
+    };
+
+    const mapToRecord = <T>(m: Map<string, T>) => {
+      const rec: Record<string, T> = {};
+      for (const [k, v] of m) rec[k] = v;
+      return rec;
+    };
+
+    const ow = this.world.dimData.overworld;
+    const ne = this.world.dimData.nether;
+
     return {
       version: SAVE_VERSION,
       seed: this.world.seed,
       gameMode: this.player.mode,
       player: this.player.serialize(),
       inventory: this.player.inventory.serialize(),
-      world: worldRec,
-      blockEntities: beRec,
-      doors: doorRec,
-      torches: torchRec,
-      water: waterRec,
-      lava: lavaRec,
+      dimension: this.world.dimension,
+      
+      world: mapToRecord(ow.savedChunks),
+      blockEntities: serializeBEs(ow.blockEntities),
+      doors: serializeDoors(ow.doorStates),
+      torches: mapToRecord(ow.torchFacings),
+      water: mapToRecord(ow.waterLevels),
+      lava: mapToRecord(ow.lavaLevels),
+      redstonePower: mapToRecord(ow.redstonePower),
+      redstoneStates: mapToRecord(ow.redstoneStates),
+      pistonFacings: mapToRecord(ow.pistonFacings),
+      
+      worldNether: mapToRecord(ne.savedChunks),
+      blockEntitiesNether: serializeBEs(ne.blockEntities),
+      doorsNether: serializeDoors(ne.doorStates),
+      torchesNether: mapToRecord(ne.torchFacings),
+      waterNether: mapToRecord(ne.waterLevels),
+      lavaNether: mapToRecord(ne.lavaLevels),
+      redstonePowerNether: mapToRecord(ne.redstonePower),
+      redstoneStatesNether: mapToRecord(ne.redstoneStates),
+      pistonFacingsNether: mapToRecord(ne.pistonFacings),
+      
       environment: { dayTime: this.dayTime },
       advancements: this.adv.serialize(),
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
@@ -872,7 +1060,9 @@ class Game {
       this.dayTime, cam.position.x, cam.position.z, this.elapsed,
       this.weather.darkening() * this.weather.intensity,
       this.weather.flashAmount(),
+      this.world.dimension === 'nether',
     );
+    this.hud.setPortalFade(this.player.portalTimer / 1.5);
     this.renderer.setBowCharge(Math.min(1, this.player.bowCharge / 0.9));
     this.renderer.updateChunkFades(dt);
     this.renderer.updateHeld(dt, this.player.isMoving());
@@ -949,6 +1139,48 @@ class Game {
       }
       const want = st.burning ? B.FURNACE_LIT : B.FURNACE;
       if (cur !== want) this.world.setBlock(x, y, z, want);
+    }
+
+    // redstone ticks: buttons tick down, pressure plates check collision
+    let redstoneDirty = false;
+    for (const [key, state] of this.world.redstoneStates) {
+      if (state.ticksLeft !== undefined && state.ticksLeft > 0) {
+        state.ticksLeft--;
+        if (state.ticksLeft === 0) {
+          state.active = false;
+          redstoneDirty = true;
+          const [bx, by, bz] = key.split(',').map(Number);
+          this.audio.play('click');
+          this.world.markDirty(Math.floor(bx / 16), Math.floor(bz / 16));
+        }
+      }
+    }
+
+    for (const key of this.world.redstoneBlocks) {
+      const [bx, by, bz] = key.split(',').map(Number);
+      const bid = this.world.getBlock(bx, by, bz);
+      if (bid === B.PRESSURE_PLATE) {
+        const playerPos = this.player.pos;
+        const playerOn = (
+          playerPos.x + 0.3 > bx && playerPos.x - 0.3 < bx + 1 &&
+          playerPos.y + 1.8 > by && playerPos.y < by + 0.5 &&
+          playerPos.z + 0.3 > bz && playerPos.z - 0.3 < bz + 1
+        );
+        const mobOn = this.entities.anyMobIntersecting(bx, by, bz);
+        const standingOn = playerOn || mobOn;
+        const state = this.world.redstoneStates.get(key) ?? { active: false };
+        if (standingOn !== state.active) {
+          state.active = standingOn;
+          this.world.redstoneStates.set(key, state);
+          this.audio.play('click');
+          redstoneDirty = true;
+          this.world.markDirty(Math.floor(bx / 16), Math.floor(bz / 16));
+        }
+      }
+    }
+
+    if (redstoneDirty) {
+      this.triggerRedstoneUpdate(0, 0, 0);
     }
 
     // support checks: sand/gravel fall, unsupported plants/torches pop off
@@ -1206,6 +1438,227 @@ class Game {
       `Entities: ${c.mobs} mobs, ${c.drops} drops, ${c.other} fx`,
       `Mode: ${this.player.mode}${this.player.flying ? ' (flying)' : ''}${this.player.onGround ? ' on ground' : ''}`,
     ]);
+  }
+
+  triggerRedstoneUpdate(x: number, y: number, z: number): void {
+    this.world.redstonePower.clear();
+    const queue: [number, number, number, number][] = [];
+
+    for (const [key, state] of this.world.redstoneStates) {
+      if (state.active) {
+        const [sx, sy, sz] = key.split(',').map(Number);
+        const bid = this.world.getBlock(sx, sy, sz);
+        if (bid === B.LEVER || bid === B.WOODEN_BUTTON || bid === B.STONE_BUTTON || bid === B.PRESSURE_PLATE) {
+          queue.push([sx, sy, sz, 15]);
+          this.world.redstonePower.set(key, 15);
+        }
+      }
+    }
+
+    while (queue.length > 0) {
+      const [cx, cy, cz, power] = queue.shift()!;
+      if (power <= 0) continue;
+
+      for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+        const nx = cx + dx, ny = cy + dy, nz = cz + dz;
+        const nkey = `${nx},${ny},${nz}`;
+        const nid = this.world.getBlock(nx, ny, nz);
+
+        if (nid === B.REDSTONE_WIRE) {
+          const newPower = power - 1;
+          if (newPower > (this.world.redstonePower.get(nkey) ?? 0)) {
+            this.world.redstonePower.set(nkey, newPower);
+            queue.push([nx, ny, nz, newPower]);
+          }
+        }
+      }
+
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const ux = cx + dx, uy = cy + 1, uz = cz + dz;
+        const ukey = `${ux},${uy},${uz}`;
+        if (this.world.getBlock(ux, uy, uz) === B.REDSTONE_WIRE) {
+          const newPower = power - 1;
+          if (newPower > (this.world.redstonePower.get(ukey) ?? 0)) {
+            this.world.redstonePower.set(ukey, newPower);
+            queue.push([ux, uy, uz, newPower]);
+          }
+        }
+
+        const dxCoord = cx + dx, dyCoord = cy - 1, dzCoord = cz + dz;
+        const dkey = `${dxCoord},${dyCoord},${dzCoord}`;
+        if (this.world.getBlock(dxCoord, dyCoord, dzCoord) === B.REDSTONE_WIRE) {
+          const newPower = power - 1;
+          if (newPower > (this.world.redstonePower.get(dkey) ?? 0)) {
+            this.world.redstonePower.set(dkey, newPower);
+            queue.push([dxCoord, dyCoord, dzCoord, newPower]);
+          }
+        }
+      }
+    }
+
+    const remeshChunks = new Set<string>();
+    for (const key of this.world.redstoneBlocks) {
+      const [rx, ry, rz] = key.split(',').map(Number);
+      const rid = this.world.getBlock(rx, ry, rz);
+
+      if (rid === B.REDSTONE_LAMP || rid === B.REDSTONE_LAMP_LIT) {
+        const powered = this.isPowered(rx, ry, rz);
+        const targetId = powered ? B.REDSTONE_LAMP_LIT : B.REDSTONE_LAMP;
+        if (rid !== targetId) {
+          this.world.setBlock(rx, ry, rz, targetId);
+          remeshChunks.add(chunkKey(Math.floor(rx / 16), Math.floor(rz / 16)));
+        }
+      } else if (rid === B.PISTON || rid === B.STICKY_PISTON) {
+        const powered = this.isPowered(rx, ry, rz);
+        const extended = this.isPistonExtended(rx, ry, rz);
+        if (powered && !extended) {
+          this.extendPiston(rx, ry, rz);
+        } else if (!powered && extended) {
+          this.retractPiston(rx, ry, rz);
+        }
+      } else if (rid === B.DOOR_LOWER || rid === B.DOOR_UPPER || rid === B.TRAPDOOR) {
+        const powered = this.isPowered(rx, ry, rz);
+        const ly = rid === B.DOOR_UPPER ? ry - 1 : ry;
+        const lx = rx, lz = rz;
+        const dkey = rid === B.TRAPDOOR ? `${rx},${ry},${rz}` : `${lx},${ly},${lz}`;
+        const st = this.world.doorStates.get(dkey);
+        if (st && st.open !== powered) {
+          st.open = powered;
+          if (st.swing === undefined) st.swing = powered ? 0 : 1;
+          this.world.doorStates.set(dkey, st);
+          this.audio.play(powered ? 'doorOpen' : 'doorClose');
+          this.world.markDirty(Math.floor(rx / 16), Math.floor(rz / 16));
+        }
+      } else if (rid === B.REDSTONE_WIRE) {
+        this.world.markDirty(Math.floor(rx / 16), Math.floor(rz / 16));
+      }
+    }
+  }
+
+  isPowered(x: number, y: number, z: number): boolean {
+    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+      const nx = x + dx, ny = y + dy, nz = z + dz;
+      const nkey = `${nx},${ny},${nz}`;
+      const nid = this.world.getBlock(nx, ny, nz);
+      if (nid === B.REDSTONE_WIRE) {
+        const p = this.world.redstonePower.get(nkey) ?? 0;
+        if (p > 0) return true;
+      }
+      if (nid === B.LEVER || nid === B.WOODEN_BUTTON || nid === B.STONE_BUTTON || nid === B.PRESSURE_PLATE) {
+        const state = this.world.redstoneStates.get(nkey);
+        if (state && state.active) return true;
+      }
+    }
+    return false;
+  }
+
+  isPistonExtended(x: number, y: number, z: number): boolean {
+    const facing = this.world.pistonFacings.get(`${x},${y},${z}`) ?? 2;
+    const [dx, dy, dz] = this.getFacingVector(facing);
+    return this.world.getBlock(x + dx, y + dy, z + dz) === B.PISTON_HEAD;
+  }
+
+  getFacingVector(facing: number): [number, number, number] {
+    switch (facing) {
+      case 0: return [0, -1, 0];
+      case 1: return [0, 1, 0];
+      case 2: return [0, 0, -1];
+      case 3: return [0, 0, 1];
+      case 4: return [-1, 0, 0];
+      case 5: return [1, 0, 0];
+      default: return [0, 0, 1];
+    }
+  }
+
+  extendPiston(x: number, y: number, z: number): void {
+    const facing = this.world.pistonFacings.get(`${x},${y},${z}`) ?? 2;
+    const [dx, dy, dz] = this.getFacingVector(facing);
+
+    const line: [number, number, number, number][] = [];
+    let pushable = true;
+    let limit = 13;
+    let count = 0;
+    for (let i = 1; i < limit; i++) {
+      const bx = x + i * dx;
+      const by = y + i * dy;
+      const bz = z + i * dz;
+      const id = this.world.getBlock(bx, by, bz);
+      if (id === B.AIR || id === B.WATER || id === B.LAVA) {
+        break;
+      }
+      if (id === B.BEDROCK || id === B.OBSIDIAN || id === B.PORTAL || id === B.FURNACE || id === B.FURNACE_LIT || id === B.CHEST || id === B.CHEST_LOOT) {
+        pushable = false;
+        break;
+      }
+      line.push([bx, by, bz, id]);
+      count++;
+    }
+
+    if (!pushable || count >= 12) return;
+
+    const pushPos = (px: number, py: number, pz: number) => {
+      const p = this.player.pos;
+      if (p.x + 0.3 > px && p.x - 0.3 < px + 1 &&
+          p.y + 1.8 > py && p.y < py + 1 &&
+          p.z + 0.3 > pz && p.z - 0.3 < pz + 1) {
+        this.player.pos.x += dx;
+        this.player.pos.y += dy;
+        this.player.pos.z += dz;
+      }
+      for (const mob of this.entities.entities) {
+        if (!this.entities.isMob(mob)) continue;
+        const hw = mob.box.w / 2;
+        if (mob.pos.x + hw > px && mob.pos.x - hw < px + 1 &&
+            mob.pos.y + mob.box.h > py && mob.pos.y < py + 1 &&
+            mob.pos.z + hw > pz && mob.pos.z - hw < pz + 1) {
+          mob.pos.x += dx;
+          mob.pos.y += dy;
+          mob.pos.z += dz;
+        }
+      }
+    };
+
+    for (let i = line.length - 1; i >= 0; i--) {
+      const [bx, by, bz, id] = line[i];
+      pushPos(bx, by, bz);
+      this.world.setBlock(bx + dx, by + dy, bz + dz, id);
+    }
+
+    const headX = x + dx, headY = y + dy, headZ = z + dz;
+    pushPos(headX, headY, headZ);
+    this.world.setBlock(headX, headY, headZ, B.PISTON_HEAD);
+    this.world.pistonFacings.set(`${headX},${headY},${headZ}`, facing);
+    this.audio.play('doorOpen');
+  }
+
+  retractPiston(x: number, y: number, z: number): void {
+    const facing = this.world.pistonFacings.get(`${x},${y},${z}`) ?? 2;
+    const [dx, dy, dz] = this.getFacingVector(facing);
+    const headX = x + dx, headY = y + dy, headZ = z + dz;
+
+    if (this.world.getBlock(headX, headY, headZ) === B.PISTON_HEAD) {
+      this.world.setBlock(headX, headY, headZ, B.AIR);
+      this.world.pistonFacings.delete(`${headX},${headY},${headZ}`);
+
+      const baseId = this.world.getBlock(x, y, z);
+      if (baseId === B.STICKY_PISTON) {
+        const pullX = x + 2 * dx, pullY = y + 2 * dy, pullZ = z + 2 * dz;
+        const pullId = this.world.getBlock(pullX, pullY, pullZ);
+        if (pullId !== B.AIR && pullId !== B.BEDROCK && pullId !== B.OBSIDIAN && pullId !== B.PORTAL && pullId !== B.FURNACE && pullId !== B.FURNACE_LIT && pullId !== B.CHEST && pullId !== B.CHEST_LOOT) {
+          const p = this.player.pos;
+          if (p.x + 0.3 > pullX && p.x - 0.3 < pullX + 1 &&
+              p.y + 1.8 > pullY && p.y < pullY + 1 &&
+              p.z + 0.3 > pullZ && p.z - 0.3 < pullZ + 1) {
+            this.player.pos.x -= dx;
+            this.player.pos.y -= dy;
+            this.player.pos.z -= dz;
+          }
+          this.world.setBlock(headX, headY, headZ, pullId);
+          this.world.setBlock(pullX, pullY, pullZ, B.AIR);
+        }
+      }
+      this.audio.play('doorClose');
+    }
   }
 
   dispose(): void {

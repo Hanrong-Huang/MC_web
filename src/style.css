@@ -171,6 +171,12 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 }
 #sleep-fade.on { opacity: 1; }
 
+#portal-fade {
+  position: absolute; inset: 0; background: radial-gradient(circle, rgba(140,43,176,0.3) 0%, rgba(74,14,78,0.85) 100%);
+  opacity: 0; pointer-events: none; z-index: 55;
+  transition: opacity 0.15s ease;
+}
+
 #hunger.shake { animation: hungershake 0.4s ease-in-out infinite; }
 @keyframes hungershake {
   0%, 100% { transform: translate(0, 0); }

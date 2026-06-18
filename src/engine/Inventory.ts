@@ -178,6 +178,16 @@ const RECIPES: Recipe[] = [
   ...armorRecipes(LE, I.LEATHER_HELMET, I.LEATHER_CHEST, I.LEATHER_LEGS, I.LEATHER_BOOTS),
   ...armorRecipes(FE, I.IRON_HELMET, I.IRON_CHEST, I.IRON_LEGS, I.IRON_BOOTS),
   ...armorRecipes(DI, I.DIAMOND_HELMET, I.DIAMOND_CHEST, I.DIAMOND_LEGS, I.DIAMOND_BOOTS),
+  // redstone + nether utility
+  { shape: [[FE, 0], [0, I.FLINT]], out: I.FLINT_AND_STEEL, n: 1 },
+  { shape: [[P, P]], out: B.PRESSURE_PLATE, n: 1 },
+  { shape: [[B.OBSIDIAN, B.OBSIDIAN, B.OBSIDIAN], [B.OBSIDIAN, 0, B.OBSIDIAN], [B.OBSIDIAN, B.OBSIDIAN, B.OBSIDIAN]], out: B.PORTAL, n: 1 },
+  { shape: [[I.REDSTONE, B.GLOWSTONE, I.REDSTONE], [B.GLOWSTONE, I.REDSTONE, B.GLOWSTONE]], out: B.REDSTONE_LAMP, n: 1 },
+  { shape: [[S], [C]], out: B.LEVER, n: 1 },
+  { shape: [[P]], out: B.WOODEN_BUTTON, n: 1 },
+  { shape: [[C]], out: B.STONE_BUTTON, n: 1 },
+  { shape: [[P, P, P], [C, FE, C], [C, I.REDSTONE, C]], out: B.PISTON, n: 1 },
+  { shape: [[B.SAPLING], [B.PISTON]], out: B.STICKY_PISTON, n: 1 },
   // light + utility
   { shape: [[I.COAL], [S]], out: B.TORCH, n: 4 },
   { shape: [[G, SA, G], [SA, G, SA], [G, SA, G]], out: B.TNT, n: 1 },
@@ -262,6 +272,9 @@ export function matchRecipe(grid: Slot[], w: number): { id: number; count: numbe
   const cropped = cropGrid(grid, w);
   if (!cropped) return null;
   for (const r of RECIPES) {
+    // the portal recipe exists only as a recipe-book hint; the real way to make
+    // one is to ignite an obsidian frame with flint & steel (see Player).
+    if (r.out === B.PORTAL) continue;
     if (shapeEquals(cropped, r.shape) || shapeEquals(cropped, mirror(r.shape))) {
       return { id: r.out, count: r.n };
     }

@@ -28,17 +28,28 @@ export interface SaveState {
     flying: boolean;
   };
   inventory: { slots: MaybeSlot[]; selected: number; armor?: MaybeSlot[] };
+  dimension?: 'overworld' | 'nether';
   /** chunk key "cx,cz" -> RLE bytes */
   world: Record<string, Uint8Array>;
   blockEntities: Record<string, BlockEntitySave>;
-  /** door state keyed by lower-half "x,y,z" -> facing/open/hinge */
   doors?: Record<string, { facing: number; open: boolean; hingeRight: boolean }>;
-  /** wall-torch facings keyed by "x,y,z" (0=+x,1=-x,2=+z,3=-z) */
   torches?: Record<string, number>;
-  /** flowing-water levels keyed by "x,y,z" (0=source, 1..7=flowing) */
   water?: Record<string, number>;
-  /** flowing-lava levels keyed by "x,y,z" (0=source, 1..3=flowing) */
   lava?: Record<string, number>;
+  redstonePower?: Record<string, number>;
+  redstoneStates?: Record<string, { active: boolean; ticksLeft?: number; facing?: number }>;
+  pistonFacings?: Record<string, number>;
+  
+  worldNether?: Record<string, Uint8Array>;
+  blockEntitiesNether?: Record<string, BlockEntitySave>;
+  doorsNether?: Record<string, { facing: number; open: boolean; hingeRight: boolean }>;
+  torchesNether?: Record<string, number>;
+  waterNether?: Record<string, number>;
+  lavaNether?: Record<string, number>;
+  redstonePowerNether?: Record<string, number>;
+  redstoneStatesNether?: Record<string, { active: boolean; ticksLeft?: number; facing?: number }>;
+  pistonFacingsNether?: Record<string, number>;
+  
   environment: { dayTime: number };
   /** bed spawn point, if set */
   spawn?: { x: number; y: number; z: number };

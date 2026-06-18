@@ -5,7 +5,7 @@
 
 import { Atlas, drawHeart, drawShank, drawBubble, drawArmor } from '../engine/Textures';
 import { Inventory, Slot, matchRecipe, FurnaceState, ChestState, SMELT_TIME, allRecipes, RecipeView } from '../engine/Inventory';
-import { def, CREATIVE_ITEMS, I } from '../engine/Blocks';
+import { def, CREATIVE_ITEMS, I, B } from '../engine/Blocks';
 import { SaveSummary, SlotData } from '../engine/Persistence';
 import { AudioEngine } from '../engine/Audio';
 import type { GameMode } from '../engine/Player';
@@ -85,6 +85,7 @@ export class HUD {
   private vignette: HTMLElement;
   private lowhpEl!: HTMLElement;
   private sleepEl!: HTMLElement;
+  private portalEl!: HTMLElement;
   private packInput: HTMLInputElement;
 
   cursor: Slot = null;
@@ -93,6 +94,8 @@ export class HUD {
   private furnaceSnapshot = '';
   private lastHearts = '';
   private recipeFilter: RecipeFilter = 'all';
+  private recipeSearchQuery = '';
+  private recipeSearchFocused = false;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private packHandler: (files: File[]) => void = () => {};
   /** main sets this: leftover items that can't return to the inventory drop here */
@@ -134,6 +137,7 @@ export class HUD {
     this.lowhpEl = el('div', '', root); this.lowhpEl.id = 'lowhp';
     this.vignette = el('div', '', root); this.vignette.id = 'vignette';
     this.sleepEl = el('div', '', root); this.sleepEl.id = 'sleep-fade';
+    this.portalEl = el('div', '', root); this.portalEl.id = 'portal-fade';
     this.pauseEl = el('div', 'overlay hidden', root); this.pauseEl.id = 'pause-overlay';
     this.deathEl = el('div', 'overlay hidden', root); this.deathEl.id = 'death-overlay';
     this.containerEl = el('div', 'overlay hidden', root); this.containerEl.id = 'container-screen';
@@ -356,6 +360,10 @@ export class HUD {
         window.setTimeout(onWake, 700);
       }, 400);
     }, 700);
+  }
+
+  setPortalFade(amount: number): void {
+    this.portalEl.style.opacity = String(Math.max(0, Math.min(1, amount)));
   }
 
   setDebugVisible(v: boolean): void { this.debugEl.classList.toggle('hidden', !v); }
@@ -773,6 +781,7 @@ export class HUD {
   }
 
   private canFillRecipe(r: RecipeView, inv: Inventory, craftW: number): boolean {
+    if (r.out === B.PORTAL) return false;
     return this.recipeFitsGrid(r, craftW) && r.counts.every((need) => inv.count(need.id) >= need.count);
   }
 
@@ -785,12 +794,17 @@ export class HUD {
   }
 
   private recipeVisible(r: RecipeView, inv: Inventory, craftW: number): boolean {
+    if (this.recipeSearchQuery) {
+      const label = def(r.out).label.toLowerCase();
+      if (!label.includes(this.recipeSearchQuery)) return false;
+    }
     if (this.recipeFilter === 'all') return this.recipeFitsGrid(r, craftW);
     if (this.recipeFilter === 'ready') return this.canFillRecipe(r, inv, craftW);
     return this.recipeFitsGrid(r, craftW) && this.recipeCategory(r) === this.recipeFilter;
   }
 
   private recipeBlockedReason(r: RecipeView, inv: Inventory, craftW: number): string {
+    if (r.out === B.PORTAL) return 'Build 4x5 Obsidian frame & ignite with Flint & Steel. Teleports to Hell map. (1:8 coordinates)';
     if (!this.recipeFitsGrid(r, craftW)) return 'Requires crafting table';
     if (this.cursor) return 'Clear cursor first';
     const missing = r.counts
@@ -825,6 +839,7 @@ export class HUD {
   }
 
   private fillRecipe(r: RecipeView, view: ContainerView, inv: Inventory): boolean {
+    if (r.out === B.PORTAL) return false;
     if (this.cursor || !this.canFillRecipe(r, inv, view.craftW)) return false;
     this.returnCraftGrid(view, inv);
     if (!this.canFillRecipe(r, inv, view.craftW)) return false;
@@ -984,6 +999,24 @@ export class HUD {
       const bookWrap = el('div', 'recipe-book', craftArea);
       const bookTitle = el('div', 'ctr-label', bookWrap);
       bookTitle.textContent = 'Recipe Book';
+
+      const searchBox = el('input', 'recipe-search', bookWrap) as HTMLInputElement;
+      searchBox.type = 'text';
+      searchBox.placeholder = 'Search...';
+      searchBox.value = this.recipeSearchQuery;
+      searchBox.onfocus = () => { this.recipeSearchFocused = true; };
+      searchBox.onblur = () => { this.recipeSearchFocused = false; };
+      searchBox.oninput = () => {
+        this.recipeSearchQuery = searchBox.value.toLowerCase();
+        rerender();
+      };
+      if (this.recipeSearchFocused) {
+        setTimeout(() => {
+          searchBox.focus();
+          searchBox.selectionStart = searchBox.selectionEnd = searchBox.value.length;
+        }, 0);
+      }
+
       const filters = el('div', 'recipe-filters', bookWrap);
       const filterLabels: { id: RecipeFilter; label: string }[] = [
         { id: 'all', label: 'All' },

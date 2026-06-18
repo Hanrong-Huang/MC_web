@@ -11,6 +11,7 @@ const NIGHT_SKY = new THREE.Color(0x0a0c1c);
 const DAWN_TINT = new THREE.Color(0xd99c66);
 const THUNDER_SKY = new THREE.Color(0x4a4f5a);
 const FLASH_WHITE = new THREE.Color(0xf4f4ff);
+const NETHER_SKY = new THREE.Color(0x2d0c0c);
 
 // Chunk shader: vertex 'alight' = (sky-lit, torch-lit). Sky scales with the
 // day/night uniform; torch light is constant and slightly warm, so torch-lit
@@ -380,7 +381,7 @@ export class Renderer {
    * it out briefly on a lightning strike.
    */
   updateEnvironment(t: number, camX: number, camZ: number, elapsed: number,
-    weatherDark = 0, flash = 0): number {
+    weatherDark = 0, flash = 0, isNether = false): number {
     const ang = t * Math.PI * 2;
     const sunY = Math.sin(ang);
     const sunX = Math.cos(ang);
@@ -388,6 +389,26 @@ export class Renderer {
     // precipitation dims the world
     light = Math.max(0.1, light * (1 - weatherDark * 0.6));
     this.daylight = light;
+
+    if (isNether) {
+      const sky = NETHER_SKY.clone();
+      (this.scene.background as THREE.Color).copy(sky);
+      this.fog.color.copy(sky);
+      this.fog.near = 12;
+      this.fog.far = 48;
+
+      this.solidMat.uniforms.uDay.value = 0.2;
+      this.waterMat.uniforms.uDay.value = 0.2;
+      this.waterMat.uniforms.uTime.value = elapsed;
+      this.hemi.intensity = 0.45;
+      this.dir.intensity = 0.15;
+      this.heldLight.intensity = 0.6;
+
+      this.sun.visible = false;
+      this.moon.visible = false;
+      this.starsMat.opacity = 0;
+      return 0.2;
+    }
 
     // sky + fog color, with a dawn/dusk tint
     const sky = NIGHT_SKY.clone().lerp(DAY_SKY, Math.max(0, Math.min(1, (light - 0.16) / 0.84)));
@@ -580,10 +601,17 @@ export class Renderer {
   }
 
   private buildExtrudedItem(sprite: HTMLCanvasElement): THREE.Mesh {
-    return new THREE.Mesh(
-      extrudeSpriteGeometry(sprite, 0.56),
-      new THREE.MeshLambertMaterial({ vertexColors: true }),
+    const isMetallic = this.heldId !== 0 && (
+      def(this.heldId).name.includes('iron') ||
+      def(this.heldId).name.includes('gold') ||
+      def(this.heldId).name.includes('diamond')
     );
+    const mat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: isMetallic ? 0.22 : 0.8,
+      metalness: isMetallic ? 0.82 : 0.05,
+    });
+    return new THREE.Mesh(extrudeSpriteGeometry(sprite, 0.56), mat);
   }
 
   private buildHeldArrow(): THREE.Group {

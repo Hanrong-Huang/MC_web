@@ -20,6 +20,12 @@ export interface DoorState {
   swing?: number;
 }
 
+export interface RedstoneState {
+  active: boolean;
+  ticksLeft?: number;
+  facing?: number;
+}
+
 export interface RayHit {
   x: number; y: number; z: number;     // block coords
   nx: number; ny: number; nz: number;  // face normal
@@ -43,6 +49,11 @@ export class World {
   /** wall-torch facings keyed by "x,y,z": 0=+x,1=-x,2=+z,3=-z. Floor torches
    *  are absent from this map. */
   torchFacings = new Map<string, number>();
+  
+  redstonePower = new Map<string, number>();
+  redstoneStates = new Map<string, RedstoneState>();
+  pistonFacings = new Map<string, number>();
+  redstoneBlocks = new Set<string>();
   onChunkRemoved: (key: string) => void = () => {};
   /** fired after every successful setBlock (gravity blocks, torch supports, ...) */
   onBlockChanged: (x: number, y: number, z: number, oldId: number, newId: number) => void = () => {};
@@ -50,13 +61,95 @@ export class World {
   private genQueue: { cx: number; cz: number; d: number }[] = [];
   private queued = new Set<string>();
 
+  dimension: 'overworld' | 'nether' = 'overworld';
+  dimData: {
+    overworld: {
+      savedChunks: Map<string, Uint8Array>;
+      blockEntities: Map<string, BlockEntity>;
+      doorStates: Map<string, DoorState>;
+      torchFacings: Map<string, number>;
+      waterLevels: Map<string, number>;
+      lavaLevels: Map<string, number>;
+      redstonePower: Map<string, number>;
+      redstoneStates: Map<string, RedstoneState>;
+      pistonFacings: Map<string, number>;
+      redstoneBlocks: Set<string>;
+    };
+    nether: {
+      savedChunks: Map<string, Uint8Array>;
+      blockEntities: Map<string, BlockEntity>;
+      doorStates: Map<string, DoorState>;
+      torchFacings: Map<string, number>;
+      waterLevels: Map<string, number>;
+      lavaLevels: Map<string, number>;
+      redstonePower: Map<string, number>;
+      redstoneStates: Map<string, RedstoneState>;
+      pistonFacings: Map<string, number>;
+      redstoneBlocks: Set<string>;
+    };
+  };
+
   constructor(seed: number) {
     this.seed = seed | 0;
     this.generator = new WorldGenerator(this.seed);
+    this.dimData = {
+      overworld: {
+        savedChunks: this.savedChunks,
+        blockEntities: this.blockEntities,
+        doorStates: this.doorStates,
+        torchFacings: this.torchFacings,
+        waterLevels: this.waterLevels,
+        lavaLevels: this.lavaLevels,
+        redstonePower: this.redstonePower,
+        redstoneStates: this.redstoneStates,
+        pistonFacings: this.pistonFacings,
+        redstoneBlocks: this.redstoneBlocks,
+      },
+      nether: {
+        savedChunks: new Map(),
+        blockEntities: new Map(),
+        doorStates: new Map(),
+        torchFacings: new Map(),
+        waterLevels: new Map(),
+        lavaLevels: new Map(),
+        redstonePower: new Map(),
+        redstoneStates: new Map(),
+        pistonFacings: new Map(),
+        redstoneBlocks: new Set(),
+      }
+    };
   }
 
   getChunk(cx: number, cz: number): Chunk | undefined {
     return this.chunks.get(chunkKey(cx, cz));
+  }
+
+  /** Force a chunk into existence synchronously. The async streamer normally
+   *  generates chunks over several frames, but teleporting needs the
+   *  destination ready *now* so we can build a landing platform and place the
+   *  player on solid ground (otherwise setBlock no-ops and the player falls). */
+  ensureChunk(cx: number, cz: number): Chunk {
+    const key = chunkKey(cx, cz);
+    const existing = this.chunks.get(key);
+    if (existing) return existing;
+    this.queued.delete(key);
+    const chunk = new Chunk(cx, cz);
+    const saved = this.savedChunks.get(key);
+    if (saved) {
+      chunk.data = rleDecode(saved, chunk.data.length);
+      chunk.computeHeightmap();
+      chunk.scanTorches();
+      chunk.ready = true;
+      chunk.modified = true;
+    } else {
+      this.generator.generate(chunk);
+    }
+    this.chunks.set(key, chunk);
+    this.dirtySet.add(key);
+    this.scanRedstoneInChunk(chunk);
+    this.markDirty(cx - 1, cz); this.markDirty(cx + 1, cz);
+    this.markDirty(cx, cz - 1); this.markDirty(cx, cz + 1);
+    return chunk;
   }
 
   getBlock(wx: number, wy: number, wz: number): number {
@@ -110,8 +203,24 @@ export class World {
       if (lz === 0) this.markDirty(cx, cz - 1);
       if (lz === 15) this.markDirty(cx, cz + 1);
     }
-    if (oldId === B.WATER && id !== B.WATER) this.waterLevels.delete(`${wx},${wy},${wz}`);
-    if (oldId === B.LAVA && id !== B.LAVA) this.lavaLevels.delete(`${wx},${wy},${wz}`);
+    const REDSTONE_IDS = new Set<number>([
+      B.REDSTONE_WIRE, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
+      B.PRESSURE_PLATE, B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT,
+      B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD
+    ]);
+    const posKey = `${wx},${wy},${wz}`;
+    if (REDSTONE_IDS.has(oldId)) {
+      this.redstoneBlocks.delete(posKey);
+      this.redstonePower.delete(posKey);
+      this.redstoneStates.delete(posKey);
+      this.pistonFacings.delete(posKey);
+    }
+    if (REDSTONE_IDS.has(id)) {
+      this.redstoneBlocks.add(posKey);
+    }
+
+    if (oldId === B.WATER && id !== B.WATER) this.waterLevels.delete(posKey);
+    if (oldId === B.LAVA && id !== B.LAVA) this.lavaLevels.delete(posKey);
     this.onBlockChanged(wx, wy, wz, oldId, id);
     // Fluid flow: re-check this cell + neighbors when an edit exposes air or
     // touches a fluid. Breaking a block beside/under fluid should start flow;
@@ -543,6 +652,7 @@ export class World {
         }
         this.chunks.set(key, chunk);
         this.dirtySet.add(key);
+        this.scanRedstoneInChunk(chunk);
         // remesh neighbors so their frontier faces update; include diagonals
         // when this chunk carries torch light that may spill across borders
         if (chunk.torches.size > 0) {
@@ -564,6 +674,7 @@ export class World {
       const dx = c.cx - pcx, dz = c.cz - pcz;
       if (dx * dx + dz * dz > U * U) {
         if (c.modified) this.savedChunks.set(key, rleEncode(c.data));
+        this.forgetRedstoneInChunk(c.cx, c.cz);
         this.chunks.delete(key);
         this.dirtySet.delete(key);
         this.onChunkRemoved(key);
@@ -606,6 +717,61 @@ export class World {
       if (t > maxDist) return null;
     }
     return null;
+  }
+
+  switchDimension(dim: 'overworld' | 'nether'): void {
+    if (this.dimension === dim) return;
+    this.stashModified();
+    for (const key of this.chunks.keys()) {
+      this.onChunkRemoved(key);
+    }
+    this.chunks.clear();
+    this.dirtySet.clear();
+    this.genQueue.length = 0;
+    this.queued.clear();
+
+    this.dimension = dim;
+    this.generator.dimension = dim;
+    this.savedChunks = this.dimData[dim].savedChunks;
+    this.blockEntities = this.dimData[dim].blockEntities;
+    this.doorStates = this.dimData[dim].doorStates;
+    this.torchFacings = this.dimData[dim].torchFacings;
+    this.waterLevels = this.dimData[dim].waterLevels;
+    this.lavaLevels = this.dimData[dim].lavaLevels;
+    this.redstonePower = this.dimData[dim].redstonePower;
+    this.redstoneStates = this.dimData[dim].redstoneStates;
+    this.pistonFacings = this.dimData[dim].pistonFacings;
+    this.redstoneBlocks = this.dimData[dim].redstoneBlocks;
+  }
+
+  scanRedstoneInChunk(chunk: Chunk): void {
+    const REDSTONE_IDS = new Set<number>([
+      B.REDSTONE_WIRE, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
+      B.PRESSURE_PLATE, B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT,
+      B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD
+    ]);
+    const bx = chunk.cx * CX, bz = chunk.cz * CZ;
+    for (let y = 0; y < CY; y++) {
+      for (let z = 0; z < CZ; z++) {
+        for (let x = 0; x < CX; x++) {
+          const id = chunk.data[x | (z << 4) | (y << 8)];
+          if (REDSTONE_IDS.has(id)) {
+            this.redstoneBlocks.add(`${bx + x},${y},${bz + z}`);
+          }
+        }
+      }
+    }
+  }
+
+  forgetRedstoneInChunk(cx: number, cz: number): void {
+    const bx0 = cx * CX, bx1 = bx0 + CX;
+    const bz0 = cz * CZ, bz1 = bz0 + CZ;
+    for (const key of this.redstoneBlocks) {
+      const [x, y, z] = key.split(',').map(Number);
+      if (x >= bx0 && x < bx1 && z >= bz0 && z < bz1) {
+        this.redstoneBlocks.delete(key);
+      }
+    }
   }
 
   countLoaded(): number { return this.chunks.size; }

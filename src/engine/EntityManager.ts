@@ -193,7 +193,7 @@ export class EntityManager {
 
   setPlayer(p: Player): void { this.player = p; }
 
-  private isMob(e: Entity): boolean { return MOB_KINDS.has(e.kind); }
+  isMob(e: Entity): boolean { return MOB_KINDS.has(e.kind); }
 
   // --- spawning ---------------------------------------------------------------
 
@@ -1666,13 +1666,23 @@ export class EntityManager {
       const pigSnout = this.boxMesh(0.26, 0.18, 0.1, pigSnoutM);
       pigSnout.position.set(0, -0.05, -0.26);
       head.add(pigSnout);
+      // ears
+      const earL = this.boxMesh(0.12, 0.08, 0.04, bodyM);
+      earL.position.set(-0.28, 0.1, 0.08);
+      const earR = earL.clone();
+      earR.position.x = 0.28;
+      head.add(earL, earR);
+      // tail
+      const tail = this.boxMesh(0.06, 0.06, 0.16, bodyM);
+      tail.position.set(0, 0.62, 0.52);
+      tail.rotation.x = -0.3;
       const legs = [
         this.leg(0.18, 0.32, bodyM, -0.2, 0.32, -0.32),
         this.leg(0.18, 0.32, bodyM, 0.2, 0.32, -0.32),
         this.leg(0.18, 0.32, bodyM, 0.2, 0.32, 0.38),
         this.leg(0.18, 0.32, bodyM, -0.2, 0.32, 0.38),
       ];
-      g.add(body, head, ...legs);
+      g.add(body, head, tail, ...legs);
       return { mesh: g, limbs: { legs, head }, mats };
     }
 
@@ -1721,18 +1731,23 @@ export class EntityManager {
       const skinM = this.mat(this.skin('sheep_skin', '#cfb89c', '#bfa88c'), mats);
       const woolM = this.mat(wool, mats);
       const faceM = this.mat(faceTex, mats);
-      const body = this.boxMesh(0.7, 0.6, 1.0, woolM);
-      body.position.set(0, 0.78, 0.05);
+      const bodySkin = this.boxMesh(0.62, 0.52, 0.92, skinM);
+      bodySkin.position.set(0, 0.78, 0.05);
+      const bodyWool = this.boxMesh(0.72, 0.62, 1.02, woolM);
+      bodyWool.position.set(0, 0.78, 0.05);
       const head = new THREE.Group();
       head.position.set(0, 0.95, -0.55);
       head.add(this.boxMesh(0.4, 0.4, 0.36, [skinM, skinM, woolM, skinM, skinM, faceM]));
+      const headWool = this.boxMesh(0.44, 0.15, 0.4, woolM);
+      headWool.position.set(0, 0.16, 0.02);
+      head.add(headWool);
       const legs = [
         this.leg(0.16, 0.5, skinM, -0.2, 0.5, -0.32),
         this.leg(0.16, 0.5, skinM, 0.2, 0.5, -0.32),
         this.leg(0.16, 0.5, skinM, 0.2, 0.5, 0.38),
         this.leg(0.16, 0.5, skinM, -0.2, 0.5, 0.38),
       ];
-      g.add(body, head, ...legs);
+      g.add(bodySkin, bodyWool, head, ...legs);
       return { mesh: g, limbs: { legs, head }, mats };
     }
 
@@ -1834,6 +1849,11 @@ export class EntityManager {
         this.leg(0.18, 0.34, bodyM, 0.12, 0.34, 0.2),
         this.leg(0.18, 0.34, bodyM, -0.12, 0.34, 0.2),
       ];
+      for (const leg of legs) {
+        const toes = this.boxMesh(0.2, 0.06, 0.08, bodyM);
+        toes.position.set(0, -0.34, -0.09);
+        leg.add(toes);
+      }
       g.add(body, head, ...legs);
       return { mesh: g, limbs: { legs, head }, mats };
     }
@@ -1846,7 +1866,7 @@ export class EntityManager {
       });
       const boneM = this.mat(bone, mats);
       const faceM = this.mat(faceTex, mats);
-      const torso = this.boxMesh(0.42, 0.72, 0.18, boneM);
+      const torso = this.boxMesh(0.3, 0.72, 0.1, boneM);
       torso.position.set(0, 1.12, 0);
       const head = new THREE.Group();
       head.position.set(0, 1.72, 0);
@@ -1854,14 +1874,14 @@ export class EntityManager {
       hb.position.y = 0.23;
       head.add(hb);
       const legs = [
-        this.leg(0.14, 0.76, boneM, -0.11, 0.76, 0),
-        this.leg(0.14, 0.76, boneM, 0.11, 0.76, 0),
+        this.leg(0.08, 0.76, boneM, -0.11, 0.76, 0),
+        this.leg(0.08, 0.76, boneM, 0.11, 0.76, 0),
       ];
       const arms: THREE.Group[] = [];
       for (const side of [-1, 1]) {
         const a = new THREE.Group();
         a.position.set(side * 0.3, 1.42, 0);
-        const am = this.boxMesh(0.13, 0.7, 0.13, boneM);
+        const am = this.boxMesh(0.08, 0.7, 0.08, boneM);
         am.position.y = -0.35;
         a.add(am);
         a.rotation.x = -Math.PI / 2;
@@ -1991,6 +2011,10 @@ export class EntityManager {
     const hb = this.boxMesh(0.46, 0.46, 0.46, [faceM, faceM, faceM, faceM, faceM, faceM]);
     hb.position.y = 0.23;
     head.add(hb);
+    const noseM = this.mat(this.skin('villager_nose', '#c8a878', '#b89868'), mats);
+    const nose = this.boxMesh(0.12, 0.28, 0.16, noseM);
+    nose.position.set(0, 0.08, -0.28);
+    head.add(nose);
     const legs = [
       this.leg(0.2, 0.76, robeM, -0.13, 0.76, 0),
       this.leg(0.2, 0.76, robeM, 0.13, 0.76, 0),

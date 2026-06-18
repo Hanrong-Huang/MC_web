@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import { World } from './World';
 import { Chunk, CX, CZ, CY } from './Chunk';
 import { B, def, isOpaque, occludes, OPAQUE_LUT, CROSS_BLOCKS, TINTED_TILES } from './Blocks';
-import { Atlas } from './Textures';
+import { Atlas, UVRect } from './Textures';
 
 // face order: +x, -x, +y, -y, +z, -z
 const FACE_NORMALS = [
@@ -237,6 +237,31 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
         if (id === B.TRAPDOOR) {
           const open = !!world.doorStates.get(`${bx + x},${y},${bz + z}`)?.open;
           emitTrapdoor(solid, atlas, x, y, z, open, skyAt(x, y, z), torchAt(x, y, z));
+          continue;
+        }
+        if (id === B.PRESSURE_PLATE) {
+          const state = world.redstoneStates.get(`${bx + x},${y},${bz + z}`);
+          const active = !!state?.active;
+          emitPressurePlate(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), active);
+          continue;
+        }
+        if (id === B.LEVER) {
+          const state = world.redstoneStates.get(`${bx + x},${y},${bz + z}`);
+          const active = !!state?.active;
+          const facing = state?.facing ?? 1;
+          emitLever(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), active, facing);
+          continue;
+        }
+        if (id === B.WOODEN_BUTTON || id === B.STONE_BUTTON) {
+          const state = world.redstoneStates.get(`${bx + x},${y},${bz + z}`);
+          const active = !!state?.active;
+          const facing = state?.facing ?? 1;
+          emitButton(solid, atlas, id, x, y, z, skyAt(x, y, z), torchAt(x, y, z), active, facing);
+          continue;
+        }
+        if (id === B.REDSTONE_WIRE) {
+          const power = world.redstonePower.get(`${bx + x},${y},${bz + z}`) ?? 0;
+          emitRedstoneWire(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), power);
           continue;
         }
         if (CROSS_BLOCKS.has(id)) {
@@ -585,6 +610,150 @@ function emitTrapdoor(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: numb
     g.tints.push(1, 1, 1);
     g.uvs.push(i === 0 || i === 3 ? rect.u0 : rect.u1, i < 2 ? rect.v1 : rect.v0);
   }
+  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  g.vertCount += 4;
+}
+
+function emitBox(
+  g: GeoBuilder, rect: UVRect, x: number, y: number, z: number,
+  x0: number, x1: number, y0: number, y1: number, z0: number, z1: number,
+  sky: number, torch: number, tint = [1, 1, 1]
+): void {
+  const push = (px: number, py: number, pz: number, u: number, v: number): void => {
+    g.positions.push(x + px, y + py, z + pz);
+    g.lights.push(sky, torch);
+    g.tints.push(tint[0], tint[1], tint[2]);
+    g.uvs.push(u, v);
+  };
+
+  // +y top
+  let base = g.vertCount;
+  push(x0, y1, z0, rect.u0, rect.v0);
+  push(x1, y1, z0, rect.u1, rect.v0);
+  push(x1, y1, z1, rect.u1, rect.v1);
+  push(x0, y1, z1, rect.u0, rect.v1);
+  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  g.vertCount += 4;
+
+  // -y bottom
+  base = g.vertCount;
+  push(x0, y0, z0, rect.u0, rect.v0);
+  push(x0, y0, z1, rect.u0, rect.v1);
+  push(x1, y0, z1, rect.u1, rect.v1);
+  push(x1, y0, z0, rect.u1, rect.v0);
+  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  g.vertCount += 4;
+
+  // +x side
+  base = g.vertCount;
+  push(x1, y0, z0, rect.u0, rect.v1);
+  push(x1, y0, z1, rect.u1, rect.v1);
+  push(x1, y1, z1, rect.u1, rect.v0);
+  push(x1, y1, z0, rect.u0, rect.v0);
+  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  g.vertCount += 4;
+
+  // -x side
+  base = g.vertCount;
+  push(x0, y0, z1, rect.u0, rect.v1);
+  push(x0, y0, z0, rect.u1, rect.v1);
+  push(x0, y1, z0, rect.u1, rect.v0);
+  push(x0, y1, z1, rect.u0, rect.v0);
+  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  g.vertCount += 4;
+
+  // +z side
+  base = g.vertCount;
+  push(x0, y0, z1, rect.u0, rect.v1);
+  push(x0, y1, z1, rect.u0, rect.v0);
+  push(x1, y1, z1, rect.u1, rect.v0);
+  push(x1, y0, z1, rect.u1, rect.v1);
+  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  g.vertCount += 4;
+
+  // -z side
+  base = g.vertCount;
+  push(x1, y0, z0, rect.u0, rect.v1);
+  push(x1, y1, z0, rect.u0, rect.v0);
+  push(x0, y1, z0, rect.u1, rect.v0);
+  push(x0, y0, z0, rect.u1, rect.v1);
+  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  g.vertCount += 4;
+}
+
+function emitPressurePlate(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean): void {
+  const rect = atlas.rect('planks');
+  const h = active ? 0.03 : 0.08;
+  emitBox(g, rect, x, y, z, 0.0625, 0.9375, 0, h, 0.0625, 0.9375, sky, torch);
+}
+
+function emitLever(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean, facing: number): void {
+  const stoneRect = atlas.rect('cobble');
+  let bx0 = 0.25, bx1 = 0.75, by0 = 0, by1 = 0.18, bz0 = 0.25, bz1 = 0.75;
+  if (facing === 0) {
+    by0 = 0.82; by1 = 1.0;
+  } else if (facing === 2) {
+    bz0 = 0.82; bz1 = 1.0; bx0 = 0.25; bx1 = 0.75; by0 = 0.25; by1 = 0.75;
+  } else if (facing === 3) {
+    bz0 = 0; bz1 = 0.18; bx0 = 0.25; bx1 = 0.75; by0 = 0.25; by1 = 0.75;
+  } else if (facing === 4) {
+    bx0 = 0.82; bx1 = 1.0; bz0 = 0.25; bz1 = 0.75; by0 = 0.25; by1 = 0.75;
+  } else if (facing === 5) {
+    bx0 = 0; bx1 = 0.18; bz0 = 0.25; bz1 = 0.75; by0 = 0.25; by1 = 0.75;
+  }
+  emitBox(g, stoneRect, x, y, z, bx0, bx1, by0, by1, bz0, bz1, sky, torch);
+
+  const woodRect = atlas.rect('planks');
+  let sx0 = 0.44, sx1 = 0.56, sy0 = 0.18, sy1 = 0.7, sz0 = active ? 0.52 : 0.32, sz1 = active ? 0.68 : 0.48;
+  if (facing === 0) {
+    sy0 = 0.3; sy1 = 0.82;
+  } else if (facing === 2) {
+    sz0 = 0.3; sz1 = 0.82; sy0 = active ? 0.52 : 0.32; sy1 = active ? 0.68 : 0.48;
+  } else if (facing === 3) {
+    sz0 = 0.18; sz1 = 0.7; sy0 = active ? 0.52 : 0.32; sy1 = active ? 0.68 : 0.48;
+  } else if (facing === 4) {
+    sx0 = 0.3; sx1 = 0.82; sy0 = active ? 0.52 : 0.32; sy1 = active ? 0.68 : 0.48;
+  } else if (facing === 5) {
+    sx0 = 0.18; sx1 = 0.7; sy0 = active ? 0.52 : 0.32; sy1 = active ? 0.68 : 0.48;
+  }
+  emitBox(g, woodRect, x, y, z, sx0, sx1, sy0, sy1, sz0, sz1, sky, torch);
+}
+
+function emitButton(g: GeoBuilder, atlas: Atlas, id: number, x: number, y: number, z: number, sky: number, torch: number, active: boolean, facing: number): void {
+  const tileName = id === B.WOODEN_BUTTON ? 'planks' : 'stone';
+  const rect = atlas.rect(tileName);
+  const depth = active ? 0.08 : 0.16;
+  let x0 = 0.375, x1 = 0.625, y0 = 0.375, y1 = 0.625, z0 = 0.375, z1 = 0.625;
+  if (facing === 0) {
+    y0 = 1 - depth; y1 = 1;
+  } else if (facing === 1) {
+    y0 = 0; y1 = depth;
+  } else if (facing === 2) {
+    z0 = 1 - depth; z1 = 1;
+  } else if (facing === 3) {
+    z0 = 0; z1 = depth;
+  } else if (facing === 4) {
+    x0 = 1 - depth; x1 = 1;
+  } else if (facing === 5) {
+    x0 = 0; x1 = depth;
+  }
+  emitBox(g, rect, x, y, z, x0, x1, y0, y1, z0, z1, sky, torch);
+}
+
+function emitRedstoneWire(g: GeoBuilder, atlas: Atlas, x: number, y: number, z: number, sky: number, torch: number, power: number): void {
+  const rect = atlas.rect('redstone_dust');
+  const base = g.vertCount;
+  const r = 0.3 + 0.7 * (power / 15);
+  const push = (px: number, py: number, pz: number, u: number, v: number): void => {
+    g.positions.push(x + px, y + py, z + pz);
+    g.lights.push(sky, Math.max(torch, power / 15));
+    g.tints.push(r, 0, 0);
+    g.uvs.push(u, v);
+  };
+  push(0, 0.01, 0, rect.u0, rect.v0);
+  push(1, 0.01, 0, rect.u1, rect.v0);
+  push(1, 0.01, 1, rect.u1, rect.v1);
+  push(0, 0.01, 1, rect.u0, rect.v1);
   g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
   g.vertCount += 4;
 }
