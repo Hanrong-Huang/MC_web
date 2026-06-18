@@ -167,6 +167,7 @@ const RECIPES: Recipe[] = [
   { shape: [[B.LOG]], out: B.PLANKS, n: 4 },
   { shape: [[B.BIRCH_LOG]], out: B.PLANKS, n: 4 },
   { shape: [[B.SPRUCE_LOG]], out: B.PLANKS, n: 4 },
+  { shape: [[B.JUNGLE_LOG]], out: B.PLANKS, n: 4 },
   { shape: [[P], [P]], out: I.STICK, n: 4 },
   { shape: [[P, P], [P, P]], out: B.TABLE, n: 1 },
   { shape: [[C, C, C], [C, 0, C], [C, C, C]], out: B.FURNACE, n: 1 },

@@ -32,6 +32,10 @@ export interface MenuHandlers {
   onPlay: (slot: string, fresh: { seed: number; mode: GameMode } | null) => void;
   onDelete: (slot: string) => void;
   onPack: (files: File[]) => void;
+  /** download a saved world as a portable .json file */
+  onExport: (slot: string) => void;
+  /** import a previously exported world file */
+  onImport: (file: File) => void;
 }
 
 export interface PauseHandlers {
@@ -89,6 +93,7 @@ export class HUD {
   private netherTintEl!: HTMLElement;
   private lowHealthEl!: HTMLElement;
   private packInput: HTMLInputElement;
+  private worldInput: HTMLInputElement;
 
   cursor: Slot = null;
   private view: ContainerView | null = null;
@@ -100,6 +105,7 @@ export class HUD {
   private recipeSearchFocused = false;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private packHandler: (files: File[]) => void = () => {};
+  private importHandler: (file: File) => void = () => {};
   /** main sets this: leftover items that can't return to the inventory drop here */
   onDropLeftover: (id: number, count: number) => void = () => {};
   /** fired when the player takes a crafting result */
@@ -159,6 +165,17 @@ export class HUD {
       const files = this.packInput.files ? [...this.packInput.files] : [];
       if (files.length) this.packHandler(files);
       this.packInput.value = '';
+    });
+
+    this.worldInput = el('input') as HTMLInputElement;
+    this.worldInput.type = 'file';
+    this.worldInput.accept = 'application/json,.json,.vcworld';
+    this.worldInput.style.display = 'none';
+    root.appendChild(this.worldInput);
+    this.worldInput.addEventListener('change', () => {
+      const file = this.worldInput.files?.[0];
+      if (file) this.importHandler(file);
+      this.worldInput.value = '';
     });
 
     document.addEventListener('mousemove', (e) => {
@@ -246,25 +263,34 @@ export class HUD {
       const play = wire(el('button', 'mc-btn small', row));
       play.textContent = 'Play';
       play.onclick = () => { this.audio.ensure(); handlers.onPlay(info.slot, null); };
+      const exp = wire(el('button', 'mc-btn small', row));
+      exp.textContent = 'Export';
+      exp.title = 'Download this world as a .json file you can re-import elsewhere';
+      exp.onclick = () => handlers.onExport(info.slot);
       const del = wire(el('button', 'mc-btn small danger', row));
       del.textContent = 'Delete';
       del.onclick = () => { if (confirm(`Delete "${info.slot}"? This cannot be undone.`)) handlers.onDelete(info.slot); };
     }
 
-    const packRow = el('div', 'menu-row', this.menu);
-    packRow.style.marginTop = '14px';
-    const packBtn = wire(el('button', 'mc-btn small', packRow));
-    packBtn.textContent = 'Load Resource Pack (folder)';
+    const toolRow = el('div', 'menu-row', this.menu);
+    toolRow.style.marginTop = '14px';
+    const packBtn = wire(el('button', 'mc-btn small', toolRow));
+    packBtn.textContent = 'Resource Pack';
+    packBtn.title = 'Apply an unzipped Minecraft Java texture-pack folder (textures only — not a world or seed)';
     packBtn.onclick = () => { this.packHandler = handlers.onPack; this.packInput.click(); };
+    const importBtn = wire(el('button', 'mc-btn small', toolRow));
+    importBtn.textContent = 'Import World';
+    importBtn.title = 'Load a world file exported from here or shared from another machine';
+    importBtn.onclick = () => { this.importHandler = handlers.onImport; this.worldInput.click(); };
 
+    // concise control hints (full details live in F3 / tooltips)
     const help = el('div', 'menu-help', this.menu);
     help.innerHTML =
-      'WASD move · double-W / Shift sprint · Ctrl sneak · Space jump<br>' +
-      'LMB break / attack · RMB place / use / eat · E inventory · 1-9 + scroll hotbar<br>' +
-      'F or double-Space (creative) fly · F3 debug · L advancements · Esc pause<br>' +
-      'Doors & trapdoors open on right-click · climb ladders with Space<br>' +
-      'Watch the sky: rain, snow & thunderstorms roll in — lightning can ignite TNT!<br>' +
-      'Resource packs: pick an <i>unzipped</i> pack folder containing assets/minecraft/textures';
+      '<b>WASD</b> move · <b>Space</b> jump · <b>Shift</b> sprint · <b>F</b> fly · <b>E</b> inventory<br>' +
+      '<b>LMB</b> break · <b>RMB</b> place / use · <b>1–9</b> + scroll hotbar · <b>Esc</b> pause';
+
+    const foot = el('div', 'menu-foot', this.menu);
+    foot.textContent = 'Voxelcraft — a from-scratch Minecraft in TypeScript + Three.js. Every texture, sound & world is generated in code.';
   }
 
   hideMenu(): void { this.menu.classList.add('hidden'); }

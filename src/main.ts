@@ -13,7 +13,7 @@ import { EntityManager } from './engine/EntityManager';
 import { AudioEngine } from './engine/Audio';
 import type { AmbientEnv } from './engine/Audio';
 import { HUD, ContainerView } from './ui/HUD';
-import { SaveDB, SaveState, ChestSave, FurnaceSave } from './engine/Persistence';
+import { SaveDB, SaveState, ChestSave, FurnaceSave, exportWorld, importWorld } from './engine/Persistence';
 import type { BlockEntitySave } from './engine/Persistence';
 import { FurnaceState, ChestState } from './engine/Inventory';
 import type { BlockEntity } from './engine/Inventory';
@@ -1873,7 +1873,49 @@ class App {
           this.hud.toast(n > 0 ? `Resource pack applied (${n} textures)` : 'No matching textures found');
         });
       },
+      onExport: (slot) => void this.downloadWorld(slot),
+      onImport: (file) => void this.uploadWorld(file),
     });
+  }
+
+  /** Download a saved world as a portable .json file. */
+  private async downloadWorld(slot: string): Promise<void> {
+    try {
+      const state = await this.db.load(slot);
+      if (!state) { this.hud.toast('World not found'); return; }
+      const blob = exportWorld(slot, state);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${slot.replace(/[^a-z0-9 _-]+/gi, '_')}.vcworld.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      this.hud.toast(`Exported "${slot}"`);
+    } catch (err) {
+      console.error('export failed', err);
+      this.hud.toast('Export failed');
+    }
+  }
+
+  /** Load a world file (from this or another machine) into a new save slot. */
+  private async uploadWorld(file: File): Promise<void> {
+    try {
+      const text = await file.text();
+      const { slot, state } = importWorld(text);
+      // avoid clobbering an existing world of the same name
+      const existing = new Set((await this.db.list()).map((s) => s.slot));
+      let name = slot;
+      if (existing.has(name)) { let k = 2; while (existing.has(`${name} (${k})`)) k++; name = `${name} (${k})`; }
+      state.lastPlayed = Date.now();
+      await this.db.save(name, state);
+      this.hud.toast(`Imported "${name}"`);
+      await this.showMenu();
+    } catch (err) {
+      console.error('import failed', err);
+      this.hud.toast('Import failed — not a valid world file');
+    }
   }
 
   private async startGame(slot: string, fresh: { seed: number; mode: GameMode } | null): Promise<void> {

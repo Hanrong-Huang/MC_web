@@ -9,7 +9,7 @@ import { B } from './Blocks';
 
 export const SEA_LEVEL = 32;
 
-export type BiomeId = 'plains' | 'forest' | 'desert' | 'snow' | 'taiga' | 'swamp' | 'mountains';
+export type BiomeId = 'plains' | 'forest' | 'desert' | 'snow' | 'taiga' | 'swamp' | 'mountains' | 'jungle';
 
 export class WorldGenerator {
   readonly seed: number;
@@ -52,11 +52,13 @@ export class WorldGenerator {
   }
 
   temperatureAt(wx: number, wz: number): number {
-    return this.temp.fbm(wx * 0.0016, wz * 0.0016, 2) * 0.5 + 0.5;
+    // higher frequency than before: biomes are smaller so a single trek crosses
+    // several of them (the old ~0.0016 scale made each world feel single-biome)
+    return this.temp.fbm(wx * 0.0042, wz * 0.0042, 2) * 0.5 + 0.5;
   }
 
   humidityAt(wx: number, wz: number): number {
-    return this.humid.fbm(wx * 0.0019, wz * 0.0019, 2) * 0.5 + 0.5;
+    return this.humid.fbm(wx * 0.0047, wz * 0.0047, 2) * 0.5 + 0.5;
   }
 
   mountainFactor(wx: number, wz: number): number {
@@ -133,6 +135,7 @@ export class WorldGenerator {
     if (t < 0.42 && m > 0.45) return 'taiga';
     if (t > 0.62 && m < 0.42 && h < 64) return 'desert';
     if (t > 0.38 && m > 0.72 && h <= SEA_LEVEL + 8) return 'swamp';
+    if (t > 0.55 && m > 0.64 && h < 78) return 'jungle'; // hot + very humid uplands
     if (m > 0.52) return 'forest';
     return 'plains';
   }
@@ -301,6 +304,7 @@ export class WorldGenerator {
         else if (biome === 'snow') chance = 0.015;
         else if (biome === 'taiga') chance = 0.022;
         else if (biome === 'swamp') chance = 0.014;
+        else if (biome === 'jungle') chance = 0.05; // dense canopy
         if (r >= chance) continue;
         const h = this.heightAt(wx, wz);
         if (h < SEA_LEVEL || h > 95) continue;
@@ -310,6 +314,8 @@ export class WorldGenerator {
           this.placeSpruce(chunk, wx, h + 1, wz, 6 + Math.floor(variant * 4));
         } else if (biome === 'swamp') {
           this.placeSwampTree(chunk, wx, h + 1, wz, 5 + Math.floor(variant * 3));
+        } else if (biome === 'jungle') {
+          this.placeJungleTree(chunk, wx, h + 1, wz, 8 + Math.floor(variant * 8));
         } else if ((biome === 'forest' && variant < 0.3) || (biome === 'plains' && variant < 0.15)) {
           this.placeTree(chunk, wx, h + 1, wz, 5 + Math.floor(variant * 10) % 3, B.BIRCH_LOG, B.BIRCH_LEAVES);
         } else {
@@ -512,6 +518,30 @@ export class WorldGenerator {
       }
     }
     for (let dy = 0; dy < height; dy++) this.put(chunk, wx, wy + dy, wz, B.SPRUCE_LOG);
+  }
+
+  /** Tall jungle tree: a high JUNGLE_LOG trunk, a broad crown, and a couple of
+   *  mid-height leaf clusters for that layered-canopy look. */
+  private placeJungleTree(chunk: Chunk, wx: number, wy: number, wz: number, height: number): void {
+    for (let dy = 0; dy < height; dy++) this.put(chunk, wx, wy + dy, wz, B.JUNGLE_LOG);
+    for (let dy = height - 4; dy <= height; dy++) {
+      const rad = dy >= height ? 1 : dy >= height - 1 ? 2 : 3;
+      for (let dx = -rad; dx <= rad; dx++) {
+        for (let dz = -rad; dz <= rad; dz++) {
+          if (dx === 0 && dz === 0 && dy < height) continue;
+          if (Math.abs(dx) === rad && Math.abs(dz) === rad &&
+            hash3(this.seed ^ 0x3c1a, wx + dx, wy + dy, wz + dz) < 0.5) continue;
+          this.putIfAir(chunk, wx + dx, wy + dy, wz + dz, B.JUNGLE_LEAVES);
+        }
+      }
+    }
+    const midY = wy + Math.floor(height * 0.55);
+    for (const [dx, dz] of [[1, 1], [-1, -1], [1, -1], [-1, 1]]) {
+      if (hash2(this.seed ^ 0x3c1b, wx + dx, wz + dz) < 0.55) {
+        this.putIfAir(chunk, wx + dx, midY, wz + dz, B.JUNGLE_LEAVES);
+        this.putIfAir(chunk, wx + dx, midY + 1, wz + dz, B.JUNGLE_LEAVES);
+      }
+    }
   }
 
   /** Short, wide oak with drooping leaves for swamp edges. */

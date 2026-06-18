@@ -86,6 +86,74 @@ export function rleDecode(buf: Uint8Array, outLen: number): Uint8Array<ArrayBuff
   return out;
 }
 
+// --- World file export / import ----------------------------------------------
+// A SaveState holds binary RLE chunk blobs (Uint8Array) which JSON can't carry,
+// so the per-dimension chunk maps are base64-encoded into a portable .json file
+// that can be downloaded and re-imported on another machine/server.
+
+const WORLD_FILE_FORMAT = 'voxelcraft-world';
+
+function u8ToB64(u: Uint8Array): string {
+  let s = '';
+  const CH = 0x8000; // chunk the String.fromCharCode args to avoid arg-count limits
+  for (let i = 0; i < u.length; i += CH) {
+    s += String.fromCharCode(...u.subarray(i, i + CH));
+  }
+  return btoa(s);
+}
+function b64ToU8(b: string): Uint8Array {
+  const s = atob(b);
+  const u = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+  return u;
+}
+function encodeChunks(rec?: Record<string, Uint8Array>): Record<string, string> | undefined {
+  if (!rec) return undefined;
+  const out: Record<string, string> = {};
+  for (const k in rec) out[k] = u8ToB64(rec[k]);
+  return out;
+}
+function decodeChunks(rec?: Record<string, string>): Record<string, Uint8Array> {
+  const out: Record<string, Uint8Array> = {};
+  if (rec) for (const k in rec) out[k] = b64ToU8(rec[k]);
+  return out;
+}
+
+/** Serialize a saved world to a downloadable Blob (JSON with base64 chunks). */
+export function exportWorld(slot: string, state: SaveState): Blob {
+  const envelope = {
+    format: WORLD_FILE_FORMAT,
+    fileVersion: 1,
+    slot,
+    state: {
+      ...state,
+      world: encodeChunks(state.world),
+      worldNether: encodeChunks(state.worldNether),
+    },
+  };
+  return new Blob([JSON.stringify(envelope)], { type: 'application/json' });
+}
+
+/** Parse a world file produced by exportWorld back into a slot name + SaveState. */
+export function importWorld(text: string): { slot: string; state: SaveState } {
+  const env = JSON.parse(text) as {
+    format?: string; slot?: string;
+    state?: SaveState & { world?: Record<string, string>; worldNether?: Record<string, string> };
+  };
+  if (!env || env.format !== WORLD_FILE_FORMAT || !env.state) {
+    throw new Error('Not a Voxelcraft world file');
+  }
+  const s = env.state;
+  const state: SaveState = {
+    ...(s as unknown as SaveState),
+    world: decodeChunks(s.world as unknown as Record<string, string>),
+    worldNether: s.worldNether
+      ? decodeChunks(s.worldNether as unknown as Record<string, string>)
+      : undefined,
+  };
+  return { slot: typeof env.slot === 'string' && env.slot ? env.slot : 'Imported World', state };
+}
+
 // --- IndexedDB ---------------------------------------------------------------
 
 const DB_NAME = 'voxelcraft';

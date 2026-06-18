@@ -47,7 +47,7 @@ const HORSE_COATS: [string, string, string][] = [
 ];
 /** Foods that put each animal into "love mode". Wolf/cat/horse must be tamed. */
 const BREED_FOOD: Partial<Record<MobKind, number[]>> = {
-  pig: [I.CARROT, I.POTATO, I.BEETROOT],
+  pig: [I.WHEAT, I.CARROT, I.POTATO, I.BEETROOT],
   cow: [I.WHEAT],
   sheep: [I.WHEAT],
   chicken: [I.SEEDS, I.BEETROOT_SEEDS],
@@ -56,6 +56,17 @@ const BREED_FOOD: Partial<Record<MobKind, number[]>> = {
   cat: [I.RAW_FISH, I.COOKED_FISH],
 };
 const BREED_NEEDS_TAME = new Set<MobKind>(['wolf', 'cat', 'horse']);
+
+/** Held items that lure an animal into facing + walking toward the player
+ *  ("follow the food"). Bone tempts an untamed dog; fish a cat; wheat cows &
+ *  pigs; seeds chickens. Used for the approach behaviour, not consumption. */
+const LURE_FOOD: Partial<Record<MobKind, number[]>> = {
+  wolf: [I.BONE],
+  cat: [I.RAW_FISH, I.COOKED_FISH],
+  cow: [I.WHEAT],
+  pig: [I.WHEAT],
+  chicken: [I.SEEDS, I.BEETROOT_SEEDS],
+};
 
 /** Cat coat palettes: [body, speckle, belly]. */
 const CAT_COATS: [string, string, string][] = [
@@ -862,7 +873,21 @@ export class EntityManager {
       return;
     }
 
-    if (e.state === 'wander' || e.state === 'flee') {
+    // Lure: while the player holds this animal's food it turns to face them and
+    // trots over (an untamed dog tempted by a bone, a cat by fish, cows/pigs by
+    // wheat, chickens by seed). Overrides the idle wander this tick.
+    let lured = false;
+    if (this.isLureFood(e.kind as MobKind, p.heldId()) && distToPlayer < 10) {
+      lured = true;
+      const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
+      const d = Math.hypot(dx, dz) || 1;
+      e.yaw = Math.atan2(-dx, -dz); // look at the player
+      if (distToPlayer > 2.2) { wishX = dx / d; wishZ = dz / d; }
+    }
+
+    if (lured) {
+      // steering handled above
+    } else if (e.state === 'wander' || e.state === 'flee') {
       wishX = -Math.sin(e.yaw);
       wishZ = -Math.cos(e.yaw);
     } else if (e.state === 'chase') {
@@ -891,7 +916,8 @@ export class EntityManager {
       }
     }
 
-    const speed = e.state === 'flee' ? e.moveSpeed * 2.2 : e.moveSpeed;
+    const speed = lured ? e.moveSpeed * 1.4
+      : e.state === 'flee' ? e.moveSpeed * 2.2 : e.moveSpeed;
     const res = this.applyGroundMove(e, dt, wishX, wishZ, speed);
     // hop single-block barriers
     if ((res.hitX || res.hitZ) && e.onGround && (wishX !== 0 || wishZ !== 0)) {
@@ -967,7 +993,15 @@ export class EntityManager {
       L[i].rotation.x = i % 2 === 0 ? swing : -swing;
     }
     if (e.limbs.arms) {
-      for (const a of e.limbs.arms) a.rotation.x = -Math.PI / 2 + Math.sin(e.walkCycle * 0.5) * 0.1;
+      // zombie/skeleton reach FORWARD (−z), the same way the face points, so the
+      // eyes and the outstretched arms line up; +π/2 points the limbs at the face
+      // side (−π/2 used to point them out the back, 180° off the head)
+      const reach = e.kind === 'zombie' || e.kind === 'skeleton';
+      for (let i = 0; i < e.limbs.arms.length; i++) {
+        e.limbs.arms[i].rotation.x = reach
+          ? Math.PI / 2 + Math.sin(e.walkCycle * 0.5) * 0.1
+          : (i % 2 === 0 ? swing : -swing) * 0.6; // villager: swing gently at the sides
+      }
     }
     // Head look-tracking: hostiles in pursuit lock on; every other mob with a
     // head glances at the player when they're close, then relaxes to neutral.
@@ -1254,21 +1288,24 @@ export class EntityManager {
     // Nether: only nether mobs spawn here (in air pockets on netherrack/solid
     // ground near the player's altitude), and the overworld spawns are skipped.
     if (this.world.dimension === 'nether') {
-      if (this.player!.mode === 'survival' && hostile < 14 && Math.random() < 0.65) {
-        const ang = Math.random() * Math.PI * 2;
-        const r = 12 + Math.random() * 22;
-        const wx = Math.floor(p.pos.x + Math.cos(ang) * r);
-        const wz = Math.floor(p.pos.z + Math.sin(ang) * r);
-        const chunk = this.world.getChunk(Math.floor(wx / 16), Math.floor(wz / 16));
-        if (chunk && chunk.ready) {
+      // the nether stays populated in both modes (its mobs can't hurt a creative
+      // player anyway) — two attempts per tick so air pockets fill more reliably
+      if (hostile < 18 && Math.random() < 0.8) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const ang = Math.random() * Math.PI * 2;
+          const r = 12 + Math.random() * 22;
+          const wx = Math.floor(p.pos.x + Math.cos(ang) * r);
+          const wz = Math.floor(p.pos.z + Math.sin(ang) * r);
+          const chunk = this.world.getChunk(Math.floor(wx / 16), Math.floor(wz / 16));
+          if (!chunk || !chunk.ready) continue;
           const py = Math.floor(p.pos.y);
-          for (let tries = 0; tries < 8; tries++) {
-            const wy = py - 8 + Math.floor(Math.random() * 18);
+          for (let tries = 0; tries < 10; tries++) {
+            const wy = py - 10 + Math.floor(Math.random() * 22);
             if (wy < 5 || wy > 120) continue;
             if (this.world.getBlock(wx, wy, wz) !== B.AIR) continue;
             if (this.world.getBlock(wx, wy + 1, wz) !== B.AIR) continue;
             if (!this.world.isSolidAt(wx, wy - 1, wz)) continue;
-            const kind = Math.random() < 0.68 ? NETHER_MOBS[0] : NETHER_MOBS[1];
+            const kind = Math.random() < 0.62 ? NETHER_MOBS[0] : NETHER_MOBS[1];
             this.spawnMob(kind, wx + 0.5, wy, wz + 0.5);
             break;
           }
@@ -1437,6 +1474,13 @@ export class EntityManager {
       return 'trade';
     }
     return null;
+  }
+
+  /** Does the player's held item tempt this animal into following? */
+  private isLureFood(kind: MobKind, heldId: number): boolean {
+    if (!heldId) return false;
+    const foods = LURE_FOOD[kind];
+    return !!foods && foods.includes(heldId);
   }
 
   /** Is this animal a breedable adult and is `heldId` its food? */
@@ -1941,22 +1985,32 @@ export class EntityManager {
       });
       const boneM = this.mat(bone, mats);
       const faceM = this.mat(faceTex, mats);
-      const torso = this.boxMesh(0.3, 0.72, 0.1, boneM);
-      torso.position.set(0, 1.12, 0);
+      // ribcage with real depth (the old wafer torso vanished side-on), plus a
+      // shoulder bar + pelvis so the frame reads as a skeleton, not a stick
+      const torso = this.boxMesh(0.34, 0.66, 0.18, boneM);
+      torso.position.set(0, 1.15, 0);
+      const shoulders = this.boxMesh(0.46, 0.12, 0.2, boneM);
+      shoulders.position.set(0, 1.46, 0);
+      const pelvis = this.boxMesh(0.32, 0.14, 0.2, boneM);
+      pelvis.position.set(0, 0.84, 0);
+      // vertebra of neck lifting the skull clear of the shoulders
+      const neck = this.boxMesh(0.13, 0.16, 0.13, boneM);
+      neck.position.set(0, 1.5, 0);
       const head = new THREE.Group();
-      head.position.set(0, 1.72, 0);
+      head.position.set(0, 1.56, 0);     // pivot at the neck top
       const hb = this.boxMesh(0.46, 0.46, 0.46, [boneM, boneM, boneM, boneM, boneM, faceM]);
       hb.position.y = 0.23;
       head.add(hb);
+      // thicker, separated leg-bones so they no longer fuse into one pole
       const legs = [
-        this.leg(0.08, 0.76, boneM, -0.11, 0.76, 0),
-        this.leg(0.08, 0.76, boneM, 0.11, 0.76, 0),
+        this.leg(0.1, 0.8, boneM, -0.13, 0.82, 0),
+        this.leg(0.1, 0.8, boneM, 0.13, 0.82, 0),
       ];
       const arms: THREE.Group[] = [];
       for (const side of [-1, 1]) {
         const a = new THREE.Group();
-        a.position.set(side * 0.3, 1.42, 0);
-        const am = this.boxMesh(0.08, 0.7, 0.08, boneM);
+        a.position.set(side * 0.28, 1.44, 0);
+        const am = this.boxMesh(0.09, 0.7, 0.09, boneM);
         am.position.y = -0.35;
         a.add(am);
         a.rotation.x = -Math.PI / 2;
@@ -1965,8 +2019,8 @@ export class EntityManager {
       // simple held bow
       const bowM = this.mat(this.skin('skel_bow', '#8a6232', '#5d4222'), mats);
       const bow = this.boxMesh(0.06, 0.5, 0.06, bowM);
-      bow.position.set(-0.3, 1.42, -0.6);
-      g.add(torso, head, ...legs, ...arms, bow);
+      bow.position.set(-0.28, 1.44, -0.6);
+      g.add(torso, shoulders, pelvis, neck, head, ...legs, ...arms, bow);
       return { mesh: g, limbs: { legs, arms, head }, mats };
     }
 
@@ -1984,26 +2038,33 @@ export class EntityManager {
       const pantsM = this.mat(pants, mats);
       const torso = this.boxMesh(0.5, 0.72, 0.26, shirtM);
       torso.position.set(0, 1.12, 0);
+      // a short skin neck bridges the shirt collar and the head
+      const neck = this.boxMesh(0.24, 0.14, 0.24, skinM);
+      neck.position.set(0, 1.5, 0);
       const head = new THREE.Group();
-      head.position.set(0, 1.72, 0);
+      head.position.set(0, 1.54, 0);     // pivot at the neck top
       const headBox = this.boxMesh(0.46, 0.46, 0.46, [skinM, skinM, skinM, skinM, skinM, faceM]);
       headBox.position.y = 0.23;
       head.add(headBox);
+      // separated legs (the old pair touched and read as a single plinth)
       const legs = [
-        this.leg(0.22, 0.76, pantsM, -0.13, 0.76, 0),
-        this.leg(0.22, 0.76, pantsM, 0.13, 0.76, 0),
+        this.leg(0.21, 0.76, pantsM, -0.15, 0.76, 0),
+        this.leg(0.21, 0.76, pantsM, 0.15, 0.76, 0),
       ];
+      // sleeved upper arm + bare green forearm so the outstretched arms read
       const arms: THREE.Group[] = [];
       for (const side of [-1, 1]) {
         const a = new THREE.Group();
         a.position.set(side * 0.36, 1.42, 0);
-        const am = this.boxMesh(0.2, 0.7, 0.2, skinM);
-        am.position.y = -0.35;
-        a.add(am);
+        const sleeve = this.boxMesh(0.2, 0.34, 0.2, shirtM);
+        sleeve.position.y = -0.17;
+        const fore = this.boxMesh(0.19, 0.38, 0.19, skinM);
+        fore.position.y = -0.53;
+        a.add(sleeve, fore);
         a.rotation.x = -Math.PI / 2;
         arms.push(a);
       }
-      g.add(torso, head, ...legs, ...arms);
+      g.add(torso, neck, head, ...legs, ...arms);
       return { mesh: g, limbs: { legs, arms, head }, mats };
     }
 
@@ -2019,58 +2080,61 @@ export class EntityManager {
     const faceM = this.mat(faceTex, mats);
     const whiteM = this.mat(this.skin('wolf_white', '#ece9e2', '#dbd7cd'), mats);
     const noseM = this.mat(this.skin('wolf_nose', '#262626', '#1a1a1a'), mats);
-    // narrower, lower-slung body — wolves are lean, not chunky
-    const body = this.boxMesh(0.48, 0.42, 0.92, bodyM);
-    body.position.set(0, 0.5, 0.05);
-    // pale chest/underside — the classic two-tone wolf coat
-    const chest = this.boxMesh(0.44, 0.3, 0.46, whiteM);
-    chest.position.set(0, 0.4, -0.16);
-    // a short fur neck so the head sits proud of the shoulders (alert wolf)
-    const neck = this.boxMesh(0.3, 0.26, 0.22, bodyM);
-    neck.position.set(0, 0.6, -0.38);
+    // compact lean trunk lifted onto taller legs so it stands like a dog rather
+    // than a low-slung dachshund
+    const body = this.boxMesh(0.46, 0.42, 0.74, bodyM);
+    body.position.set(0, 0.62, 0.06);
+    // pale chest/belly running along the underside — the two-tone coat
+    const belly = this.boxMesh(0.4, 0.22, 0.52, whiteM);
+    belly.position.set(0, 0.46, -0.02);
+    // a sloped fur neck bridging shoulders to head so there's no floating-head gap
+    const neck = this.boxMesh(0.32, 0.34, 0.3, bodyM);
+    neck.position.set(0, 0.76, -0.32);
+    neck.rotation.x = -0.5;
     const head = new THREE.Group();
-    head.position.set(0, 0.72, -0.52);
+    head.position.set(0, 0.88, -0.5);
     // boxy forward-set head, a touch wider than tall
-    head.add(this.boxMesh(0.38, 0.34, 0.32, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
-    // long pale muzzle — the single strongest "this is a canine" cue
-    const snout = this.boxMesh(0.22, 0.16, 0.3, [whiteM, whiteM, whiteM, whiteM, whiteM, faceM]);
-    snout.position.set(0, -0.09, -0.28);
+    head.add(this.boxMesh(0.36, 0.32, 0.3, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
+    // pale muzzle — the single strongest "this is a canine" cue
+    const snout = this.boxMesh(0.2, 0.15, 0.26, [whiteM, whiteM, whiteM, whiteM, whiteM, faceM]);
+    snout.position.set(0, -0.08, -0.25);
     head.add(snout);
     // black nose tip on the end of the muzzle
     const nose = this.boxMesh(0.1, 0.08, 0.05, noseM);
-    nose.position.set(0, -0.05, -0.45);
+    nose.position.set(0, -0.04, -0.39);
     head.add(nose);
-    // short, forward, *tapered* triangular ears (base + smaller tip) so they read
-    // as pointed wolf ears instead of tall floppy rabbit ears
+    // upright, slightly tapered triangular ears (base + smaller tip) so they read
+    // as alert pointed dog ears, not floppy rabbit ears
     const ears: THREE.Object3D[] = [];
     for (const sx of [-1, 1]) {
       const ear = new THREE.Group();
-      ear.position.set(sx * 0.11, 0.17, -0.03);
-      ear.rotation.z = sx * -0.1;
-      const base = this.boxMesh(0.12, 0.1, 0.06, bodyM);
-      const tip = this.boxMesh(0.07, 0.08, 0.06, bodyM);
-      tip.position.y = 0.09;
+      ear.position.set(sx * 0.12, 0.18, 0.02);
+      ear.rotation.z = sx * -0.08;
+      const base = this.boxMesh(0.11, 0.12, 0.06, bodyM);
+      const tip = this.boxMesh(0.06, 0.08, 0.06, bodyM);
+      tip.position.y = 0.1;
       ear.add(base, tip);
       head.add(ear);
       ears.push(ear);
     }
+    // longer legs, set just inside the trunk corners
     const legs = [
-      this.leg(0.14, 0.32, bodyM, -0.17, 0.32, -0.3),
-      this.leg(0.14, 0.32, bodyM, 0.17, 0.32, -0.3),
-      this.leg(0.14, 0.32, bodyM, 0.17, 0.32, 0.35),
-      this.leg(0.14, 0.32, bodyM, -0.17, 0.32, 0.35),
+      this.leg(0.14, 0.44, bodyM, -0.16, 0.46, -0.24),
+      this.leg(0.14, 0.44, bodyM, 0.16, 0.46, -0.24),
+      this.leg(0.14, 0.44, bodyM, 0.16, 0.46, 0.32),
+      this.leg(0.14, 0.44, bodyM, -0.16, 0.46, 0.32),
     ];
-    // bushy tail pivoting at its base; shorter + thicker so it reads as fur, not
-    // a plank, and hangs steeply down-back at rest
+    // bushy tail pivoting at its base; thick so it reads as fur, hangs steeply
+    // down-back at rest (a happy tamed dog raises it — see animateMob)
     const tail = new THREE.Group();
-    tail.position.set(0, 0.58, 0.46);
-    const tailM = this.boxMesh(0.17, 0.17, 0.3, bodyM);
-    tailM.position.z = 0.15;
-    const tailTip = this.boxMesh(0.14, 0.14, 0.12, whiteM);
-    tailTip.position.z = 0.32;
+    tail.position.set(0, 0.72, 0.4);
+    const tailM = this.boxMesh(0.16, 0.16, 0.3, bodyM);
+    tailM.position.z = 0.14;
+    const tailTip = this.boxMesh(0.13, 0.13, 0.12, whiteM);
+    tailTip.position.z = 0.3;
     tail.add(tailM, tailTip);
-    tail.rotation.x = 0.9; // hangs down-and-back; a happy tamed wolf raises it (see animateMob)
-    g.add(body, neck, head, chest, tail, ...legs);
+    tail.rotation.x = 0.85;
+    g.add(body, neck, head, belly, tail, ...legs);
     return { mesh: g, limbs: { legs, head, tail, body, ears }, mats };
   }
 
@@ -2086,7 +2150,7 @@ export class EntityManager {
     const torso = this.boxMesh(0.5, 0.8, 0.28, robeM);
     torso.position.set(0, 1.1, 0);
     const head = new THREE.Group();
-    head.position.set(0, 1.72, 0);
+    head.position.set(0, 1.5, 0);      // pivot at the neck so the head sits flush on the torso
     const hb = this.boxMesh(0.46, 0.46, 0.46, [faceM, faceM, faceM, faceM, faceM, faceM]);
     hb.position.y = 0.23;
     head.add(hb);

@@ -82,6 +82,8 @@ export enum B {
   PISTON_HEAD = 77,
   MAGMA = 78,
   NETHER_BRICKS = 79,
+  JUNGLE_LOG = 80,
+  JUNGLE_LEAVES = 81,
 }
 
 export enum I {
@@ -391,6 +393,16 @@ blockDef({
   id: B.SPRUCE_LEAVES, name: 'spruce_leaves', label: 'Spruce Leaves', hardness: 0.2, sound: 'grass',
   opaque: false, occludes: true,
   faces: { top: 'spruce_leaves', bottom: 'spruce_leaves', sides: 'spruce_leaves' },
+  drop: null,
+});
+blockDef({
+  id: B.JUNGLE_LOG, name: 'jungle_log', label: 'Jungle Log', hardness: 2, tool: 'axe', sound: 'wood', fuel: 15,
+  faces: { top: 'jungle_log_top', bottom: 'jungle_log_top', sides: 'jungle_log_side' },
+});
+blockDef({
+  id: B.JUNGLE_LEAVES, name: 'jungle_leaves', label: 'Jungle Leaves', hardness: 0.2, sound: 'grass',
+  opaque: false, occludes: true,
+  faces: { top: 'jungle_leaves', bottom: 'jungle_leaves', sides: 'jungle_leaves' },
   drop: null,
 });
 blockDef({
@@ -795,8 +807,8 @@ export function attackDamage(heldId: number): number {
 
 /** Blocks the player can place / that show in the creative panel. */
 export const PLACEABLE: number[] = [
-  B.GRASS, B.DIRT, B.STONE, B.COBBLE, B.SAND, B.GRAVEL, B.LOG, B.BIRCH_LOG, B.SPRUCE_LOG,
-  B.PLANKS, B.LEAVES, B.BIRCH_LEAVES, B.SPRUCE_LEAVES,
+  B.GRASS, B.DIRT, B.STONE, B.COBBLE, B.SAND, B.GRAVEL, B.LOG, B.BIRCH_LOG, B.SPRUCE_LOG, B.JUNGLE_LOG,
+  B.PLANKS, B.LEAVES, B.BIRCH_LEAVES, B.SPRUCE_LEAVES, B.JUNGLE_LEAVES,
   B.GLASS, B.TABLE, B.FURNACE, B.CHEST, B.TORCH, B.BED, B.TNT,
   B.SANDSTONE, B.STONE_BRICKS, B.WOOL, B.SNOW_GRASS,
   B.POPPY, B.DANDELION, B.TALL_GRASS, B.CACTUS, B.SUGAR_CANE, B.SAPLING, B.FARMLAND,

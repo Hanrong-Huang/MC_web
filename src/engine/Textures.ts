@@ -628,6 +628,40 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
       c.clearRect(x + ((rand() * 16) | 0), y + ((rand() * 16) | 0), 1, 1);
     }
   },
+  jungle_log_side: (c, x, y) => {
+    const rand = mulberry32(337);
+    for (let px = 0; px < 16; px++) {
+      const streak = rand() < 0.4;
+      for (let py = 0; py < 16; py++) {
+        const r = rand();
+        c.fillStyle = streak
+          ? (r < 0.8 ? '#5a3f22' : '#6e4f2c')
+          : (r < 0.78 ? '#6e4f2c' : r < 0.9 ? '#7d5b33' : '#4d351c');
+        c.fillRect(x + px, y + py, 1, 1);
+      }
+    }
+  },
+  jungle_log_top: (c, x, y) => {
+    const rand = mulberry32(338);
+    for (let py = 0; py < 16; py++) {
+      for (let px = 0; px < 16; px++) {
+        const d = Math.max(Math.abs(px - 7.5), Math.abs(py - 7.5));
+        let col: string;
+        if (d > 6.5) col = rand() < 0.8 ? '#6e4f2c' : '#4d351c';
+        else col = (d | 0) % 2 === 0 ? '#b89b5e' : '#9c8049';
+        c.fillStyle = col;
+        c.fillRect(x + px, y + py, 1, 1);
+      }
+    }
+  },
+  jungle_leaves: (c, x, y) => {
+    // deep, lush green with vivid highlights — denser than oak/birch
+    noiseFill(c, x, y, ['#2f7a2a', '#266a22', '#398f30', '#1f5a1c'], 339, 0);
+    const rand = mulberry32(439);
+    for (let i = 0; i < 40; i++) {
+      c.clearRect(x + ((rand() * 16) | 0), y + ((rand() * 16) | 0), 1, 1);
+    }
+  },
   poppy: (c, x, y) => {
     c.clearRect(x, y, 16, 16);
     pixmap(c, x, y, [
@@ -1603,6 +1637,9 @@ const PACK_MAP: Record<string, PackEntry> = {
   spruce_log_top: { paths: ['block/spruce_log_top', 'block/log_spruce_top'], kind: 'tile' },
   birch_leaves: { paths: ['block/birch_leaves', 'block/leaves_birch'], tint: '#80a755', kind: 'tile' },
   spruce_leaves: { paths: ['block/spruce_leaves', 'block/leaves_spruce'], tint: '#619961', kind: 'tile' },
+  jungle_log_side: { paths: ['block/jungle_log', 'block/log_jungle'], kind: 'tile' },
+  jungle_log_top: { paths: ['block/jungle_log_top', 'block/log_jungle_top'], kind: 'tile' },
+  jungle_leaves: { paths: ['block/jungle_leaves', 'block/leaves_jungle'], tint: '#48b13a', kind: 'tile' },
   poppy: { paths: ['block/poppy', 'block/flower_rose'], kind: 'tile' },
   dandelion: { paths: ['block/dandelion', 'block/flower_dandelion'], kind: 'tile' },
   tall_grass: { paths: ['block/short_grass', 'block/grass', 'block/tallgrass'], tint: '#7cbd6b', kind: 'tile' },
