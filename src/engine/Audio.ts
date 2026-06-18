@@ -9,6 +9,9 @@ export type SfxName =
   | 'explode' | 'bow' | 'snap' | 'fuse' | 'arrowHit'
   | 'thunder' | 'rain' | 'splash' | 'hoof' | 'mount';
 
+/** Ambient mood selector for ambientTick. */
+export type AmbientEnv = 'day' | 'night' | 'cave' | 'nether';
+
 interface AudioSettings { music: boolean; sound: boolean }
 
 const SETTINGS_KEY = 'voxelcraft-audio';
@@ -441,25 +444,25 @@ export class AudioEngine {
   // entirely on the Web Audio clock. Day pieces are major, night pieces minor.
   // ---------------------------------------------------------------------------
 
-  /** Call every frame; starts a new piece when the timer runs out. */
-  ambientTick(dt: number, isNight = false, underground = false): void {
+  /** Call every frame; env picks the mood. Starts a new piece when timer runs out. */
+  ambientTick(dt: number, env: AmbientEnv = 'day'): void {
     if (!this.ctx || !this.settings.music) return;
+    const dark = env !== 'day';
     this.ambientT -= dt;
     if (this.ambientT <= 0) {
-      this.playAmbientStinger(isNight);
-      this.ambientT = (isNight ? 22 : 30) + Math.random() * 28;
+      this.playAmbientStinger(dark);
+      this.ambientT = (dark ? 22 : 30) + Math.random() * 28;
     }
-    // sparse "alone in a vast world" atmosphere cues in the gaps between music;
-    // deep underground these become eerie cave dread instead of open-air wind
+    // environment-flavoured ambience: lively birdsong by day, lonely wind/owl at
+    // night, eerie dread underground, ominous drones in the Nether
     this.atmosphereT -= dt;
     if (this.atmosphereT <= 0) {
-      if (underground) this.caveCue();
-      else this.atmosphereCue(isNight);
-      this.atmosphereT = (underground ? 10 : isNight ? 15 : 22) + Math.random() * 24;
+      this.atmosphereCue(env);
+      this.atmosphereT = (env === 'cave' ? 10 : env === 'day' ? 11 : 15) + Math.random() * 24;
     }
     this.musicT -= dt;
     if (this.musicT > 0) return;
-    const pieceLen = this.playPiece(isNight);
+    const pieceLen = this.playPiece(dark);
     this.musicT = pieceLen + 55 + Math.random() * 80;
   }
 
@@ -477,24 +480,95 @@ export class AudioEngine {
     this.tone(0.08, 62, 40, vol * 0.7, 'sine', 0.15); // dub
   }
 
-  /** One lonely ambient gesture (through the music reverb) — wind sigh, a low
-   *  eerie drone, or a single distant bell ringing out into the emptiness. */
-  private atmosphereCue(isNight: boolean): void {
+  /** One ambient gesture (through the music reverb), flavoured by environment. */
+  private atmosphereCue(env: AmbientEnv): void {
     if (!this.ctx || !this.musicBus) return;
     const t = this.ctx.currentTime + 0.05;
     const r = Math.random();
-    if (r < 0.45) {
-      this.windSigh(t, isNight ? 0.05 : 0.038, isNight);
-    } else if (r < 0.76) {
-      // a low drone swelling out of the dark; deeper + a touch louder at night
-      const f = (isNight ? 55 : 73.42) * (Math.random() < 0.5 ? 1 : 1.5);
-      this.padAt(t, f, isNight ? 0.03 : 0.02, 6 + Math.random() * 4);
-    } else {
-      // a single far-off bell, left alone to decay into the reverb
-      const root = isNight ? 196 : 261.63;
-      const deg = [0, 3, 7, 10, 12][(Math.random() * 5) | 0];
-      this.bellNote(t, root * Math.pow(2, deg / 12), 0.013, 5);
+    if (env === 'cave') { this.caveCue(); return; }
+    if (env === 'nether') {
+      // ominous emptiness: a low drone or a far molten roar
+      if (r < 0.6) this.padAt(t, 49 * (Math.random() < 0.5 ? 1 : 1.5), 0.03, 7);
+      else { this.padAt(t, 41, 0.035, 3); this.noiseBurst(1.6, 240, 0.05, 'lowpass', 70); }
+      return;
     }
+    if (env === 'night') {
+      // lonely night: wind, a low drone, a distant owl, or a lone bell
+      if (r < 0.38) this.windSigh(t, 0.05, true);
+      else if (r < 0.62) this.padAt(t, 55 * (Math.random() < 0.5 ? 1 : 1.5), 0.03, 7);
+      else if (r < 0.84) this.owlHoot(t);
+      else this.bellNote(t, 196 * Math.pow(2, [0, 3, 7, 10][(Math.random() * 4) | 0] / 12), 0.013, 5);
+      return;
+    }
+    // day: a living world — birdsong, insect trills, a gentle breeze
+    if (r < 0.52) this.birdChirp(t);
+    else if (r < 0.78) this.insectTrill(t);
+    else this.windSigh(t, 0.03, false);
+  }
+
+  /** A short cheerful birdsong — a few quick gliding high notes. */
+  private birdChirp(when: number): void {
+    if (!this.ctx || !this.musicBus) return;
+    const n = 2 + ((Math.random() * 3) | 0);
+    let base = 2200 + Math.random() * 1200;
+    for (let i = 0; i < n; i++) {
+      const f = base * (0.9 + Math.random() * 0.4);
+      this.chirpNote(when + i * (0.07 + Math.random() * 0.05), f, f * (1 + (Math.random() - 0.3) * 0.4), 0.05);
+      base *= 0.96;
+    }
+  }
+
+  private chirpNote(when: number, f0: number, f1: number, vol: number): void {
+    if (!this.ctx || !this.musicBus) return;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(f0, when);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(200, f1), when + 0.05);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.linearRampToValueAtTime(vol, when + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0003, when + 0.07);
+    osc.connect(g).connect(this.musicBus);
+    osc.start(when); osc.stop(when + 0.1);
+  }
+
+  /** A soft amplitude-modulated cricket/insect trill. */
+  private insectTrill(when: number): void {
+    if (!this.ctx || !this.musicBus) return;
+    const dur = 0.6 + Math.random() * 0.9;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.value = 4200 + Math.random() * 1500;
+    const lfo = this.ctx.createOscillator();
+    lfo.type = 'square'; lfo.frequency.value = 28 + Math.random() * 14;
+    const lfoGain = this.ctx.createGain(); lfoGain.gain.value = 0.018;
+    const g = this.ctx.createGain(); g.gain.value = 0;
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.linearRampToValueAtTime(0.018, when + 0.15);
+    g.gain.linearRampToValueAtTime(0.0001, when + dur);
+    lfo.connect(lfoGain).connect(g.gain);
+    osc.connect(g).connect(this.musicBus);
+    osc.start(when); lfo.start(when);
+    osc.stop(when + dur + 0.05); lfo.stop(when + dur + 0.05);
+  }
+
+  /** A soft two-note owl hoot, low with gentle vibrato. */
+  private owlHoot(when: number): void {
+    if (!this.ctx || !this.musicBus) return;
+    const hoot = (t: number) => {
+      const osc = this.ctx!.createOscillator();
+      osc.type = 'sine'; osc.frequency.value = 360 + Math.random() * 60;
+      const vib = this.ctx!.createOscillator(); vib.type = 'sine'; vib.frequency.value = 7;
+      const vibG = this.ctx!.createGain(); vibG.gain.value = 6;
+      vib.connect(vibG).connect(osc.frequency);
+      const g = this.ctx!.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.05, t + 0.05);
+      g.gain.exponentialRampToValueAtTime(0.0003, t + 0.4);
+      osc.connect(g).connect(this.musicBus!);
+      osc.start(t); vib.start(t); osc.stop(t + 0.45); vib.stop(t + 0.45);
+    };
+    hoot(when); hoot(when + 0.55);
   }
 
   /** Underground dread: an eerie moan, a lone echoing drip, or a distant rumble. */

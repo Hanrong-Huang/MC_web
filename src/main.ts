@@ -11,6 +11,7 @@ import { Player, GameMode } from './engine/Player';
 import { Input } from './engine/Input';
 import { EntityManager } from './engine/EntityManager';
 import { AudioEngine } from './engine/Audio';
+import type { AmbientEnv } from './engine/Audio';
 import { HUD, ContainerView } from './ui/HUD';
 import { SaveDB, SaveState, ChestSave, FurnaceSave } from './engine/Persistence';
 import type { BlockEntitySave } from './engine/Persistence';
@@ -1041,13 +1042,13 @@ class Game {
         this.tickAcc -= 0.05;
         this.tick20();
       }
-      // the Nether always uses the dark (minor) musical mood, day or night
-      const darkMood = this.world.dimension === 'nether' || Math.sin(this.dayTime * Math.PI * 2) < -0.06;
-      // deep + sky-occluded overworld = underground (eerie cave ambience)
+      // pick the ambient mood: nether > underground cave > night > lively day
       const pgx = Math.floor(this.player.pos.x), pgy = Math.floor(this.player.pos.y), pgz = Math.floor(this.player.pos.z);
-      const underground = this.world.dimension === 'overworld' && pgy < 52 &&
-        this.world.skyLight(pgx, pgy + 1, pgz) < 0.5;
-      this.audio.ambientTick(dt, darkMood, underground);
+      let env: AmbientEnv;
+      if (this.world.dimension === 'nether') env = 'nether';
+      else if (pgy < 52 && this.world.skyLight(pgx, pgy + 1, pgz) < 0.5) env = 'cave';
+      else env = Math.sin(this.dayTime * Math.PI * 2) < -0.06 ? 'night' : 'day';
+      this.audio.ambientTick(dt, env);
       // heartbeat + red vignette rise as health gets low (survival only)
       const hpFrac = this.player.mode === 'survival' ? this.player.hp / 20 : 1;
       this.audio.heartbeatTick(dt, hpFrac);
