@@ -409,6 +409,18 @@ export class AudioEngine {
         this.tone(0.18, 620, 720, 0.12 * vol, 'sawtooth');
         this.tone(0.22, 700, 480, 0.1 * vol, 'sawtooth', 0.16);
         break;
+      case 'cinderling':
+        // a crackling ember hiss + a small shrill screech
+        this.noiseBurst(0.22, 2600, 0.1 * vol, 'highpass');
+        this.tone(0.12, 880, 1280, 0.1 * vol, 'square');
+        this.tone(0.1, 700, 420, 0.07 * vol, 'sawtooth', 0.12);
+        break;
+      case 'ashstalker':
+        // a low molten growl with a crackle on top
+        this.tone(0.5, 130, 80, 0.22 * vol, 'sawtooth');
+        this.tone(0.4, 165, 105, 0.12 * vol, 'square', 0.05);
+        this.noiseBurst(0.35, 1400, 0.08 * vol, 'bandpass', 500);
+        break;
     }
   }
 

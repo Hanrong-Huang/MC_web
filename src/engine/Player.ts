@@ -220,6 +220,15 @@ export class Player {
     if (underFeet === B.SOUL_SAND && !this.flying) {
       speed *= 0.4;
     }
+    // magma block scorches the feet (unless sneaking) — lighter than lava, and
+    // shares the lava burn cooldown so you can't be double-burned
+    if (underFeet === B.MAGMA && this.onGround && !this.flying && !this.sneaking &&
+        this.mode === 'survival' && this.lavaT <= 0) {
+      this.lavaT = 0.5;
+      this.damage(1);
+      this.deps.entities.spawnBlockParticles(
+        Math.floor(this.pos.x), Math.floor(this.pos.y), Math.floor(this.pos.z), B.MAGMA, 2);
+    }
 
     // snappy acceleration with slight air control
     const accelK = this.flying ? 9 : this.onGround ? 16 : wasInWater ? 7 : 4.2;

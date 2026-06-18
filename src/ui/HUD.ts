@@ -804,7 +804,7 @@ export class HUD {
   }
 
   private recipeBlockedReason(r: RecipeView, inv: Inventory, craftW: number): string {
-    if (r.out === B.PORTAL) return 'Build 4x5 Obsidian frame & ignite with Flint & Steel. Teleports to Hell map. (1:8 coordinates)';
+    if (r.out === B.PORTAL) return 'Build 4x5 Obsidian frame & ignite with Flint & Steel. Teleports to the Nether map. (1:8 coordinates)';
     if (!this.recipeFitsGrid(r, craftW)) return 'Requires crafting table';
     if (this.cursor) return 'Clear cursor first';
     const missing = r.counts

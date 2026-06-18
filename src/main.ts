@@ -812,7 +812,7 @@ class Game {
       this.adv.unlock('thunder');
     }
     
-    this.hud.toast(`Entered the ${targetDim === 'nether' ? 'Nether (Hell Map)' : 'Overworld'}`);
+    this.hud.toast(`Entered the ${targetDim === 'nether' ? 'Nether map' : 'Overworld'}`);
   }
 
   private dropPlayerInventory(pos: { x: number; y: number; z: number }): void {
@@ -1303,6 +1303,16 @@ class Game {
   /** Light ambient life: torch embers and night fireflies near the player. */
   private emitAmbientParticles(): void {
     const p = this.player.pos;
+    // nether: drifting ember sparks fill the air for a hellish ambience
+    if (this.world.dimension === 'nether') {
+      for (let i = 0; i < 2; i++) {
+        if (Math.random() > 0.6) continue;
+        const ex = p.x + (Math.random() - 0.5) * 16;
+        const ez = p.z + (Math.random() - 0.5) * 16;
+        const ey = p.y + 0.5 + (Math.random() - 0.5) * 6;
+        this.entities.spawnTorchFlame(ex, ey, ez);
+      }
+    }
     const pcx = Math.floor(p.x / CX), pcz = Math.floor(p.z / CZ);
     for (let dz = -1; dz <= 1; dz++) {
       for (let dx = -1; dx <= 1; dx++) {

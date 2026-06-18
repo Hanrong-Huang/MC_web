@@ -199,6 +199,8 @@ export class WorldGenerator {
               const r = hash3(this.seed ^ 0x111, wx, y, wz);
               if (r < 0.012) {
                 id = B.QUARTZ_ORE;
+              } else if (chunk.get(x, y - 1, z) === B.LAVA && r > 0.6) {
+                id = B.MAGMA; // crusts the lava surface
               }
             } else {
               if (y <= 32) {

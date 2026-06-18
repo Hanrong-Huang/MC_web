@@ -80,6 +80,8 @@ export enum B {
   STICKY_PISTON = 75,
   PRESSURE_PLATE = 76,
   PISTON_HEAD = 77,
+  MAGMA = 78,
+  NETHER_BRICKS = 79,
 }
 
 export enum I {
@@ -163,6 +165,7 @@ export enum I {
   FLINT_AND_STEEL = 177,
   QUARTZ = 178,
   REDSTONE = 179,
+  NETHER_BRICK = 180,
 }
 
 /** Wearable-armor slot index: 0 head, 1 chest, 2 legs, 3 feet. */
@@ -627,7 +630,7 @@ itemDef({ id: I.WATER_BUCKET, name: 'water_bucket', label: 'Water Bucket', sprit
 itemDef({ id: I.LAVA_BUCKET, name: 'lava_bucket', label: 'Lava Bucket', sprite: 'lava_bucket', stack: 1 });
 
 blockDef({
-  id: B.PORTAL, name: 'portal', label: 'Hell Gate Portal', hardness: -1, sound: 'glass',
+  id: B.PORTAL, name: 'portal', label: 'Nether Portal', hardness: -1, sound: 'glass',
   faces: { top: 'portal', bottom: 'portal', sides: 'portal' },
   solid: false, opaque: false, occludes: false
 });
@@ -647,6 +650,14 @@ blockDef({
   id: B.QUARTZ_ORE, name: 'nether_quartz_ore', label: 'Nether Quartz Ore', hardness: 2.0, tool: 'pickaxe', minTier: 4, sound: 'stone',
   faces: { top: 'nether_quartz_ore', bottom: 'nether_quartz_ore', sides: 'nether_quartz_ore' },
   drop: { id: I.QUARTZ, min: 1, max: 1 }
+});
+blockDef({
+  id: B.MAGMA, name: 'magma', label: 'Magma Block', hardness: 0.5, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  faces: { top: 'magma', bottom: 'magma', sides: 'magma' }
+});
+blockDef({
+  id: B.NETHER_BRICKS, name: 'nether_bricks', label: 'Nether Bricks', hardness: 2.0, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  faces: { top: 'nether_bricks', bottom: 'nether_bricks', sides: 'nether_bricks' }
 });
 blockDef({
   id: B.REDSTONE_WIRE, name: 'redstone_dust', label: 'Redstone Dust', hardness: 0, sound: 'stone',
@@ -698,6 +709,7 @@ blockDef({
 itemDef({ id: I.FLINT_AND_STEEL, name: 'flint_and_steel', label: 'Flint and Steel', sprite: 'flint_and_steel', stack: 1 });
 itemDef({ id: I.QUARTZ, name: 'quartz', label: 'Nether Quartz', sprite: 'quartz', stack: 64 });
 itemDef({ id: I.REDSTONE, name: 'redstone', label: 'Redstone Dust', sprite: 'redstone', stack: 64 });
+itemDef({ id: I.NETHER_BRICK, name: 'nether_brick', label: 'Nether Brick', sprite: 'nether_brick', stack: 64 });
 
 export function def(id: number): Def {
   const d = DEFS.get(id);
@@ -790,6 +802,7 @@ export const PLACEABLE: number[] = [
   B.IRON_BLOCK, B.GOLD_BLOCK, B.DIAMOND_BLOCK, B.BEDROCK,
   B.LADDER, B.TRAPDOOR, B.OBSIDIAN,
   B.PORTAL, B.NETHERRACK, B.GLOWSTONE, B.SOUL_SAND, B.QUARTZ_ORE,
+  B.MAGMA, B.NETHER_BRICKS,
   B.REDSTONE_WIRE, B.REDSTONE_LAMP, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
   B.PISTON, B.STICKY_PISTON, B.PRESSURE_PLATE,
 ];
@@ -813,5 +826,5 @@ export const CREATIVE_ITEMS: number[] = [
   I.IRON_HELMET, I.IRON_CHEST, I.IRON_LEGS, I.IRON_BOOTS,
   I.DIAMOND_HELMET, I.DIAMOND_CHEST, I.DIAMOND_LEGS, I.DIAMOND_BOOTS,
   I.BUCKET, I.WATER_BUCKET, I.LAVA_BUCKET,
-  I.FLINT_AND_STEEL, I.QUARTZ, I.REDSTONE,
+  I.FLINT_AND_STEEL, I.QUARTZ, I.REDSTONE, I.NETHER_BRICK,
 ];

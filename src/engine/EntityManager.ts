@@ -15,14 +15,18 @@ import type { Player } from './Player';
 export type MobKind =
   | 'pig' | 'chicken' | 'sheep' | 'cow'
   | 'zombie' | 'skeleton' | 'spider' | 'creeper'
-  | 'wolf' | 'villager' | 'phantom' | 'horse' | 'cat';
+  | 'wolf' | 'villager' | 'phantom' | 'horse' | 'cat'
+  | 'cinderling' | 'ashstalker';
 export type EntityKind = 'drop' | MobKind | 'arrow' | 'tnt' | 'falling' | 'particle' | 'bobber';
 
 const MOB_KINDS = new Set<EntityKind>([
   'pig', 'chicken', 'sheep', 'cow',
   'zombie', 'skeleton', 'spider', 'creeper',
   'wolf', 'villager', 'phantom', 'horse', 'cat',
+  'cinderling', 'ashstalker',
 ]);
+/** Nether-only hostile mobs. */
+const NETHER_MOBS: MobKind[] = ['cinderling', 'ashstalker'];
 const JUMP_V = Math.sqrt(2 * 32 * 1.25); // same 1.25-block hop as the player
 const GRAVITY = 32;
 
@@ -94,7 +98,12 @@ const MOB_STATS: Record<MobKind, MobStats> = {
   phantom: { box: { w: 0.9, h: 0.5 }, hp: 12, speed: 2.4, hostile: true },
   horse: { box: { w: 1.0, h: 1.6 }, hp: 22, speed: 2.1, hostile: false },
   cat: { box: { w: 0.5, h: 0.6 }, hp: 8, speed: 1.7, hostile: false },
+  // nether: a small fast ember imp and a heavier charred beast
+  cinderling: { box: { w: 0.5, h: 0.85 }, hp: 8, speed: 2.7, hostile: true },
+  ashstalker: { box: { w: 0.8, h: 0.9 }, hp: 16, speed: 3.0, hostile: true },
 };
+/** Melee mobs that deal contact damage while chasing. */
+const MELEE_MOBS = new Set<MobKind>(['zombie', 'spider', 'cinderling', 'ashstalker']);
 
 export class Entity {
   kind: EntityKind;
@@ -817,6 +826,11 @@ export class EntityManager {
     }
     // tamed wolf collar glow
     if (e.kind === 'wolf' && e.tamed) { er = 0.15; eg = 0.1; eb = 0.05; }
+    // nether mobs smoulder: a warm ember glow that pulses like cooling lava
+    if ((e.kind === 'cinderling' || e.kind === 'ashstalker') && e.hurtFlash <= 0) {
+      const pulse = 0.32 + 0.12 * Math.sin(e.age * 4 + (e.kind === 'ashstalker' ? 1 : 0));
+      er = pulse; eg = pulse * 0.4; eb = 0.02;
+    }
     for (const m of e.materials) m.emissive.setRGB(er, eg, eb);
 
     // steering by state
@@ -885,14 +899,17 @@ export class EntityManager {
     }
 
     // melee contact attacks
-    if ((e.kind === 'zombie' || e.kind === 'spider') && !p.dead && e.attackCooldown <= 0 && e.state === 'chase') {
+    if (MELEE_MOBS.has(e.kind as MobKind) && !p.dead && e.attackCooldown <= 0 && e.state === 'chase') {
       const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
       const dy = p.pos.y - e.pos.y;
-      if (Math.hypot(dx, dz) < (e.kind === 'spider' ? 1.4 : 1.1) && Math.abs(dy) < 2) {
-        e.attackCooldown = 1;
+      const reach = e.kind === 'spider' ? 1.4 : e.kind === 'ashstalker' ? 1.3 : 1.1;
+      const dmg = e.kind === 'spider' ? 2 : e.kind === 'cinderling' ? 2
+        : e.kind === 'ashstalker' ? 4 : 3;
+      if (Math.hypot(dx, dz) < reach && Math.abs(dy) < 2) {
+        e.attackCooldown = e.kind === 'cinderling' ? 0.7 : 1;
         if (p.mode === 'survival') {
-          p.damage(e.kind === 'spider' ? 2 : 3);
-          p.applyKnockback(dx, dz, 6);
+          p.damage(dmg);
+          p.applyKnockback(dx, dz, e.kind === 'ashstalker' ? 7 : 5);
         }
       }
     }
@@ -1234,6 +1251,32 @@ export class EntityManager {
       this.spawnMob(kinds[Math.floor(Math.random() * kinds.length)], wx + 0.5, wy, wz + 0.5);
     };
 
+    // Nether: only nether mobs spawn here (in air pockets on netherrack/solid
+    // ground near the player's altitude), and the overworld spawns are skipped.
+    if (this.world.dimension === 'nether') {
+      if (this.player!.mode === 'survival' && hostile < 14 && Math.random() < 0.65) {
+        const ang = Math.random() * Math.PI * 2;
+        const r = 12 + Math.random() * 22;
+        const wx = Math.floor(p.pos.x + Math.cos(ang) * r);
+        const wz = Math.floor(p.pos.z + Math.sin(ang) * r);
+        const chunk = this.world.getChunk(Math.floor(wx / 16), Math.floor(wz / 16));
+        if (chunk && chunk.ready) {
+          const py = Math.floor(p.pos.y);
+          for (let tries = 0; tries < 8; tries++) {
+            const wy = py - 8 + Math.floor(Math.random() * 18);
+            if (wy < 5 || wy > 120) continue;
+            if (this.world.getBlock(wx, wy, wz) !== B.AIR) continue;
+            if (this.world.getBlock(wx, wy + 1, wz) !== B.AIR) continue;
+            if (!this.world.isSolidAt(wx, wy - 1, wz)) continue;
+            const kind = Math.random() < 0.68 ? NETHER_MOBS[0] : NETHER_MOBS[1];
+            this.spawnMob(kind, wx + 0.5, wy, wz + 0.5);
+            break;
+          }
+        }
+      }
+      return;
+    }
+
     if (!isNight && passive < 10 && Math.random() < 0.5) {
       surfaceSpawn(['pig', 'chicken', 'sheep', 'cow'], 12, 36);
     }
@@ -1319,6 +1362,8 @@ export class EntityManager {
       case 'wolf': if (!e.tamed) at(I.BONE, 1, 2); break;
       case 'villager': break; // villagers drop nothing
       case 'phantom': at(I.ROTTEN_FLESH, 0, 1); break;
+      case 'cinderling': at(I.QUARTZ, 0, 1); at(I.COAL, 0, 1); break;
+      case 'ashstalker': at(I.COAL, 1, 2); at(I.BONE, 0, 1); break;
       default: break;
     }
   }
@@ -2132,6 +2177,74 @@ export class EntityManager {
 
     g.add(body, head, tail, ...legs);
     return { mesh: g, limbs: { legs, head, tail, body, ears }, mats };
+  }
+
+  if (kind === 'cinderling') {
+    // a small charcoal imp with blazing eyes and ember horns/arms
+    const charM = this.mat(this.skin('cinderling', '#2a2320', '#d65a16'), mats);
+    const faceTex = this.skin('cinderling_face', '#2a2320', '#d65a16', (ctx) => {
+      ctx.fillStyle = '#ffd24a'; ctx.fillRect(1, 3, 2, 2); ctx.fillRect(5, 3, 2, 2); // blazing eyes
+      ctx.fillStyle = '#ff8a1a'; ctx.fillRect(2, 6, 4, 1); // grin
+    });
+    const faceM = this.mat(faceTex, mats);
+    const emberM = this.mat(this.skin('cinder_ember', '#ff7a1a', '#ffd24a'), mats);
+    const body = this.boxMesh(0.34, 0.3, 0.24, charM);
+    body.position.set(0, 0.42, 0);
+    const head = new THREE.Group();
+    head.position.set(0, 0.66, 0);
+    head.add(this.boxMesh(0.32, 0.3, 0.3, [charM, charM, charM, charM, charM, faceM]));
+    for (const sx of [-1, 1]) {
+      const horn = new THREE.Group();
+      horn.position.set(sx * 0.1, 0.15, 0);
+      const h1 = this.boxMesh(0.06, 0.1, 0.06, emberM);
+      const h2 = this.boxMesh(0.05, 0.08, 0.05, emberM); h2.position.set(sx * 0.03, 0.08, 0);
+      horn.add(h1, h2); horn.rotation.z = sx * -0.25;
+      head.add(horn);
+    }
+    const legs = [
+      this.leg(0.1, 0.28, charM, -0.09, 0.28, 0),
+      this.leg(0.1, 0.28, charM, 0.09, 0.28, 0),
+    ];
+    // arms hang at the sides (not animated, so they don't get the zombie pose)
+    for (const sx of [-1, 1]) {
+      const arm = this.boxMesh(0.08, 0.26, 0.08, emberM);
+      arm.position.set(sx * 0.22, 0.42, 0);
+      g.add(arm);
+    }
+    g.add(body, head, ...legs);
+    return { mesh: g, limbs: { legs, head, body }, mats };
+  }
+
+  if (kind === 'ashstalker') {
+    // a charred four-legged beast with an ember-lit spine
+    const hideM = this.mat(this.skin('ashstalker', '#241e1c', '#b8501a'), mats);
+    const faceTex = this.skin('ashstalker_face', '#241e1c', '#b8501a', (ctx) => {
+      ctx.fillStyle = '#ffd24a'; ctx.fillRect(1, 3, 2, 1); ctx.fillRect(5, 3, 2, 1); // eyes
+      ctx.fillStyle = '#ff7a1a'; ctx.fillRect(2, 5, 4, 1); // maw
+    });
+    const faceM = this.mat(faceTex, mats);
+    const emberM = this.mat(this.skin('ash_ember', '#ff7a1a', '#ffd24a'), mats);
+    const body = this.boxMesh(0.5, 0.4, 0.95, hideM);
+    body.position.set(0, 0.52, 0.05);
+    const head = new THREE.Group();
+    head.position.set(0, 0.56, -0.5);
+    head.add(this.boxMesh(0.36, 0.34, 0.34, [hideM, hideM, hideM, hideM, hideM, faceM]));
+    const snout = this.boxMesh(0.2, 0.16, 0.18, [hideM, hideM, hideM, hideM, hideM, faceM]);
+    snout.position.set(0, -0.08, -0.24); head.add(snout);
+    // ember spines along the back
+    for (let i = 0; i < 3; i++) {
+      const sp = this.boxMesh(0.06, 0.14, 0.1, emberM);
+      sp.position.set(0, 0.78, -0.18 + i * 0.28); sp.rotation.x = -0.2;
+      g.add(sp);
+    }
+    const legs = [
+      this.leg(0.14, 0.34, hideM, -0.18, 0.34, -0.3),
+      this.leg(0.14, 0.34, hideM, 0.18, 0.34, -0.3),
+      this.leg(0.14, 0.34, hideM, 0.18, 0.34, 0.35),
+      this.leg(0.14, 0.34, hideM, -0.18, 0.34, 0.35),
+    ];
+    g.add(body, head, ...legs);
+    return { mesh: g, limbs: { legs, head, body }, mats };
   }
 
   // phantom: a small flying mob with two angular wings

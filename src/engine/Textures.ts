@@ -231,6 +231,23 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
       c.fillRect(x + bx, y + by, 3, 2);
     }
   },
+  magma: (c, x, y) => {
+    const pal = ['#2a1108', '#3a1810', '#241008', '#311409'];
+    noiseFill(c, x, y, pal, 7050, 1);
+    const rand = mulberry32(7051);
+    for (let i = 0; i < 9; i++) {
+      c.fillStyle = rand() < 0.5 ? '#ff7a1a' : '#ffb13a';
+      c.fillRect(x + ((rand() * 13) | 0), y + ((rand() * 13) | 0), 2, 2);
+    }
+  },
+  nether_bricks: (c, x, y) => {
+    const pal = ['#2a1418', '#34191e', '#241115', '#2f161b'];
+    noiseFill(c, x, y, pal, 7052, 1);
+    c.fillStyle = '#160a0d';
+    for (const ry of [3, 7, 11, 15]) c.fillRect(x, y + ry, 16, 1);
+    c.fillRect(x + 4, y, 1, 4); c.fillRect(x + 12, y + 4, 1, 4);
+    c.fillRect(x + 4, y + 8, 1, 4); c.fillRect(x + 12, y + 12, 1, 4);
+  },
   redstone_dust: (c, x, y) => {
     c.clearRect(x, y, 16, 16);
     const rand = mulberry32(7009);
@@ -1155,6 +1172,24 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     '................',
     '................'
   ], { O: '#9c9297', L: '#ffffff', Q: '#eae5e8' }),
+  nether_brick: (c) => pixmap(c, 0, 0, [
+    '................',
+    '................',
+    '....OOOOOO......',
+    '...OBBBBBBO.....',
+    '...OBDBBDBO.....',
+    '...OBBBBBBO.....',
+    '...OBDBBDBO.....',
+    '...OBBBBBBO.....',
+    '....OOOOOO......',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................'
+  ], { O: '#160a0d', B: '#3a1c22', D: '#2a1418' }),
   redstone: (c) => pixmap(c, 0, 0, [
     '................',
     '................',
@@ -1593,6 +1628,8 @@ const PACK_MAP: Record<string, PackEntry> = {
   glowstone: { paths: ['block/glowstone'], kind: 'tile' },
   soul_sand: { paths: ['block/soul_sand'], kind: 'tile' },
   nether_quartz_ore: { paths: ['block/nether_quartz_ore'], kind: 'tile' },
+  magma: { paths: ['block/magma'], kind: 'tile' },
+  nether_bricks: { paths: ['block/nether_bricks'], kind: 'tile' },
   redstone_dust: { paths: ['block/redstone_dust_line'], kind: 'tile' },
   redstone_lamp: { paths: ['block/redstone_lamp'], kind: 'tile' },
   lever: { paths: ['block/lever'], kind: 'tile' },
@@ -1653,6 +1690,7 @@ const PACK_MAP: Record<string, PackEntry> = {
   hoe: { paths: ['item/wooden_hoe', 'item/wood_hoe'], kind: 'item' },
   flint_and_steel: { paths: ['item/flint_and_steel'], kind: 'item' },
   quartz: { paths: ['item/quartz'], kind: 'item' },
+  nether_brick: { paths: ['item/netherbrick', 'item/nether_brick'], kind: 'item' },
   redstone: { paths: ['item/redstone_dust', 'item/redstone'], kind: 'item' },
 };
 for (let i = 0; i < 10; i++) {

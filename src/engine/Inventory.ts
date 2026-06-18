@@ -206,6 +206,7 @@ const RECIPES: Recipe[] = [
   // building materials
   { shape: [[SA, SA], [SA, SA]], out: B.SANDSTONE, n: 1 },
   { shape: [[B.STONE, B.STONE], [B.STONE, B.STONE]], out: B.STONE_BRICKS, n: 4 },
+  { shape: [[I.NETHER_BRICK, I.NETHER_BRICK], [I.NETHER_BRICK, I.NETHER_BRICK]], out: B.NETHER_BRICKS, n: 1 },
   { shape: [[ST, ST], [ST, ST]], out: B.WOOL, n: 1 },
   // buildable interactivity
   { shape: [[P, P], [P, P], [P, P]], out: I.WOOD_DOOR, n: 3 },
@@ -298,6 +299,7 @@ const SMELT = new Map<number, number>([
   [I.BEEF, I.COOKED_BEEF],
   [I.RAW_FISH, I.COOKED_FISH],
   [I.POTATO, I.BAKED_POTATO],
+  [B.NETHERRACK, I.NETHER_BRICK],
 ]);
 
 export function smeltResult(id: number): number | undefined { return SMELT.get(id); }
