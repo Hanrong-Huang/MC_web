@@ -8,6 +8,11 @@ function lightTransparent(id: number): boolean {
   return id === B.AIR || id === B.TORCH || id === B.GLASS || CROSS_BLOCKS.has(id);
 }
 
+/** Full-block light emitters that feed the block-light flood-fill (alongside torches). */
+export function isGlower(id: number): boolean {
+  return id === B.GLOWSTONE || id === B.REDSTONE_LAMP_LIT;
+}
+
 export const CX = 16;
 export const CZ = 16;
 export const CY = 128;
@@ -29,6 +34,8 @@ export class Chunk {
   heightmap = new Uint8Array(CX * CZ);
   /** packed local indices of torch blocks (light sources) */
   torches = new Set<number>();
+  /** packed local indices of full-block light emitters (glowstone, lit lamp) */
+  glowers = new Set<number>();
   /** needs remesh */
   dirty = true;
   /** edited since generation (must be persisted) */
@@ -50,8 +57,11 @@ export class Chunk {
   set(x: number, y: number, z: number, id: number): void {
     if (y < 0 || y >= CY) return;
     const idx = x | (z << 4) | (y << 8);
-    if (this.data[idx] === B.TORCH) this.torches.delete(idx);
+    const old = this.data[idx];
+    if (old === B.TORCH) this.torches.delete(idx);
     if (id === B.TORCH) this.torches.add(idx);
+    if (isGlower(old)) this.glowers.delete(idx);
+    if (isGlower(id)) this.glowers.add(idx);
     this.data[idx] = id;
     this.updateColumnHeight(x, z);
   }
@@ -75,11 +85,14 @@ export class Chunk {
     }
   }
 
-  /** Rebuild the torch index after bulk data writes (generation / save load). */
+  /** Rebuild the torch + glower indices after bulk data writes (generation / save load). */
   scanTorches(): void {
     this.torches.clear();
+    this.glowers.clear();
     for (let i = 0; i < this.data.length; i++) {
-      if (this.data[i] === B.TORCH) this.torches.add(i);
+      const id = this.data[i];
+      if (id === B.TORCH) this.torches.add(i);
+      else if (isGlower(id)) this.glowers.add(i);
     }
   }
 

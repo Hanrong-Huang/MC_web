@@ -1,7 +1,7 @@
 // World: chunk map + streaming, block get/set with dirty propagation,
 // DDA voxel raycasting, skylight lookups, and furnace block-entities.
 
-import { Chunk, chunkKey, CX, CZ, CY } from './Chunk';
+import { Chunk, chunkKey, CX, CZ, CY, isGlower } from './Chunk';
 import { WorldGenerator } from './WorldGenerator';
 import { B, isSolid, def, hasDef } from './Blocks';
 import { BlockEntity } from './Inventory';
@@ -192,7 +192,7 @@ export class World {
 
     // torch light spans chunks: remesh the whole 3x3 neighborhood when the
     // edit involves a torch or happens near existing torch light
-    if (id === B.TORCH || oldId === B.TORCH || this.torchesNear(cx, cz)) {
+    if (id === B.TORCH || oldId === B.TORCH || isGlower(id) || isGlower(oldId) || this.lightsNear(cx, cz)) {
       for (let dz = -1; dz <= 1; dz++) {
         for (let dx = -1; dx <= 1; dx++) this.markDirty(cx + dx, cz + dz);
       }
@@ -230,11 +230,11 @@ export class World {
     return true;
   }
 
-  private torchesNear(cx: number, cz: number): boolean {
+  private lightsNear(cx: number, cz: number): boolean {
     for (let dz = -1; dz <= 1; dz++) {
       for (let dx = -1; dx <= 1; dx++) {
         const c = this.chunks.get(chunkKey(cx + dx, cz + dz));
-        if (c && c.torches.size > 0) return true;
+        if (c && (c.torches.size > 0 || c.glowers.size > 0)) return true;
       }
     }
     return false;

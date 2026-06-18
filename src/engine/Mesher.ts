@@ -32,6 +32,7 @@ const FACE_GEO: { o: number[]; u: number[]; v: number[] }[] = [
 const AO_SHADE = [0.45, 0.65, 0.84, 1.0];
 
 const TORCH_LEVEL = 14;
+const GLOW_LEVEL = 15; // glowstone / lit redstone lamp: full-strength block light
 const MAX_LIGHT = 15;
 
 // shared flood-fill region: chunk plus a 15-block margin on each side
@@ -159,25 +160,24 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
     return TINT_CACHE.subarray(ci * 3, ci * 3 + 3);
   };
 
-  // --- torch flood fill ------------------------------------------------------
-  let hasTorches = false;
-  for (const c of refs) if (c && c.torches.size > 0) { hasTorches = true; break; }
-  if (hasTorches) {
+  // --- block-light flood fill (torches + glowstone/lit lamps) ----------------
+  let hasLights = false;
+  for (const c of refs) if (c && (c.torches.size > 0 || c.glowers.size > 0)) { hasLights = true; break; }
+  if (hasLights) {
     REGION.fill(0);
     let qHead = 0, qTail = 0;
     const push = (idx: number) => { QUEUE[qTail++ % QUEUE.length] = idx; };
-    for (const c of refs) {
-      if (!c || c.torches.size === 0) continue;
+    const seed = (c: Chunk, packed: number, level: number): void => {
       const ox = c.cx * CX - bx, oz = c.cz * CZ - bz;
-      for (const t of c.torches) {
-        const rx = ox + (t & 15), rz = oz + ((t >> 4) & 15), ry = t >> 8;
-        if (rx < RX0 || rx > RX1 || rz < RX0 || rz > RX1) continue;
-        const ri = regionIdx(rx, rz, ry);
-        if (REGION[ri] < TORCH_LEVEL) {
-          REGION[ri] = TORCH_LEVEL;
-          push(ri);
-        }
-      }
+      const rx = ox + (packed & 15), rz = oz + ((packed >> 4) & 15), ry = packed >> 8;
+      if (rx < RX0 || rx > RX1 || rz < RX0 || rz > RX1) return;
+      const ri = regionIdx(rx, rz, ry);
+      if (REGION[ri] < level) { REGION[ri] = level; push(ri); }
+    };
+    for (const c of refs) {
+      if (!c || (c.torches.size === 0 && c.glowers.size === 0)) continue;
+      for (const t of c.torches) seed(c, t, TORCH_LEVEL);
+      for (const t of c.glowers) seed(c, t, GLOW_LEVEL); // glowstone/lamp burn a touch brighter
     }
     while (qHead < qTail) {
       const ri = QUEUE[qHead++ % QUEUE.length];
@@ -206,7 +206,7 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
     }
   }
   const torchAt = (x: number, y: number, z: number): number => {
-    if (!hasTorches || y < 0 || y >= CY || x < RX0 || x > RX1 || z < RX0 || z > RX1) return 0;
+    if (!hasLights || y < 0 || y >= CY || x < RX0 || x > RX1 || z < RX0 || z > RX1) return 0;
     return REGION[regionIdx(x, z, y)] / MAX_LIGHT;
   };
 
