@@ -442,18 +442,20 @@ export class AudioEngine {
   // ---------------------------------------------------------------------------
 
   /** Call every frame; starts a new piece when the timer runs out. */
-  ambientTick(dt: number, isNight = false): void {
+  ambientTick(dt: number, isNight = false, underground = false): void {
     if (!this.ctx || !this.settings.music) return;
     this.ambientT -= dt;
     if (this.ambientT <= 0) {
       this.playAmbientStinger(isNight);
       this.ambientT = (isNight ? 22 : 30) + Math.random() * 28;
     }
-    // sparse "alone in a vast world" atmosphere cues in the gaps between music
+    // sparse "alone in a vast world" atmosphere cues in the gaps between music;
+    // deep underground these become eerie cave dread instead of open-air wind
     this.atmosphereT -= dt;
     if (this.atmosphereT <= 0) {
-      this.atmosphereCue(isNight);
-      this.atmosphereT = (isNight ? 15 : 22) + Math.random() * 26;
+      if (underground) this.caveCue();
+      else this.atmosphereCue(isNight);
+      this.atmosphereT = (underground ? 10 : isNight ? 15 : 22) + Math.random() * 24;
     }
     this.musicT -= dt;
     if (this.musicT > 0) return;
@@ -492,6 +494,48 @@ export class AudioEngine {
       const root = isNight ? 196 : 261.63;
       const deg = [0, 3, 7, 10, 12][(Math.random() * 5) | 0];
       this.bellNote(t, root * Math.pow(2, deg / 12), 0.013, 5);
+    }
+  }
+
+  /** Underground dread: an eerie moan, a lone echoing drip, or a distant rumble. */
+  private caveCue(): void {
+    if (!this.ctx || !this.musicBus) return;
+    const t = this.ctx.currentTime + 0.05;
+    const r = Math.random();
+    if (r < 0.5) {
+      this.caveMoan(t);
+    } else if (r < 0.82) {
+      // a single water drip, echoing into the reverb
+      this.bellNote(t, 1500 + Math.random() * 700, 0.02, 0.5);
+      this.bellNote(t + 0.09, 900 + Math.random() * 300, 0.012, 0.7);
+    } else {
+      // a distant rockfall rumble
+      this.padAt(t, 44, 0.03, 2.5);
+      this.noiseBurst(1.4, 180, 0.05, 'lowpass', 55);
+    }
+  }
+
+  /** A low, slowly-wavering moan through the reverb — the classic cave unease. */
+  private caveMoan(when: number): void {
+    if (!this.ctx || !this.musicBus) return;
+    const dur = 2.6 + Math.random() * 2.2;
+    const base = 58 + Math.random() * 46;
+    const lp = this.ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 380; lp.Q.value = 1.5;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.linearRampToValueAtTime(0.06, when + dur * 0.4);
+    g.gain.linearRampToValueAtTime(0.0001, when + dur);
+    lp.connect(g).connect(this.musicBus);
+    for (const [mult, detune] of [[1, 0], [1, 8], [2, -5]] as [number, number][]) {
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(base * mult, when);
+      osc.detune.value = detune;
+      osc.frequency.linearRampToValueAtTime(base * mult * 1.07, when + dur * 0.5);
+      osc.frequency.linearRampToValueAtTime(base * mult * 0.96, when + dur);
+      osc.connect(lp);
+      osc.start(when); osc.stop(when + dur + 0.05);
     }
   }
 

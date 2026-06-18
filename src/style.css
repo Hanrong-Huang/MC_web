@@ -185,6 +185,14 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   transition: opacity 1.2s ease;
 }
 
+/* a red edge vignette that tightens as health runs low */
+#low-health {
+  position: absolute; inset: 0;
+  background: radial-gradient(circle, rgba(120,0,0,0) 40%, rgba(140,0,0,0.7) 100%);
+  opacity: 0; pointer-events: none; z-index: 52;
+  transition: opacity 0.4s ease;
+}
+
 #hunger.shake { animation: hungershake 0.4s ease-in-out infinite; }
 @keyframes hungershake {
   0%, 100% { transform: translate(0, 0); }

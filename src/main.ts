@@ -1043,9 +1043,15 @@ class Game {
       }
       // the Nether always uses the dark (minor) musical mood, day or night
       const darkMood = this.world.dimension === 'nether' || Math.sin(this.dayTime * Math.PI * 2) < -0.06;
-      this.audio.ambientTick(dt, darkMood);
-      // heartbeat rises as health gets low (survival only)
-      this.audio.heartbeatTick(dt, this.player.mode === 'survival' ? this.player.hp / 20 : 1);
+      // deep + sky-occluded overworld = underground (eerie cave ambience)
+      const pgx = Math.floor(this.player.pos.x), pgy = Math.floor(this.player.pos.y), pgz = Math.floor(this.player.pos.z);
+      const underground = this.world.dimension === 'overworld' && pgy < 52 &&
+        this.world.skyLight(pgx, pgy + 1, pgz) < 0.5;
+      this.audio.ambientTick(dt, darkMood, underground);
+      // heartbeat + red vignette rise as health gets low (survival only)
+      const hpFrac = this.player.mode === 'survival' ? this.player.hp / 20 : 1;
+      this.audio.heartbeatTick(dt, hpFrac);
+      this.hud.setLowHealth(hpFrac);
 
       // ambient particles: torch embers + night fireflies near the player
       this.ambientPT -= dt;

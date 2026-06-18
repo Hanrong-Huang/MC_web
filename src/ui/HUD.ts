@@ -87,6 +87,7 @@ export class HUD {
   private sleepEl!: HTMLElement;
   private portalEl!: HTMLElement;
   private netherTintEl!: HTMLElement;
+  private lowHealthEl!: HTMLElement;
   private packInput: HTMLInputElement;
 
   cursor: Slot = null;
@@ -140,6 +141,7 @@ export class HUD {
     this.sleepEl = el('div', '', root); this.sleepEl.id = 'sleep-fade';
     this.portalEl = el('div', '', root); this.portalEl.id = 'portal-fade';
     this.netherTintEl = el('div', '', root); this.netherTintEl.id = 'nether-tint';
+    this.lowHealthEl = el('div', '', root); this.lowHealthEl.id = 'low-health';
     this.pauseEl = el('div', 'overlay hidden', root); this.pauseEl.id = 'pause-overlay';
     this.deathEl = el('div', 'overlay hidden', root); this.deathEl.id = 'death-overlay';
     this.containerEl = el('div', 'overlay hidden', root); this.containerEl.id = 'container-screen';
@@ -370,6 +372,12 @@ export class HUD {
 
   setNetherTint(on: boolean): void {
     this.netherTintEl.style.opacity = on ? '1' : '0';
+  }
+
+  /** hpFrac = health/maxHealth; a red vignette fades in below 30% health. */
+  setLowHealth(hpFrac: number): void {
+    const a = hpFrac > 0.3 || hpFrac <= 0 ? 0 : (0.3 - hpFrac) / 0.3;
+    this.lowHealthEl.style.opacity = String(a * 0.85);
   }
 
   setDebugVisible(v: boolean): void { this.debugEl.classList.toggle('hidden', !v); }
