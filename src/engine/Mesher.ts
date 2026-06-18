@@ -68,13 +68,30 @@ function faceTile(f: NonNullable<ReturnType<typeof def>['faces']>, face: number)
   return f.sides;
 }
 
+// Two reusable array pools (solid + water). Meshing is synchronous and
+// single-threaded, so reusing these across chunks avoids ~10 array allocations
+// per chunk and keeps the grown backing capacity (no realloc churn -> far less GC).
+const GEO_POOLS = [0, 1].map(() => ({
+  positions: [] as number[], lights: [] as number[], tints: [] as number[],
+  uvs: [] as number[], indices: [] as number[],
+}));
+
 class GeoBuilder {
-  positions: number[] = [];
-  lights: number[] = [];
-  tints: number[] = [];
-  uvs: number[] = [];
-  indices: number[] = [];
+  positions: number[];
+  lights: number[];
+  tints: number[];
+  uvs: number[];
+  indices: number[];
   vertCount = 0;
+
+  constructor(poolIdx: number) {
+    const p = GEO_POOLS[poolIdx];
+    this.positions = p.positions; this.positions.length = 0;
+    this.lights = p.lights; this.lights.length = 0;
+    this.tints = p.tints; this.tints.length = 0;
+    this.uvs = p.uvs; this.uvs.length = 0;
+    this.indices = p.indices; this.indices.length = 0;
+  }
 
   build(): THREE.BufferGeometry | null {
     if (this.vertCount === 0) return null;
@@ -100,8 +117,8 @@ export interface ChunkGeometry {
 }
 
 export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): ChunkGeometry {
-  const solid = new GeoBuilder();
-  const water = new GeoBuilder();
+  const solid = new GeoBuilder(0);
+  const water = new GeoBuilder(1);
   const bx = chunk.cx * CX, bz = chunk.cz * CZ;
   let maxY = 1;
   for (let i = 0; i < chunk.heightmap.length; i++) {

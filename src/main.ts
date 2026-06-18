@@ -1422,10 +1422,16 @@ class Game {
     if (this.world.dirtySet.size === 0) return;
     const pcx = Math.floor(this.player.pos.x / CX);
     const pcz = Math.floor(this.player.pos.z / CZ);
+    // bias toward chunks the player is looking at, so moving forward fills in
+    // ahead first (any meshing lag shows up behind you, not in your path)
+    const fx = -Math.sin(this.player.yaw), fz = -Math.cos(this.player.yaw);
     const jobs: { key: string; d: number }[] = [];
     for (const key of this.world.dirtySet) {
       const [cx, cz] = key.split(',').map(Number);
-      jobs.push({ key, d: (cx - pcx) ** 2 + (cz - pcz) ** 2 });
+      const dx = cx - pcx, dz = cz - pcz;
+      const dist2 = dx * dx + dz * dz;
+      const front = (dx * fx + dz * fz) / (Math.hypot(dx, dz) || 1); // -1..1
+      jobs.push({ key, d: dist2 - front * 6 });
     }
     jobs.sort((a, b) => a.d - b.d);
     const t0 = performance.now();
