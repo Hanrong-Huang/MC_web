@@ -86,6 +86,7 @@ export class HUD {
   private lowhpEl!: HTMLElement;
   private sleepEl!: HTMLElement;
   private portalEl!: HTMLElement;
+  private netherTintEl!: HTMLElement;
   private packInput: HTMLInputElement;
 
   cursor: Slot = null;
@@ -138,6 +139,7 @@ export class HUD {
     this.vignette = el('div', '', root); this.vignette.id = 'vignette';
     this.sleepEl = el('div', '', root); this.sleepEl.id = 'sleep-fade';
     this.portalEl = el('div', '', root); this.portalEl.id = 'portal-fade';
+    this.netherTintEl = el('div', '', root); this.netherTintEl.id = 'nether-tint';
     this.pauseEl = el('div', 'overlay hidden', root); this.pauseEl.id = 'pause-overlay';
     this.deathEl = el('div', 'overlay hidden', root); this.deathEl.id = 'death-overlay';
     this.containerEl = el('div', 'overlay hidden', root); this.containerEl.id = 'container-screen';
@@ -364,6 +366,10 @@ export class HUD {
 
   setPortalFade(amount: number): void {
     this.portalEl.style.opacity = String(Math.max(0, Math.min(1, amount)));
+  }
+
+  setNetherTint(on: boolean): void {
+    this.netherTintEl.style.opacity = on ? '1' : '0';
   }
 
   setDebugVisible(v: boolean): void { this.debugEl.classList.toggle('hidden', !v); }

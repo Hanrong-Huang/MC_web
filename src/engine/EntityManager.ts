@@ -1768,7 +1768,7 @@ export class EntityManager {
     }
 
     if (kind === 'sheep') {
-      const wool = this.skin('sheep_wool', '#e8e8e8', '#d4d4d4');
+      const wool = this.skin('sheep_wool', '#f2efe8', '#e3ded2');
       const faceTex = this.skin('sheep_face', '#cfb89c', '#bfa88c', (ctx) => {
         ctx.fillStyle = '#2a2a36'; ctx.fillRect(1, 3, 1, 1); ctx.fillRect(6, 3, 1, 1);
         ctx.fillStyle = '#a8907a'; ctx.fillRect(3, 5, 2, 2);

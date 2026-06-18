@@ -1067,6 +1067,7 @@ class Game {
       this.world.dimension === 'nether',
     );
     this.hud.setPortalFade(this.player.portalTimer / 1.5);
+    this.hud.setNetherTint(this.world.dimension === 'nether');
     this.renderer.setBowCharge(Math.min(1, this.player.bowCharge / 0.9));
     this.renderer.updateChunkFades(dt);
     this.renderer.updateHeld(dt, this.player.isMoving());
