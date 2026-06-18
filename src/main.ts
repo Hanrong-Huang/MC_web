@@ -18,7 +18,9 @@ import { FurnaceState, ChestState } from './engine/Inventory';
 import type { BlockEntity } from './engine/Inventory';
 import type { Slot } from './engine/Inventory';
 import { buildChunkGeometry } from './engine/Mesher';
+import type { GeoArrays, MeshDoor, MeshRedstone } from './engine/Mesher';
 import { chunkGeometryFromArrays } from './engine/Renderer';
+import type { MeshJob, MeshChunkSnap } from './engine/mesh-worker';
 import { chunkKey, CX, CZ } from './engine/Chunk';
 import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef } from './engine/Blocks';
 import { Weather } from './engine/Weather';
@@ -56,6 +58,10 @@ class Game {
   private fps = 60;
   private meshMs = 0;       // EMA of meshing cost per chunk (ms), for the debug overlay
   private meshPerFrame = 0; // chunks meshed in the last frame
+  private meshWorker: Worker | null = null;
+  private meshWorkerTried = false;
+  private meshJobId = 0;
+  private meshInFlight = new Set<string>(); // chunk keys being meshed off-thread
   private raf = 0;
   private disposed = false;
   /** bed respawn point, if set */
@@ -1437,6 +1443,29 @@ class Game {
       jobs.push({ key, d: dist2 - front * 6 });
     }
     jobs.sort((a, b) => a.d - b.d);
+
+    const worker = this.ensureMeshWorker();
+    if (worker) {
+      // off-thread: keep a few jobs in flight; the worker meshes without ever
+      // blocking the render frame. Snapshots are posted with transferable buffers.
+      const MAX_INFLIGHT = 4;
+      for (const job of jobs) {
+        if (this.meshInFlight.size >= MAX_INFLIGHT) break;
+        if (this.meshInFlight.has(job.key)) continue;
+        const [cx, cz] = job.key.split(',').map(Number);
+        const chunk = this.world.getChunk(cx, cz);
+        if (!chunk || !chunk.ready) { this.world.dirtySet.delete(job.key); continue; }
+        if (!this.world.neighborsReady(cx, cz)) continue;
+        const { job: msg, transfers } = this.buildMeshJob(cx, cz, ++this.meshJobId);
+        worker.postMessage({ type: 'job', job: msg }, transfers);
+        this.meshInFlight.add(job.key);
+        this.world.dirtySet.delete(job.key); // re-added by markDirty if edited mid-flight
+      }
+      this.meshPerFrame = this.meshInFlight.size;
+      return;
+    }
+
+    // synchronous fallback (no Worker support)
     const t0 = performance.now();
     let meshed = 0;
     for (const job of jobs) {
@@ -1457,6 +1486,93 @@ class Game {
       meshed++;
     }
     this.meshPerFrame = meshed;
+  }
+
+  /** Lazily spin up the mesh worker; returns null if Workers are unavailable. */
+  private ensureMeshWorker(): Worker | null {
+    if (this.meshWorkerTried) return this.meshWorker;
+    this.meshWorkerTried = true;
+    try {
+      const w = new Worker(new URL('./engine/mesh-worker.ts', import.meta.url), { type: 'module' });
+      w.postMessage({ type: 'init', rects: this.atlas.allRects() });
+      w.onmessage = (e: MessageEvent) => this.onMeshDone(e.data);
+      w.onerror = () => {
+        // fall back to synchronous meshing; requeue anything in flight
+        this.meshWorker = null;
+        for (const k of this.meshInFlight) this.world.dirtySet.add(k);
+        this.meshInFlight.clear();
+      };
+      this.meshWorker = w;
+    } catch {
+      this.meshWorker = null;
+    }
+    return this.meshWorker;
+  }
+
+  private onMeshDone(data: { key: string; cx: number; cz: number; ms: number; solid: GeoArrays | null; water: GeoArrays | null }): void {
+    this.meshInFlight.delete(data.key);
+    this.meshMs = this.meshMs * 0.9 + data.ms * 0.1;
+    // edited mid-flight (re-dirtied) or unloaded -> discard this (now stale) result
+    if (this.world.dirtySet.has(data.key)) return;
+    const chunk = this.world.getChunk(data.cx, data.cz);
+    if (!chunk || !chunk.ready) return;
+    chunk.dirty = false;
+    this.renderer.setChunkGeometry(data.key, data.cx, data.cz,
+      chunkGeometryFromArrays({ solid: data.solid, water: data.water }));
+  }
+
+  /** Snapshot the 3x3 chunk region + the world state the mesher reads, with
+   *  transferable buffers, for the worker to mesh off-thread. */
+  private buildMeshJob(cx: number, cz: number, id: number): { job: MeshJob; transfers: Transferable[] } {
+    const chunks: (MeshChunkSnap | null)[] = [];
+    const transfers: Transferable[] = [];
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const c = this.world.getChunk(cx + dx, cz + dz);
+        if (c && c.ready) {
+          const data = c.data.slice();
+          const heightmap = c.heightmap.slice();
+          const torches = Uint32Array.from(c.torches);
+          const glowers = Uint32Array.from(c.glowers);
+          chunks.push({ cx: cx + dx, cz: cz + dz, data, heightmap, torches, glowers });
+          transfers.push(data.buffer, heightmap.buffer, torches.buffer, glowers.buffer);
+        } else {
+          chunks.push(null);
+        }
+      }
+    }
+    const bx = cx * CX, bz = cz * CZ;
+    const tint = new Float32Array(256 * 3);
+    const out = { r: 1, g: 1, b: 1 };
+    for (let lz = 0; lz < 16; lz++) {
+      for (let lx = 0; lx < 16; lx++) {
+        this.world.generator.grassTint(bx + lx, bz + lz, out);
+        const i = (lz * 16 + lx) * 3;
+        tint[i] = out.r; tint[i + 1] = out.g; tint[i + 2] = out.b;
+      }
+    }
+    transfers.push(tint.buffer);
+    // only the state entries within the center chunk (+1 block for door/liquid edges)
+    const inRange = (k: string): boolean => {
+      const ci = k.indexOf(','), cj = k.indexOf(',', ci + 1);
+      const x = +k.slice(0, ci), z = +k.slice(cj + 1);
+      return x >= bx - 1 && x <= bx + 16 && z >= bz - 1 && z <= bz + 16;
+    };
+    const filt = <T>(m: Map<string, T>): [string, T][] => {
+      const o: [string, T][] = [];
+      for (const e of m) if (inRange(e[0])) o.push(e);
+      return o;
+    };
+    const job: MeshJob = {
+      id, key: chunkKey(cx, cz), cx, cz, chunks, tint,
+      torchFacings: filt(this.world.torchFacings),
+      doorStates: filt(this.world.doorStates) as [string, MeshDoor][],
+      redstoneStates: filt(this.world.redstoneStates) as [string, MeshRedstone][],
+      redstonePower: filt(this.world.redstonePower),
+      waterLevels: filt(this.world.waterLevels),
+      lavaLevels: filt(this.world.lavaLevels),
+    };
+    return { job, transfers };
   }
 
   private updateDebug(): void {
@@ -1703,6 +1819,8 @@ class Game {
   dispose(): void {
     this.disposed = true;
     cancelAnimationFrame(this.raf);
+    this.meshWorker?.terminate();
+    this.meshWorker = null;
     this.input.exitLock();
     this.input.dispose();
     this.audio.setRain('off');

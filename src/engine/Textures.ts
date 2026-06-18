@@ -1757,6 +1757,13 @@ export class Atlas {
     this.texture.needsUpdate = true;
   }
 
+  /** Every tile's UV rect, keyed by name — sent to the mesh worker once at init. */
+  allRects(): Record<string, UVRect> {
+    const out: Record<string, UVRect> = {};
+    for (const name of this.tiles.keys()) out[name] = this.rect(name);
+    return out;
+  }
+
   // The mesher calls rect() once per face; cache the (immutable) UVRect per tile
   // so the hot path does a single Map.get and no per-call object allocation.
   private rectCache = new Map<string, UVRect>();
