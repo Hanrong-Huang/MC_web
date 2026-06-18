@@ -182,8 +182,18 @@ export class AudioEngine {
     this.ensure();
     switch (name) {
       case 'pop': this.tone(0.1, 420, 940, 0.3, 'sine'); break;
-      case 'hurt': this.tone(0.16, 170, 90, 0.4, 'sawtooth'); this.noiseBurst(0.1, 500, 0.2); break;
-      case 'hit': this.tone(0.1, 240, 130, 0.3, 'square'); break;
+      case 'hurt':
+        // a short pained grunt — a low vocal body with a noisy rasp on top
+        this.tone(0.2, 198, 104, 0.34, 'sawtooth');
+        this.tone(0.17, 150, 86, 0.2, 'triangle', 0.015);
+        this.noiseBurst(0.12, 1000, 0.15, 'bandpass', 340);
+        break;
+      case 'hit':
+        // a meaty thwack on a mob — a soft impact thump + a faint woody knock
+        this.noiseBurst(0.07, 1400, 0.28, 'lowpass', 420);
+        this.tone(0.1, 205, 95, 0.26, 'sine');
+        this.tone(0.045, 360, 150, 0.1, 'square', 0.006);
+        break;
       case 'eat': this.noiseBurst(0.07, 1400, 0.25, 'bandpass'); break;
       case 'burp': this.tone(0.25, 220, 80, 0.3, 'sawtooth'); break;
       case 'click': this.tone(0.035, 850, 700, 0.18, 'square'); break;

@@ -712,7 +712,16 @@ class Game {
     this.input.exitLock();
     this.hud.showDeath(
       () => {
+        // dying always returns you to the Overworld (the Nether is a one-way
+        // trip on death, like Minecraft)
+        if (this.world.dimension !== 'overworld') {
+          this.world.switchDimension('overworld');
+          this.hud.setNetherTint(false);
+        }
         const spawn = this.spawnPoint ?? this.world.generator.findSpawn();
+        // force-generate the landing chunks so the player doesn't free-fall
+        const scx = Math.floor(spawn.x / CX), scz = Math.floor(spawn.z / CZ);
+        for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) this.world.ensureChunk(scx + dx, scz + dz);
         this.player.respawn({ ...spawn });
         this.hud.hideDeath();
         this.state = 'playing';

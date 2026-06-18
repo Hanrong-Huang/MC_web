@@ -804,9 +804,12 @@ export class HUD {
       const label = def(r.out).label.toLowerCase();
       if (!label.includes(this.recipeSearchQuery)) return false;
     }
-    if (this.recipeFilter === 'all') return this.recipeFitsGrid(r, craftW);
+    // show every recipe regardless of the current grid size; ones that need a
+    // crafting table are still listed (and explain themselves when clicked), so
+    // the book is a complete catalogue. "ready" stays limited to craftable-now.
+    if (this.recipeFilter === 'all') return true;
     if (this.recipeFilter === 'ready') return this.canFillRecipe(r, inv, craftW);
-    return this.recipeFitsGrid(r, craftW) && this.recipeCategory(r) === this.recipeFilter;
+    return this.recipeCategory(r) === this.recipeFilter;
   }
 
   private recipeBlockedReason(r: RecipeView, inv: Inventory, craftW: number): string {
