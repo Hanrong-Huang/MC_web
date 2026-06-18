@@ -1038,6 +1038,8 @@ class Game {
       // the Nether always uses the dark (minor) musical mood, day or night
       const darkMood = this.world.dimension === 'nether' || Math.sin(this.dayTime * Math.PI * 2) < -0.06;
       this.audio.ambientTick(dt, darkMood);
+      // heartbeat rises as health gets low (survival only)
+      this.audio.heartbeatTick(dt, this.player.mode === 'survival' ? this.player.hp / 20 : 1);
 
       // ambient particles: torch embers + night fireflies near the player
       this.ambientPT -= dt;

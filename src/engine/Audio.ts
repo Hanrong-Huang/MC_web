@@ -21,6 +21,8 @@ export class AudioEngine {
   private noiseBuf: AudioBuffer | null = null;
   private ambientT = 22;
   private musicT = 6;        // seconds until the next generated piece
+  private atmosphereT = 12;  // sparse lonely wind/drone/bell cues between music
+  private heartT = 0;        // low-health heartbeat pacing
   private settings: AudioSettings = { music: true, sound: true };
   // continuous rain bed: a persistent looping noise source we fade in/out
   private rainSrc: AudioBufferSourceNode | null = null;
@@ -447,10 +449,66 @@ export class AudioEngine {
       this.playAmbientStinger(isNight);
       this.ambientT = (isNight ? 22 : 30) + Math.random() * 28;
     }
+    // sparse "alone in a vast world" atmosphere cues in the gaps between music
+    this.atmosphereT -= dt;
+    if (this.atmosphereT <= 0) {
+      this.atmosphereCue(isNight);
+      this.atmosphereT = (isNight ? 15 : 22) + Math.random() * 26;
+    }
     this.musicT -= dt;
     if (this.musicT > 0) return;
     const pieceLen = this.playPiece(isNight);
     this.musicT = pieceLen + 55 + Math.random() * 80;
+  }
+
+  /** A soft heartbeat that emerges and quickens as health drops — survival
+   *  tension. hpFrac is health/maxHealth; silent above 30%. Call every frame. */
+  heartbeatTick(dt: number, hpFrac: number): void {
+    if (!this.ctx || !this.settings.sound) { this.heartT = 0; return; }
+    if (hpFrac <= 0 || hpFrac > 0.3) { this.heartT = 0; return; }
+    const k = 1 - hpFrac / 0.3;                 // 0 at 30% hp, 1 near death
+    this.heartT -= dt;
+    if (this.heartT > 0) return;
+    this.heartT = 1.0 - k * 0.45;               // ~1.0s -> ~0.55s as it worsens
+    const vol = 0.06 + k * 0.1;
+    this.tone(0.09, 72, 44, vol, 'sine');        // lub
+    this.tone(0.08, 62, 40, vol * 0.7, 'sine', 0.15); // dub
+  }
+
+  /** One lonely ambient gesture (through the music reverb) — wind sigh, a low
+   *  eerie drone, or a single distant bell ringing out into the emptiness. */
+  private atmosphereCue(isNight: boolean): void {
+    if (!this.ctx || !this.musicBus) return;
+    const t = this.ctx.currentTime + 0.05;
+    const r = Math.random();
+    if (r < 0.45) {
+      this.windSigh(t, isNight ? 0.05 : 0.038, isNight);
+    } else if (r < 0.76) {
+      // a low drone swelling out of the dark; deeper + a touch louder at night
+      const f = (isNight ? 55 : 73.42) * (Math.random() < 0.5 ? 1 : 1.5);
+      this.padAt(t, f, isNight ? 0.03 : 0.02, 6 + Math.random() * 4);
+    } else {
+      // a single far-off bell, left alone to decay into the reverb
+      const root = isNight ? 196 : 261.63;
+      const deg = [0, 3, 7, 10, 12][(Math.random() * 5) | 0];
+      this.bellNote(t, root * Math.pow(2, deg / 12), 0.013, 5);
+    }
+  }
+
+  /** A slow wind swell routed through the music reverb for spacious emptiness. */
+  private windSigh(when: number, vol: number, dark: boolean): void {
+    if (!this.ctx || !this.musicBus || !this.noiseBuf) return;
+    const dur = 3 + Math.random() * 3;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf; src.loop = true; src.playbackRate.value = 0.5;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = dark ? 300 : 460; bp.Q.value = 0.7;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.linearRampToValueAtTime(vol, when + dur * 0.4);
+    g.gain.linearRampToValueAtTime(0.0001, when + dur);
+    src.connect(bp).connect(g).connect(this.musicBus);
+    src.start(when); src.stop(when + dur + 0.05);
   }
 
   private playAmbientStinger(isNight: boolean): void {
