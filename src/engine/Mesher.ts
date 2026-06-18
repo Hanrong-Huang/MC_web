@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { World } from './World';
 import { Chunk, CX, CZ, CY } from './Chunk';
-import { B, def, isOpaque, occludes, OPAQUE_LUT, CROSS_BLOCKS, TINTED_TILES } from './Blocks';
+import { B, def, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES } from './Blocks';
 import { Atlas, UVRect } from './Textures';
 
 // face order: +x, -x, +y, -y, +z, -z
@@ -31,6 +31,22 @@ const FACE_GEO: { o: number[]; u: number[]; v: number[] }[] = [
 
 const AO_SHADE = [0.45, 0.65, 0.84, 1.0];
 
+// reusable 3x3 per-face light/occlusion sample grids (index (i+1)*3+(j+1)),
+// so each face samples the front layer once instead of re-sampling per corner
+const SKY9 = new Float32Array(9);
+const TORCH9 = new Float32Array(9);
+const OCC9 = new Uint8Array(9);
+
+/** AO level (0..3) for a face corner, read from the shared 3x3 OCC9 grid. */
+function aoCorner(a: number, b: number, isLiquid: boolean): number {
+  if (isLiquid) return 3;
+  const si = a ? 1 : -1, sj = b ? 1 : -1;
+  const s1 = OCC9[(si + 1) * 3 + 1];        // along u
+  const s2 = OCC9[3 + (sj + 1)];            // along v
+  const sc = OCC9[(si + 1) * 3 + (sj + 1)]; // diagonal
+  return s1 && s2 ? 0 : 3 - (s1 + s2 + sc);
+}
+
 const TORCH_LEVEL = 14;
 const GLOW_LEVEL = 15; // glowstone / lit redstone lamp: full-strength block light
 const MAX_LIGHT = 15;
@@ -45,8 +61,7 @@ function regionIdx(rx: number, rz: number, y: number): number {
   return (rx - RX0) + (rz - RX0) * RW + y * RW * RW;
 }
 
-function faceTile(id: number, face: number): string {
-  const f = def(id).faces!;
+function faceTile(f: NonNullable<ReturnType<typeof def>['faces']>, face: number): string {
   if (face === 2) return f.top;
   if (face === 3) return f.bottom;
   if ((face === 4 || face === 5) && f.front) return f.front;
@@ -144,7 +159,7 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
     if (!c) return 1;
     return c.skyLight(x & 15, Math.max(0, y), z & 15);
   };
-  const occ = (x: number, y: number, z: number): number => (occludes(get(x, y, z)) ? 1 : 0);
+  const occ = (x: number, y: number, z: number): number => OCCLUDE_LUT[get(x, y, z)];
 
   // biome tint per column, computed lazily
   TINT_SET.fill(0);
@@ -285,22 +300,41 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
           // culling rules
           if (isLiquid) {
             if (nb === id) continue;
-            if (isOpaque(nb)) continue;
+            if (OPAQUE_LUT[nb]) continue;
             if (nb !== B.AIR && nb !== B.LEAVES && nb !== B.TORCH && face !== 2) continue;
           } else if (d.opaque) {
-            if (isOpaque(nb)) continue;
+            if (OPAQUE_LUT[nb]) continue;
           } else {
             // cutout blocks (leaves, glass): cull against opaque and same type
-            if (isOpaque(nb) || nb === id) continue;
+            if (OPAQUE_LUT[nb] || nb === id) continue;
           }
 
-          const tileName = faceTile(id, face);
+          const tileName = faceTile(d.faces!, face);
           const geo = FACE_GEO[face];
           const rect = atlas.rect(tileName);
           const shade = FACE_SHADE[face];
           const base = target.vertCount;
           const tint = TINTED_TILES.has(tileName) ? tintAt(x, z) : null;
-          const aos: number[] = [];
+
+          // Sample the 3x3 grid of cells in the layer in front of this face ONCE,
+          // then each corner reads from it (the 4 corners share these samples).
+          const cx0 = x + n[0], cy0 = y + n[1], cz0 = z + n[2];
+          const ux = geo.u[0], uy = geo.u[1], uz = geo.u[2];
+          const vx = geo.v[0], vy = geo.v[1], vz = geo.v[2];
+          for (let i = -1; i <= 1; i++) {
+            for (let j = -1; j <= 1; j++) {
+              const gx = cx0 + i * ux + j * vx;
+              const gy = cy0 + i * uy + j * vy;
+              const gz = cz0 + i * uz + j * vz;
+              const gi = (i + 1) * 3 + (j + 1);
+              SKY9[gi] = skyAt(gx, gy, gz);
+              TORCH9[gi] = torchAt(gx, gy, gz);
+              OCC9[gi] = occ(gx, gy, gz);
+            }
+          }
+
+          const ao0 = aoCorner(0, 0, isLiquid), ao1 = aoCorner(1, 0, isLiquid);
+          const ao2 = aoCorner(1, 1, isLiquid), ao3 = aoCorner(0, 1, isLiquid);
 
           for (let corner = 0; corner < 4; corner++) {
             const a = corner === 1 || corner === 2 ? 1 : 0; // u coefficient
@@ -310,30 +344,13 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
             let pz = geo.o[2] + a * geo.u[2] + b * geo.v[2];
             if (waterTopOpen && py === 1) py = liquidCornerHeight(id, x, y, z, px, pz);
 
-            // AO + smooth light sampled in the cell layer in front of the face
-            const cx0 = x + n[0], cy0 = y + n[1], cz0 = z + n[2];
-            const su = a ? geo.u : [-geo.u[0], -geo.u[1], -geo.u[2]];
-            const sv = b ? geo.v : [-geo.v[0], -geo.v[1], -geo.v[2]];
-            const s1 = occ(cx0 + su[0], cy0 + su[1], cz0 + su[2]);
-            const s2 = occ(cx0 + sv[0], cy0 + sv[1], cz0 + sv[2]);
-            const sc = occ(cx0 + su[0] + sv[0], cy0 + su[1] + sv[1], cz0 + su[2] + sv[2]);
-            const aoLevel = isLiquid ? 3 : s1 && s2 ? 0 : 3 - (s1 + s2 + sc);
-            aos.push(aoLevel);
+            const si = a ? 1 : -1, sj = b ? 1 : -1;
+            const cIdx = 4, suIdx = (si + 1) * 3 + 1, svIdx = 3 + (sj + 1), scIdx = (si + 1) * 3 + (sj + 1);
+            const sky = (SKY9[cIdx] + SKY9[suIdx] + SKY9[svIdx] + SKY9[scIdx]) / 4;
+            const torch = (TORCH9[cIdx] + TORCH9[suIdx] + TORCH9[svIdx] + TORCH9[scIdx]) / 4;
 
-            const sky = (
-              skyAt(cx0, cy0, cz0) +
-              skyAt(cx0 + su[0], cy0 + su[1], cz0 + su[2]) +
-              skyAt(cx0 + sv[0], cy0 + sv[1], cz0 + sv[2]) +
-              skyAt(cx0 + su[0] + sv[0], cy0 + su[1] + sv[1], cz0 + su[2] + sv[2])
-            ) / 4;
-            const torch = (
-              torchAt(cx0, cy0, cz0) +
-              torchAt(cx0 + su[0], cy0 + su[1], cz0 + su[2]) +
-              torchAt(cx0 + sv[0], cy0 + sv[1], cz0 + sv[2]) +
-              torchAt(cx0 + su[0] + sv[0], cy0 + su[1] + sv[1], cz0 + su[2] + sv[2])
-            ) / 4;
-
-            const k = shade * AO_SHADE[aoLevel];
+            const aoc = corner === 0 ? ao0 : corner === 1 ? ao1 : corner === 2 ? ao2 : ao3;
+            const k = shade * AO_SHADE[aoc];
             target.positions.push(x + px, y + py, z + pz);
             target.lights.push(k * sky, k * torch);
             if (tint) target.tints.push(tint[0], tint[1], tint[2]);
@@ -345,7 +362,7 @@ export function buildChunkGeometry(world: World, chunk: Chunk, atlas: Atlas): Ch
           }
 
           // flip the quad diagonal when AO is anisotropic
-          if (aos[0] + aos[2] >= aos[1] + aos[3]) {
+          if (ao0 + ao2 >= ao1 + ao3) {
             target.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
           } else {
             target.indices.push(base + 1, base + 2, base + 3, base + 1, base + 3, base);

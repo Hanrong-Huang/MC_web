@@ -1757,16 +1757,24 @@ export class Atlas {
     this.texture.needsUpdate = true;
   }
 
+  // The mesher calls rect() once per face; cache the (immutable) UVRect per tile
+  // so the hot path does a single Map.get and no per-call object allocation.
+  private rectCache = new Map<string, UVRect>();
+
   rect(name: string): UVRect {
+    const cached = this.rectCache.get(name);
+    if (cached) return cached;
     const idx = this.tiles.get(name);
     if (idx === undefined) throw new Error(`Unknown tile ${name}`);
     const [x, y] = this.slotXY(idx);
     const W = this.canvas.width, H = this.canvas.height;
     const e = 0.02; // half-ish texel inset against bleeding
-    return {
+    const r: UVRect = {
       u0: (x + e) / W, v0: (y + e) / H,
       u1: (x + TILE - e) / W, v1: (y + TILE - e) / H,
     };
+    this.rectCache.set(name, r);
+    return r;
   }
 
   tileCanvas(name: string): HTMLCanvasElement {

@@ -724,10 +724,12 @@ export function isOpaque(id: number): boolean { return id !== B.AIR && def(id).o
 export function isLiquid(id: number): boolean { return id === B.WATER || id === B.LAVA; }
 export function occludes(id: number): boolean { return id !== B.AIR && def(id).occludes; }
 
-/** Fast lookup table for the light flood fill (1 = blocks light). */
+/** Fast lookup tables for the mesher hot path (avoid per-face def() Map.gets). */
 export const OPAQUE_LUT = new Uint8Array(256);
+export const OCCLUDE_LUT = new Uint8Array(256);
 for (const d of DEFS.values()) {
   if (d.block && d.opaque) OPAQUE_LUT[d.id] = 1;
+  if (d.id !== B.AIR && d.occludes) OCCLUDE_LUT[d.id] = 1;
 }
 
 export const GRAVITY_BLOCKS = new Set<number>([B.SAND, B.GRAVEL]);

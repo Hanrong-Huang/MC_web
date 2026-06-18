@@ -53,6 +53,8 @@ class Game {
   private elapsed = 0;
   private lastFrame = 0;
   private fps = 60;
+  private meshMs = 0;       // EMA of meshing cost per chunk (ms), for the debug overlay
+  private meshPerFrame = 0; // chunks meshed in the last frame
   private raf = 0;
   private disposed = false;
   /** bed respawn point, if set */
@@ -1023,7 +1025,9 @@ class Game {
         this.tickAcc -= 0.05;
         this.tick20();
       }
-      this.audio.ambientTick(dt, Math.sin(this.dayTime * Math.PI * 2) < -0.06);
+      // the Nether always uses the dark (minor) musical mood, day or night
+      const darkMood = this.world.dimension === 'nether' || Math.sin(this.dayTime * Math.PI * 2) < -0.06;
+      this.audio.ambientTick(dt, darkMood);
 
       // ambient particles: torch embers + night fireflies near the player
       this.ambientPT -= dt;
@@ -1415,6 +1419,7 @@ class Game {
     }
     jobs.sort((a, b) => a.d - b.d);
     const t0 = performance.now();
+    let meshed = 0;
     for (const job of jobs) {
       if (performance.now() - t0 > budgetMs) break;
       const [cx, cz] = job.key.split(',').map(Number);
@@ -1424,11 +1429,15 @@ class Game {
         continue;
       }
       if (!this.world.neighborsReady(cx, cz)) continue; // wait for neighbors
+      const m0 = performance.now();
       const geo = buildChunkGeometry(this.world, chunk, this.atlas);
+      this.meshMs = this.meshMs * 0.9 + (performance.now() - m0) * 0.1;
       this.renderer.setChunkGeometry(job.key, cx, cz, geo);
       chunk.dirty = false;
       this.world.dirtySet.delete(job.key);
+      meshed++;
     }
+    this.meshPerFrame = meshed;
   }
 
   private updateDebug(): void {
@@ -1445,6 +1454,7 @@ class Game {
       `Facing: ${facing} (yaw ${yawDeg.toFixed(1)})`,
       `Biome: ${biome}  Day: ${(this.dayTime * 100).toFixed(0)}%`,
       `Chunks: ${this.world.countLoaded()} loaded, ${this.world.dirtySet.size} dirty`,
+      `Mesh: ${this.meshMs.toFixed(2)} ms/chunk (${this.meshPerFrame}/frame)`,
       `Entities: ${c.mobs} mobs, ${c.drops} drops, ${c.other} fx`,
       `Mode: ${this.player.mode}${this.player.flying ? ' (flying)' : ''}${this.player.onGround ? ' on ground' : ''}`,
     ]);
