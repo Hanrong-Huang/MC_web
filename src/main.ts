@@ -83,6 +83,7 @@ class Game {
   private wasNight = false;
   private minimapT = 0;
   private wasRiding = false;
+  private wasUnderwater = false;
   private ambientPT = 0;
 
   constructor(app: App, slot: string, save: SaveState | null, fresh: { seed: number; mode: GameMode } | null) {
@@ -1048,7 +1049,17 @@ class Game {
       if (this.world.dimension === 'nether') env = 'nether';
       else if (pgy < 52 && this.world.skyLight(pgx, pgy + 1, pgz) < 0.5) env = 'cave';
       else env = Math.sin(this.dayTime * Math.PI * 2) < -0.06 ? 'night' : 'day';
-      this.audio.ambientTick(dt, env);
+      // the surface biome (already computed above for weather) flavours the
+      // generative music as you cross terrains
+      this.audio.ambientTick(dt, env, this.world.dimension === 'nether' ? undefined : biome);
+
+      // muffle the mix while the head is under; play a splash on crossing the surface
+      const uw = this.player.underwaterEye();
+      this.audio.setUnderwater(uw); // idempotent — also clears a stale muffle
+      if (uw !== this.wasUnderwater) {
+        this.wasUnderwater = uw;
+        this.audio.play(uw ? 'submerge' : 'emerge');
+      }
       // heartbeat + red vignette rise as health gets low (survival only)
       const hpFrac = this.player.mode === 'survival' ? this.player.hp / 20 : 1;
       this.audio.heartbeatTick(dt, hpFrac);

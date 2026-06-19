@@ -7,10 +7,31 @@ export type SfxName =
   | 'pop' | 'hurt' | 'hit' | 'eat' | 'burp' | 'click' | 'select' | 'fail' | 'craft' | 'level'
   | 'doorOpen' | 'doorClose'
   | 'explode' | 'bow' | 'snap' | 'fuse' | 'arrowHit'
-  | 'thunder' | 'rain' | 'splash' | 'hoof' | 'mount';
+  | 'thunder' | 'rain' | 'splash' | 'hoof' | 'mount'
+  | 'submerge' | 'emerge';
 
 /** Ambient mood selector for ambientTick. */
 export type AmbientEnv = 'day' | 'night' | 'cave' | 'nether';
+
+/** Overworld biome flavour for the generative music (subtle scale/tempo/colour shifts). */
+export type MusicBiome =
+  'plains' | 'forest' | 'desert' | 'snow' | 'taiga' | 'swamp' | 'mountains' | 'jungle';
+
+/** Resolved musical character for one generated piece. */
+interface PieceMood {
+  night: boolean;
+  scale: number[];          // scale degrees (semitones) for the melody
+  arpDeg: number[];         // arpeggio degree pattern
+  third: number;            // pad colour 3rd (major 4 / minor 3)
+  seventh: number;          // jazzy 7th colour
+  progressions: number[][]; // chord-root movements (semitones)
+  roots: number[];          // candidate tonics (Hz)
+  barLen: number;           // seconds per bar (tempo)
+  octaveBias: number;       // chance the melody leaps an octave up (sparkle)
+  bellChance: number;       // high bell frequency
+  padVol: number;           // pad richness multiplier
+  density: number;          // melody note probability multiplier
+}
 
 interface AudioSettings { music: boolean; sound: boolean }
 
@@ -34,6 +55,12 @@ export class AudioEngine {
   private rainState: 'off' | 'rain' | 'thunder' = 'off';
   // held so the reverb/delay send chain isn't garbage-collected mid-session
   private musicFx: AudioNode[] = [];
+  // underwater: a lowpass on the master that muffles everything while submerged,
+  // plus a soft bubbling bed
+  private uwFilter: BiquadFilterNode | null = null;
+  private uwBubbleSrc: AudioBufferSourceNode | null = null;
+  private uwBubbleGain: GainNode | null = null;
+  private underwater = false;
 
   constructor() {
     try {
@@ -71,7 +98,14 @@ export class AudioEngine {
       this.ctx = new AudioContext();
       this.master = this.ctx.createGain();
       this.master.gain.value = 0.35;
-      this.master.connect(this.ctx.destination);
+      // master → underwater lowpass → speakers. The filter is transparent (20kHz)
+      // until submerged, when it ramps down to a muffled ~600 Hz.
+      this.uwFilter = this.ctx.createBiquadFilter();
+      this.uwFilter.type = 'lowpass';
+      this.uwFilter.frequency.value = 20000;
+      this.uwFilter.Q.value = 0.7;
+      this.master.connect(this.uwFilter);
+      this.uwFilter.connect(this.ctx.destination);
       this.sfx = this.ctx.createGain();
       this.sfx.gain.value = this.settings.sound ? 1 : 0;
       this.sfx.connect(this.master);
@@ -249,6 +283,18 @@ export class AudioEngine {
         this.noiseBurst(0.22, 1400, 0.18, 'bandpass', 520);
         this.noiseBurst(0.12, 3200, 0.08, 'highpass');
         break;
+      case 'submerge':
+        // head goes under: a muffled descending gloop + a low watery thud
+        this.noiseBurst(0.4, 900, 0.3, 'lowpass', 160);
+        this.tone(0.32, 360, 110, 0.16, 'sine');
+        this.tone(0.5, 150, 70, 0.12, 'sine', 0.04);
+        break;
+      case 'emerge':
+        // breaking the surface: a bright rising splash + a gasp of air
+        this.noiseBurst(0.26, 1200, 0.26, 'highpass');
+        this.noiseBurst(0.18, 2600, 0.14, 'bandpass', 1400);
+        this.tone(0.18, 220, 520, 0.12, 'triangle');
+        break;
       case 'hoof':
         // a dull clop: low square thud + soft body
         this.tone(0.05, 150, 88, 0.16, 'square');
@@ -327,6 +373,38 @@ export class AudioEngine {
     for (let i = 0; i < drips; i++) {
       const when = 0.1 + Math.random() * 1.4;
       this.tone(0.03 + Math.random() * 0.03, 700 + Math.random() * 900, 280 + Math.random() * 300, 0.012 * k, 'sine', when);
+    }
+  }
+
+  /** Muffle the whole mix and run a soft bubble bed while the head is submerged. */
+  setUnderwater(on: boolean): void {
+    this.ensure();
+    if (!this.ctx || !this.uwFilter || !this.sfx || !this.noiseBuf) return;
+    if (on === this.underwater) return;
+    this.underwater = on;
+    const t = this.ctx.currentTime;
+    // ramp the master lowpass: muffled while under, transparent above
+    this.uwFilter.frequency.cancelScheduledValues(t);
+    this.uwFilter.frequency.setValueAtTime(this.uwFilter.frequency.value, t);
+    this.uwFilter.frequency.exponentialRampToValueAtTime(on ? 620 : 20000, t + 0.45);
+    if (on) {
+      // a low, gently wavering bubble bed
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.noiseBuf; src.loop = true; src.playbackRate.value = 0.42;
+      const lp = this.ctx.createBiquadFilter();
+      lp.type = 'lowpass'; lp.frequency.value = 500; lp.Q.value = 0.8;
+      const g = this.ctx.createGain(); g.gain.value = 0;
+      g.gain.linearRampToValueAtTime(0.05, t + 0.5);
+      src.connect(lp).connect(g).connect(this.sfx);
+      src.start();
+      this.uwBubbleSrc = src; this.uwBubbleGain = g;
+    } else if (this.uwBubbleGain && this.uwBubbleSrc) {
+      const g = this.uwBubbleGain; const src = this.uwBubbleSrc;
+      g.gain.cancelScheduledValues(t);
+      g.gain.setValueAtTime(g.gain.value, t);
+      g.gain.linearRampToValueAtTime(0, t + 0.4);
+      setTimeout(() => { try { src.stop(); } catch { /* already stopped */ } }, 600);
+      this.uwBubbleSrc = null; this.uwBubbleGain = null;
     }
   }
 
@@ -444,8 +522,8 @@ export class AudioEngine {
   // entirely on the Web Audio clock. Day pieces are major, night pieces minor.
   // ---------------------------------------------------------------------------
 
-  /** Call every frame; env picks the mood. Starts a new piece when timer runs out. */
-  ambientTick(dt: number, env: AmbientEnv = 'day'): void {
+  /** Call every frame; env + biome pick the mood. Starts a new piece on timeout. */
+  ambientTick(dt: number, env: AmbientEnv = 'day', biome?: MusicBiome): void {
     if (!this.ctx || !this.settings.music) return;
     const dark = env !== 'day';
     this.ambientT -= dt;
@@ -453,17 +531,82 @@ export class AudioEngine {
       this.playAmbientStinger(dark);
       this.ambientT = (dark ? 22 : 30) + Math.random() * 28;
     }
-    // environment-flavoured ambience: lively birdsong by day, lonely wind/owl at
-    // night, eerie dread underground, ominous drones in the Nether
+    // environment-flavoured ambience: lively birdsong by day (biome-tinted),
+    // lonely wind/owl at night, eerie dread underground, ominous Nether drones
     this.atmosphereT -= dt;
     if (this.atmosphereT <= 0) {
-      this.atmosphereCue(env);
+      this.atmosphereCue(env, biome);
       this.atmosphereT = (env === 'cave' ? 10 : env === 'day' ? 11 : 15) + Math.random() * 24;
     }
     this.musicT -= dt;
     if (this.musicT > 0) return;
-    const pieceLen = this.playPiece(dark);
-    this.musicT = pieceLen + 55 + Math.random() * 80;
+    const pieceLen = this.playPiece(this.moodFor(env, biome));
+    // a little less silence between pieces than before, so the world sings more
+    this.musicT = pieceLen + 34 + Math.random() * 62;
+  }
+
+  /** Resolve the musical character for the current environment + biome. The
+   *  shifts stay subtle so everything still reads as the same calm, exploratory
+   *  Minecraft-style score — just touched with each terrain's mood. */
+  private moodFor(env: AmbientEnv, biome?: MusicBiome): PieceMood {
+    const night = env !== 'day';
+    // base: bright C418-style major by day, wistful minor by night (plains/forest)
+    const m: PieceMood = {
+      night,
+      scale: night ? [0, 3, 5, 7, 10] : [0, 2, 4, 7, 9],
+      arpDeg: night ? [0, 3, 7, 12, 10, 12, 7, 3] : [0, 4, 7, 12, 11, 12, 7, 4],
+      third: night ? 3 : 4,
+      seventh: night ? 10 : 11,
+      progressions: night
+        ? [[0, -5, -2, -7], [0, 3, -2, -5], [0, -4, -7, -2]]
+        : [[0, 7, 9, 5], [0, 5, 7, 12], [0, 9, 5, 7]],
+      roots: night ? [196, 220, 246.94] : [196, 220, 246.94, 261.63, 293.66],
+      barLen: night ? 3.8 : 3.25,
+      octaveBias: night ? 0.2 : 0.34,
+      bellChance: 0.3,
+      padVol: 1.0,
+      density: 1.0,
+    };
+    // underground / Nether: dark and modal, no biome colour
+    if (env === 'cave' || env === 'nether') {
+      m.scale = [0, 2, 3, 7, 8];        // phrygian-tinged unease
+      m.barLen = 4.2; m.density = 0.68; m.octaveBias = 0.12; m.padVol = 1.2; m.bellChance = 0.2;
+      if (env === 'nether') m.roots = [146.83, 164.81, 174.61];
+      return m;
+    }
+    switch (biome) {
+      case 'snow':
+      case 'taiga':
+        // cold crystalline loneliness — sparse, slow, high bells (kumoi colour)
+        m.scale = night ? [0, 2, 3, 7, 10] : [0, 2, 3, 7, 9];
+        m.barLen = night ? 4.4 : 4.0;
+        m.density = 0.6; m.bellChance = 0.62; m.octaveBias += 0.26; m.padVol = 0.85;
+        break;
+      case 'jungle':
+        // lush and alive — lydian sparkle, busier arpeggios, quicker
+        m.scale = night ? [0, 3, 5, 7, 9] : [0, 2, 4, 6, 9];
+        m.arpDeg = night ? [0, 3, 7, 10, 12, 7] : [0, 2, 4, 7, 9, 11, 12, 9];
+        m.barLen = night ? 3.4 : 2.9; m.density = 1.25; m.bellChance = 0.34;
+        break;
+      case 'desert':
+        // wide modal mythos — mixolydian, slow and spacious
+        m.scale = night ? [0, 3, 5, 7, 10] : [0, 2, 4, 7, 10];
+        m.seventh = 10;
+        m.progressions = night ? [[0, -2, -5, -7], [0, 5, -2, -7]] : [[0, 5, 3, 7], [0, 7, 5, 10], [0, 3, 7, 5]];
+        m.barLen = night ? 4.2 : 3.8; m.density = 0.78; m.octaveBias += 0.08; m.padVol = 1.12;
+        break;
+      case 'swamp':
+        // murky mystery — low dorian minor, sustained
+        m.scale = [0, 2, 3, 5, 7, 9, 10]; m.third = 3; m.seventh = 10;
+        m.barLen = 4.2; m.density = 0.8; m.octaveBias = 0.1; m.padVol = 1.2; m.bellChance = 0.2;
+        break;
+      case 'mountains':
+        // grand and mythic — rich pads, wide bells
+        m.barLen = night ? 4.0 : 3.6; m.padVol = 1.28; m.bellChance = 0.5; m.octaveBias += 0.12; m.density = 0.88;
+        break;
+      // plains / forest / undefined keep the classic base
+    }
+    return m;
   }
 
   /** A soft heartbeat that emerges and quickens as health drops — survival
@@ -481,7 +624,7 @@ export class AudioEngine {
   }
 
   /** One ambient gesture (through the music reverb), flavoured by environment. */
-  private atmosphereCue(env: AmbientEnv): void {
+  private atmosphereCue(env: AmbientEnv, biome?: MusicBiome): void {
     if (!this.ctx || !this.musicBus) return;
     const t = this.ctx.currentTime + 0.05;
     const r = Math.random();
@@ -500,10 +643,65 @@ export class AudioEngine {
       else this.bellNote(t, 196 * Math.pow(2, [0, 3, 7, 10][(Math.random() * 4) | 0] / 12), 0.013, 5);
       return;
     }
-    // day: a living world — birdsong, insect trills, a gentle breeze
+    // day: a living world — birdsong, insect trills, a gentle breeze, tinted by
+    // the terrain so each biome sounds distinct as you walk into it
+    switch (biome) {
+      case 'snow':
+      case 'taiga':
+        // thin cold wind + sparse icy shimmer
+        if (r < 0.6) this.windSigh(t, 0.042, true);
+        else this.bellNote(t, 1900 + Math.random() * 900, 0.009, 2.4);
+        return;
+      case 'desert':
+        // dry, wide breeze with the rare insect
+        if (r < 0.72) this.windSigh(t, 0.045, false);
+        else this.insectTrill(t);
+        return;
+      case 'jungle':
+        // dense, chattering birds + insects
+        if (r < 0.5) this.birdChirp(t);
+        else if (r < 0.82) { this.birdChirp(t); this.birdChirp(t + 0.18); }
+        else this.insectTrill(t);
+        return;
+      case 'swamp':
+        // low frog croaks and bugs over a heavy hush
+        if (r < 0.5) this.frogCroak(t);
+        else if (r < 0.8) this.insectTrill(t);
+        else this.windSigh(t, 0.03, true);
+        return;
+      case 'mountains':
+        // airy heights — breeze with a far bell
+        if (r < 0.6) this.windSigh(t, 0.04, false);
+        else if (r < 0.85) this.birdChirp(t);
+        else this.bellNote(t, 1400 + Math.random() * 500, 0.012, 3.5);
+        return;
+    }
+    // plains / forest / unknown: the classic lively day
     if (r < 0.52) this.birdChirp(t);
     else if (r < 0.78) this.insectTrill(t);
     else this.windSigh(t, 0.03, false);
+  }
+
+  /** A short low frog croak — two quick rasps, for swamp daytime. */
+  private frogCroak(when: number): void {
+    if (!this.ctx || !this.musicBus) return;
+    const croak = (t: number, f: number) => {
+      const osc = this.ctx!.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(f, t);
+      osc.frequency.linearRampToValueAtTime(f * 0.82, t + 0.12);
+      const lp = this.ctx!.createBiquadFilter();
+      lp.type = 'lowpass'; lp.frequency.value = 900; lp.Q.value = 3;
+      const g = this.ctx!.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.05, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0003, t + 0.14);
+      osc.connect(lp).connect(g).connect(this.musicBus!);
+      osc.start(t); osc.stop(t + 0.16);
+    };
+    const base = 150 + Math.random() * 50;
+    croak(when, base);
+    croak(when + 0.16, base * 1.05);
   }
 
   /** A short cheerful birdsong — a few quick gliding high notes. */
@@ -645,20 +843,14 @@ export class AudioEngine {
     }
   }
 
-  /** Schedule one full generated piece; returns its length in seconds. */
-  private playPiece(isNight: boolean): number {
+  /** Schedule one full generated piece in the resolved mood; returns its length. */
+  private playPiece(mood: PieceMood): number {
     if (!this.ctx || !this.musicBus) return 0;
     const t0 = this.ctx.currentTime + 0.15;
-    const roots = [196, 220, 246.94, 261.63, 293.66];
-    const root = roots[(Math.random() * roots.length) | 0];
-    const pent = isNight ? [0, 3, 5, 7, 10] : [0, 2, 4, 7, 9];
-    const third = isNight ? 3 : 4;
-    const progressions = isNight
-      ? [[0, -5, -2, -7], [0, 3, -2, -5], [0, -4, -7, -2]]
-      : [[0, 7, 9, 5], [0, 5, 7, 12], [0, 9, 5, 7]];
-    const progression = progressions[(Math.random() * progressions.length) | 0];
+    const { night, scale: pent, third, seventh, barLen, padVol, density, octaveBias, bellChance } = mood;
+    const root = mood.roots[(Math.random() * mood.roots.length) | 0];
+    const progression = mood.progressions[(Math.random() * mood.progressions.length) | 0];
     const bars = 8 + (((Math.random() * 2) | 0) * 4);
-    const barLen = isNight ? 3.8 : 3.25;
     const motif = [
       pent[(Math.random() * pent.length) | 0],
       pent[(Math.random() * pent.length) | 0],
@@ -667,26 +859,24 @@ export class AudioEngine {
 
     // arpeggio runs in alternating stretches so the piece breathes: a couple of
     // flowing bars, then space. The 7th gives the wistful C418 jazz colour.
-    const seventh = isNight ? 10 : 11;
     let arpRun = false;
     for (let bar = 0; bar < bars; bar++) {
       const tBar = t0 + bar * barLen;
       const chordRoot = root * Math.pow(2, progression[bar % progression.length] / 12);
       // pad: root + third + fifth (+ occasional 7th colour), swelling under everything
-      this.padAt(tBar, chordRoot * 0.5, 0.045, barLen * 1.15);
-      this.padAt(tBar, chordRoot * Math.pow(2, third / 12) * 0.5, 0.032, barLen * 1.15);
-      this.padAt(tBar, chordRoot * Math.pow(2, 7 / 12) * 0.5, 0.028, barLen * 1.15);
-      if (Math.random() < 0.5) this.padAt(tBar, chordRoot * Math.pow(2, seventh / 12) * 0.5, 0.018, barLen * 1.05);
+      this.padAt(tBar, chordRoot * 0.5, 0.045 * padVol, barLen * 1.15);
+      this.padAt(tBar, chordRoot * Math.pow(2, third / 12) * 0.5, 0.032 * padVol, barLen * 1.15);
+      this.padAt(tBar, chordRoot * Math.pow(2, 7 / 12) * 0.5, 0.028 * padVol, barLen * 1.15);
+      if (Math.random() < 0.5) this.padAt(tBar, chordRoot * Math.pow(2, seventh / 12) * 0.5, 0.018 * padVol, barLen * 1.05);
       // soft bass pulse — warm and low, MC-style drone
       this.pianoNote(tBar, chordRoot * 0.25, 0.05, 2.6);
       if (Math.random() < 0.36) this.pianoNote(tBar + barLen * 0.5, chordRoot * 0.5, 0.034, 2.0);
       // flowing broken-chord arpeggio in roughly half the bars, panning gently L↔R
       arpRun = bar === 0 ? Math.random() < 0.5 : (Math.random() < 0.72 ? arpRun : !arpRun);
       if (arpRun) {
-        const arpDeg = [0, third, 7, 12, seventh, 12, 7, third];
-        const steps = isNight ? 6 : 8;
+        const steps = night ? 6 : 8;
         for (let i = 0; i < steps; i++) {
-          const deg = arpDeg[i % arpDeg.length];
+          const deg = mood.arpDeg[i % mood.arpDeg.length];
           const freq = chordRoot * Math.pow(2, deg / 12);
           const when = tBar + (i / steps) * barLen + (Math.random() - 0.5) * 0.015;
           const pan = Math.sin((i / steps) * Math.PI * 2) * 0.5;
@@ -694,16 +884,16 @@ export class AudioEngine {
         }
       }
       // occasional high sparkle bell for the airy MC ambience
-      if (bar % 2 === 1 && Math.random() < 0.3) {
+      if (bar % 2 === 1 && Math.random() < bellChance) {
         const deg = pent[(Math.random() * pent.length) | 0];
         this.bellNote(tBar + barLen * 0.25, root * 8 * Math.pow(2, deg / 12), 0.012, 3.5);
       }
       // sparse, repeated pentatonic motifs with enough silence to feel exploratory.
-      const beats = isNight ? [0, 0.375, 0.75] : [0, 0.25, 0.5, 0.75];
+      const beats = night ? [0, 0.375, 0.75] : [0, 0.25, 0.5, 0.75];
       for (let i = 0; i < beats.length; i++) {
-        if (Math.random() > (i === 0 ? 0.62 : 0.38)) continue;
+        if (Math.random() > Math.min(0.95, (i === 0 ? 0.62 : 0.38) * density)) continue;
         const deg = Math.random() < 0.55 ? motif[i % motif.length] : pent[(Math.random() * pent.length) | 0];
-        const octave = Math.random() < (isNight ? 0.2 : 0.34) ? 4 : 2;
+        const octave = Math.random() < octaveBias ? 4 : 2;
         const freq = root * octave * Math.pow(2, deg / 12);
         const when = tBar + beats[i] * barLen + Math.random() * 0.04;
         this.pianoNote(when, freq, 0.044 + Math.random() * 0.025, 2.3);
@@ -712,7 +902,7 @@ export class AudioEngine {
       }
       if (bar % 4 === 3 && Math.random() < 0.58) {
         const deg = pent[(Math.random() * pent.length) | 0];
-        this.bellNote(tBar + barLen * 0.82, root * 4 * Math.pow(2, deg / 12), 0.028, 4.5);
+        this.bellNote(tBar + barLen * 0.82, root * 4 * Math.pow(2, deg / 12), 0.026 + bellChance * 0.02, 4.5);
       }
     }
     return bars * barLen;
