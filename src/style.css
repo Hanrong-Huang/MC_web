@@ -44,7 +44,24 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   box-shadow: 0 0 0 3px #000;
   padding: 14px;
   color: #3f3f3f;
+  /* never grow past the screen — scroll if the contents are taller/wider */
+  max-height: 94vh; max-width: 96vw; overflow: auto;
 }
+
+/* container panel header: title on the left, a close button on the right */
+.ctr-header {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 10px;
+  position: sticky; top: -14px; background: #c6c6c6; padding-top: 2px; z-index: 2;
+}
+.ctr-close {
+  flex: none; width: 30px; height: 30px; line-height: 1;
+  font-family: inherit; font-size: 16px; color: #fff; cursor: pointer;
+  background: linear-gradient(#b46060, #9c4a4a);
+  border: 2px solid; border-color: #d89a9a #5a2020 #5a2020 #d89a9a;
+  text-shadow: 1px 1px #3f1010;
+}
+.ctr-close:active { border-color: #5a2020 #d89a9a #d89a9a #5a2020; }
 
 .mc-slot {
   width: 44px; height: 44px;
@@ -577,4 +594,14 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   #hotbar .hotbar-slot { width: 52px; height: 52px; }
   .menu-col { min-width: 0; width: min(94vw, 480px); }
   .menu-title { font-size: 12vw; }
+}
+
+/* compact the inventory grids so the whole panel fits a short phone screen
+   (overrides the inline 48px columns) */
+@media (pointer: coarse) and (max-height: 540px) {
+  .ctr-grid, .creative-grid { grid-template-columns: repeat(9, 40px) !important; gap: 2px !important; }
+  .mc-slot { width: 40px; height: 40px; }
+  .mc-slot canvas { left: 3px; top: 3px; width: 32px; height: 32px; }
+  .creative-grid { max-height: 200px; }
+  .mc-panel { padding: 10px; }
 }

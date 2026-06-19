@@ -311,6 +311,8 @@ export class HUD {
 
   /** Tapping a hotbar slot selects it (mobile-friendly; harmless on desktop). */
   onHotbarSelect: (i: number) => void = () => {};
+  /** Close button on a container panel (so touch devices can close it). */
+  onCloseContainer: () => void = () => {};
 
   refreshHotbar(inv: Inventory, mode: GameMode): void {
     this.hotbarEl.innerHTML = '';
@@ -930,15 +932,21 @@ export class HUD {
     const panel = el('div', 'mc-panel', this.containerEl);
     const rerender = (): void => { this.renderContainer(mode); this.renderCursor(); };
 
-    const title = el('div', 'ctr-label', panel);
+    // sticky header with the title + a tap/click close button (the only way to
+    // close on touch, where there's no E/Esc key)
+    const header = el('div', 'ctr-header', panel);
+    const title = el('div', 'ctr-label', header);
     title.style.fontSize = '14px';
-    title.style.marginBottom = '10px';
     title.textContent =
       view.kind === 'table' ? 'Crafting Table' :
       view.kind === 'furnace' ? 'Furnace' :
       view.kind === 'chest' ? 'Chest' :
       view.kind === 'trade' ? 'Villager Trades' :
       view.kind === 'creative' ? 'Creative Inventory' : 'Inventory';
+    const close = el('button', 'ctr-close', header);
+    close.textContent = '✕';
+    close.title = 'Close';
+    close.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onCloseContainer(); });
 
     // --- trade section (villager) -------------------------------------------
     if (view.kind === 'trade' && view.trades) {

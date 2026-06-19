@@ -500,6 +500,8 @@ class Game {
 
     // tapping a hotbar slot selects it (touch + a convenience on desktop)
     this.hud.onHotbarSelect = (i) => { if (this.state === 'playing') this.player.selectSlot(i); };
+    // the container panel's ✕ button closes it (essential on touch — no Esc key)
+    this.hud.onCloseContainer = () => this.closeContainer();
 
     // on phones/tablets: on-screen joystick + look + action buttons, no pointer lock
     if (isTouchDevice()) {
