@@ -1,8 +1,8 @@
-// On-screen touch controls for phones/tablets. Twin joysticks: the RIGHT stick
-// walks (WASD + sprint), the LEFT stick turns the camera (held = continuous
-// look). Action buttons sit within easy thumb reach. Everything drives the same
-// Input fields the keyboard/mouse path uses, so the rest of the game is
-// unchanged. Shown only on touch devices while playing.
+// On-screen touch controls for phones/tablets. Movement is the RIGHT joystick;
+// looking is drag-anywhere on the screen (like Minecraft Pocket Edition). Action
+// buttons sit on the left for the free thumb. Everything drives the same Input
+// fields the keyboard/mouse path uses, so the rest of the game is unchanged.
+// Shown only on touch devices while playing.
 
 import { Input } from '../engine/Input';
 
@@ -18,8 +18,8 @@ export function isTouchDevice(): boolean {
     (('ontouchstart' in window) || (navigator.maxTouchPoints ?? 0) > 0);
 }
 
-const JOY_RADIUS = 50;     // px throw of a joystick knob
-const LOOK_RATE = 13;      // look-stick deflection → "mouse" pixels per frame
+const JOY_RADIUS = 50;     // px throw of the movement knob
+const LOOK_SCALE = 1.3;    // drag pixels → look "mouse" pixels
 
 function el(tag: string, cls: string, parent: HTMLElement, text = ''): HTMLElement {
   const e = document.createElement(tag);
@@ -32,10 +32,6 @@ function el(tag: string, cls: string, parent: HTMLElement, text = ''): HTMLEleme
 export class TouchControls {
   readonly el: HTMLElement;
   private input: Input;
-  private camX = 0;          // current look-stick deflection (-1..1)
-  private camY = 0;
-  private visible = false;
-  private disposed = false;
   private resets: Array<() => void> = [];
 
   constructor(root: HTMLElement, input: Input, hooks: TouchHooks) {
@@ -43,31 +39,41 @@ export class TouchControls {
     const c = el('div', 'hidden', root); c.id = 'touch-controls';
     this.el = c;
 
-    // LEFT stick: camera/look (held = keep turning). RIGHT stick: movement.
-    this.makeStick('touch-stick stick-cam', (nx, ny) => { this.camX = nx; this.camY = ny; });
+    // full-screen LOOK layer (drag to turn the camera). It sits beneath the
+    // joystick + buttons, so touches on those go to them and only empty-area
+    // drags rotate the view.
+    const look = el('div', 'touch-look', c);
+    let lookId = -1, lx = 0, ly = 0;
+    look.addEventListener('pointerdown', (e) => {
+      if (lookId >= 0) return;
+      e.preventDefault();
+      lookId = e.pointerId; look.setPointerCapture(e.pointerId);
+      lx = e.clientX; ly = e.clientY;
+    });
+    look.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== lookId) return;
+      input.mouseDX += (e.clientX - lx) * LOOK_SCALE;
+      input.mouseDY += (e.clientY - ly) * LOOK_SCALE;
+      lx = e.clientX; ly = e.clientY;
+    });
+    const endLook = (e: PointerEvent): void => { if (e.pointerId === lookId) lookId = -1; };
+    look.addEventListener('pointerup', endLook);
+    look.addEventListener('pointercancel', endLook);
+    this.resets.push(() => { lookId = -1; });
+
+    // RIGHT movement joystick
     this.makeStick('touch-stick stick-move', (nx, ny) => this.setMove(nx, ny));
 
-    // action buttons (on top of everything)
-    this.hold('tb tb-mine', '⛏', () => { input.leftDown = true; }, () => { input.leftDown = false; });
+    // action buttons. Mine also fires a left-click so it attacks mobs (not just
+    // breaks blocks); place drives the right-click (place / use / eat / draw bow).
+    this.hold('tb tb-mine', '⛏', () => { input.leftDown = true; input.onMouseDown(0); }, () => { input.leftDown = false; });
     this.hold('tb tb-place', '✋', () => { input.rightDown = true; input.queueRightClick(); }, () => { input.rightDown = false; });
     this.hold('tb tb-jump', '⏶', () => { input.keys.add('Space'); }, () => { input.keys.delete('Space'); });
     this.hold('tb tb-down', '⏷', () => { input.keys.add('ControlLeft'); }, () => { input.keys.delete('ControlLeft'); });
     this.tap('tb tb-inv', '🎒', hooks.onInventory);
     this.tap('tb tb-fly', '✈', hooks.onFly);
     this.tap('tb tb-pause', '⏸', hooks.onPause);
-
-    requestAnimationFrame(this.lookLoop);
   }
-
-  /** Apply the held look-stick each frame so the camera keeps turning. */
-  private lookLoop = (): void => {
-    if (this.disposed) return;
-    requestAnimationFrame(this.lookLoop);
-    if (this.visible && (this.camX !== 0 || this.camY !== 0)) {
-      this.input.mouseDX += this.camX * LOOK_RATE;
-      this.input.mouseDY += this.camY * LOOK_RATE * 0.85; // gentler vertical
-    }
-  };
 
   /** A fixed joystick: drag the knob, get a normalized (-1..1) vector. */
   private makeStick(cls: string, onVec: (nx: number, ny: number) => void): void {
@@ -137,11 +143,9 @@ export class TouchControls {
     for (const c of ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'Space', 'ControlLeft', 'ShiftLeft']) this.input.keys.delete(c);
     this.input.leftDown = false;
     this.input.rightDown = false;
-    this.camX = 0; this.camY = 0;
   }
 
   setVisible(on: boolean): void {
-    this.visible = on;
     this.el.classList.toggle('hidden', !on);
     if (!on) this.reset();
   }

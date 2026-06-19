@@ -1898,6 +1898,11 @@ class App {
   constructor() {
     this.root = document.getElementById('app')!;
     this.hud = new HUD(this.root, this.atlas, this.audio);
+    // resume audio on the first user gesture (mobile needs a touch to unlock the
+    // AudioContext; the menu buttons help, but this guarantees it everywhere)
+    const unlock = (): void => this.audio.ensure();
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('touchend', unlock);
     void this.showMenu();
   }
 

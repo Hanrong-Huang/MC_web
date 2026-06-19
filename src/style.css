@@ -255,6 +255,8 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   display: flex; align-items: center; justify-content: center; flex-direction: column;
   background-color: #3a2a1d;
   image-rendering: pixelated;
+  overflow-y: auto;            /* scroll if the menu is taller than the screen */
+  padding: 16px 0;
 }
 .menu-title {
   font-size: 58px; color: #eafff0; letter-spacing: 5px;
@@ -554,14 +556,20 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   touch-action: none;
 }
 
-/* twin joysticks: LEFT = camera/look, RIGHT = movement */
+/* drag-to-look layer (under the joystick + buttons). Stops short of the bottom
+   hotbar strip so hotbar taps still land on the HUD beneath. */
+#touch-controls .touch-look {
+  position: absolute; left: 0; right: 0; top: 0; bottom: 70px;
+  pointer-events: auto; touch-action: none;
+}
+
+/* RIGHT movement joystick */
 #touch-controls .touch-stick {
   position: absolute; width: 132px; height: 132px; border-radius: 50%;
   pointer-events: auto; touch-action: none;
   background: radial-gradient(circle, rgba(255,255,255,0.13), rgba(255,255,255,0.04));
   border: 2px solid rgba(255,255,255,0.3);
 }
-#touch-controls .stick-cam  { left: 24px;  bottom: 24px; }
 #touch-controls .stick-move { right: 24px; bottom: 24px; }
 #touch-controls .touch-knob {
   position: absolute; left: 50%; top: 50%; width: 58px; height: 58px;
@@ -576,24 +584,38 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   font-size: 26px; color: #fff; text-shadow: 1px 1px #000;
   background: rgba(0,0,0,0.34); border: 2px solid rgba(255,255,255,0.4);
 }
-#touch-controls .tb.held { background: rgba(255,255,255,0.34); }
+#touch-controls .tb.held { background: rgba(255,255,255,0.45); }
 
-/* action buttons sit between the sticks, reachable by the right thumb. Break &
-   place are the big primaries; jump/down are smaller, just above the move stick. */
-#touch-controls .tb-mine  { right: 172px; bottom: 118px; width: 74px; height: 74px; font-size: 30px; }
-#touch-controls .tb-place { right: 172px; bottom: 36px;  width: 74px; height: 74px; font-size: 30px; }
-#touch-controls .tb-jump  { right: 24px;  bottom: 168px; }
-#touch-controls .tb-down  { right: 96px;  bottom: 168px; }
+/* action buttons on the LEFT for the free thumb (movement is the right stick),
+   so you can move + jump/mine/place at once. Break & place are the big primaries. */
+#touch-controls .tb-mine  { left: 24px;  bottom: 100px; width: 74px; height: 74px; font-size: 30px; }
+#touch-controls .tb-place { left: 112px; bottom: 40px;  width: 74px; height: 74px; font-size: 30px; }
+#touch-controls .tb-jump  { left: 200px; bottom: 112px; }
+#touch-controls .tb-down  { left: 200px; bottom: 40px; }
 /* utility buttons top-LEFT, clear of the top-right minimap */
 #touch-controls .tb-pause { left: 16px;  top: 16px; width: 50px; height: 50px; font-size: 20px; }
 #touch-controls .tb-inv   { left: 74px;  top: 16px; width: 50px; height: 50px; font-size: 22px; }
 #touch-controls .tb-fly   { left: 132px; top: 16px; width: 50px; height: 50px; font-size: 20px; }
 
-/* roomier hit targets for the on-screen hotbar on touch */
+/* roomier hit targets for the on-screen hotbar on touch; make it tappable
+   (the HUD is pointer-events:none, so re-enable just the hotbar) */
 @media (pointer: coarse) {
+  #hotbar { pointer-events: auto; }
   #hotbar .hotbar-slot { width: 52px; height: 52px; }
-  .menu-col { min-width: 0; width: min(94vw, 480px); }
-  .menu-title { font-size: 12vw; }
+}
+
+/* compact, scrollable title screen so it fits a short landscape phone (the
+   centred desktop layout pushed the title/footer off-screen) */
+@media (pointer: coarse), (max-height: 620px) {
+  #menu { justify-content: flex-start; }
+  .menu-col { min-width: 0; width: min(94vw, 460px); }
+  .menu-title { font-size: clamp(30px, 8vw, 52px); margin-bottom: 2px; }
+  .menu-sub { margin-bottom: 12px; }
+  .menu-card { padding: 10px 12px; gap: 6px; }
+  .menu-input { padding: 10px; }          /* taller tap targets */
+  .world-list { max-height: 38vh; }
+  .menu-help { margin-top: 10px; line-height: 1.6; }
+  .menu-foot { margin-top: 8px; }
 }
 
 /* compact the inventory grids so the whole panel fits a short phone screen

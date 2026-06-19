@@ -406,7 +406,7 @@ export class Player {
     }
 
     // interaction
-    if (!uiOpen && input.pointerLocked) {
+    if (!uiOpen && input.active) {
       this.updateTarget();
       this.updateBreaking(dt);
       this.updateRightClick(dt);
@@ -1272,7 +1272,7 @@ export class Player {
 
   /** Left mouse press: try attacking an entity first; swing regardless. */
   onLeftClick(): void {
-    if (this.deps.isUIOpen() || this.dead || !this.deps.input.pointerLocked) return;
+    if (this.deps.isUIOpen() || this.dead || !this.deps.input.active) return;
     this.deps.renderer.triggerSwing();
     if (this.attackCooldown > 0) return;
     const d = this.lookDir();

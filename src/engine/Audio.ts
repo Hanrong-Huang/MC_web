@@ -137,6 +137,9 @@ export class AudioEngine {
       this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
       const data = this.noiseBuf.getChannelData(0);
       for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      // mobile browsers create the context "suspended" — resume it now, while we
+      // are still inside the user gesture that called ensure(), or there's no sound
+      if (this.ctx.state === 'suspended') void this.ctx.resume();
     } catch {
       this.ctx = null;
     }
