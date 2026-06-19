@@ -1,7 +1,8 @@
-// On-screen touch controls for phones/tablets: a floating movement joystick on
-// the left, drag-to-look on the right, and hold/tap action buttons. Everything
-// drives the same Input fields the keyboard/mouse path uses, so the rest of the
-// game is unchanged. Shown only on touch devices while playing.
+// On-screen touch controls for phones/tablets. Twin joysticks: the RIGHT stick
+// walks (WASD + sprint), the LEFT stick turns the camera (held = continuous
+// look). Action buttons sit within easy thumb reach. Everything drives the same
+// Input fields the keyboard/mouse path uses, so the rest of the game is
+// unchanged. Shown only on touch devices while playing.
 
 import { Input } from '../engine/Input';
 
@@ -17,8 +18,8 @@ export function isTouchDevice(): boolean {
     (('ontouchstart' in window) || (navigator.maxTouchPoints ?? 0) > 0);
 }
 
-const LOOK_SCALE = 1.35;   // touch-drag pixels → look "mouse" pixels
-const JOY_RADIUS = 56;     // px throw of the joystick knob
+const JOY_RADIUS = 50;     // px throw of a joystick knob
+const LOOK_RATE = 13;      // look-stick deflection → "mouse" pixels per frame
 
 function el(tag: string, cls: string, parent: HTMLElement, text = ''): HTMLElement {
   const e = document.createElement(tag);
@@ -31,72 +32,22 @@ function el(tag: string, cls: string, parent: HTMLElement, text = ''): HTMLEleme
 export class TouchControls {
   readonly el: HTMLElement;
   private input: Input;
-  private joyId = -1;
-  private joyCx = 0;
-  private joyCy = 0;
-  private joyBase: HTMLElement;
-  private joyKnob: HTMLElement;
-  private lookId = -1;
-  private lookX = 0;
-  private lookY = 0;
+  private camX = 0;          // current look-stick deflection (-1..1)
+  private camY = 0;
+  private visible = false;
+  private disposed = false;
+  private resets: Array<() => void> = [];
 
   constructor(root: HTMLElement, input: Input, hooks: TouchHooks) {
     this.input = input;
     const c = el('div', 'hidden', root); c.id = 'touch-controls';
     this.el = c;
 
-    // left half: floating joystick zone
-    const moveZone = el('div', 'touch-zone touch-move', c);
-    this.joyBase = el('div', 'touch-joy-base hidden', c);
-    this.joyKnob = el('div', 'touch-joy-knob', this.joyBase);
-    moveZone.addEventListener('pointerdown', (e) => {
-      if (this.joyId >= 0) return;
-      e.preventDefault();
-      this.joyId = e.pointerId;
-      moveZone.setPointerCapture(e.pointerId);
-      this.joyCx = e.clientX; this.joyCy = e.clientY;
-      this.joyBase.style.left = `${e.clientX}px`;
-      this.joyBase.style.top = `${e.clientY}px`;
-      this.joyBase.classList.remove('hidden');
-      this.knob(0, 0);
-    });
-    moveZone.addEventListener('pointermove', (e) => {
-      if (e.pointerId !== this.joyId) return;
-      let dx = e.clientX - this.joyCx, dy = e.clientY - this.joyCy;
-      const d = Math.hypot(dx, dy);
-      if (d > JOY_RADIUS) { dx = dx / d * JOY_RADIUS; dy = dy / d * JOY_RADIUS; }
-      this.knob(dx, dy);
-      this.setMove(dx / JOY_RADIUS, dy / JOY_RADIUS);
-    });
-    const endJoy = (e: PointerEvent): void => {
-      if (e.pointerId !== this.joyId) return;
-      this.joyId = -1;
-      this.joyBase.classList.add('hidden');
-      this.setMove(0, 0);
-    };
-    moveZone.addEventListener('pointerup', endJoy);
-    moveZone.addEventListener('pointercancel', endJoy);
+    // LEFT stick: camera/look (held = keep turning). RIGHT stick: movement.
+    this.makeStick('touch-stick stick-cam', (nx, ny) => { this.camX = nx; this.camY = ny; });
+    this.makeStick('touch-stick stick-move', (nx, ny) => this.setMove(nx, ny));
 
-    // right half: drag to look
-    const lookZone = el('div', 'touch-zone touch-look', c);
-    lookZone.addEventListener('pointerdown', (e) => {
-      if (this.lookId >= 0) return;
-      e.preventDefault();
-      this.lookId = e.pointerId;
-      lookZone.setPointerCapture(e.pointerId);
-      this.lookX = e.clientX; this.lookY = e.clientY;
-    });
-    lookZone.addEventListener('pointermove', (e) => {
-      if (e.pointerId !== this.lookId) return;
-      this.input.mouseDX += (e.clientX - this.lookX) * LOOK_SCALE;
-      this.input.mouseDY += (e.clientY - this.lookY) * LOOK_SCALE;
-      this.lookX = e.clientX; this.lookY = e.clientY;
-    });
-    const endLook = (e: PointerEvent): void => { if (e.pointerId === this.lookId) this.lookId = -1; };
-    lookZone.addEventListener('pointerup', endLook);
-    lookZone.addEventListener('pointercancel', endLook);
-
-    // action buttons (on top of the zones)
+    // action buttons (on top of everything)
     this.hold('tb tb-mine', '⛏', () => { input.leftDown = true; }, () => { input.leftDown = false; });
     this.hold('tb tb-place', '✋', () => { input.rightDown = true; input.queueRightClick(); }, () => { input.rightDown = false; });
     this.hold('tb tb-jump', '⏶', () => { input.keys.add('Space'); }, () => { input.keys.delete('Space'); });
@@ -104,13 +55,51 @@ export class TouchControls {
     this.tap('tb tb-inv', '🎒', hooks.onInventory);
     this.tap('tb tb-fly', '✈', hooks.onFly);
     this.tap('tb tb-pause', '⏸', hooks.onPause);
+
+    requestAnimationFrame(this.lookLoop);
   }
 
-  private knob(dx: number, dy: number): void {
-    this.joyKnob.style.transform = `translate(${dx}px, ${dy}px)`;
+  /** Apply the held look-stick each frame so the camera keeps turning. */
+  private lookLoop = (): void => {
+    if (this.disposed) return;
+    requestAnimationFrame(this.lookLoop);
+    if (this.visible && (this.camX !== 0 || this.camY !== 0)) {
+      this.input.mouseDX += this.camX * LOOK_RATE;
+      this.input.mouseDY += this.camY * LOOK_RATE * 0.85; // gentler vertical
+    }
+  };
+
+  /** A fixed joystick: drag the knob, get a normalized (-1..1) vector. */
+  private makeStick(cls: string, onVec: (nx: number, ny: number) => void): void {
+    const base = el('div', cls, this.el);
+    const knob = el('div', 'touch-knob', base);
+    let id = -1, cx = 0, cy = 0;
+    const apply = (e: PointerEvent): void => {
+      let dx = e.clientX - cx, dy = e.clientY - cy;
+      const d = Math.hypot(dx, dy);
+      if (d > JOY_RADIUS) { dx = dx / d * JOY_RADIUS; dy = dy / d * JOY_RADIUS; }
+      knob.style.transform = `translate(${dx}px, ${dy}px)`;
+      onVec(dx / JOY_RADIUS, dy / JOY_RADIUS);
+    };
+    base.addEventListener('pointerdown', (e) => {
+      if (id >= 0) return;
+      e.preventDefault();
+      id = e.pointerId; base.setPointerCapture(e.pointerId);
+      const r = base.getBoundingClientRect();
+      cx = r.left + r.width / 2; cy = r.top + r.height / 2;
+      apply(e);
+    });
+    base.addEventListener('pointermove', (e) => { if (e.pointerId === id) apply(e); });
+    const end = (e: PointerEvent): void => {
+      if (e.pointerId !== id) return;
+      id = -1; knob.style.transform = 'translate(0,0)'; onVec(0, 0);
+    };
+    base.addEventListener('pointerup', end);
+    base.addEventListener('pointercancel', end);
+    this.resets.push(() => { id = -1; knob.style.transform = 'translate(0,0)'; onVec(0, 0); });
   }
 
-  /** Map the joystick vector to WASD (+ sprint when pushed fully forward). */
+  /** Map the movement-stick vector to WASD (+ sprint on a full forward push). */
   private setMove(nx: number, ny: number): void {
     const k = this.input.keys;
     const set = (code: string, on: boolean): void => { if (on) k.add(code); else k.delete(code); };
@@ -118,10 +107,10 @@ export class TouchControls {
     set('KeyS', ny > 0.35);
     set('KeyA', nx < -0.35);
     set('KeyD', nx > 0.35);
-    set('ShiftLeft', ny < -0.35 && Math.hypot(nx, ny) > 0.92); // full-forward = sprint
+    set('ShiftLeft', ny < -0.35 && Math.hypot(nx, ny) > 0.92);
   }
 
-  private hold(cls: string, label: string, onDown: () => void, onUp: () => void): HTMLElement {
+  private hold(cls: string, label: string, onDown: () => void, onUp: () => void): void {
     const b = el('div', cls, this.el, label);
     b.addEventListener('pointerdown', (e) => {
       e.preventDefault(); b.setPointerCapture(e.pointerId); b.classList.add('held'); onDown();
@@ -129,10 +118,10 @@ export class TouchControls {
     const up = (): void => { b.classList.remove('held'); onUp(); };
     b.addEventListener('pointerup', up);
     b.addEventListener('pointercancel', up);
-    return b;
+    this.resets.push(up);
   }
 
-  private tap(cls: string, label: string, onTap: () => void): HTMLElement {
+  private tap(cls: string, label: string, onTap: () => void): void {
     const b = el('div', cls, this.el, label);
     b.addEventListener('pointerdown', (e) => {
       e.preventDefault(); b.classList.add('held'); onTap();
@@ -140,19 +129,19 @@ export class TouchControls {
     const up = (): void => b.classList.remove('held');
     b.addEventListener('pointerup', up);
     b.addEventListener('pointercancel', up);
-    return b;
   }
 
   /** Clear any held inputs (called when hiding / opening a menu). */
   private reset(): void {
+    for (const r of this.resets) r();
     for (const c of ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'Space', 'ControlLeft', 'ShiftLeft']) this.input.keys.delete(c);
     this.input.leftDown = false;
     this.input.rightDown = false;
-    this.joyId = -1; this.lookId = -1;
-    this.joyBase.classList.add('hidden');
+    this.camX = 0; this.camY = 0;
   }
 
   setVisible(on: boolean): void {
+    this.visible = on;
     this.el.classList.toggle('hidden', !on);
     if (!on) this.reset();
   }

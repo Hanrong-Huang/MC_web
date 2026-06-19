@@ -533,47 +533,44 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 
 #touch-controls {
   position: absolute; inset: 0; z-index: 24;
-  pointer-events: none;            /* zones/buttons re-enable it */
+  pointer-events: none;            /* sticks/buttons re-enable it */
   touch-action: none;
 }
-#touch-controls .touch-zone {
-  position: absolute; top: 0; bottom: 0;
-  pointer-events: auto; touch-action: none;
-}
-#touch-controls .touch-move { left: 0; width: 46%; }
-#touch-controls .touch-look { right: 0; width: 54%; }
 
-#touch-controls .touch-joy-base {
-  position: fixed; width: 132px; height: 132px; margin: -66px 0 0 -66px;
-  border-radius: 50%; pointer-events: none;
-  background: radial-gradient(circle, rgba(255,255,255,0.12), rgba(255,255,255,0.04));
-  border: 2px solid rgba(255,255,255,0.35);
+/* twin joysticks: LEFT = camera/look, RIGHT = movement */
+#touch-controls .touch-stick {
+  position: absolute; width: 132px; height: 132px; border-radius: 50%;
+  pointer-events: auto; touch-action: none;
+  background: radial-gradient(circle, rgba(255,255,255,0.13), rgba(255,255,255,0.04));
+  border: 2px solid rgba(255,255,255,0.3);
 }
-#touch-controls .touch-joy-knob {
+#touch-controls .stick-cam  { left: 24px;  bottom: 24px; }
+#touch-controls .stick-move { right: 24px; bottom: 24px; }
+#touch-controls .touch-knob {
   position: absolute; left: 50%; top: 50%; width: 58px; height: 58px;
-  margin: -29px 0 0 -29px; border-radius: 50%;
-  background: rgba(255,255,255,0.32); border: 2px solid rgba(255,255,255,0.6);
+  margin: -29px 0 0 -29px; border-radius: 50%; pointer-events: none;
+  background: rgba(255,255,255,0.32); border: 2px solid rgba(255,255,255,0.62);
 }
 
 #touch-controls .tb {
   position: absolute; pointer-events: auto; touch-action: none;
   display: flex; align-items: center; justify-content: center;
-  width: 64px; height: 64px; border-radius: 50%;
+  width: 62px; height: 62px; border-radius: 50%;
   font-size: 26px; color: #fff; text-shadow: 1px 1px #000;
-  background: rgba(0,0,0,0.32); border: 2px solid rgba(255,255,255,0.4);
+  background: rgba(0,0,0,0.34); border: 2px solid rgba(255,255,255,0.4);
 }
 #touch-controls .tb.held { background: rgba(255,255,255,0.34); }
 
-/* right-hand action cluster (thumb reach) */
-#touch-controls .tb-jump  { right: 26px;  bottom: 96px; width: 78px; height: 78px; font-size: 30px; }
-#touch-controls .tb-place { right: 112px; bottom: 150px; }
-#touch-controls .tb-mine  { right: 120px; bottom: 40px; width: 72px; height: 72px; }
-#touch-controls .tb-down  { right: 26px;  bottom: 24px; }
-/* utility buttons, top-right */
+/* action buttons sit between the sticks, reachable by the right thumb. Break &
+   place are the big primaries; jump/down are smaller, just above the move stick. */
+#touch-controls .tb-mine  { right: 172px; bottom: 118px; width: 74px; height: 74px; font-size: 30px; }
+#touch-controls .tb-place { right: 172px; bottom: 36px;  width: 74px; height: 74px; font-size: 30px; }
+#touch-controls .tb-jump  { right: 24px;  bottom: 168px; }
+#touch-controls .tb-down  { right: 96px;  bottom: 168px; }
 /* utility buttons top-LEFT, clear of the top-right minimap */
-#touch-controls .tb-pause { left: 16px;  top: 16px; width: 52px; height: 52px; font-size: 20px; }
-#touch-controls .tb-inv   { left: 78px;  top: 16px; width: 52px; height: 52px; font-size: 22px; }
-#touch-controls .tb-fly   { left: 140px; top: 16px; width: 52px; height: 52px; font-size: 20px; }
+#touch-controls .tb-pause { left: 16px;  top: 16px; width: 50px; height: 50px; font-size: 20px; }
+#touch-controls .tb-inv   { left: 74px;  top: 16px; width: 50px; height: 50px; font-size: 22px; }
+#touch-controls .tb-fly   { left: 132px; top: 16px; width: 50px; height: 50px; font-size: 20px; }
 
 /* roomier hit targets for the on-screen hotbar on touch */
 @media (pointer: coarse) {
