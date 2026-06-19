@@ -1,8 +1,7 @@
-// On-screen touch controls for phones/tablets. Movement is the RIGHT joystick;
-// looking is drag-anywhere on the screen (like Minecraft Pocket Edition). Action
-// buttons sit on the left for the free thumb. Everything drives the same Input
-// fields the keyboard/mouse path uses, so the rest of the game is unchanged.
-// Shown only on touch devices while playing.
+// On-screen touch controls for phones/tablets, in the Minecraft Pocket Edition
+// layout: a floating movement joystick on the LEFT, drag-to-look on the RIGHT,
+// and action buttons on the right for the same thumb. Everything drives the same
+// Input fields the keyboard/mouse path uses. Shown only on touch while playing.
 
 import { Input } from '../engine/Input';
 
@@ -18,7 +17,7 @@ export function isTouchDevice(): boolean {
     (('ontouchstart' in window) || (navigator.maxTouchPoints ?? 0) > 0);
 }
 
-const JOY_RADIUS = 50;     // px throw of the movement knob
+const JOY_RADIUS = 52;     // px throw of the movement knob
 const LOOK_SCALE = 1.3;    // drag pixels → look "mouse" pixels
 
 function el(tag: string, cls: string, parent: HTMLElement, text = ''): HTMLElement {
@@ -39,9 +38,39 @@ export class TouchControls {
     const c = el('div', 'hidden', root); c.id = 'touch-controls';
     this.el = c;
 
-    // full-screen LOOK layer (drag to turn the camera). It sits beneath the
-    // joystick + buttons, so touches on those go to them and only empty-area
-    // drags rotate the view.
+    // LEFT: a floating movement joystick — touch anywhere on the left and the
+    // stick appears under your thumb, drag to walk (full forward push = sprint).
+    const moveZone = el('div', 'touch-move-zone', c);
+    const base = el('div', 'touch-stick stick-move hidden', c);
+    const knob = el('div', 'touch-knob', base);
+    let mid = -1, mcx = 0, mcy = 0;
+    moveZone.addEventListener('pointerdown', (e) => {
+      if (mid >= 0) return;
+      e.preventDefault();
+      mid = e.pointerId; moveZone.setPointerCapture(e.pointerId);
+      mcx = e.clientX; mcy = e.clientY;
+      base.style.left = `${mcx}px`; base.style.top = `${mcy}px`;
+      base.classList.remove('hidden');
+      knob.style.transform = 'translate(0,0)';
+      this.setMove(0, 0);
+    });
+    moveZone.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== mid) return;
+      let dx = e.clientX - mcx, dy = e.clientY - mcy;
+      const d = Math.hypot(dx, dy);
+      if (d > JOY_RADIUS) { dx = dx / d * JOY_RADIUS; dy = dy / d * JOY_RADIUS; }
+      knob.style.transform = `translate(${dx}px, ${dy}px)`;
+      this.setMove(dx / JOY_RADIUS, dy / JOY_RADIUS);
+    });
+    const endMove = (e: PointerEvent): void => {
+      if (e.pointerId !== mid) return;
+      mid = -1; base.classList.add('hidden'); this.setMove(0, 0);
+    };
+    moveZone.addEventListener('pointerup', endMove);
+    moveZone.addEventListener('pointercancel', endMove);
+    this.resets.push(() => { mid = -1; base.classList.add('hidden'); this.setMove(0, 0); });
+
+    // RIGHT: drag to look
     const look = el('div', 'touch-look', c);
     let lookId = -1, lx = 0, ly = 0;
     look.addEventListener('pointerdown', (e) => {
@@ -61,48 +90,16 @@ export class TouchControls {
     look.addEventListener('pointercancel', endLook);
     this.resets.push(() => { lookId = -1; });
 
-    // RIGHT movement joystick
-    this.makeStick('touch-stick stick-move', (nx, ny) => this.setMove(nx, ny));
-
-    // action buttons. Mine also fires a left-click so it attacks mobs (not just
-    // breaks blocks); place drives the right-click (place / use / eat / draw bow).
+    // RIGHT action buttons (same thumb as look). Mine also fires a left-click so
+    // it attacks mobs; place drives the right-click (place / use / eat / bow).
     this.hold('tb tb-mine', '⛏', () => { input.leftDown = true; input.onMouseDown(0); }, () => { input.leftDown = false; });
     this.hold('tb tb-place', '✋', () => { input.rightDown = true; input.queueRightClick(); }, () => { input.rightDown = false; });
     this.hold('tb tb-jump', '⏶', () => { input.keys.add('Space'); }, () => { input.keys.delete('Space'); });
     this.hold('tb tb-down', '⏷', () => { input.keys.add('ControlLeft'); }, () => { input.keys.delete('ControlLeft'); });
+    // utility (top)
     this.tap('tb tb-inv', '🎒', hooks.onInventory);
     this.tap('tb tb-fly', '✈', hooks.onFly);
     this.tap('tb tb-pause', '⏸', hooks.onPause);
-  }
-
-  /** A fixed joystick: drag the knob, get a normalized (-1..1) vector. */
-  private makeStick(cls: string, onVec: (nx: number, ny: number) => void): void {
-    const base = el('div', cls, this.el);
-    const knob = el('div', 'touch-knob', base);
-    let id = -1, cx = 0, cy = 0;
-    const apply = (e: PointerEvent): void => {
-      let dx = e.clientX - cx, dy = e.clientY - cy;
-      const d = Math.hypot(dx, dy);
-      if (d > JOY_RADIUS) { dx = dx / d * JOY_RADIUS; dy = dy / d * JOY_RADIUS; }
-      knob.style.transform = `translate(${dx}px, ${dy}px)`;
-      onVec(dx / JOY_RADIUS, dy / JOY_RADIUS);
-    };
-    base.addEventListener('pointerdown', (e) => {
-      if (id >= 0) return;
-      e.preventDefault();
-      id = e.pointerId; base.setPointerCapture(e.pointerId);
-      const r = base.getBoundingClientRect();
-      cx = r.left + r.width / 2; cy = r.top + r.height / 2;
-      apply(e);
-    });
-    base.addEventListener('pointermove', (e) => { if (e.pointerId === id) apply(e); });
-    const end = (e: PointerEvent): void => {
-      if (e.pointerId !== id) return;
-      id = -1; knob.style.transform = 'translate(0,0)'; onVec(0, 0);
-    };
-    base.addEventListener('pointerup', end);
-    base.addEventListener('pointercancel', end);
-    this.resets.push(() => { id = -1; knob.style.transform = 'translate(0,0)'; onVec(0, 0); });
   }
 
   /** Map the movement-stick vector to WASD (+ sprint on a full forward push). */

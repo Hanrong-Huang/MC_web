@@ -559,25 +559,28 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   touch-action: none;
 }
 
-/* drag-to-look layer (under the joystick + buttons). Stops short of the bottom
-   hotbar strip so hotbar taps still land on the HUD beneath. */
+/* LEFT half: floating movement-joystick zone */
+#touch-controls .touch-move-zone {
+  position: absolute; left: 0; top: 0; width: 46%; bottom: 0;
+  pointer-events: auto; touch-action: none;
+}
+/* RIGHT half: drag-to-look (clear of the bottom hotbar strip) */
 #touch-controls .touch-look {
-  position: absolute; left: 0; right: 0; top: 0; bottom: 70px;
+  position: absolute; right: 0; top: 0; width: 54%; bottom: 70px;
   pointer-events: auto; touch-action: none;
 }
 
-/* RIGHT movement joystick */
+/* floating joystick base — positioned by JS at the touch point (margin centres it) */
 #touch-controls .touch-stick {
-  position: absolute; width: 132px; height: 132px; border-radius: 50%;
-  pointer-events: auto; touch-action: none;
-  background: radial-gradient(circle, rgba(255,255,255,0.13), rgba(255,255,255,0.04));
-  border: 2px solid rgba(255,255,255,0.3);
+  position: absolute; width: 132px; height: 132px; margin: -66px 0 0 -66px;
+  border-radius: 50%; pointer-events: none; touch-action: none;
+  background: radial-gradient(circle, rgba(255,255,255,0.14), rgba(255,255,255,0.04));
+  border: 2px solid rgba(255,255,255,0.32);
 }
-#touch-controls .stick-move { right: 24px; bottom: 24px; }
 #touch-controls .touch-knob {
   position: absolute; left: 50%; top: 50%; width: 58px; height: 58px;
   margin: -29px 0 0 -29px; border-radius: 50%; pointer-events: none;
-  background: rgba(255,255,255,0.32); border: 2px solid rgba(255,255,255,0.62);
+  background: rgba(255,255,255,0.34); border: 2px solid rgba(255,255,255,0.64);
 }
 
 #touch-controls .tb {
@@ -589,13 +592,12 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 }
 #touch-controls .tb.held { background: rgba(255,255,255,0.5); }
 
-/* action buttons: a tidy 2x2 grid on the LEFT for the free thumb (movement is
-   the right stick). Attack/mine and place share the same x, stacked vertically;
-   jump/sneak form the second column. */
-#touch-controls .tb-mine  { left: 26px;  bottom: 118px; width: 68px; height: 68px; font-size: 30px; }
-#touch-controls .tb-place { left: 26px;  bottom: 42px;  width: 68px; height: 68px; font-size: 30px; }
-#touch-controls .tb-jump  { left: 106px; bottom: 118px; width: 68px; height: 68px; }
-#touch-controls .tb-down  { left: 106px; bottom: 42px;  width: 68px; height: 68px; }
+/* action buttons on the RIGHT (the look thumb). Attack/mine and place share the
+   same x (stacked); jump/sneak form the inner column. */
+#touch-controls .tb-mine  { right: 26px;  bottom: 118px; width: 68px; height: 68px; font-size: 30px; }
+#touch-controls .tb-place { right: 26px;  bottom: 42px;  width: 68px; height: 68px; font-size: 30px; }
+#touch-controls .tb-jump  { right: 106px; bottom: 118px; width: 68px; height: 68px; }
+#touch-controls .tb-down  { right: 106px; bottom: 42px;  width: 68px; height: 68px; }
 /* utility buttons top-LEFT, clear of the top-right minimap */
 #touch-controls .tb-pause { left: 16px;  top: 16px; width: 50px; height: 50px; font-size: 20px; }
 #touch-controls .tb-inv   { left: 74px;  top: 16px; width: 50px; height: 50px; font-size: 22px; }

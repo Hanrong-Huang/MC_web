@@ -178,11 +178,18 @@ export class HUD {
       this.worldInput.value = '';
     });
 
-    document.addEventListener('mousemove', (e) => {
-      this.cursorEl.style.left = `${e.clientX - 18}px`;
-      this.cursorEl.style.top = `${e.clientY - 18}px`;
-    });
+    // the held "cursor" item follows the pointer (pointermove covers touch-drag
+    // too, so on a phone you can see the stack you've picked up)
+    const followCursor = (x: number, y: number): void => {
+      this.cursorEl.style.left = `${x - 18}px`;
+      this.cursorEl.style.top = `${y - 18}px`;
+    };
+    document.addEventListener('mousemove', (e) => followCursor(e.clientX, e.clientY));
+    document.addEventListener('pointermove', (e) => followCursor(e.clientX, e.clientY));
+    this.followCursor = followCursor;
   }
+
+  private followCursor: (x: number, y: number) => void = () => {};
 
   // =========================================================================
   // Main menu
@@ -814,8 +821,11 @@ export class HUD {
         c.textContent = String(item.count);
       }
     }
-    s.addEventListener('mousedown', (e) => {
+    // pointerdown fires reliably on touch (a tap) and mouse; move the held-item
+    // cursor to the tap point first so it's visible where the finger is
+    s.addEventListener('pointerdown', (e) => {
       e.preventDefault();
+      this.followCursor(e.clientX, e.clientY);
       onClick(e.button);
     });
   }
