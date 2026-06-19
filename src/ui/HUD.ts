@@ -275,12 +275,12 @@ export class HUD {
     const toolRow = el('div', 'menu-row', this.menu);
     toolRow.style.marginTop = '14px';
     const packBtn = wire(el('button', 'mc-btn small', toolRow));
-    packBtn.textContent = 'Resource Pack';
-    packBtn.title = 'Apply an unzipped Minecraft Java texture-pack folder (textures only — not a world or seed)';
+    packBtn.textContent = 'Texture Pack…';
+    packBtn.title = 'Apply an unzipped Minecraft Java texture-pack FOLDER (changes how blocks look — not a world or seed)';
     packBtn.onclick = () => { this.packHandler = handlers.onPack; this.packInput.click(); };
     const importBtn = wire(el('button', 'mc-btn small', toolRow));
-    importBtn.textContent = 'Import World';
-    importBtn.title = 'Load a world file exported from here or shared from another machine';
+    importBtn.textContent = 'Import World (.json)…';
+    importBtn.title = 'Load a world .json FILE exported with the Export button (here or from another machine)';
     importBtn.onclick = () => { this.importHandler = handlers.onImport; this.worldInput.click(); };
 
     // concise control hints (full details live in F3 / tooltips)

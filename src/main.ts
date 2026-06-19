@@ -1880,8 +1880,16 @@ class App {
         void this.db.delete(slot).then(() => this.showMenu());
       },
       onPack: (files) => {
-        void this.atlas.loadResourcePack(files).then((n) => {
-          this.hud.toast(n > 0 ? `Resource pack applied (${n} textures)` : 'No matching textures found');
+        void this.atlas.loadResourcePack(files).then(async (n) => {
+          if (n > 0) { this.hud.toast(`Resource pack applied (${n} textures)`); return; }
+          // a world file slipped into the texture-pack picker? import it instead
+          // of the unhelpful "no textures" dead-end (a common mix-up).
+          const worldFile = files.find((f) => /\.(vcworld|json)$/i.test(f.name));
+          if (worldFile) {
+            try { importWorld(await worldFile.text()); await this.uploadWorld(worldFile); return; }
+            catch { /* not actually a world file */ }
+          }
+          this.hud.toast('No textures found. To load a saved world, use “Import World”.');
         });
       },
       onExport: (slot) => void this.downloadWorld(slot),
