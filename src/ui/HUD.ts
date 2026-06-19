@@ -309,6 +309,9 @@ export class HUD {
     this.hideAdvancements();
   }
 
+  /** Tapping a hotbar slot selects it (mobile-friendly; harmless on desktop). */
+  onHotbarSelect: (i: number) => void = () => {};
+
   refreshHotbar(inv: Inventory, mode: GameMode): void {
     this.hotbarEl.innerHTML = '';
     for (let i = 0; i < 9; i++) {
@@ -321,6 +324,7 @@ export class HUD {
           c.textContent = String(item.count);
         }
       }
+      s.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onHotbarSelect(i); });
     }
   }
 

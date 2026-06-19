@@ -12,6 +12,7 @@ import { Input } from './engine/Input';
 import { EntityManager } from './engine/EntityManager';
 import { AudioEngine } from './engine/Audio';
 import type { AmbientEnv } from './engine/Audio';
+import { TouchControls, isTouchDevice } from './ui/TouchControls';
 import { HUD, ContainerView } from './ui/HUD';
 import { SaveDB, SaveState, ChestSave, FurnaceSave, exportWorld, importWorld } from './engine/Persistence';
 import type { BlockEntitySave } from './engine/Persistence';
@@ -84,6 +85,8 @@ class Game {
   private minimapT = 0;
   private wasRiding = false;
   private wasUnderwater = false;
+  private touch: TouchControls | null = null;
+  private touchVisible = false;
   private ambientPT = 0;
 
   constructor(app: App, slot: string, save: SaveState | null, fresh: { seed: number; mode: GameMode } | null) {
@@ -480,7 +483,7 @@ class Game {
           }
           break;
         case 'KeyE':
-          if (this.state === 'playing' && this.input.pointerLocked) this.openInventory();
+          if (this.state === 'playing' && this.input.active) this.openInventory();
           else if (this.state === 'container') this.closeContainer();
           break;
         case 'F3':
@@ -494,6 +497,29 @@ class Game {
           break;
       }
     };
+
+    // tapping a hotbar slot selects it (touch + a convenience on desktop)
+    this.hud.onHotbarSelect = (i) => { if (this.state === 'playing') this.player.selectSlot(i); };
+
+    // on phones/tablets: on-screen joystick + look + action buttons, no pointer lock
+    if (isTouchDevice()) {
+      this.input.touchActive = true;
+      this.touch = new TouchControls(this.app.root, this.input, {
+        onInventory: () => {
+          if (this.state === 'playing') this.openInventory();
+          else if (this.state === 'container') this.closeContainer();
+        },
+        onFly: () => {
+          if (this.state !== 'playing') return;
+          this.player.toggleFly();
+          this.hud.toast(this.player.flying ? 'Flying enabled' : 'Flying disabled');
+        },
+        onPause: () => {
+          if (this.state === 'playing') this.openPause();
+          else if (this.state === 'paused') this.resume();
+        },
+      });
+    }
   }
 
   // --- UI state machine ---------------------------------------------------------------
@@ -993,6 +1019,12 @@ class Game {
     if (dt > 0.1) dt = 0.1;
     this.elapsed += dt;
     this.fps = this.fps * 0.95 + (1 / Math.max(dt, 1e-4)) * 0.05;
+
+    // show the touch overlay only while actually playing
+    if (this.touch) {
+      const tv = this.state === 'playing';
+      if (tv !== this.touchVisible) { this.touchVisible = tv; this.touch.setVisible(tv); }
+    }
 
     const paused = this.state === 'paused';
     if (!paused) {
@@ -1841,6 +1873,7 @@ class Game {
     this.meshWorker = null;
     this.input.exitLock();
     this.input.dispose();
+    this.touch?.el.remove();
     this.audio.setRain('off');
     this.entities.clear();
     this.weather.dispose();

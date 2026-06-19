@@ -7,8 +7,16 @@ export class Input {
   leftDown = false;
   rightDown = false;
   pointerLocked = false;
+  /** touch devices drive movement/look without pointer lock (see TouchControls) */
+  touchActive = false;
   /** edge-triggered click queues so brief clicks survive slow frames */
   private rightClickQueued = false;
+
+  /** True when input should drive the player: pointer-locked OR touch controls. */
+  get active(): boolean { return this.pointerLocked || this.touchActive; }
+
+  /** Queue a single right-click (used by the touch "use" button). */
+  queueRightClick(): void { this.rightClickQueued = true; }
 
   onKeyDown: (code: string, doubleTap: boolean) => void = () => {};
   onMouseDown: (button: number) => void = () => {};
@@ -94,6 +102,7 @@ export class Input {
   }
 
   requestLock(): void {
+    if (this.touchActive) return; // no pointer lock on touch devices
     if (!this.pointerLocked) {
       this.el.requestPointerLock?.();
     }

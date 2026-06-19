@@ -143,8 +143,8 @@ export class Player {
     const { input, world } = this.deps;
     const uiOpen = this.deps.isUIOpen() || this.dead;
 
-    // mouse look
-    if (input.pointerLocked && !uiOpen) {
+    // mouse look (pointer-lock on desktop, touch-drag on mobile)
+    if (input.active && !uiOpen) {
       const [dx, dy] = input.consumeMouse();
       const sens = 0.0023;
       this.yaw -= dx * sens;
@@ -166,7 +166,7 @@ export class Player {
     let fwd = 0, strafe = 0;
     let space = false;
     this.sneaking = false;
-    if (!uiOpen && input.pointerLocked) {
+    if (!uiOpen && input.active) {
       if (input.down('KeyW')) fwd += 1;
       if (input.down('KeyS')) fwd -= 1;
       if (input.down('KeyA')) strafe -= 1;
@@ -467,7 +467,7 @@ export class Player {
     const uiOpen = this.deps.isUIOpen() || this.dead;
 
     let fwd = 0, strafe = 0, jump = false, dismount = false;
-    if (!uiOpen && input.pointerLocked) {
+    if (!uiOpen && input.active) {
       if (input.down('KeyW')) fwd += 1;
       if (input.down('KeyS')) fwd -= 1;
       if (input.down('KeyA')) strafe -= 1;
