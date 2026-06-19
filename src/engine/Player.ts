@@ -286,6 +286,14 @@ export class Player {
     }
     this.onGround = res.onGround;
 
+    // auto-jump on touch: hop a 1-block step while walking into it, so phone
+    // players don't have to tap jump for every ledge (matches Minecraft mobile)
+    if (input.touchActive && this.onGround && !this.flying && !this.sneaking &&
+        (res.hitX || res.hitZ) && (wx !== 0 || wz !== 0) && this.canStepUp(world, wx, wz)) {
+      this.vel.y = JUMP_VELOCITY;
+      this.onGround = false;
+    }
+
     // fall damage + landing dust on hard impacts
     if (!this.flying && !wasInWater && !inWaterNow) {
       if (this.vel.y < 0) this.fallDist += -this.vel.y * dt;

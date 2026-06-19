@@ -1903,6 +1903,8 @@ class App {
     const unlock = (): void => this.audio.ensure();
     window.addEventListener('pointerdown', unlock);
     window.addEventListener('touchend', unlock);
+    // resume audio when returning to the tab (mobile suspends it in the background)
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) this.audio.ensure(); });
     void this.showMenu();
   }
 

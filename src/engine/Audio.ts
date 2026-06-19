@@ -91,7 +91,8 @@ export class AudioEngine {
   /** Must be called from a user gesture at least once. */
   ensure(): void {
     if (this.ctx) {
-      if (this.ctx.state === 'suspended') void this.ctx.resume();
+      if (this.ctx.state !== 'running') void this.ctx.resume();
+      this.unlock();
       return;
     }
     try {
@@ -137,12 +138,27 @@ export class AudioEngine {
       this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
       const data = this.noiseBuf.getChannelData(0);
       for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
-      // mobile browsers create the context "suspended" — resume it now, while we
-      // are still inside the user gesture that called ensure(), or there's no sound
-      if (this.ctx.state === 'suspended') void this.ctx.resume();
+      // mobile browsers create the context "suspended" — resume + play a silent
+      // buffer now, while we're still inside the user gesture, or there's no sound
+      if (this.ctx.state !== 'running') void this.ctx.resume();
+      this.unlock();
     } catch {
       this.ctx = null;
     }
+  }
+
+  /** iOS/Safari unlock trick: play a one-sample silent buffer inside a gesture so
+   *  the audio hardware is actually started. Harmless elsewhere; runs once. */
+  private unlocked = false;
+  private unlock(): void {
+    if (this.unlocked || !this.ctx) return;
+    try {
+      const b = this.ctx.createBufferSource();
+      b.buffer = this.ctx.createBuffer(1, 1, 22050);
+      b.connect(this.ctx.destination);
+      b.start(0);
+      this.unlocked = true;
+    } catch { /* ignore */ }
   }
 
   private noiseBurst(dur: number, freq: number, vol: number, type: BiquadFilterType = 'lowpass', freqEnd?: number): void {

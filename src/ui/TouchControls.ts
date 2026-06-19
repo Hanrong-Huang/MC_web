@@ -116,10 +116,12 @@ export class TouchControls {
     set('ShiftLeft', ny < -0.35 && Math.hypot(nx, ny) > 0.92);
   }
 
+  private buzz(): void { try { navigator.vibrate?.(8); } catch { /* unsupported */ } }
+
   private hold(cls: string, label: string, onDown: () => void, onUp: () => void): void {
     const b = el('div', cls, this.el, label);
     b.addEventListener('pointerdown', (e) => {
-      e.preventDefault(); b.setPointerCapture(e.pointerId); b.classList.add('held'); onDown();
+      e.preventDefault(); b.setPointerCapture(e.pointerId); b.classList.add('held'); this.buzz(); onDown();
     });
     const up = (): void => { b.classList.remove('held'); onUp(); };
     b.addEventListener('pointerup', up);
@@ -130,7 +132,7 @@ export class TouchControls {
   private tap(cls: string, label: string, onTap: () => void): void {
     const b = el('div', cls, this.el, label);
     b.addEventListener('pointerdown', (e) => {
-      e.preventDefault(); b.classList.add('held'); onTap();
+      e.preventDefault(); b.classList.add('held'); this.buzz(); onTap();
     });
     const up = (): void => b.classList.remove('held');
     b.addEventListener('pointerup', up);

@@ -6,6 +6,9 @@ html, body {
   font-family: 'Lucida Console', Monaco, monospace;
   user-select: none;
   -webkit-user-select: none;
+  -webkit-touch-callout: none;            /* no long-press menus on mobile */
+  -webkit-tap-highlight-color: transparent; /* no blue tap flash */
+  overscroll-behavior: none;              /* no pull-to-refresh / bounce */
 }
 
 #app { width: 100%; height: 100%; position: relative; }
@@ -584,14 +587,15 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   font-size: 26px; color: #fff; text-shadow: 1px 1px #000;
   background: rgba(0,0,0,0.34); border: 2px solid rgba(255,255,255,0.4);
 }
-#touch-controls .tb.held { background: rgba(255,255,255,0.45); }
+#touch-controls .tb.held { background: rgba(255,255,255,0.5); }
 
-/* action buttons on the LEFT for the free thumb (movement is the right stick),
-   so you can move + jump/mine/place at once. Break & place are the big primaries. */
-#touch-controls .tb-mine  { left: 24px;  bottom: 100px; width: 74px; height: 74px; font-size: 30px; }
-#touch-controls .tb-place { left: 112px; bottom: 40px;  width: 74px; height: 74px; font-size: 30px; }
-#touch-controls .tb-jump  { left: 200px; bottom: 112px; }
-#touch-controls .tb-down  { left: 200px; bottom: 40px; }
+/* action buttons: a tidy 2x2 grid on the LEFT for the free thumb (movement is
+   the right stick). Attack/mine and place share the same x, stacked vertically;
+   jump/sneak form the second column. */
+#touch-controls .tb-mine  { left: 26px;  bottom: 118px; width: 68px; height: 68px; font-size: 30px; }
+#touch-controls .tb-place { left: 26px;  bottom: 42px;  width: 68px; height: 68px; font-size: 30px; }
+#touch-controls .tb-jump  { left: 106px; bottom: 118px; width: 68px; height: 68px; }
+#touch-controls .tb-down  { left: 106px; bottom: 42px;  width: 68px; height: 68px; }
 /* utility buttons top-LEFT, clear of the top-right minimap */
 #touch-controls .tb-pause { left: 16px;  top: 16px; width: 50px; height: 50px; font-size: 20px; }
 #touch-controls .tb-inv   { left: 74px;  top: 16px; width: 50px; height: 50px; font-size: 22px; }
