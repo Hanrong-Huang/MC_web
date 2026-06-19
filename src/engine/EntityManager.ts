@@ -837,12 +837,18 @@ export class EntityManager {
     }
     // tamed wolf collar glow
     if (e.kind === 'wolf' && e.tamed) { er = 0.15; eg = 0.1; eb = 0.05; }
-    // nether mobs smoulder: a warm ember glow that pulses like cooling lava
-    if ((e.kind === 'cinderling' || e.kind === 'ashstalker') && e.hurtFlash <= 0) {
-      const pulse = 0.32 + 0.12 * Math.sin(e.age * 4 + (e.kind === 'ashstalker' ? 1 : 0));
+    // nether mobs smoulder: bright ember accents over a dark charred hide. The
+    // hide glows only faintly so it stays recognizably charcoal instead of washing
+    // the whole mob to flat lava-orange (ember materials are tagged at build time).
+    const netherGlow = (e.kind === 'cinderling' || e.kind === 'ashstalker') && e.hurtFlash <= 0;
+    if (netherGlow) {
+      const pulse = 0.34 + 0.14 * Math.sin(e.age * 4 + (e.kind === 'ashstalker' ? 1 : 0));
       er = pulse; eg = pulse * 0.4; eb = 0.02;
     }
-    for (const m of e.materials) m.emissive.setRGB(er, eg, eb);
+    for (const m of e.materials) {
+      if (netherGlow && !m.userData.ember) m.emissive.setRGB(er * 0.22, eg * 0.22, eb);
+      else m.emissive.setRGB(er, eg, eb);
+    }
 
     // steering by state
     let wishX = 0, wishZ = 0;
@@ -1040,9 +1046,13 @@ export class EntityManager {
         e.limbs.tail.rotation.x += (raised - e.limbs.tail.rotation.x) * Math.min(1, 4 * dt);
       }
     }
-    // idle breathing: subtle body bob that fades out once moving
+    // idle breathing: subtle body bob that fades out once moving. Bob *around*
+    // the body's rest height — an absolute set slammed bodies whose limb sits at
+    // its true height (wolf/cinderling/ashstalker) down onto the feet.
     if (e.limbs.body) {
-      e.limbs.body.position.y = Math.sin(e.age * 2.2) * 0.02 * Math.max(0, 1 - hSpeed);
+      const b = e.limbs.body;
+      if (b.userData.baseY === undefined) b.userData.baseY = b.position.y;
+      b.position.y = (b.userData.baseY as number) + Math.sin(e.age * 2.2) * 0.02 * Math.max(0, 1 - hSpeed);
     }
   }
 
@@ -1240,15 +1250,20 @@ export class EntityManager {
       for (let i = vs.length - 1; i >= 0; i--) {
         const s = vs[i];
         const d = Math.hypot(s.x - p.pos.x, s.z - p.pos.z);
-        if (d < 40 && villagerCount < 12) {
-          // only spawn if the chunk is loaded + has ground
+        if (d < 44 && villagerCount < 12) {
+          // only spawn once the chunk is loaded + has ground beneath the spot
           const chunk = this.world.getChunk(Math.floor(s.x / 16), Math.floor(s.z / 16));
           if (chunk && chunk.ready && this.world.isSolidAt(Math.floor(s.x), Math.floor(s.y) - 1, Math.floor(s.z))) {
             this.spawnMob('villager', s.x, s.y, s.z);
             villagerCount++;
+            vs.splice(i, 1); // spawned → consume this spot
           }
+          // else: chunk not ready yet — keep it queued and retry next tick. (The
+          // old code dropped it here unconditionally, so villagers usually never
+          // spawned: the spot was discarded before the village chunks settled.)
+        } else if (d > 120) {
+          vs.splice(i, 1); // wandered far away → drop so the queue can't grow forever
         }
-        if (d < 60) vs.splice(i, 1); // consumed (or out of range, drop it)
       }
     }
 
@@ -2080,31 +2095,45 @@ export class EntityManager {
     const faceM = this.mat(faceTex, mats);
     const whiteM = this.mat(this.skin('wolf_white', '#ece9e2', '#dbd7cd'), mats);
     const noseM = this.mat(this.skin('wolf_nose', '#262626', '#1a1a1a'), mats);
-    // compact lean trunk lifted onto taller legs so it stands like a dog rather
-    // than a low-slung dachshund
-    const body = this.boxMesh(0.46, 0.42, 0.74, bodyM);
-    body.position.set(0, 0.62, 0.06);
-    // pale chest/belly running along the underside — the two-tone coat
-    const belly = this.boxMesh(0.4, 0.22, 0.52, whiteM);
-    belly.position.set(0, 0.46, -0.02);
-    // a sloped fur neck bridging shoulders to head so there's no floating-head gap
-    const neck = this.boxMesh(0.32, 0.34, 0.3, bodyM);
-    neck.position.set(0, 0.76, -0.32);
-    neck.rotation.x = -0.5;
+    // The trunk (body + chest + neck + tail) rides in one group so the shared
+    // breathing bob lifts the whole torso together and the tail can never drift
+    // off the body.
+    const trunk = new THREE.Group();
+    // compact lean body sitting on the legs (bottom ~0.42 = hip top)
+    const body = this.boxMesh(0.48, 0.4, 0.72, bodyM);
+    body.position.set(0, 0.62, 0.04);
+    // white chest bib stood proud of the lower front — the classic two-tone coat
+    const chest = this.boxMesh(0.34, 0.3, 0.18, whiteM);
+    chest.position.set(0, 0.54, -0.32);
+    // a fluffy fur ruff at the shoulders that the head nestles into — replaces the
+    // old rotated neck wedge that read as a strange step between head and body
+    const ruff = this.boxMesh(0.42, 0.38, 0.24, bodyM);
+    ruff.position.set(0, 0.72, -0.28);
+    // bushy tail rooted DEEP in the rear of the body (near segment buried inside
+    // the trunk) so sway/animation can never pull it off
+    const tail = new THREE.Group();
+    tail.position.set(0, 0.72, 0.3);
+    const tailA = this.boxMesh(0.18, 0.18, 0.28, bodyM); tailA.position.z = 0.08;
+    const tailB = this.boxMesh(0.15, 0.15, 0.22, bodyM); tailB.position.z = 0.28;
+    const tailTip = this.boxMesh(0.12, 0.12, 0.12, whiteM); tailTip.position.z = 0.42;
+    tail.add(tailA, tailB, tailTip);
+    tail.rotation.x = 0.7; // down-and-back at rest (tamed dogs raise it, see animateMob)
+    trunk.add(body, chest, ruff, tail);
+
+    // head nestled into the ruff: its rear-bottom overlaps the ruff so there's no
+    // gap and no awkward neck, while the snout/face read clearly out front
     const head = new THREE.Group();
-    head.position.set(0, 0.88, -0.5);
-    // boxy forward-set head, a touch wider than tall
-    head.add(this.boxMesh(0.36, 0.32, 0.3, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
+    head.position.set(0, 0.8, -0.46);
+    head.add(this.boxMesh(0.36, 0.32, 0.32, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
     // pale muzzle — the single strongest "this is a canine" cue
     const snout = this.boxMesh(0.2, 0.15, 0.26, [whiteM, whiteM, whiteM, whiteM, whiteM, faceM]);
-    snout.position.set(0, -0.08, -0.25);
+    snout.position.set(0, -0.08, -0.28);
     head.add(snout);
     // black nose tip on the end of the muzzle
     const nose = this.boxMesh(0.1, 0.08, 0.05, noseM);
-    nose.position.set(0, -0.04, -0.39);
+    nose.position.set(0, -0.04, -0.42);
     head.add(nose);
-    // upright, slightly tapered triangular ears (base + smaller tip) so they read
-    // as alert pointed dog ears, not floppy rabbit ears
+    // upright, slightly tapered triangular ears (base + smaller tip)
     const ears: THREE.Object3D[] = [];
     for (const sx of [-1, 1]) {
       const ear = new THREE.Group();
@@ -2117,25 +2146,15 @@ export class EntityManager {
       head.add(ear);
       ears.push(ear);
     }
-    // longer legs, set just inside the trunk corners
+    // taller legs, set just inside the trunk corners, so it stands like a dog
     const legs = [
-      this.leg(0.14, 0.44, bodyM, -0.16, 0.46, -0.24),
-      this.leg(0.14, 0.44, bodyM, 0.16, 0.46, -0.24),
-      this.leg(0.14, 0.44, bodyM, 0.16, 0.46, 0.32),
-      this.leg(0.14, 0.44, bodyM, -0.16, 0.46, 0.32),
+      this.leg(0.15, 0.42, bodyM, -0.16, 0.44, -0.22),
+      this.leg(0.15, 0.42, bodyM, 0.16, 0.44, -0.22),
+      this.leg(0.15, 0.42, bodyM, 0.16, 0.44, 0.3),
+      this.leg(0.15, 0.42, bodyM, -0.16, 0.44, 0.3),
     ];
-    // bushy tail pivoting at its base; thick so it reads as fur, hangs steeply
-    // down-back at rest (a happy tamed dog raises it — see animateMob)
-    const tail = new THREE.Group();
-    tail.position.set(0, 0.72, 0.4);
-    const tailM = this.boxMesh(0.16, 0.16, 0.3, bodyM);
-    tailM.position.z = 0.14;
-    const tailTip = this.boxMesh(0.13, 0.13, 0.12, whiteM);
-    tailTip.position.z = 0.3;
-    tail.add(tailM, tailTip);
-    tail.rotation.x = 0.85;
-    g.add(body, neck, head, belly, tail, ...legs);
-    return { mesh: g, limbs: { legs, head, tail, body, ears }, mats };
+    g.add(trunk, head, ...legs);
+    return { mesh: g, limbs: { legs, head, tail, body: trunk, ears }, mats };
   }
 
   if (kind === 'villager') {
@@ -2147,15 +2166,17 @@ export class EntityManager {
     });
     const robeM = this.mat(robe, mats);
     const faceM = this.mat(faceTex, mats);
+    // plain skin for the rest of the head — the face only belongs on the front
+    // (the old mesh used faceM on all six sides, so it had a face on every side)
+    const headM = this.mat(this.skin('villager_head', '#c8a878', '#b89868'), mats);
     const torso = this.boxMesh(0.5, 0.8, 0.28, robeM);
     torso.position.set(0, 1.1, 0);
     const head = new THREE.Group();
     head.position.set(0, 1.5, 0);      // pivot at the neck so the head sits flush on the torso
-    const hb = this.boxMesh(0.46, 0.46, 0.46, [faceM, faceM, faceM, faceM, faceM, faceM]);
+    const hb = this.boxMesh(0.46, 0.46, 0.46, [headM, headM, headM, headM, headM, faceM]);
     hb.position.y = 0.23;
     head.add(hb);
-    const noseM = this.mat(this.skin('villager_nose', '#c8a878', '#b89868'), mats);
-    const nose = this.boxMesh(0.12, 0.28, 0.16, noseM);
+    const nose = this.boxMesh(0.12, 0.28, 0.16, headM);
     nose.position.set(0, 0.08, -0.28);
     head.add(nose);
     const legs = [
@@ -2279,35 +2300,44 @@ export class EntityManager {
   }
 
   if (kind === 'cinderling') {
-    // a small charcoal imp with blazing eyes and ember horns/arms
+    // a small upright charcoal imp: blazing eyes, ember horns, glowing chest
+    // crack, ember arms at its sides
     const charM = this.mat(this.skin('cinderling', '#2a2320', '#d65a16'), mats);
     const faceTex = this.skin('cinderling_face', '#2a2320', '#d65a16', (ctx) => {
-      ctx.fillStyle = '#ffd24a'; ctx.fillRect(1, 3, 2, 2); ctx.fillRect(5, 3, 2, 2); // blazing eyes
-      ctx.fillStyle = '#ff8a1a'; ctx.fillRect(2, 6, 4, 1); // grin
+      ctx.fillStyle = '#ffd24a'; ctx.fillRect(1, 2, 2, 2); ctx.fillRect(5, 2, 2, 2); // blazing eyes
+      ctx.fillStyle = '#ff8a1a'; ctx.fillRect(2, 6, 4, 1);                             // grin
     });
     const faceM = this.mat(faceTex, mats);
     const emberM = this.mat(this.skin('cinder_ember', '#ff7a1a', '#ffd24a'), mats);
-    const body = this.boxMesh(0.34, 0.3, 0.24, charM);
-    body.position.set(0, 0.42, 0);
+    emberM.userData.ember = true; // glows bright; the charcoal hide stays dark
+    const body = this.boxMesh(0.36, 0.36, 0.26, charM);
+    body.position.set(0, 0.5, 0);
+    // a glowing ember crack down the chest so it reads as molten charcoal
+    const crack = this.boxMesh(0.1, 0.24, 0.04, emberM);
+    crack.position.set(0, 0.48, -0.14);
+    g.add(crack);
     const head = new THREE.Group();
-    head.position.set(0, 0.66, 0);
+    head.position.set(0, 0.74, 0);
     head.add(this.boxMesh(0.32, 0.3, 0.3, [charM, charM, charM, charM, charM, faceM]));
+    // swept-back ember horns
     for (const sx of [-1, 1]) {
       const horn = new THREE.Group();
       horn.position.set(sx * 0.1, 0.15, 0);
-      const h1 = this.boxMesh(0.06, 0.1, 0.06, emberM);
-      const h2 = this.boxMesh(0.05, 0.08, 0.05, emberM); h2.position.set(sx * 0.03, 0.08, 0);
-      horn.add(h1, h2); horn.rotation.z = sx * -0.25;
+      const h1 = this.boxMesh(0.06, 0.12, 0.06, emberM);
+      const h2 = this.boxMesh(0.05, 0.08, 0.05, emberM); h2.position.set(sx * 0.04, 0.09, 0.02);
+      horn.add(h1, h2); horn.rotation.z = sx * -0.32; horn.rotation.x = 0.2;
       head.add(horn);
     }
     const legs = [
-      this.leg(0.1, 0.28, charM, -0.09, 0.28, 0),
-      this.leg(0.1, 0.28, charM, 0.09, 0.28, 0),
+      this.leg(0.11, 0.3, charM, -0.1, 0.34, 0),
+      this.leg(0.11, 0.3, charM, 0.1, 0.34, 0),
     ];
-    // arms hang at the sides (not animated, so they don't get the zombie pose)
+    // ember arms hanging at the sides (added straight to g so the forward-reach
+    // arm animation never grabs them)
     for (const sx of [-1, 1]) {
-      const arm = this.boxMesh(0.08, 0.26, 0.08, emberM);
-      arm.position.set(sx * 0.22, 0.42, 0);
+      const arm = this.boxMesh(0.09, 0.28, 0.09, emberM);
+      arm.position.set(sx * 0.23, 0.5, 0);
+      arm.rotation.z = sx * -0.1;
       g.add(arm);
     }
     g.add(body, head, ...legs);
@@ -2315,32 +2345,43 @@ export class EntityManager {
   }
 
   if (kind === 'ashstalker') {
-    // a charred four-legged beast with an ember-lit spine
+    // a charred four-legged hell-beast: ember-lit spine, glowing maw + underbelly
     const hideM = this.mat(this.skin('ashstalker', '#241e1c', '#b8501a'), mats);
     const faceTex = this.skin('ashstalker_face', '#241e1c', '#b8501a', (ctx) => {
-      ctx.fillStyle = '#ffd24a'; ctx.fillRect(1, 3, 2, 1); ctx.fillRect(5, 3, 2, 1); // eyes
-      ctx.fillStyle = '#ff7a1a'; ctx.fillRect(2, 5, 4, 1); // maw
+      ctx.fillStyle = '#ffd24a'; ctx.fillRect(1, 2, 2, 2); ctx.fillRect(5, 2, 2, 2); // eyes
+      ctx.fillStyle = '#ff7a1a'; ctx.fillRect(1, 6, 6, 1);                            // glowing maw
     });
     const faceM = this.mat(faceTex, mats);
     const emberM = this.mat(this.skin('ash_ember', '#ff7a1a', '#ffd24a'), mats);
-    const body = this.boxMesh(0.5, 0.4, 0.95, hideM);
-    body.position.set(0, 0.52, 0.05);
-    const head = new THREE.Group();
-    head.position.set(0, 0.56, -0.5);
-    head.add(this.boxMesh(0.36, 0.34, 0.34, [hideM, hideM, hideM, hideM, hideM, faceM]));
-    const snout = this.boxMesh(0.2, 0.16, 0.18, [hideM, hideM, hideM, hideM, hideM, faceM]);
-    snout.position.set(0, -0.08, -0.24); head.add(snout);
-    // ember spines along the back
-    for (let i = 0; i < 3; i++) {
-      const sp = this.boxMesh(0.06, 0.14, 0.1, emberM);
-      sp.position.set(0, 0.78, -0.18 + i * 0.28); sp.rotation.x = -0.2;
+    emberM.userData.ember = true; // glows bright; the charred hide stays dark
+    const body = this.boxMesh(0.52, 0.42, 0.92, hideM);
+    body.position.set(0, 0.58, 0.05);
+    // ember underbelly seam — molten glow between the legs
+    const belly = this.boxMesh(0.3, 0.12, 0.66, emberM);
+    belly.position.set(0, 0.4, 0.04);
+    g.add(belly);
+    // four ember spines marching down the back
+    for (let i = 0; i < 4; i++) {
+      const sp = this.boxMesh(0.08, 0.2, 0.1, emberM);
+      sp.position.set(0, 0.82, -0.26 + i * 0.26); sp.rotation.x = -0.12;
       g.add(sp);
     }
+    const head = new THREE.Group();
+    head.position.set(0, 0.62, -0.5);
+    head.add(this.boxMesh(0.4, 0.36, 0.34, [hideM, hideM, hideM, hideM, hideM, faceM]));
+    const snout = this.boxMesh(0.24, 0.18, 0.2, [hideM, hideM, hideM, hideM, hideM, faceM]);
+    snout.position.set(0, -0.08, -0.24); head.add(snout);
+    // jagged ear/horn nubs
+    for (const sx of [-1, 1]) {
+      const ear = this.boxMesh(0.09, 0.14, 0.07, hideM);
+      ear.position.set(sx * 0.13, 0.24, 0.06); ear.rotation.z = sx * -0.2;
+      head.add(ear);
+    }
     const legs = [
-      this.leg(0.14, 0.34, hideM, -0.18, 0.34, -0.3),
-      this.leg(0.14, 0.34, hideM, 0.18, 0.34, -0.3),
-      this.leg(0.14, 0.34, hideM, 0.18, 0.34, 0.35),
-      this.leg(0.14, 0.34, hideM, -0.18, 0.34, 0.35),
+      this.leg(0.16, 0.36, hideM, -0.18, 0.38, -0.3),
+      this.leg(0.16, 0.36, hideM, 0.18, 0.38, -0.3),
+      this.leg(0.16, 0.36, hideM, 0.18, 0.38, 0.34),
+      this.leg(0.16, 0.36, hideM, -0.18, 0.38, 0.34),
     ];
     g.add(body, head, ...legs);
     return { mesh: g, limbs: { legs, head, body }, mats };

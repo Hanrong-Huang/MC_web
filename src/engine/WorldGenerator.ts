@@ -436,9 +436,10 @@ export class WorldGenerator {
             this.placeKeep(chunk, ox, oy, oz);
           }
         }
-        // village: rare cluster of houses on plains/forest — villagers spawn here
-        // (tracked in world.villageSpawns so the entity manager can place NPCs)
-        if (hash2(this.seed ^ 0xb1b0, scx, scz) < 0.014) {
+        // village: cluster of houses on plains/forest — villagers spawn here
+        // (tracked in world.villageSpawns so the entity manager can place NPCs).
+        // Bumped up so villages stay findable now that biomes are smaller.
+        if (hash2(this.seed ^ 0xb1b0, scx, scz) < 0.032) {
           const ox = scx * CX + 4 + Math.floor(hash2(this.seed ^ 0xb1b1, scx, scz) * 4);
           const oz = scz * CZ + 4 + Math.floor(hash2(this.seed ^ 0xb1b2, scx, scz) * 4);
           const oy = this.heightAt(ox + 6, oz + 6);
