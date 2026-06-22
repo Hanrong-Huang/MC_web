@@ -51,6 +51,8 @@ export interface SaveState {
   pistonFacingsNether?: Record<string, number>;
   
   environment: { dayTime: number };
+  /** queued/known village dwelling spots so villagers repopulate after reload */
+  villageSpawns?: { x: number; y: number; z: number }[];
   /** bed spawn point, if set */
   spawn?: { x: number; y: number; z: number };
   /** unlocked advancement ids */

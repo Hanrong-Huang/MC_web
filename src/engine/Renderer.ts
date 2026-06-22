@@ -127,7 +127,6 @@ export class Renderer {
   // is swapped back to the shared material once the fade completes.
   private fading: { mesh: THREE.Mesh; clone: THREE.ShaderMaterial; base: THREE.ShaderMaterial; baseOpacity: number; t: number }[] = [];
   private static readonly FADE_TIME = 1.0;
-  private outline: THREE.LineSegments;
   private crackMesh: THREE.Mesh;
   private crackMat: THREE.MeshBasicMaterial;
 
@@ -152,6 +151,9 @@ export class Renderer {
   private swingT = 1; // 0..1, 1 = idle
   private raiseT = 1; // 0..1, drives the raise-up when the held item changes
   private bowCharge = 0;
+  private eatAmt = 0;     // 0..1 eased eating raise
+  private eatTarget = 0;  // target set each frame by setEating
+  private eatPhase = 0;   // chew oscillator
   private bobT = 0;
   private atlas: Atlas;
   private heldLight: THREE.HemisphereLight;
@@ -184,14 +186,6 @@ export class Renderer {
     this.dir = new THREE.DirectionalLight(0xffffff, 0.55);
     this.dir.position.set(0.4, 1, 0.6);
     this.scene.add(this.hemi, this.dir);
-
-    // block outline
-    const og = new THREE.EdgesGeometry(new THREE.BoxGeometry(1.002, 1.002, 1.002));
-    this.outline = new THREE.LineSegments(
-      og, new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.85 }),
-    );
-    this.outline.visible = false;
-    this.scene.add(this.outline);
 
     // crack overlay
     this.crackMat = new THREE.MeshBasicMaterial({
@@ -382,11 +376,9 @@ export class Renderer {
 
   // --- highlight / cracks ---------------------------------------------------
 
-  setOutline(pos: { x: number; y: number; z: number } | null): void {
-    if (!pos) { this.outline.visible = false; return; }
-    this.outline.visible = true;
-    this.outline.position.set(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5);
-  }
+  // Block-targeting wireframe removed for a cleaner view; the crosshair already
+  // indicates the aimed block. Kept as a no-op so callers don't need changes.
+  setOutline(_pos: { x: number; y: number; z: number } | null): void { /* no outline */ }
 
   setCrack(pos: { x: number; y: number; z: number } | null, stage: number): void {
     if (!pos || stage < 0) { this.crackMesh.visible = false; return; }
@@ -573,6 +565,11 @@ export class Renderer {
     this.bowCharge = Math.max(0, Math.min(1, charge));
   }
 
+  /** Drive the eating animation: target 1 while chewing, 0 otherwise. */
+  setEating(on: boolean): void {
+    this.eatTarget = on ? 1 : 0;
+  }
+
   /** Update held-item animation; `moving` drives view bob. */
   updateHeld(dt: number, moving: boolean): void {
     if (this.swingT < 1) this.swingT = Math.min(1, this.swingT + dt / 0.28);
@@ -588,20 +585,21 @@ export class Renderer {
 
     if (drawingBow) {
       const pull = this.bowCharge;
-      this.heldGroup.position.set(0.30 - pull * 0.02, -0.30 + bob * 0.14 - lower, -0.74 - pull * 0.03);
-      this.heldGroup.rotation.set(-0.06 - pull * 0.05, 0.05, -0.04);
+      // bow comes up to center-left and is held upright as the string draws
+      this.heldGroup.position.set(0.16, -0.18 + bob * 0.1 - lower * 0.5, -0.58 - pull * 0.02);
+      this.heldGroup.rotation.set(0, 0, 0);
       if (this.heldMesh) {
-        // keep the bow upright (matching the idle pose) while the string draws back
-        this.heldMesh.scale.setScalar(1.0 + pull * 0.06);
-        this.heldMesh.rotation.set(0.05, 0.62, 0.10);
+        // upright bow, limbs vertical, face turned slightly toward the camera
+        this.heldMesh.scale.setScalar(1.06 + pull * 0.05);
+        this.heldMesh.rotation.set(0, 0.22, 0);
       }
       if (this.bowArrow) {
-        // arrow nocked across the bow, pointing forward at the crosshair; it
-        // slides back toward the player as the draw deepens
+        // arrow nocked on the bow, angled so the shaft reads as it points
+        // toward the crosshair; slides back toward the player as the draw deepens
         this.bowArrow.visible = true;
-        this.bowArrow.position.set(0.0, -0.02, -0.74 + pull * 0.14);
-        this.bowArrow.rotation.set(0, Math.PI * 0.5, 0);
-        this.bowArrow.scale.set(0.85, 0.85, 1.0);
+        this.bowArrow.position.set(0.11, -0.08, -0.44 + pull * 0.16);
+        this.bowArrow.rotation.set(0.03, 0.5, 0);
+        this.bowArrow.scale.setScalar(1.05);
       }
       return;
     }
@@ -611,6 +609,26 @@ export class Renderer {
       this.heldMesh.rotation.copy(this.heldIdleRot);
     }
     if (this.bowArrow) this.bowArrow.visible = false;
+
+    // eating: lift the food toward the mouth and nudge it with each chew
+    this.eatAmt += (this.eatTarget - this.eatAmt) * Math.min(1, dt * 10);
+    if (this.eatAmt > 0.01) {
+      this.eatPhase += dt * 22;
+      const e = this.eatAmt;
+      const chew = Math.sin(this.eatPhase) * 0.05 * e;            // quick bite jitter
+      this.heldGroup.position.set(
+        0.34 - e * 0.07,
+        -0.34 + bob - lower + e * 0.06 + chew,                    // rise toward the face
+        -0.60 + e * 0.05,                                         // a touch closer
+      );
+      this.heldGroup.rotation.set(
+        -0.1 - e * 0.35 + chew * 1.6,                             // tilt food toward mouth
+        0.25 + e * 0.1,
+        0.25,
+      );
+      if (this.heldMesh) this.heldMesh.rotation.copy(this.heldIdleRot);
+      return;
+    }
 
     this.heldGroup.position.set(
       0.42 - swingAngle * 0.18,

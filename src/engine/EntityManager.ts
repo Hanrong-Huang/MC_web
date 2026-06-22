@@ -1242,27 +1242,29 @@ export class EntityManager {
       else passive++;
     }
 
-    // consume village villager spawns near the player (once each)
+    // Repopulate village dwelling spots near the player. Spots are kept (not
+    // consumed) and persisted, so a village keeps its villagers after they
+    // despawn or after a save/reload — it just won't double up on an occupied one.
     const vs = this.world.generator.villageSpawns;
     if (vs.length) {
       let villagerCount = 0;
       for (const e of this.entities) if (e.kind === 'villager') villagerCount++;
-      for (let i = vs.length - 1; i >= 0; i--) {
-        const s = vs[i];
+      for (const s of vs) {
+        if (villagerCount >= 12) break;
         const d = Math.hypot(s.x - p.pos.x, s.z - p.pos.z);
-        if (d < 44 && villagerCount < 12) {
-          // only spawn once the chunk is loaded + has ground beneath the spot
-          const chunk = this.world.getChunk(Math.floor(s.x / 16), Math.floor(s.z / 16));
-          if (chunk && chunk.ready && this.world.isSolidAt(Math.floor(s.x), Math.floor(s.y) - 1, Math.floor(s.z))) {
-            this.spawnMob('villager', s.x, s.y, s.z);
-            villagerCount++;
-            vs.splice(i, 1); // spawned → consume this spot
-          }
-          // else: chunk not ready yet — keep it queued and retry next tick. (The
-          // old code dropped it here unconditionally, so villagers usually never
-          // spawned: the spot was discarded before the village chunks settled.)
-        } else if (d > 120) {
-          vs.splice(i, 1); // wandered far away → drop so the queue can't grow forever
+        if (d >= 44) continue;
+        // skip if a villager already lives near this spot
+        let occupied = false;
+        for (const e of this.entities) {
+          if (e.kind !== 'villager') continue;
+          if (Math.hypot(e.pos.x - s.x, e.pos.z - s.z) < 7) { occupied = true; break; }
+        }
+        if (occupied) continue;
+        // only spawn once the chunk is loaded + has ground beneath the spot
+        const chunk = this.world.getChunk(Math.floor(s.x / 16), Math.floor(s.z / 16));
+        if (chunk && chunk.ready && this.world.isSolidAt(Math.floor(s.x), Math.floor(s.y) - 1, Math.floor(s.z))) {
+          this.spawnMob('villager', s.x, s.y, s.z);
+          villagerCount++;
         }
       }
     }

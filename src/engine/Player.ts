@@ -91,6 +91,8 @@ export class Player {
   private placeCooldown = 0;
   private eatT = 0;
   private chewT = 0;
+  /** true while actively consuming food — drives the held-item eating animation */
+  eating = false;
   private stepDist = 0;
   private swingRepeat = 0;
   private regenT = 0;
@@ -894,6 +896,7 @@ export class Player {
     const { input, world, audio } = this.deps;
     if (!input.rightDown && !input.takeRightClick()) {
       this.eatT = 0;
+      this.eating = false;
       return;
     }
 
@@ -981,6 +984,7 @@ export class Player {
     // eating
     if (this.mode === 'survival' && heldDef?.food && this.hunger < 20) {
       this.eatT += dt;
+      this.eating = true;
       this.chewT -= dt;
       if (this.chewT <= 0) { this.chewT = 0.25; audio.play('eat'); }
       if (this.eatT >= 1.6) {
@@ -997,6 +1001,7 @@ export class Player {
       return;
     }
     this.eatT = 0;
+    this.eating = false;
 
     if (this.placeCooldown > 0) return;
 
@@ -1159,6 +1164,8 @@ export class Player {
       world.setBlock(px, py, pz, B.DOOR_LOWER);
       world.setBlock(px, py + 1, pz, B.DOOR_UPPER);
       world.doorStates.set(`${px},${py},${pz}`, { facing, open: false, hingeRight, swing: 0 });
+      // reflect an already-powered plate/lever beside the freshly placed door
+      this.deps.onRedstoneUpdate(px, py, pz);
       this.placeCooldown = 0.3;
       this.deps.renderer.triggerSwing();
       audio.dig('wood', 0.8);

@@ -18,6 +18,9 @@ export interface DoorState {
   hingeRight?: boolean;
   /** 0 = fully closed, 1 = fully open (animated swing) */
   swing?: number;
+  /** last redstone power state seen — lets a manual open survive unrelated
+   *  redstone updates (only a real powered↔unpowered transition moves the door) */
+  poweredBy?: boolean;
 }
 
 export interface RedstoneState {
@@ -206,7 +209,9 @@ export class World {
     const REDSTONE_IDS = new Set<number>([
       B.REDSTONE_WIRE, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
       B.PRESSURE_PLATE, B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT,
-      B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD
+      B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD,
+      // doors/trapdoors are redstone sinks: tracked so power can open/close them
+      B.DOOR_LOWER, B.DOOR_UPPER, B.TRAPDOOR
     ]);
     const posKey = `${wx},${wy},${wz}`;
     if (REDSTONE_IDS.has(oldId)) {
@@ -748,7 +753,9 @@ export class World {
     const REDSTONE_IDS = new Set<number>([
       B.REDSTONE_WIRE, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
       B.PRESSURE_PLATE, B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT,
-      B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD
+      B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD,
+      // doors/trapdoors are redstone sinks: tracked so power can open/close them
+      B.DOOR_LOWER, B.DOOR_UPPER, B.TRAPDOOR
     ]);
     const bx = chunk.cx * CX, bz = chunk.cz * CZ;
     for (let y = 0; y < CY; y++) {

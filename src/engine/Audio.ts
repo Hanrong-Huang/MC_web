@@ -5,7 +5,7 @@ import { SoundClass } from './Blocks';
 
 export type SfxName =
   | 'pop' | 'hurt' | 'hit' | 'eat' | 'burp' | 'click' | 'select' | 'fail' | 'craft' | 'level'
-  | 'doorOpen' | 'doorClose'
+  | 'doorOpen' | 'doorClose' | 'plateOn' | 'plateOff'
   | 'explode' | 'bow' | 'snap' | 'fuse' | 'arrowHit'
   | 'thunder' | 'rain' | 'splash' | 'hoof' | 'mount'
   | 'submerge' | 'emerge';
@@ -281,6 +281,16 @@ export class AudioEngine {
         this.tone(0.18, 210, 95, 0.18, 'triangle');
         this.tone(0.08, 380, 260, 0.1, 'square', 0.04);
         this.noiseBurst(0.06, 180, 0.14, 'lowpass', 90);
+        break;
+      case 'plateOn':
+        // soft wooden depress: a low muted tick (no sharp UI click)
+        this.tone(0.05, 240, 180, 0.12, 'triangle');
+        this.noiseBurst(0.05, 600, 0.08, 'lowpass', 240);
+        break;
+      case 'plateOff':
+        // gentle release, a touch higher and shorter
+        this.tone(0.04, 300, 360, 0.09, 'triangle');
+        this.noiseBurst(0.04, 700, 0.06, 'lowpass', 300);
         break;
       case 'level': this.tone(0.3, 520, 1040, 0.2, 'sine'); this.tone(0.3, 660, 1320, 0.15, 'sine', 0.08); break;
       case 'explode':
@@ -561,7 +571,7 @@ export class AudioEngine {
     if (this.musicT > 0) return;
     const pieceLen = this.playPiece(this.moodFor(env, biome));
     // a little less silence between pieces than before, so the world sings more
-    this.musicT = pieceLen + 34 + Math.random() * 62;
+    this.musicT = pieceLen + 22 + Math.random() * 42;
   }
 
   /** Resolve the musical character for the current environment + biome. The
@@ -887,6 +897,9 @@ export class AudioEngine {
       this.padAt(tBar, chordRoot * Math.pow(2, third / 12) * 0.5, 0.032 * padVol, barLen * 1.15);
       this.padAt(tBar, chordRoot * Math.pow(2, 7 / 12) * 0.5, 0.028 * padVol, barLen * 1.15);
       if (Math.random() < 0.5) this.padAt(tBar, chordRoot * Math.pow(2, seventh / 12) * 0.5, 0.018 * padVol, barLen * 1.05);
+      // add-9 shimmer + a warm 5th above for a fuller, richer chord bed
+      if (Math.random() < 0.45) this.padAt(tBar, chordRoot * Math.pow(2, 14 / 12), 0.012 * padVol, barLen * 0.92);
+      if (Math.random() < 0.4) this.padAt(tBar, chordRoot * Math.pow(2, (third + 12) / 12), 0.011 * padVol, barLen * 0.9);
       // soft bass pulse — warm and low, MC-style drone
       this.pianoNote(tBar, chordRoot * 0.25, 0.05, 2.6);
       if (Math.random() < 0.36) this.pianoNote(tBar + barLen * 0.5, chordRoot * 0.5, 0.034, 2.0);
@@ -918,6 +931,11 @@ export class AudioEngine {
         this.pianoNote(when, freq, 0.044 + Math.random() * 0.025, 2.3);
         // a faint octave-up echo a beat later — adds the airy MC sparkle
         if (Math.random() < 0.5) this.pianoNote(when + 0.28, freq * 2, 0.015, 1.6);
+      }
+      // a gentle counter-melody answering the motif a third up — adds warmth/body
+      if (bar % 2 === 1 && Math.random() < 0.5 * density) {
+        const cd = motif[(bar >> 1) % motif.length];
+        this.arpNote(tBar + barLen * 0.5, root * 2 * Math.pow(2, (cd + third) / 12), 0.016, barLen * 0.7, -0.25);
       }
       if (bar % 4 === 3 && Math.random() < 0.58) {
         const deg = pent[(Math.random() * pent.length) | 0];

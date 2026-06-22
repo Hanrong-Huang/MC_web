@@ -149,7 +149,8 @@ class Game {
       const REDSTONE_IDS = new Set<number>([
         B.REDSTONE_WIRE, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
         B.PRESSURE_PLATE, B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT,
-        B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD
+        B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD,
+        B.DOOR_LOWER, B.DOOR_UPPER, B.TRAPDOOR
       ]);
       const isRedstoneRelated = (bx: number, by: number, bz: number) => {
         if (REDSTONE_IDS.has(this.world.getBlock(bx, by, bz))) return true;
@@ -273,6 +274,8 @@ class Game {
         this.world.pistonFacings = ne.pistonFacings;
         this.world.redstoneBlocks = ne.redstoneBlocks;
       }
+      // restore known village dwelling spots so villagers repopulate on revisit
+      if (save.villageSpawns) this.world.generator.villageSpawns = save.villageSpawns.map((s) => ({ ...s }));
     } else {
       this.player.mode = fresh!.mode;
       const spawn = this.world.generator.findSpawn();
@@ -982,6 +985,7 @@ class Game {
       pistonFacingsNether: mapToRecord(ne.pistonFacings),
       
       environment: { dayTime: this.dayTime },
+      villageSpawns: this.world.generator.villageSpawns.map((s) => ({ ...s })),
       advancements: this.adv.serialize(),
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
       lastPlayed: Date.now(),
@@ -1139,6 +1143,7 @@ class Game {
     this.hud.setPortalFade(this.player.portalTimer / 1.5);
     this.hud.setNetherTint(this.world.dimension === 'nether');
     this.renderer.setBowCharge(Math.min(1, this.player.bowCharge / 0.9));
+    this.renderer.setEating(this.player.eating);
     this.renderer.updateChunkFades(dt);
     this.renderer.updateHeld(dt, this.player.isMoving());
     this.hud.updateStats(this.player.hp, this.player.hunger, this.player.air, this.player.mode, this.player.inventory.armorPoints());
@@ -1247,7 +1252,7 @@ class Game {
         if (standingOn !== state.active) {
           state.active = standingOn;
           this.world.redstoneStates.set(key, state);
-          this.audio.play('click');
+          this.audio.play(standingOn ? 'plateOn' : 'plateOff');
           redstoneDirty = true;
           this.world.markDirty(Math.floor(bx / 16), Math.floor(bz / 16));
         }
@@ -1724,17 +1729,43 @@ class Game {
           this.retractPiston(rx, ry, rz);
         }
       } else if (rid === B.DOOR_LOWER || rid === B.DOOR_UPPER || rid === B.TRAPDOOR) {
-        const powered = this.isPowered(rx, ry, rz);
+        // Power any block of the door: check the lower half and both halves so a
+        // plate beside either the foot or head of the door still drives it.
         const ly = rid === B.DOOR_UPPER ? ry - 1 : ry;
         const lx = rx, lz = rz;
-        const dkey = rid === B.TRAPDOOR ? `${rx},${ry},${rz}` : `${lx},${ly},${lz}`;
+        const isTrap = rid === B.TRAPDOOR;
+        const dkey = isTrap ? `${rx},${ry},${rz}` : `${lx},${ly},${lz}`;
         const st = this.world.doorStates.get(dkey);
-        if (st && st.open !== powered) {
-          st.open = powered;
-          if (st.swing === undefined) st.swing = powered ? 0 : 1;
-          this.world.doorStates.set(dkey, st);
-          this.audio.play(powered ? 'doorOpen' : 'doorClose');
-          this.world.markDirty(Math.floor(rx / 16), Math.floor(rz / 16));
+        if (st) {
+          const powered = isTrap
+            ? this.isPowered(rx, ry, rz)
+            : this.isPowered(lx, ly, lz) || this.isPowered(lx, ly + 1, lz);
+          const wasPowered = !!st.poweredBy;
+          // Only a genuine power transition moves the door, so a hand-opened door
+          // isn't slammed by an unrelated redstone update elsewhere in the world.
+          if (powered !== wasPowered) {
+            st.poweredBy = powered;
+            if (st.open !== powered) {
+              st.open = powered;
+              if (st.swing === undefined) st.swing = powered ? 0 : 1;
+              this.world.doorStates.set(dkey, st);
+              this.audio.play(powered ? 'doorOpen' : 'doorClose');
+              this.world.markDirty(Math.floor(rx / 16), Math.floor(rz / 16));
+              // double doors swing as a pair
+              if (!isTrap) {
+                const partner = this.world.doorPartner(lx, ly, lz, st);
+                if (partner && partner.st.open !== st.open) {
+                  partner.st.open = st.open;
+                  partner.st.poweredBy = powered;
+                  partner.st.swing = partner.st.swing ?? (powered ? 0 : 1);
+                  this.world.doorStates.set(partner.key, partner.st);
+                  this.world.markDirty(Math.floor(partner.x / 16), Math.floor(partner.z / 16));
+                }
+              }
+            } else {
+              this.world.doorStates.set(dkey, st);
+            }
+          }
         }
       } else if (rid === B.REDSTONE_WIRE) {
         this.world.markDirty(Math.floor(rx / 16), Math.floor(rz / 16));
