@@ -84,6 +84,8 @@ export enum B {
   NETHER_BRICKS = 79,
   JUNGLE_LOG = 80,
   JUNGLE_LEAVES = 81,
+  /** head half of a 2-block bed (foot half is B.BED) */
+  BED_HEAD = 82,
 }
 
 export enum I {
@@ -358,11 +360,18 @@ blockDef({
   faces: { top: 'tnt_top', bottom: 'tnt_top', sides: 'tnt_side' },
 });
 blockDef({
+  // foot half of a 2-block bed; the head half (B.BED_HEAD) is placed alongside it
   id: B.BED, name: 'bed', label: 'Bed', hardness: 0.3, sound: 'wood',
   // a flat partial model (see Mesher emitBed): don't occlude neighbours or it
   // would punch holes in the blocks around its empty upper half
   opaque: false, occludes: false,
-  faces: { top: 'bed_top', bottom: 'planks', sides: 'bed_side' },
+  faces: { top: 'bed_foot_top', bottom: 'planks', sides: 'bed_side' },
+});
+blockDef({
+  id: B.BED_HEAD, name: 'bed_head', label: 'Bed', hardness: 0.3, sound: 'wood',
+  opaque: false, occludes: false,
+  drop: null, // breaking either half drops a single bed item (handled in Player)
+  faces: { top: 'bed_head_top', bottom: 'planks', sides: 'bed_side' },
 });
 blockDef({
   id: B.TORCH, name: 'torch', label: 'Torch', hardness: 0, sound: 'wood',

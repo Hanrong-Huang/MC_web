@@ -18,6 +18,7 @@ export interface MeshJob {
   chunks: (MeshChunkSnap | null)[]; // 9, index (dz+1)*3+(dx+1)
   tint: Float32Array;               // 256*3
   torchFacings: [string, number][];
+  bedFacings: [string, number][];
   doorStates: [string, MeshDoor][];
   redstoneStates: [string, MeshRedstone][];
   redstonePower: [string, number][];
@@ -47,6 +48,7 @@ function makeWorld(job: MeshJob): MeshWorld {
   for (const snap of job.chunks) if (snap) byKey.set(chunkKey(snap.cx, snap.cz), makeChunk(snap));
   const bx = job.cx * CX, bz = job.cz * CX;
   const torchFacings = new Map(job.torchFacings);
+  const bedFacings = new Map(job.bedFacings);
   const doorStates = new Map(job.doorStates);
   const redstoneStates = new Map(job.redstoneStates);
   const redstonePower = new Map(job.redstonePower);
@@ -75,7 +77,7 @@ function makeWorld(job: MeshJob): MeshWorld {
       if (id === B.DOOR_LOWER) return doorStates.get(`${wx},${y + 1},${wz}`);
       return undefined;
     },
-    doorStates, torchFacings, redstoneStates, redstonePower,
+    doorStates, torchFacings, bedFacings, redstoneStates, redstonePower,
     generator: {
       grassTint: (wx, wz, out) => {
         const i = ((wz - bz) * CX + (wx - bx)) * 3;

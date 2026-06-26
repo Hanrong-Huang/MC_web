@@ -513,7 +513,7 @@ export class Renderer {
       const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
       // BoxGeometry face order: +x,-x,+y,-y,+z,-z; 4 uvs per face
       const faceNames = [
-        d.faces!.sides, d.faces!.sides, d.faces!.top,
+        d.faces!.sides, d.faces!.sides, flatBed ? 'bed_top' : d.faces!.top,
         d.faces!.bottom, d.faces!.front ?? d.faces!.sides, d.faces!.sides,
       ];
       for (let f = 0; f < 6; f++) {

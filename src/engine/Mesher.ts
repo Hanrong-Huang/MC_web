@@ -31,6 +31,7 @@ export interface MeshWorld {
   doorStateAt(wx: number, wy: number, wz: number): MeshDoor | undefined;
   doorStates: ReadMap<MeshDoor>;
   torchFacings: ReadMap<number>;
+  bedFacings: ReadMap<number>;
   redstoneStates: ReadMap<MeshRedstone>;
   redstonePower: ReadMap<number>;
   generator: { grassTint(wx: number, wz: number, out: { r: number; g: number; b: number }): void };
@@ -295,8 +296,9 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           emitLadder(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z));
           continue;
         }
-        if (id === B.BED) {
-          emitBed(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z));
+        if (id === B.BED || id === B.BED_HEAD) {
+          const facing = world.bedFacings.get(`${bx + x},${y},${bz + z}`) ?? 0;
+          emitBed(solid, atlas, x, y, z, id === B.BED_HEAD, facing, skyAt(x, y, z), torchAt(x, y, z));
           continue;
         }
         if (id === B.TRAPDOOR) {
@@ -754,19 +756,26 @@ function emitPressurePlate(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number
   emitBox(g, rect, x, y, z, 0.0625, 0.9375, 0, h, 0.0625, 0.9375, sky, torch);
 }
 
-/** Bed: a full-footprint mattress lifted on four short corner legs, leaving the
- *  classic gap underneath. The blanket texture (which already draws the pillow)
- *  goes on top and the bed trim wraps the mattress rim — a true 3D bed shape. */
-function emitBed(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number): void {
+/** One half of a 2-block bed: a full-footprint mattress lifted on two legs at its
+ *  OUTER end (away from the partner half), leaving the classic gap underneath.
+ *  Foot halves get a plain blanket top, head halves a pillow. `facing` is the
+ *  foot->head direction (0=-z,1=-x,2=+z,3=+x). */
+function emitBed(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, isHead: boolean, facing: number, sky: number, torch: number): void {
   const side = atlas.rect('bed_side');
-  const top = atlas.rect('bed_top');
+  const top = atlas.rect(isHead ? 'bed_head_top' : 'bed_foot_top');
   const wood = atlas.rect('planks');
-  const legH = 0.1875;     // legs hold the mattress 3/16 off the ground
-  const legW = 0.22;
-  for (const [lx0, lz0] of [[0, 0], [1 - legW, 0], [0, 1 - legW], [1 - legW, 1 - legW]]) {
-    emitBox(g, wood, x, y, z, lx0, lx0 + legW, 0, legH, lz0, lz0 + legW, sky, torch);
+  const legH = 0.1875, legW = 0.22;
+  // unit vector from this half toward its outer (legged) end
+  const fx = facing === 1 ? -1 : facing === 3 ? 1 : 0;
+  const fz = facing === 0 ? -1 : facing === 2 ? 1 : 0;
+  const ox = isHead ? fx : -fx, oz = isHead ? fz : -fz;
+  const legSpots: [number, number][] = oz !== 0
+    ? [[0, oz > 0 ? 1 - legW : 0], [1 - legW, oz > 0 ? 1 - legW : 0]]
+    : [[ox > 0 ? 1 - legW : 0, 0], [ox > 0 ? 1 - legW : 0, 1 - legW]];
+  for (const [lx, lz] of legSpots) {
+    emitBox(g, wood, x, y, z, lx, lx + legW, 0, legH, lz, lz + legW, sky, torch);
   }
-  // mattress slab resting on the legs, spanning the whole block
+  // mattress slab on the legs, spanning the whole block
   emitBox(g, side, x, y, z, 0, 1, legH, 0.5625, 0, 1, sky, torch, [1, 1, 1], top);
 }
 

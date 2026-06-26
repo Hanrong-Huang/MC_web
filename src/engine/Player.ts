@@ -622,6 +622,20 @@ export class Player {
       world.doorStates.delete(`${x},${y},${z}`);
     }
 
+    // beds: removing one half removes the other; drop a single bed item
+    let bedDrop = false;
+    if (id === B.BED || id === B.BED_HEAD) {
+      const facing = world.bedFacings.get(`${x},${y},${z}`) ?? 0;
+      const dvx = facing === 1 ? -1 : facing === 3 ? 1 : 0;
+      const dvz = facing === 0 ? -1 : facing === 2 ? 1 : 0;
+      const sign = id === B.BED_HEAD ? -1 : 1; // head's partner is back toward the foot
+      const ox = x + dvx * sign, oz = z + dvz * sign;
+      world.setBlock(ox, y, oz, B.AIR);
+      world.bedFacings.delete(`${ox},${y},${oz}`);
+      world.bedFacings.delete(`${x},${y},${z}`);
+      bedDrop = true;
+    }
+
     world.setBlock(x, y, z, B.AIR);
     audio.dig(def(id).sound, 1);
     entities.spawnBlockParticles(x, y, z, id, 12);
@@ -629,6 +643,10 @@ export class Player {
 
     if (doorDrop && withDrops && this.mode === 'survival') {
       entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.WOOD_DOOR, 1);
+      return;
+    }
+    if (bedDrop) {
+      if (withDrops && this.mode === 'survival') entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, B.BED, 1);
       return;
     }
 
@@ -1045,7 +1063,7 @@ export class Player {
         this.deps.openContainer('chest', t.x, t.y, t.z);
         return;
       }
-      if (t.id === B.BED) {
+      if (t.id === B.BED || t.id === B.BED_HEAD) {
         this.placeCooldown = 0.4;
         this.deps.useBed(t.x, t.y, t.z);
         return;
@@ -1186,6 +1204,34 @@ export class Player {
       this.deps.renderer.triggerSwing();
       audio.dig('wood', 0.8);
       this.deps.useDoor(px, py, pz);
+      if (this.mode === 'survival') this.inventory.consumeSelected();
+      return;
+    }
+
+    // bed item: place a 2-block bed — foot at the clicked cell, head extends in
+    // the direction the player is facing
+    if (held.id === B.BED) {
+      const fx = this.target.x + this.target.nx;
+      const fy = this.target.y + this.target.ny;
+      const fz = this.target.z + this.target.nz;
+      const yawDeg = ((this.yaw * 180 / Math.PI) % 360 + 360) % 360;
+      const facing = Math.round(yawDeg / 90) % 4; // 0=-z,1=-x,2=+z,3=+x
+      const dvx = facing === 1 ? -1 : facing === 3 ? 1 : 0;
+      const dvz = facing === 0 ? -1 : facing === 2 ? 1 : 0;
+      const hx = fx + dvx, hz = fz + dvz;
+      const freeCell = (bx: number, by: number, bz: number): boolean => {
+        const e = world.getBlock(bx, by, bz);
+        return (e === B.AIR || e === B.WATER) && isSolid(world.getBlock(bx, by - 1, bz));
+      };
+      if (!freeCell(fx, fy, fz) || !freeCell(hx, fy, hz)) return;
+      if (boxIntersectsBlock(this.pos, BOX, fx, fy, fz) || boxIntersectsBlock(this.pos, BOX, hx, fy, hz)) return;
+      world.setBlock(fx, fy, fz, B.BED);
+      world.setBlock(hx, fy, hz, B.BED_HEAD);
+      world.bedFacings.set(`${fx},${fy},${fz}`, facing);
+      world.bedFacings.set(`${hx},${fy},${hz}`, facing);
+      this.placeCooldown = 0.3;
+      this.deps.renderer.triggerSwing();
+      audio.dig('wood', 0.8);
       if (this.mode === 'survival') this.inventory.consumeSelected();
       return;
     }

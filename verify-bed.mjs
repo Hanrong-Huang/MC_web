@@ -1,5 +1,6 @@
-// Thorough bed check: place a real bed on a cleared platform, view it from
-// several angles, then hold it in hand to confirm it's a flat slab, not a cube.
+// Verify the 2-block (1x2) bed: place foot+head via the real placement path,
+// confirm it makes two blocks with a facing, and screenshot it from several
+// angles. Also check the held-in-hand item.
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
 
@@ -20,44 +21,53 @@ await page.locator('.create-btn').click();
 await page.waitForSelector('#loading.hidden', { timeout: 60000, state: 'attached' });
 await page.waitForTimeout(2500);
 
-// build a clean platform and place a bed at its centre; remember the bed coords
-const bed = await page.evaluate(() => {
+// build a clean platform and lay a 1x2 bed (foot + head) facing -Z, plus give
+// the player a bed item to hold
+const info = await page.evaluate(() => {
   const g = window.__game; const p = g.player; const B = window.__B;
-  p.mode = 'creative'; p.dead = false; p.hp = 20; // can't die / fall-damage while posing
+  p.mode = 'creative'; p.dead = false; p.hp = 20;
   const cx = Math.floor(p.pos.x), cy = Math.floor(p.pos.y), cz = Math.floor(p.pos.z) - 6;
-  for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) {
+  for (let dx = -4; dx <= 4; dx++) for (let dz = -5; dz <= 4; dz++) {
     g.world.setBlock(cx + dx, cy - 1, cz + dz, B.STONE);
     for (let dy = 0; dy <= 4; dy++) g.world.setBlock(cx + dx, cy + dy, cz + dz, 0);
   }
+  // facing 0 = -z: foot at (cx,cy,cz), head one block toward -z
+  const facing = 0;
   g.world.setBlock(cx, cy, cz, B.BED);
+  g.world.setBlock(cx, cy, cz - 1, B.BED_HEAD);
+  g.world.bedFacings.set(`${cx},${cy},${cz}`, facing);
+  g.world.bedFacings.set(`${cx},${cy},${cz - 1}`, facing);
+  g.world.markDirty(Math.floor(cx / 16), Math.floor(cz / 16));
   p.inventory.slots[0] = { id: B.BED, count: 1 };
   p.inventory.selected = 0; p.inventory.onChange();
   p.flying = true; p.vel = { x: 0, y: 0, z: 0 };
-  return { x: cx + 0.5, y: cy, z: cz + 0.5 };
+  return {
+    foot: g.world.getBlock(cx, cy, cz),
+    head: g.world.getBlock(cx, cy, cz - 1),
+    BED: B.BED, BED_HEAD: B.BED_HEAD,
+    bedX: cx + 0.5, bedY: cy, bedZ: cz - 0.5, // centre of the 1x2 bed
+  };
 });
+console.log('foot block:', info.foot, '(expect', info.BED + ')  head block:', info.head, '(expect', info.BED_HEAD + ')');
 
-// helper: place the camera at an offset and aim it at the bed
 async function shot(name, ox, oy, oz) {
-  await page.evaluate(({ bed, ox, oy, oz }) => {
+  await page.evaluate(({ b, ox, oy, oz }) => {
     const p = window.__game.player;
-    p.pos.x = bed.x + ox; p.pos.y = bed.y + oy; p.pos.z = bed.z + oz;
-    const dx = bed.x - p.pos.x, dy = (bed.y + 0.3) - (p.pos.y + p.eyeHeight()), dz = bed.z - p.pos.z;
+    p.pos.x = b.bedX + ox; p.pos.y = b.bedY + oy; p.pos.z = b.bedZ + oz;
+    const dx = b.bedX - p.pos.x, dy = (b.bedY + 0.3) - (p.pos.y + p.eyeHeight()), dz = b.bedZ - p.pos.z;
     p.yaw = Math.atan2(-dx, -dz);
     p.pitch = Math.atan2(dy, Math.hypot(dx, dz));
-  }, { bed, ox, oy, oz });
+  }, { b: info, ox, oy, oz });
   await page.waitForTimeout(700);
   await page.screenshot({ path: name });
 }
 
-await shot('bed-front.png', 0, 1.2, 3.0);   // looking from the foot
-await shot('bed-side.png', 3.0, 1.2, 0.2);   // looking from the side
-await shot('bed-iso.png', 2.4, 2.2, 2.4);    // 3/4 isometric-ish
+await shot('bed-iso.png', 2.6, 2.4, 2.6);
+await shot('bed-side.png', 3.4, 1.0, 0);
+await shot('bed-front.png', 0, 1.2, 3.4);
 
-// held in hand: look flat ahead at the sky so the held bed shows in the corner
-await page.evaluate(() => {
-  const p = window.__game.player;
-  p.pos.y = p.pos.y + 1; p.pitch = 0.1; p.yaw = 0;
-});
+// held in hand
+await page.evaluate(() => { const p = window.__game.player; p.pos.y += 1; p.yaw = 0; p.pitch = 0.1; });
 await page.waitForTimeout(700);
 await page.screenshot({ path: 'bed-held.png' });
 

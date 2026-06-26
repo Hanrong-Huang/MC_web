@@ -523,6 +523,20 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
     c.fillStyle = '#6b5532';
     c.fillRect(x, y, 1, 16); c.fillRect(x + 15, y, 1, 16); c.fillRect(x, y + 15, 16, 1);
   },
+  // foot half: plain red blanket with a wooden rim
+  bed_foot_top: (c, x, y) => {
+    noiseFill(c, x, y, ['#b02e2e', '#a02828', '#bd3737'], 126, 0);
+    c.fillStyle = '#6b5532';
+    c.fillRect(x, y, 1, 16); c.fillRect(x + 15, y, 1, 16);
+  },
+  // head half: red blanket with a fat white pillow band toward the head end
+  bed_head_top: (c, x, y) => {
+    noiseFill(c, x, y, ['#b02e2e', '#a02828', '#bd3737'], 126, 0);
+    c.fillStyle = '#efefef'; c.fillRect(x + 2, y + 2, 12, 7);
+    c.fillStyle = '#d8d8d8'; c.fillRect(x + 2, y + 8, 12, 1);
+    c.fillStyle = '#6b5532';
+    c.fillRect(x, y, 1, 16); c.fillRect(x + 15, y, 1, 16); c.fillRect(x, y, 16, 1);
+  },
   bed_side: (c, x, y) => {
     TILE_PAINTERS.planks(c, x, y);
     c.fillStyle = '#b02e2e'; c.fillRect(x, y + 2, 16, 5);
@@ -1844,7 +1858,7 @@ export class Atlas {
       // the bed is a flat (9/16) block, so draw a low isometric slab — a wide top
       // diamond (blanket + pillow) over short side rims — not a full cube
       ctx.imageSmoothingEnabled = false;
-      const top = this.tileCanvas(d.faces.top);
+      const top = this.tileCanvas('bed_top'); // full bed (blanket + pillow) for the item
       const side = this.tileCanvas(d.faces.sides);
       ctx.fillStyle = 'rgba(0,0,0,0.2)';
       ctx.beginPath();

@@ -54,7 +54,10 @@ export class World {
   /** wall-torch facings keyed by "x,y,z": 0=+x,1=-x,2=+z,3=-z. Floor torches
    *  are absent from this map. */
   torchFacings = new Map<string, number>();
-  
+  /** 2-block bed facing keyed by "x,y,z" (both halves): 0=-z,1=-x,2=+z,3=+x,
+   *  the direction from the foot half toward the head half */
+  bedFacings = new Map<string, number>();
+
   redstonePower = new Map<string, number>();
   redstoneStates = new Map<string, RedstoneState>();
   pistonFacings = new Map<string, number>();
@@ -73,6 +76,7 @@ export class World {
       blockEntities: Map<string, BlockEntity>;
       doorStates: Map<string, DoorState>;
       torchFacings: Map<string, number>;
+      bedFacings: Map<string, number>;
       waterLevels: Map<string, number>;
       lavaLevels: Map<string, number>;
       redstonePower: Map<string, number>;
@@ -85,6 +89,7 @@ export class World {
       blockEntities: Map<string, BlockEntity>;
       doorStates: Map<string, DoorState>;
       torchFacings: Map<string, number>;
+      bedFacings: Map<string, number>;
       waterLevels: Map<string, number>;
       lavaLevels: Map<string, number>;
       redstonePower: Map<string, number>;
@@ -103,6 +108,7 @@ export class World {
         blockEntities: this.blockEntities,
         doorStates: this.doorStates,
         torchFacings: this.torchFacings,
+        bedFacings: this.bedFacings,
         waterLevels: this.waterLevels,
         lavaLevels: this.lavaLevels,
         redstonePower: this.redstonePower,
@@ -115,6 +121,7 @@ export class World {
         blockEntities: new Map(),
         doorStates: new Map(),
         torchFacings: new Map(),
+        bedFacings: new Map(),
         waterLevels: new Map(),
         lavaLevels: new Map(),
         redstonePower: new Map(),
@@ -743,6 +750,7 @@ export class World {
     this.blockEntities = this.dimData[dim].blockEntities;
     this.doorStates = this.dimData[dim].doorStates;
     this.torchFacings = this.dimData[dim].torchFacings;
+    this.bedFacings = this.dimData[dim].bedFacings;
     this.waterLevels = this.dimData[dim].waterLevels;
     this.lavaLevels = this.dimData[dim].lavaLevels;
     this.redstonePower = this.dimData[dim].redstonePower;

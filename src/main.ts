@@ -234,6 +234,7 @@ class Game {
         });
       }
       for (const [k, v] of Object.entries(save.torches ?? {})) ow.torchFacings.set(k, v as number);
+      for (const [k, v] of Object.entries(save.beds ?? {})) ow.bedFacings.set(k, v as number);
       for (const [k, v] of Object.entries(save.water ?? {})) ow.waterLevels.set(k, v as number);
       for (const [k, v] of Object.entries(save.lava ?? {})) ow.lavaLevels.set(k, v as number);
       for (const [k, v] of Object.entries(save.redstonePower ?? {})) ow.redstonePower.set(k, v as number);
@@ -258,6 +259,7 @@ class Game {
         });
       }
       for (const [k, v] of Object.entries(save.torchesNether ?? {})) ne.torchFacings.set(k, v as number);
+      for (const [k, v] of Object.entries(save.bedsNether ?? {})) ne.bedFacings.set(k, v as number);
       for (const [k, v] of Object.entries(save.waterNether ?? {})) ne.waterLevels.set(k, v as number);
       for (const [k, v] of Object.entries(save.lavaNether ?? {})) ne.lavaLevels.set(k, v as number);
       for (const [k, v] of Object.entries(save.redstonePowerNether ?? {})) ne.redstonePower.set(k, v as number);
@@ -271,6 +273,7 @@ class Game {
         this.world.blockEntities = ne.blockEntities;
         this.world.doorStates = ne.doorStates;
         this.world.torchFacings = ne.torchFacings;
+        this.world.bedFacings = ne.bedFacings;
         this.world.waterLevels = ne.waterLevels;
         this.world.lavaLevels = ne.lavaLevels;
         this.world.redstonePower = ne.redstonePower;
@@ -972,6 +975,7 @@ class Game {
       blockEntities: serializeBEs(ow.blockEntities),
       doors: serializeDoors(ow.doorStates),
       torches: mapToRecord(ow.torchFacings),
+      beds: mapToRecord(ow.bedFacings),
       water: mapToRecord(ow.waterLevels),
       lava: mapToRecord(ow.lavaLevels),
       redstonePower: mapToRecord(ow.redstonePower),
@@ -982,6 +986,7 @@ class Game {
       blockEntitiesNether: serializeBEs(ne.blockEntities),
       doorsNether: serializeDoors(ne.doorStates),
       torchesNether: mapToRecord(ne.torchFacings),
+      bedsNether: mapToRecord(ne.bedFacings),
       waterNether: mapToRecord(ne.waterLevels),
       lavaNether: mapToRecord(ne.lavaLevels),
       redstonePowerNether: mapToRecord(ne.redstonePower),
@@ -1641,6 +1646,7 @@ class Game {
     const job: MeshJob = {
       id, key: chunkKey(cx, cz), cx, cz, chunks, tint,
       torchFacings: filt(this.world.torchFacings),
+      bedFacings: filt(this.world.bedFacings),
       doorStates: filt(this.world.doorStates) as [string, MeshDoor][],
       redstoneStates: filt(this.world.redstoneStates) as [string, MeshRedstone][],
       redstonePower: filt(this.world.redstonePower),

@@ -34,6 +34,7 @@ export interface SaveState {
   blockEntities: Record<string, BlockEntitySave>;
   doors?: Record<string, { facing: number; open: boolean; hingeRight: boolean }>;
   torches?: Record<string, number>;
+  beds?: Record<string, number>;
   water?: Record<string, number>;
   lava?: Record<string, number>;
   redstonePower?: Record<string, number>;
@@ -44,6 +45,7 @@ export interface SaveState {
   blockEntitiesNether?: Record<string, BlockEntitySave>;
   doorsNether?: Record<string, { facing: number; open: boolean; hingeRight: boolean }>;
   torchesNether?: Record<string, number>;
+  bedsNether?: Record<string, number>;
   waterNether?: Record<string, number>;
   lavaNether?: Record<string, number>;
   redstonePowerNether?: Record<string, number>;
