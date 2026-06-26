@@ -16,17 +16,17 @@ export type MobKind =
   | 'pig' | 'chicken' | 'sheep' | 'cow'
   | 'zombie' | 'skeleton' | 'spider' | 'creeper'
   | 'wolf' | 'villager' | 'phantom' | 'horse' | 'cat'
-  | 'cinderling' | 'ashstalker';
+  | 'cinderling' | 'ashstalker' | 'emberghast';
 export type EntityKind = 'drop' | MobKind | 'arrow' | 'tnt' | 'falling' | 'particle' | 'bobber';
 
 const MOB_KINDS = new Set<EntityKind>([
   'pig', 'chicken', 'sheep', 'cow',
   'zombie', 'skeleton', 'spider', 'creeper',
   'wolf', 'villager', 'phantom', 'horse', 'cat',
-  'cinderling', 'ashstalker',
+  'cinderling', 'ashstalker', 'emberghast',
 ]);
 /** Nether-only hostile mobs. */
-const NETHER_MOBS: MobKind[] = ['cinderling', 'ashstalker'];
+const NETHER_MOBS: MobKind[] = ['cinderling', 'ashstalker', 'emberghast'];
 const JUMP_V = Math.sqrt(2 * 32 * 1.25); // same 1.25-block hop as the player
 const GRAVITY = 32;
 
@@ -109,9 +109,11 @@ const MOB_STATS: Record<MobKind, MobStats> = {
   phantom: { box: { w: 0.9, h: 0.5 }, hp: 12, speed: 2.4, hostile: true },
   horse: { box: { w: 1.0, h: 1.6 }, hp: 22, speed: 2.1, hostile: false },
   cat: { box: { w: 0.5, h: 0.6 }, hp: 8, speed: 1.7, hostile: false },
-  // nether: a small fast ember imp and a heavier charred beast
+  // nether: a small fast ember imp, a heavier charred beast, and a floating
+  // fireball-spitting ghast
   cinderling: { box: { w: 0.5, h: 0.85 }, hp: 8, speed: 2.7, hostile: true },
   ashstalker: { box: { w: 0.8, h: 0.9 }, hp: 16, speed: 3.0, hostile: true },
+  emberghast: { box: { w: 1.0, h: 1.0 }, hp: 10, speed: 1.8, hostile: true },
 };
 /** Melee mobs that deal contact damage while chasing. */
 const MELEE_MOBS = new Set<MobKind>(['zombie', 'spider', 'cinderling', 'ashstalker']);
@@ -143,7 +145,7 @@ export class Entity {
   shootCooldown = 0; // skeleton
   materials: THREE.MeshLambertMaterial[] = [];
   // arrow fields
-  owner: 'player' | 'skeleton' = 'player';
+  owner: 'player' | 'skeleton' | 'emberghast' = 'player';
   dmg = 0;
   // particle fields
   life = 0;
@@ -240,8 +242,8 @@ export class EntityManager {
     e.materials = mats;
     e.variant = variant;
     e.yaw = Math.random() * Math.PI * 2;
-    // soft contact shadow under grounded mobs (phantoms fly, so they get none)
-    if (kind !== 'phantom') mesh.add(this.makeShadow(stats.box.w));
+    // soft contact shadow under grounded mobs (flyers get none)
+    if (kind !== 'phantom' && kind !== 'emberghast') mesh.add(this.makeShadow(stats.box.w));
     this.entities.push(e);
     this.scene.add(mesh);
     return e;
@@ -728,8 +730,9 @@ export class EntityManager {
     const speed = Math.hypot(e.vel.x, e.vel.y, e.vel.z);
     const steps = Math.max(1, Math.ceil(speed * dt / 0.45));
     const sdt = dt / steps;
+    const fireball = e.owner === 'emberghast';
     for (let s = 0; s < steps && !e.dead; s++) {
-      e.vel.y -= 16 * sdt;
+      if (!fireball) e.vel.y -= 16 * sdt; // fireballs fly flat
       e.pos.x += e.vel.x * sdt;
       e.pos.y += e.vel.y * sdt;
       e.pos.z += e.vel.z * sdt;
@@ -737,6 +740,7 @@ export class EntityManager {
       const id = this.world.getBlock(Math.floor(e.pos.x), Math.floor(e.pos.y), Math.floor(e.pos.z));
       if (id !== B.AIR && id !== B.WATER && id !== B.TORCH && def(id).solid) {
         e.dead = true;
+        if (fireball) { this.fireballBurst(e.pos.x, e.pos.y, e.pos.z); return; }
         this.audio.play('arrowHit');
         if (e.owner === 'player' && Math.random() < 0.7) {
           this.spawnDrop(e.pos.x - e.vel.x * sdt, e.pos.y - e.vel.y * sdt, e.pos.z - e.vel.z * sdt, I.ARROW, 1);
@@ -744,7 +748,7 @@ export class EntityManager {
         return;
       }
       // entity hit
-      if (e.owner === 'skeleton') {
+      if (e.owner === 'skeleton' || e.owner === 'emberghast') {
         const p = this.player!;
         const hw = 0.3;
         if (!p.dead && p.mode === 'survival' &&
@@ -754,6 +758,7 @@ export class EntityManager {
           p.damage(e.dmg);
           p.applyKnockback(e.vel.x, e.vel.z, 5);
           e.dead = true;
+          if (fireball) this.fireballBurst(e.pos.x, e.pos.y, e.pos.z);
           return;
         }
       } else {
@@ -827,6 +832,8 @@ export class EntityManager {
 
     // phantom: flying mob, circles + swoops the player
     if (e.kind === 'phantom') { this.updatePhantom(e, dt); return; }
+    // emberghast: floats at range and spits fireballs
+    if (e.kind === 'emberghast') { this.updateEmberghast(e, dt); return; }
     // a ridden horse is driven by the player (see Player.updateRiding)
     if (e.ridden) return;
 
@@ -841,6 +848,10 @@ export class EntityManager {
     // hide glows only faintly so it stays recognizably charcoal instead of washing
     // the whole mob to flat lava-orange (ember materials are tagged at build time).
     const netherGlow = (e.kind === 'cinderling' || e.kind === 'ashstalker') && e.hurtFlash <= 0;
+    // nether mobs trail a few embers while hunting the player
+    if ((e.kind === 'cinderling' || e.kind === 'ashstalker') && e.state === 'chase' && Math.random() < 0.18) {
+      this.spawnFirefly(e.pos.x + (Math.random() - 0.5) * 0.4, e.pos.y + e.box.h * 0.5, e.pos.z + (Math.random() - 0.5) * 0.4);
+    }
     if (netherGlow) {
       const pulse = 0.34 + 0.14 * Math.sin(e.age * 4 + (e.kind === 'ashstalker' ? 1 : 0));
       er = pulse; eg = pulse * 0.4; eb = 0.02;
@@ -1141,6 +1152,81 @@ export class EntityManager {
     e.mesh.rotation.y = e.yaw;
   }
 
+  /** Emberghast: hovers above the player at a stand-off range, bobbing, and
+   *  lobs slow fireballs on a cooldown. Flies, so it ignores block collision. */
+  private updateEmberghast(e: Entity, dt: number): void {
+    const p = this.player!;
+    e.circling += dt;
+    const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
+    const distH = Math.hypot(dx, dz);
+    const ang = Math.atan2(dz, dx);
+    // hold ~9 blocks horizontal range: close in if far, back off if near, while
+    // always drifting sideways so it weaves rather than sitting still
+    const ideal = 9;
+    const radial = distH > ideal + 2 ? 1 : distH < ideal - 2 ? -1 : 0;
+    const wishX = Math.cos(ang) * radial - Math.sin(ang) * 0.55;
+    const wishZ = Math.sin(ang) * radial + Math.cos(ang) * 0.55;
+    const speed = e.moveSpeed;
+    e.vel.x += (wishX * speed - e.vel.x) * Math.min(1, 2 * dt);
+    e.vel.z += (wishZ * speed - e.vel.z) * Math.min(1, 2 * dt);
+    const targetY = p.pos.y + 4.5 + Math.sin(e.age * 1.5) * 0.7;
+    e.vel.y += ((targetY - e.pos.y) * 0.6 - e.vel.y) * Math.min(1, 1.5 * dt);
+    e.pos.x += e.vel.x * dt;
+    e.pos.y += e.vel.y * dt;
+    e.pos.z += e.vel.z * dt;
+    e.yaw = Math.atan2(-dx, -dz);
+    e.attackCooldown = Math.max(0, e.attackCooldown - dt);
+    if (e.attackCooldown <= 0 && distH < 18 && !p.dead && p.mode === 'survival') {
+      e.attackCooldown = 2.6 + Math.random() * 1.4;
+      this.spawnFireball(e.pos.x, e.pos.y, e.pos.z, p.pos.x - e.pos.x, (p.pos.y + 1) - e.pos.y, p.pos.z - e.pos.z);
+    }
+    // gently pulsing ember tips over a near-dark charcoal hide (kept low so the
+    // tips read as distinct glints rather than blooming into one orange mass)
+    const pulse = 0.32 + 0.16 * Math.sin(e.age * 5);
+    for (const m of e.materials) {
+      if (m.userData.ember) m.emissive.setRGB(pulse, pulse * 0.38, 0.02);
+      else m.emissive.setRGB(0.04, 0.015, 0.005);
+    }
+    if (e.limbs) {
+      for (let i = 0; i < e.limbs.legs.length; i++) {
+        e.limbs.legs[i].rotation.x = Math.sin(e.age * 3 + i) * 0.4;
+      }
+    }
+    e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+    e.mesh.rotation.y = e.yaw;
+  }
+
+  /** Launch a slow, flat-flying fireball toward a direction (owner emberghast). */
+  spawnFireball(x: number, y: number, z: number, dx: number, dy: number, dz: number): void {
+    const mesh = new THREE.Group();
+    const core = new THREE.Mesh(
+      new THREE.BoxGeometry(0.3, 0.3, 0.3),
+      new THREE.MeshBasicMaterial({ color: 0xffb030 }),
+    );
+    const glow = new THREE.Mesh(
+      new THREE.BoxGeometry(0.5, 0.5, 0.5),
+      new THREE.MeshBasicMaterial({ color: 0xff5010, transparent: true, opacity: 0.4 }),
+    );
+    mesh.add(core, glow);
+    const len = Math.hypot(dx, dy, dz) || 1;
+    const speed = 8;
+    const e = new Entity('arrow', { x, y, z }, { w: 0.3, h: 0.3 }, mesh);
+    e.vel = { x: (dx / len) * speed, y: (dy / len) * speed, z: (dz / len) * speed };
+    e.owner = 'emberghast';
+    e.dmg = 4;
+    this.entities.push(e);
+    this.scene.add(mesh);
+    this.audio.play('bow');
+  }
+
+  /** A small fiery puff where a fireball lands. */
+  private fireballBurst(x: number, y: number, z: number): void {
+    this.audio.play('arrowHit');
+    for (let i = 0; i < 8; i++) {
+      this.spawnFirefly(x + (Math.random() - 0.5) * 0.8, y + (Math.random() - 0.5) * 0.8, z + (Math.random() - 0.5) * 0.8);
+    }
+  }
+
   // --- 20 Hz AI tick --------------------------------------------------------------
 
   tick(isNight: boolean): void {
@@ -1418,6 +1504,7 @@ export class EntityManager {
       case 'phantom': at(I.ROTTEN_FLESH, 0, 1); break;
       case 'cinderling': at(I.QUARTZ, 0, 1); at(I.COAL, 0, 1); break;
       case 'ashstalker': at(I.COAL, 1, 2); at(I.BONE, 0, 1); break;
+      case 'emberghast': at(I.QUARTZ, 1, 2); at(B.GLOWSTONE, 0, 1); break;
       default: break;
     }
   }
@@ -1441,6 +1528,20 @@ export class EntityManager {
       const hw = e.box.w / 2;
       if (e.pos.x + hw > bx && e.pos.x - hw < bx + 1 &&
         e.pos.y + e.box.h > by && e.pos.y < by + 1 &&
+        e.pos.z + hw > bz && e.pos.z - hw < bz + 1) return true;
+    }
+    return false;
+  }
+
+  /** Mobs OR dropped items overlapping a block — used by pressure plates, which
+   *  (like wooden plates) are tripped by entities resting on them, not just by
+   *  the player. */
+  anyEntityOnBlock(bx: number, by: number, bz: number): boolean {
+    for (const e of this.entities) {
+      if (!this.isMob(e) && e.kind !== 'drop') continue;
+      const hw = e.box.w / 2;
+      if (e.pos.x + hw > bx && e.pos.x - hw < bx + 1 &&
+        e.pos.y + e.box.h > by && e.pos.y < by + 0.5 &&
         e.pos.z + hw > bz && e.pos.z - hw < bz + 1) return true;
     }
     return false;
@@ -2387,6 +2488,44 @@ export class EntityManager {
     ];
     g.add(body, head, ...legs);
     return { mesh: g, limbs: { legs, head, body }, mats };
+  }
+
+  if (kind === 'emberghast') {
+    // a floating charcoal cube with a molten maw and dangling charcoal tendrils
+    // tipped with glowing embers (the ghast silhouette: a face + nine tentacles)
+    const charM = this.mat(this.skin('emberghast', '#2a2320', '#3a2f28'), mats);
+    const faceTex = this.skin('emberghast_face', '#2a2320', '#3a2f28', (ctx) => {
+      ctx.fillStyle = '#ffd24a'; ctx.fillRect(1, 2, 2, 2); ctx.fillRect(5, 2, 2, 2); // eyes
+      ctx.fillStyle = '#ff5a10'; ctx.fillRect(2, 5, 4, 2);                            // molten maw
+    });
+    const faceM = this.mat(faceTex, mats);
+    const emberM = this.mat(this.skin('ghast_ember', '#ff7a1a', '#ffd24a'), mats);
+    emberM.userData.ember = true;
+    // body: face is the -Z front (material index 5)
+    const body = this.boxMesh(0.8, 0.8, 0.8, [charM, charM, charM, charM, charM, faceM]);
+    body.position.set(0, 0.7, 0);
+    g.add(body);
+    // a thin molten underline along the front jaw — just a hint of glow, not a slab
+    const jaw = this.boxMesh(0.5, 0.07, 0.06, emberM);
+    jaw.position.set(0, 0.36, -0.4);
+    g.add(jaw);
+    // nine charcoal tendrils in a 3x3 grid, each ending in a small ember tip so
+    // they read as distinct danglers instead of one bright orange mass
+    const legs: THREE.Group[] = [];
+    for (const lx of [-0.26, 0, 0.26]) {
+      for (const lz of [-0.26, 0, 0.26]) {
+        const tendril = new THREE.Group();
+        tendril.position.set(lx, 0.32, lz);
+        const seg = this.boxMesh(0.09, 0.34, 0.09, charM);
+        seg.position.y = -0.17;
+        const tip = this.boxMesh(0.07, 0.1, 0.07, emberM);
+        tip.position.y = -0.36;
+        tendril.add(seg, tip);
+        g.add(tendril);
+        legs.push(tendril);
+      }
+    }
+    return { mesh: g, limbs: { legs, body }, mats };
   }
 
   // phantom: a small flying mob with two angular wings

@@ -295,6 +295,10 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           emitLadder(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z));
           continue;
         }
+        if (id === B.BED) {
+          emitBed(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z));
+          continue;
+        }
         if (id === B.TRAPDOOR) {
           const open = !!world.doorStates.get(`${bx + x},${y},${bz + z}`)?.open;
           emitTrapdoor(solid, atlas, x, y, z, open, skyAt(x, y, z), torchAt(x, y, z));
@@ -680,7 +684,7 @@ function emitTrapdoor(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: 
 function emitBox(
   g: GeoBuilder, rect: UVRect, x: number, y: number, z: number,
   x0: number, x1: number, y0: number, y1: number, z0: number, z1: number,
-  sky: number, torch: number, tint = [1, 1, 1]
+  sky: number, torch: number, tint = [1, 1, 1], topRect: UVRect = rect
 ): void {
   const push = (px: number, py: number, pz: number, u: number, v: number): void => {
     g.positions.push(x + px, y + py, z + pz);
@@ -689,12 +693,12 @@ function emitBox(
     g.uvs.push(u, v);
   };
 
-  // +y top
+  // +y top (may use a distinct texture, e.g. a bed's blanket)
   let base = g.vertCount;
-  push(x0, y1, z0, rect.u0, rect.v0);
-  push(x1, y1, z0, rect.u1, rect.v0);
-  push(x1, y1, z1, rect.u1, rect.v1);
-  push(x0, y1, z1, rect.u0, rect.v1);
+  push(x0, y1, z0, topRect.u0, topRect.v0);
+  push(x1, y1, z0, topRect.u1, topRect.v0);
+  push(x1, y1, z1, topRect.u1, topRect.v1);
+  push(x0, y1, z1, topRect.u0, topRect.v1);
   g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
   g.vertCount += 4;
 
@@ -748,6 +752,27 @@ function emitPressurePlate(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number
   const rect = atlas.rect('planks');
   const h = active ? 0.03 : 0.08;
   emitBox(g, rect, x, y, z, 0.0625, 0.9375, 0, h, 0.0625, 0.9375, sky, torch);
+}
+
+/** Bed: a low wooden frame on four stubby legs, a mattress (blanket on top, bed
+ *  trim around the rim), and a raised pillow at the head end (-Z). A genuine bed
+ *  silhouette rather than a full cube. */
+function emitBed(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number): void {
+  const side = atlas.rect('bed_side');
+  const top = atlas.rect('bed_top');
+  const wood = atlas.rect('planks');
+  // four short corner legs
+  const legs: [number, number, number, number][] = [
+    [0.03, 0.2, 0.03, 0.2], [0.8, 0.97, 0.03, 0.2],
+    [0.03, 0.2, 0.8, 0.97], [0.8, 0.97, 0.8, 0.97],
+  ];
+  for (const [lx0, lx1, lz0, lz1] of legs) {
+    emitBox(g, wood, x, y, z, lx0, lx1, 0, 0.18, lz0, lz1, sky, torch);
+  }
+  // mattress slab
+  emitBox(g, side, x, y, z, 0.02, 0.98, 0.18, 0.46, 0.02, 0.98, sky, torch, [1, 1, 1], top);
+  // raised pillow at the head (-Z) end
+  emitBox(g, side, x, y, z, 0.14, 0.86, 0.46, 0.6, 0.06, 0.34, sky, torch, [1, 1, 1], top);
 }
 
 function emitLever(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean, facing: number): void {

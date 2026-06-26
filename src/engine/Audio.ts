@@ -567,6 +567,12 @@ export class AudioEngine {
         this.tone(0.4, 165, 105, 0.12 * vol, 'square', 0.05);
         this.noiseBurst(0.35, 1400, 0.08 * vol, 'bandpass', 500);
         break;
+      case 'emberghast':
+        // a breathy hollow moan with a fiery hiss — a distant floating menace
+        this.tone(0.7, 280, 200, 0.14 * vol, 'sine');
+        this.tone(0.6, 210, 150, 0.1 * vol, 'triangle', 0.1);
+        this.noiseBurst(0.5, 2000, 0.07 * vol, 'bandpass', 700);
+        break;
     }
   }
 

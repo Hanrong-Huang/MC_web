@@ -359,6 +359,9 @@ blockDef({
 });
 blockDef({
   id: B.BED, name: 'bed', label: 'Bed', hardness: 0.3, sound: 'wood',
+  // a flat partial model (see Mesher emitBed): don't occlude neighbours or it
+  // would punch holes in the blocks around its empty upper half
+  opaque: false, occludes: false,
   faces: { top: 'bed_top', bottom: 'planks', sides: 'bed_side' },
 });
 blockDef({

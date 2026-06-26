@@ -27,6 +27,8 @@ export interface RedstoneState {
   active: boolean;
   ticksLeft?: number;
   facing?: number;
+  /** pressure plates: ticks remaining before releasing after the last step-off */
+  releaseT?: number;
 }
 
 export interface RayHit {

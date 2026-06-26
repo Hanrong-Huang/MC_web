@@ -24,6 +24,7 @@ export class WorldGenerator {
   private river: Simplex2;
   private erosion: Simplex2;
   private detail: Simplex2;
+  private ravine: Simplex2;
   /** villager spawn positions queued by village generation (consumed by EntityManager) */
   villageSpawns: { x: number; y: number; z: number }[] = [];
 
@@ -39,6 +40,18 @@ export class WorldGenerator {
     this.river = new Simplex2(this.seed ^ 0x4afe);
     this.erosion = new Simplex2(this.seed ^ 0xe705);
     this.detail = new Simplex2(this.seed ^ 0xd37a);
+    this.ravine = new Simplex2(this.seed ^ 0x5a17);
+  }
+
+  /** 0..1 strength of a rare, deep, meandering ravine slot at this column
+   *  (1 = canyon centre, 0 = outside). Like rivers but far rarer and carved
+   *  down into bedrock-deep stone rather than filled with water. */
+  ravineMask(wx: number, wz: number): number {
+    const n = Math.abs(this.ravine.fbm(wx * 0.0014, wz * 0.0014, 2));
+    const HALF_WIDTH = 0.013;
+    if (n >= HALF_WIDTH) return 0;
+    const t = 1 - n / HALF_WIDTH;
+    return t * t * (3 - 2 * t); // smoothstep: steep walls, flat floor
   }
 
   /** Spaghetti tunnels (two intersecting ridges) + cheese caverns. */
@@ -253,12 +266,16 @@ export class WorldGenerator {
         const beach = h >= SEA_LEVEL - 2 && h <= SEA_LEVEL + 1 && biome !== 'swamp';
         // caves may breach the surface, but never near/under water
         const caveCeil = h < SEA_LEVEL + 2 ? h - 8 : h;
+        // ravine: a deep open slot. Only on dry land; the floor rises toward the
+        // rim (high rvFloor at the edges) so the walls step down into a canyon.
+        const rv = h >= SEA_LEVEL + 3 ? this.ravineMask(wx, wz) : 0;
+        const rvFloor = rv > 0 ? 11 + Math.round((1 - rv) * 24) : CY;
 
         for (let y = 0; y <= h; y++) {
           let id: number;
           if (y === 0) id = B.BEDROCK;
-          else if (y > 3 && y <= caveCeil && this.isCave(wx, y, wz)) {
-            // deep caves below y=8 flood with lava; above that they stay airy
+          else if (y > 3 && y <= caveCeil && (this.isCave(wx, y, wz) || y >= rvFloor)) {
+            // deep caves/ravines below y=8 flood with lava; above that they stay airy
             if (y <= 8) chunk.setRaw(x, y, z, B.LAVA);
             else chunk.setRaw(x, y, z, B.AIR);
             continue;
@@ -387,6 +404,17 @@ export class WorldGenerator {
           const surface = this.heightAt(ox + 7, oz + 7);
           const oy = 9 + Math.floor(hash2(this.seed ^ 0xc44e, scx, scz) * Math.max(5, surface - 30));
           if (oy + 8 < surface - 6) this.placeCrypt(chunk, ox, oy, oz);
+        }
+        // overgrown ruins: common low broken-wall remnants on temperate land
+        if (hash2(this.seed ^ 0x2ec5, scx, scz) < 0.03) {
+          const ox = scx * CX + 3 + Math.floor(hash2(this.seed ^ 0x2ec6, scx, scz) * 6);
+          const oz = scz * CZ + 3 + Math.floor(hash2(this.seed ^ 0x2ec7, scx, scz) * 6);
+          const oy = this.heightAt(ox + 3, oz + 2);
+          const biome = this.biomeAtHeight(ox + 3, oz + 2, oy);
+          if ((biome === 'plains' || biome === 'forest' || biome === 'taiga' || biome === 'jungle') &&
+            oy > SEA_LEVEL && oy <= 88) {
+            this.placeRuin(chunk, ox, oy, oz);
+          }
         }
         // desert temple: rare, only on desert surface
         if (hash2(this.seed ^ 0x7eab, scx, scz) < 0.012) {
@@ -803,6 +831,39 @@ export class WorldGenerator {
     for (let dy = 1; dy <= H; dy++) this.put(chunk, ox + 5, oy + dy, oz + 5, B.LADDER);
     this.put(chunk, ox + 2, oy + 1, oz + 4, B.CHEST_LOOT);
     this.put(chunk, ox + 4, oy + 6, oz + 2, B.TORCH);
+  }
+
+  /** Overgrown ruin: a small footprint of broken cobble/stone-brick walls that
+   *  follows the terrain, with gravel rubble and an occasional loot chest. */
+  private placeRuin(chunk: Chunk, ox: number, oy: number, oz: number): void {
+    const W = 5 + Math.floor(hash2(this.seed ^ 0x2ed0, ox, oz) * 3); // 5-7
+    const D = 4 + Math.floor(hash2(this.seed ^ 0x2ed1, oz, ox) * 3); // 4-6
+    for (let dx = 0; dx < W; dx++) {
+      for (let dz = 0; dz < D; dz++) {
+        const wx = ox + dx, wz = oz + dz;
+        const gy = this.heightAt(wx, wz);
+        if (gy <= SEA_LEVEL || Math.abs(gy - oy) > 3) continue; // skip cliffs/water
+        // foundation flush with the ground, some of it crumbled to gravel
+        this.put(chunk, wx, gy, wz, hash3(this.seed ^ 0x2ed2, wx, gy, wz) < 0.32 ? B.GRAVEL : B.COBBLE);
+        for (let dy = 1; dy <= 4; dy++) this.put(chunk, wx, gy + dy, wz, B.AIR); // clear scrub
+        const edge = dx === 0 || dx === W - 1 || dz === 0 || dz === D - 1;
+        if (!edge) continue;
+        const corner = (dx === 0 || dx === W - 1) && (dz === 0 || dz === D - 1);
+        const base = corner ? 3 : 1 + Math.floor(hash3(this.seed ^ 0x2ed3, wx, 0, wz) * 3);
+        for (let dy = 1; dy <= base; dy++) {
+          // upper courses crumble away for a ruined silhouette (corners hold)
+          if (!corner && hash3(this.seed ^ 0x2ed4, wx, dy, wz) < (dy / (base + 1)) * 0.7) continue;
+          const mat = hash3(this.seed ^ 0x2ed5, wx, dy, wz) < 0.3 ? B.STONE_BRICKS : B.COBBLE;
+          this.put(chunk, wx, gy + dy, wz, mat);
+        }
+      }
+    }
+    // a half the time, a loot chest sits among the rubble in the centre
+    if (hash2(this.seed ^ 0x2ed6, ox, oz) < 0.5) {
+      const cx = ox + (W >> 1), cz = oz + (D >> 1);
+      const gy = this.heightAt(cx, cz);
+      if (gy > SEA_LEVEL && Math.abs(gy - oy) <= 3) this.put(chunk, cx, gy + 1, cz, B.CHEST_LOOT);
+    }
   }
 
   private placeKeep(chunk: Chunk, ox: number, oy: number, oz: number): void {

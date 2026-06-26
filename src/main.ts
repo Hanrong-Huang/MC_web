@@ -32,6 +32,9 @@ import type { Entity } from './engine/EntityManager';
 const DAY_LENGTH = 1200; // 20 real minutes
 const SAVE_VERSION = 2;
 const AUTOSAVE_SECONDS = 60;
+// pressure plates stay powered this many 20 Hz ticks after the last step-off,
+// so walking across one doesn't flicker the plate (and slam wired doors)
+const PLATE_RELEASE_TICKS = 8;
 
 type GameUIState = 'loading' | 'playing' | 'paused' | 'container' | 'dead' | 'sleeping';
 
@@ -1247,15 +1250,28 @@ class Game {
           playerPos.y + 1.8 > by && playerPos.y < by + 0.5 &&
           playerPos.z + 0.3 > bz && playerPos.z - 0.3 < bz + 1
         );
-        const mobOn = this.entities.anyMobIntersecting(bx, by, bz);
-        const standingOn = playerOn || mobOn;
+        const occupied = playerOn || this.entities.anyEntityOnBlock(bx, by, bz);
         const state = this.world.redstoneStates.get(key) ?? { active: false };
-        if (standingOn !== state.active) {
-          state.active = standingOn;
+        if (occupied) {
+          // press immediately; refresh the release timer while anything stays on
+          state.releaseT = PLATE_RELEASE_TICKS;
+          if (!state.active) {
+            state.active = true;
+            this.audio.play('plateOn');
+            redstoneDirty = true;
+            this.world.markDirty(Math.floor(bx / 16), Math.floor(bz / 16));
+          }
           this.world.redstoneStates.set(key, state);
-          this.audio.play(standingOn ? 'plateOn' : 'plateOff');
-          redstoneDirty = true;
-          this.world.markDirty(Math.floor(bx / 16), Math.floor(bz / 16));
+        } else if (state.active) {
+          // linger briefly after step-off so walking across doesn't slam doors
+          state.releaseT = (state.releaseT ?? 0) - 1;
+          if (state.releaseT <= 0) {
+            state.active = false;
+            this.audio.play('plateOff');
+            redstoneDirty = true;
+            this.world.markDirty(Math.floor(bx / 16), Math.floor(bz / 16));
+          }
+          this.world.redstoneStates.set(key, state);
         }
       }
     }
