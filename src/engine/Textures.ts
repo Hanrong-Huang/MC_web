@@ -528,13 +528,15 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
     c.fillStyle = 'rgba(120,24,24,0.5)';
     c.fillRect(x + 7, y, 1, 16); c.fillRect(x, y + 7, 16, 1);
   },
-  // head half top: white pillow along the outer edge (low v), red blanket below.
-  // The mesher rotates this so the pillow always faces away from the foot.
+  // head half top: a big white pillow over the outer ~2/3 (low v), with a thin
+  // red blanket strip at the inner edge. The mesher rotates this so the pillow
+  // always faces away from the foot.
   bed_head_top: (c, x, y) => {
     noiseFill(c, x, y, ['#b02e2e', '#a02828', '#bd3737'], 126, 0);
-    c.fillStyle = '#ededed'; c.fillRect(x + 1, y + 1, 14, 5);  // pillow
-    c.fillStyle = '#cfcfcf'; c.fillRect(x + 1, y + 5, 14, 1);  // pillow shadow seam
-    c.fillStyle = '#9a9a9a'; c.fillRect(x + 1, y + 1, 14, 1);  // pillow top edge
+    c.fillStyle = '#ededed'; c.fillRect(x, y, 16, 11);        // big pillow
+    c.fillStyle = '#f6f6f6'; c.fillRect(x, y, 16, 2);         // bright outer edge
+    c.fillStyle = '#d2d2d2'; c.fillRect(x, y + 9, 16, 2);     // pillow shadow seam
+    c.fillStyle = '#8a2222'; c.fillRect(x, y + 11, 16, 1);    // red seam at the join
   },
   // mattress side: red blanket with a brighter top edge and a darker base seam
   bed_side: (c, x, y) => {
