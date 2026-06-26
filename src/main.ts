@@ -1052,8 +1052,9 @@ class Game {
       this.processMeshing(8);
       this.entities.update(dt, this.elapsed, this.renderer.camera.quaternion);
 
-      // weather follows the player
+      // weather follows the player; the Nether has no sky, so no weather there
       const pp = this.player.pos;
+      this.weather.setSuppressed(this.world.dimension !== 'overworld');
       this.weather.update(dt, pp.x, pp.y + this.player.eyeHeight(), pp.z);
 
       // continuous rain bed driven by weather state (snow uses wind gusts)

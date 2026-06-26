@@ -99,6 +99,8 @@ export class Weather {
   private hooks: WeatherHooks;
   /** base sky color the renderer is using, darkened while raining */
   private darken = 0;
+  /** when true (e.g. in the Nether), no precipitation, gloom, or lightning */
+  private suppressed = false;
 
   constructor(scene: THREE.Scene, world: World, hooks: WeatherHooks) {
     this.scene = scene;
@@ -118,8 +120,21 @@ export class Weather {
   /** 0..1 sky whiteout from a recent lightning strike */
   flashAmount(): number { return Math.max(0, this.flashT / 0.35); }
 
+  /** Suppress all weather (Nether/other dimensions have no sky to rain from). */
+  setSuppressed(on: boolean): void { this.suppressed = on; }
+
   /** Drive the state machine + particle motion. Call every frame. */
   update(dt: number, camX: number, camY: number, camZ: number): void {
+    if (this.suppressed) {
+      // force a fast fade to a clear, gloom-free sky with no drops or lightning
+      this.kind = 'clear';
+      this.intensity += (0 - this.intensity) * Math.min(1, dt * 1.2);
+      this.darken += (0 - this.darken) * Math.min(1, dt * 1.2);
+      this.flashT = Math.max(0, this.flashT - dt);
+      this.rain.setVisible(false);
+      this.snow.setVisible(false);
+      return;
+    }
     this.timer -= dt;
     if (this.timer <= 0) this.rollWeather();
 
@@ -184,7 +199,7 @@ export class Weather {
     const x = Math.floor(camX + Math.cos(ang) * dist);
     const z = Math.floor(camZ + Math.sin(ang) * dist);
     // walk down from above to find the highest non-air block
-    let y = 120;
+    let y = 150;
     while (y > 1) {
       const id = this.world.getBlock(x, y, z);
       if (id !== B.AIR && id !== B.WATER) break;

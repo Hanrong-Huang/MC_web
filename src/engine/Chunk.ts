@@ -1,4 +1,4 @@
-// Chunk: 16x16x128 column of block ids packed in a flat Uint8Array,
+// Chunk: 16x16x160 column of block ids packed in a flat Uint8Array,
 // plus a heightmap used for the cheap skylight model.
 
 import { B, CROSS_BLOCKS } from './Blocks';
@@ -15,8 +15,8 @@ export function isGlower(id: number): boolean {
 
 export const CX = 16;
 export const CZ = 16;
-export const CY = 128;
-export const CHUNK_VOLUME = CX * CZ * CY; // 32768 bytes
+export const CY = 160;
+export const CHUNK_VOLUME = CX * CZ * CY; // 40960 bytes
 
 export function chunkKey(cx: number, cz: number): string {
   return `${cx},${cz}`;

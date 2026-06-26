@@ -7,7 +7,8 @@ import { Simplex2, Simplex3, hash2, hash3, mulberry32 } from './Noise';
 import { Chunk, CX, CZ, CY } from './Chunk';
 import { B } from './Blocks';
 
-export const SEA_LEVEL = 32;
+// Raised well above bedrock (y=0) so there's a deep stone column to mine through.
+export const SEA_LEVEL = 64;
 
 export type BiomeId = 'plains' | 'forest' | 'desert' | 'snow' | 'taiga' | 'swamp' | 'mountains' | 'jungle';
 
@@ -96,7 +97,7 @@ export class WorldGenerator {
     const humid = this.humidityAt(wx, wz);
     const erosion = this.erosion.fbm(wx * 0.0035, wz * 0.0035, 3) * 0.5 + 0.5;
     const detail = this.detail.fbm(wx * 0.027, wz * 0.027, 2);
-    let h = 34 + cont * 13 + hills * 7 + detail * 1.8 + Math.pow(m, 2.2) * (42 + erosion * 20);
+    let h = 66 + cont * 13 + hills * 7 + detail * 1.8 + Math.pow(m, 2.2) * (42 + erosion * 20);
     // dry hot regions get broad, low dunes instead of noisy grassy hills
     if (t > 0.62 && humid < 0.45) {
       const dune = Math.sin(wx * 0.07 + this.seed) * Math.cos(wz * 0.045 - this.seed * 0.5);
@@ -200,13 +201,14 @@ export class WorldGenerator {
           const wx = bx + x, wz = bz + z;
           
           chunk.setRaw(x, 0, z, B.BEDROCK);
-          chunk.setRaw(x, 127, z, B.BEDROCK);
-          
-          for (let y = 1; y < 127; y++) {
+          chunk.setRaw(x, CY - 1, z, B.BEDROCK);
+
+          for (let y = 1; y < CY - 1; y++) {
             const n = this.cave1.noise(wx * 0.024, y * 0.04, wz * 0.024) +
                       this.cave2.noise(wx * 0.04, y * 0.024, wz * 0.04) * 0.5;
-            
-            const distToCenter = Math.abs(y - 64) / 64;
+
+            // centre the open cavern on the taller world so it fills the new height
+            const distToCenter = Math.abs(y - CY / 2) / (CY / 2);
             const threshold = -0.1 + distToCenter * 0.6;
             
             let id = B.AIR;
@@ -237,7 +239,7 @@ export class WorldGenerator {
       for (let z = 1; z < CZ - 1; z++) {
         for (let x = 1; x < CX - 1; x++) {
           if (rand() < 0.025) {
-            for (let y = 115; y >= 60; y--) {
+            for (let y = CY - 13; y >= 70; y--) {
               if (chunk.get(x, y, z) === B.NETHERRACK && chunk.get(x, y - 1, z) === B.AIR) {
                 chunk.setRaw(x, y - 1, z, B.GLOWSTONE);
                 if (rand() < 0.5) chunk.setRaw(x - 1, y - 1, z, B.GLOWSTONE);
@@ -284,12 +286,14 @@ export class WorldGenerator {
             const r = hash3(this.seed, wx, y, wz);
             const blob = hash3(this.seed ^ 0xabc, wx >> 2, y >> 2, wz >> 2);
             if (blob < 0.012 && r < 0.8) id = B.GRAVEL;
-            else if (y <= 14 && r < 0.0035) id = B.DIAMOND_ORE;
-            else if (y <= 30 && r >= 0.01 && r < 0.0135) id = B.GOLD_ORE;
-            else if (y <= 54 && r >= 0.02 && r < 0.028) id = B.IRON_ORE;
-            else if (y <= 96 && r >= 0.03 && r < 0.04) id = B.COAL_ORE;
+            // ore depth bands raised with the terrain (+32) so they stay the same
+            // distance below the surface as before the world got deeper
+            else if (y <= 46 && r < 0.0035) id = B.DIAMOND_ORE;
+            else if (y <= 62 && r >= 0.01 && r < 0.0135) id = B.GOLD_ORE;
+            else if (y <= 86 && r >= 0.02 && r < 0.028) id = B.IRON_ORE;
+            else if (y <= 128 && r >= 0.03 && r < 0.04) id = B.COAL_ORE;
             // rare isolated lava pockets in the deep stone
-            else if (y <= 12 && hash3(this.seed ^ 0x1a7a, wx, y, wz) < 0.004) id = B.LAVA;
+            else if (y <= 16 && hash3(this.seed ^ 0x1a7a, wx, y, wz) < 0.004) id = B.LAVA;
           } else if (y < h) {
             id = biome === 'desert' || beach ? B.SAND : B.DIRT;
             if (biome === 'mountains' && y > h - 3 && h > 74) id = B.STONE;

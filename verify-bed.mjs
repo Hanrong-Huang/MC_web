@@ -1,5 +1,5 @@
-// Look at the #debugmobs bed (one block east, foot level) to confirm it now
-// renders as a flat mattress rather than a full cube.
+// Thorough bed check: place a real bed on a cleared platform, view it from
+// several angles, then hold it in hand to confirm it's a flat slab, not a cube.
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
 
@@ -20,17 +20,46 @@ await page.locator('.create-btn').click();
 await page.waitForSelector('#loading.hidden', { timeout: 60000, state: 'attached' });
 await page.waitForTimeout(2500);
 
-// back off west + up and look at the bed obliquely to judge its height/profile
+// build a clean platform and place a bed at its centre; remember the bed coords
+const bed = await page.evaluate(() => {
+  const g = window.__game; const p = g.player; const B = window.__B;
+  p.mode = 'creative'; p.dead = false; p.hp = 20; // can't die / fall-damage while posing
+  const cx = Math.floor(p.pos.x), cy = Math.floor(p.pos.y), cz = Math.floor(p.pos.z) - 6;
+  for (let dx = -4; dx <= 4; dx++) for (let dz = -4; dz <= 4; dz++) {
+    g.world.setBlock(cx + dx, cy - 1, cz + dz, B.STONE);
+    for (let dy = 0; dy <= 4; dy++) g.world.setBlock(cx + dx, cy + dy, cz + dz, 0);
+  }
+  g.world.setBlock(cx, cy, cz, B.BED);
+  p.inventory.slots[0] = { id: B.BED, count: 1 };
+  p.inventory.selected = 0; p.inventory.onChange();
+  p.flying = true; p.vel = { x: 0, y: 0, z: 0 };
+  return { x: cx + 0.5, y: cy, z: cz + 0.5 };
+});
+
+// helper: place the camera at an offset and aim it at the bed
+async function shot(name, ox, oy, oz) {
+  await page.evaluate(({ bed, ox, oy, oz }) => {
+    const p = window.__game.player;
+    p.pos.x = bed.x + ox; p.pos.y = bed.y + oy; p.pos.z = bed.z + oz;
+    const dx = bed.x - p.pos.x, dy = (bed.y + 0.3) - (p.pos.y + p.eyeHeight()), dz = bed.z - p.pos.z;
+    p.yaw = Math.atan2(-dx, -dz);
+    p.pitch = Math.atan2(dy, Math.hypot(dx, dz));
+  }, { bed, ox, oy, oz });
+  await page.waitForTimeout(700);
+  await page.screenshot({ path: name });
+}
+
+await shot('bed-front.png', 0, 1.2, 3.0);   // looking from the foot
+await shot('bed-side.png', 3.0, 1.2, 0.2);   // looking from the side
+await shot('bed-iso.png', 2.4, 2.2, 2.4);    // 3/4 isometric-ish
+
+// held in hand: look flat ahead at the sky so the held bed shows in the corner
 await page.evaluate(() => {
   const p = window.__game.player;
-  const bedX = Math.floor(p.pos.x) + 1, bedY = Math.floor(p.pos.y), bedZ = Math.floor(p.pos.z);
-  p.flying = true; p.vel = { x: 0, y: 0, z: 0 };
-  p.pos.x = bedX - 2.0; p.pos.y = bedY + 1.4; p.pos.z = bedZ + 0.5;
-  p.yaw = -Math.PI / 2;   // look east (+x) at the bed
-  p.pitch = -0.45;        // steeper downward tilt for a close oblique profile
+  p.pos.y = p.pos.y + 1; p.pitch = 0.1; p.yaw = 0;
 });
-await page.waitForTimeout(1000);
-await page.screenshot({ path: 'bed-shape.png' });
+await page.waitForTimeout(700);
+await page.screenshot({ path: 'bed-held.png' });
 
 console.log('--- console errors ---');
 console.log(errors.length ? errors.slice(0, 8).join('\n') : 'NONE');

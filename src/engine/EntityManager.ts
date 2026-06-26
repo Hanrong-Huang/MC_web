@@ -1363,7 +1363,7 @@ export class EntityManager {
       const chunk = this.world.getChunk(Math.floor(wx / 16), Math.floor(wz / 16));
       if (!chunk || !chunk.ready) return;
       const h = chunk.heightmap[(wz & 15) * 16 + (wx & 15)];
-      if (h <= SEA_LEVEL || h >= 120) return;
+      if (h <= SEA_LEVEL || h >= 150) return;
       const ground = this.world.getBlock(wx, h - 1, wz);
       if (ground !== B.GRASS && ground !== B.SNOW_GRASS && ground !== B.SAND) return;
       if (this.world.getBlock(wx, h, wz) !== B.AIR || this.world.getBlock(wx, h + 1, wz) !== B.AIR) return;
@@ -1404,7 +1404,7 @@ export class EntityManager {
           const py = Math.floor(p.pos.y);
           for (let tries = 0; tries < 10; tries++) {
             const wy = py - 10 + Math.floor(Math.random() * 22);
-            if (wy < 5 || wy > 120) continue;
+            if (wy < 5 || wy > 150) continue;
             if (this.world.getBlock(wx, wy, wz) !== B.AIR) continue;
             if (this.world.getBlock(wx, wy + 1, wz) !== B.AIR) continue;
             if (!this.world.isSolidAt(wx, wy - 1, wz)) continue;

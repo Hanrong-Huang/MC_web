@@ -754,25 +754,20 @@ function emitPressurePlate(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number
   emitBox(g, rect, x, y, z, 0.0625, 0.9375, 0, h, 0.0625, 0.9375, sky, torch);
 }
 
-/** Bed: a low wooden frame on four stubby legs, a mattress (blanket on top, bed
- *  trim around the rim), and a raised pillow at the head end (-Z). A genuine bed
- *  silhouette rather than a full cube. */
+/** Bed: a full-footprint mattress lifted on four short corner legs, leaving the
+ *  classic gap underneath. The blanket texture (which already draws the pillow)
+ *  goes on top and the bed trim wraps the mattress rim — a true 3D bed shape. */
 function emitBed(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number): void {
   const side = atlas.rect('bed_side');
   const top = atlas.rect('bed_top');
   const wood = atlas.rect('planks');
-  // four short corner legs
-  const legs: [number, number, number, number][] = [
-    [0.03, 0.2, 0.03, 0.2], [0.8, 0.97, 0.03, 0.2],
-    [0.03, 0.2, 0.8, 0.97], [0.8, 0.97, 0.8, 0.97],
-  ];
-  for (const [lx0, lx1, lz0, lz1] of legs) {
-    emitBox(g, wood, x, y, z, lx0, lx1, 0, 0.18, lz0, lz1, sky, torch);
+  const legH = 0.1875;     // legs hold the mattress 3/16 off the ground
+  const legW = 0.22;
+  for (const [lx0, lz0] of [[0, 0], [1 - legW, 0], [0, 1 - legW], [1 - legW, 1 - legW]]) {
+    emitBox(g, wood, x, y, z, lx0, lx0 + legW, 0, legH, lz0, lz0 + legW, sky, torch);
   }
-  // mattress slab
-  emitBox(g, side, x, y, z, 0.02, 0.98, 0.18, 0.46, 0.02, 0.98, sky, torch, [1, 1, 1], top);
-  // raised pillow at the head (-Z) end
-  emitBox(g, side, x, y, z, 0.14, 0.86, 0.46, 0.6, 0.06, 0.34, sky, torch, [1, 1, 1], top);
+  // mattress slab resting on the legs, spanning the whole block
+  emitBox(g, side, x, y, z, 0, 1, legH, 0.5625, 0, 1, sky, torch, [1, 1, 1], top);
 }
 
 function emitLever(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean, facing: number): void {

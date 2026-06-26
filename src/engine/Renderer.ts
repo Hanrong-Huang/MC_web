@@ -226,7 +226,7 @@ export class Renderer {
     });
     this.clouds = new THREE.Mesh(new THREE.PlaneGeometry(1536, 1536), cloudMat);
     this.clouds.rotation.x = -Math.PI / 2;
-    this.clouds.position.y = 130;
+    this.clouds.position.y = 150;
     this.clouds.renderOrder = 2;
     this.scene.add(this.clouds);
 
@@ -507,7 +507,9 @@ export class Renderer {
       this.heldMesh = mesh;
     } else if (id !== 0 && hasDef(id) && def(id).block) {
       const d = def(id);
-      const geo = new THREE.BoxGeometry(1, 1, 1);
+      // the bed holds as a flat 9/16 slab, not a full cube (matches the world mesh)
+      const flatBed = d.name === 'bed';
+      const geo = new THREE.BoxGeometry(1, flatBed ? 0.5625 : 1, 1);
       const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
       // BoxGeometry face order: +x,-x,+y,-y,+z,-z; 4 uvs per face
       const faceNames = [
@@ -522,7 +524,7 @@ export class Renderer {
       }
       uv.needsUpdate = true;
       const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: this.atlas.texture, alphaTest: 0.35 }));
-      mesh.scale.setScalar(0.34);
+      mesh.scale.setScalar(flatBed ? 0.42 : 0.34);
       // a slight 3/4 tilt so the top + two side faces all catch the light
       mesh.rotation.set(-0.16, 0.5, 0);
       this.heldMesh = mesh;

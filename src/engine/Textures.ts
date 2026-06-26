@@ -1840,7 +1840,30 @@ export class Atlas {
     if (cached) return cached;
     const d = def(id);
     const [c, ctx] = makeCanvas(32, 32);
-    if (d.block && d.faces && !d.solid) {
+    if (d.name === 'bed' && d.faces) {
+      // the bed is a flat (9/16) block, so draw a low isometric slab — a wide top
+      // diamond (blanket + pillow) over short side rims — not a full cube
+      ctx.imageSmoothingEnabled = false;
+      const top = this.tileCanvas(d.faces.top);
+      const side = this.tileCanvas(d.faces.sides);
+      ctx.fillStyle = 'rgba(0,0,0,0.2)';
+      ctx.beginPath();
+      ctx.moveTo(16, 27); ctx.lineTo(29, 20.5); ctx.lineTo(16, 14); ctx.lineTo(3, 20.5);
+      ctx.closePath(); ctx.fill();
+      // top face, lowered so the slab reads as flat
+      ctx.setTransform(0.93, 0.47, -0.93, 0.47, 16, 7.4);
+      ctx.drawImage(top, 0, 0, 16, 16, 0, 0, 16, 16);
+      // left rim (short), darkened
+      ctx.setTransform(0.93, 0.47, 0, 0.55, 1.1, 15);
+      ctx.filter = 'brightness(78%)';
+      ctx.drawImage(side, 0, 0, 16, 16, 0, 0, 16, 16);
+      // right rim, darker
+      ctx.setTransform(0.93, -0.47, 0, 0.55, 16, 22.4);
+      ctx.filter = 'brightness(58%)';
+      ctx.drawImage(side, 0, 0, 16, 16, 0, 0, 16, 16);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.filter = 'none';
+    } else if (d.block && d.faces && !d.solid) {
       // non-cube decorations (torch, flowers, crops, cane, sapling, ladder,
       // doors, water) read better as a flat tile than as an isometric cube
       ctx.imageSmoothingEnabled = false;
