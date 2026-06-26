@@ -52,6 +52,8 @@ export interface PlayerDeps {
   onDeath: () => void;
   onTeleport: () => void;
   onRedstoneUpdate: (x: number, y: number, z: number) => void;
+  /** brief on-screen message (tool warnings, etc.) */
+  toast: (msg: string) => void;
 }
 
 export class Player {
@@ -700,10 +702,20 @@ export class Player {
     const d = def(slot.id);
     if (!d.durability) return;
     if (miningOnly && !d.toolInfo) return; // bows don't wear from punching blocks
-    slot.dur = (slot.dur ?? d.durability) - 1;
+    const prev = slot.dur ?? d.durability;
+    slot.dur = prev - 1;
     if (slot.dur <= 0) {
       this.inventory.slots[this.inventory.selected] = null;
       this.deps.audio.play('snap');
+      this.deps.toast(`Your ${d.label} broke!`);
+    } else {
+      // one-shot warning the moment durability dips under 10% — gives the player
+      // time to craft a replacement before it snaps mid-task
+      const warn = Math.max(1, Math.ceil(d.durability * 0.1));
+      if (prev > warn && slot.dur <= warn) {
+        this.deps.audio.play('lowdur');
+        this.deps.toast(`${d.label} is almost broken!`);
+      }
     }
     this.inventory.onChange();
   }
@@ -732,7 +744,11 @@ export class Player {
       const max = def(s.id).durability ?? 0;
       if (!max) continue;
       s.dur = (s.dur ?? max) - 1;
-      if (s.dur <= 0) { this.inventory.armor[i] = null; this.deps.audio.play('snap'); }
+      if (s.dur <= 0) {
+        this.deps.toast(`Your ${def(s.id).label} broke!`);
+        this.inventory.armor[i] = null;
+        this.deps.audio.play('snap');
+      }
       changed = true;
     }
     if (changed) this.inventory.onChange();
@@ -1307,6 +1323,9 @@ export class Player {
       this.deps.entities.hurt(hit.entity, dmg, d.x, d.z);
       this.addExhaustion(0.1);
       this.damageHeldTool();
+    } else if (!this.target && (!hit || hit.entity === this.riding)) {
+      // swung at empty air (nothing to break, nothing to hit) — a soft swish
+      this.deps.audio.play('whoosh');
     }
   }
 

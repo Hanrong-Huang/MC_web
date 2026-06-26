@@ -86,6 +86,7 @@ export class HUD {
   private loadingEl: HTMLElement;
   private toastEl: HTMLElement;
   private cursorEl: HTMLElement;
+  private tooltipEl!: HTMLElement;
   private vignette: HTMLElement;
   private lowhpEl!: HTMLElement;
   private sleepEl!: HTMLElement;
@@ -154,6 +155,7 @@ export class HUD {
     this.loadingEl = el('div', 'overlay hidden', root); this.loadingEl.id = 'loading';
     this.toastEl = el('div', '', root); this.toastEl.id = 'toast';
     this.cursorEl = el('div', 'hidden', root); this.cursorEl.id = 'cursor-item';
+    this.tooltipEl = el('div', 'hidden', root); this.tooltipEl.id = 'item-tooltip';
 
     this.packInput = el('input') as HTMLInputElement;
     this.packInput.type = 'file';
@@ -313,6 +315,7 @@ export class HUD {
     this.deathEl.classList.add('hidden');
     this.containerEl.classList.add('hidden');
     this.cursorEl.classList.add('hidden');
+    this.hideTooltip();
     this.hideAdvancements();
   }
 
@@ -384,9 +387,24 @@ export class HUD {
     }
   }
 
+  /** A name colour keyed to the item's material/role, so the hotbar popup and
+   *  tooltips read at a glance (diamond aqua, iron pale, food warm, …). */
+  private itemAccent(id: number): string {
+    const d = def(id);
+    const tier = d.toolInfo?.tier ?? (d.armor ? 0 : -1);
+    const n = d.name;
+    if (n.includes('diamond')) return '#5decd5';
+    if (n.includes('gold') || id === I.GOLDEN_CARROT) return '#ffe14a';
+    if (tier >= 6 || n.includes('iron')) return '#dfe6ee';
+    if (d.food) return '#ffcf8a';
+    if (d.bow || d.toolInfo) return '#e8d7b0';
+    return '#ffffff';
+  }
+
   /** Item-name popup shown above the hotbar when the selection changes. */
-  showItemName(label: string): void {
+  showItemName(label: string, id?: number): void {
     this.itemNameEl.textContent = label;
+    this.itemNameEl.style.color = id !== undefined ? this.itemAccent(id) : '#fff';
     this.itemNameEl.classList.add('show');
     if (this.itemNameTimer) clearTimeout(this.itemNameTimer);
     this.itemNameTimer = setTimeout(() => this.itemNameEl.classList.remove('show'), 1400);
@@ -627,6 +645,17 @@ export class HUD {
     sound.textContent = `Sounds: ${h.soundOn() ? 'On' : 'Off'}`;
     sound.onclick = () => { this.audio.play('click'); h.onToggleSound(); };
 
+    // master volume slider
+    const volRow = el('div', 'menu-row', col);
+    const volLbl = el('span', 'vol-label', volRow);
+    const setVolLabel = (): void => { volLbl.textContent = `Volume: ${Math.round(this.audio.volume * 100)}%`; };
+    setVolLabel();
+    const vol = el('input', 'vol-slider', volRow) as HTMLInputElement;
+    vol.type = 'range'; vol.min = '0'; vol.max = '100'; vol.step = '5';
+    vol.value = String(Math.round(this.audio.volume * 100));
+    vol.oninput = () => { this.audio.setVolume(parseInt(vol.value, 10) / 100); setVolLabel(); };
+    vol.onchange = () => this.audio.play('click');
+
     const pack = el('button', 'mc-btn', col);
     pack.textContent = 'Load Resource Pack';
     pack.onclick = () => { this.packHandler = h.onPack; this.packInput.click(); };
@@ -696,6 +725,7 @@ export class HUD {
     this.inv = null;
     this.containerEl.classList.add('hidden');
     this.cursorEl.classList.add('hidden');
+    this.hideTooltip();
     this.renderCursor();
   }
 
@@ -712,6 +742,53 @@ export class HUD {
       this.furnaceSnapshot = snap;
       this.renderContainer('survival');
     }
+  }
+
+  // --- item tooltips --------------------------------------------------------
+
+  /** Descriptive stat lines for a stack — attack, durability, food, armor. */
+  private tooltipLines(item: SlotData): string[] {
+    const d = def(item.id);
+    const lines: string[] = [];
+    // the item's label already names the tier+kind (e.g. "Diamond Sword"), so
+    // the tooltip only adds the numbers that aren't in the name
+    if (d.toolInfo) lines.push(`Attack: ${d.toolInfo.damage}`);
+    if (d.bow) lines.push('Ranged weapon — hold to draw');
+    if (d.armor) lines.push(`Armor: +${d.armor.points}`);
+    if (d.food) lines.push(`Restores ${d.food} hunger`);
+    if (d.durability) {
+      const cur = item.dur ?? d.durability;
+      lines.push(`Durability: ${cur} / ${d.durability}`);
+    }
+    if (d.fuel) lines.push(`Furnace fuel: ${d.fuel}s`);
+    return lines;
+  }
+
+  /** Show the rich tooltip for an item near (x, y); a no-op for empty slots. */
+  showTooltip(item: Slot, x: number, y: number): void {
+    if (!item) { this.hideTooltip(); return; }
+    const d = def(item.id);
+    this.tooltipEl.innerHTML = '';
+    const name = el('div', 'tt-name', this.tooltipEl);
+    name.textContent = d.label;
+    name.style.color = this.itemAccent(item.id);
+    for (const line of this.tooltipLines(item)) {
+      el('div', 'tt-line', this.tooltipEl).textContent = line;
+    }
+    this.tooltipEl.classList.remove('hidden');
+    this.moveTooltip(x, y);
+  }
+
+  hideTooltip(): void { this.tooltipEl.classList.add('hidden'); }
+
+  private moveTooltip(x: number, y: number): void {
+    // keep the box on screen: flip to the left/up near the right/bottom edges
+    const r = this.tooltipEl.getBoundingClientRect();
+    let left = x + 14, top = y + 16;
+    if (left + r.width > window.innerWidth - 6) left = x - r.width - 14;
+    if (top + r.height > window.innerHeight - 6) top = y - r.height - 8;
+    this.tooltipEl.style.left = `${Math.max(4, left)}px`;
+    this.tooltipEl.style.top = `${Math.max(4, top)}px`;
   }
 
   private iconCanvas(item: SlotData): HTMLCanvasElement {
@@ -744,6 +821,46 @@ export class HUD {
       const c = el('span', 'slot-count', this.cursorEl);
       c.textContent = String(this.cursor.count);
     }
+  }
+
+  /** Shift-click quick-move: shove src[i]'s whole stack into dst[lo..hi),
+   *  merging into matching stacks first, then filling empty slots. */
+  private transfer(src: Slot[], i: number, dst: Slot[], lo: number, hi: number): boolean {
+    const s = src[i];
+    if (!s) return false;
+    const max = def(s.id).stack;
+    let moved = false;
+    for (let j = lo; j < hi && s.count > 0; j++) {
+      const t = dst[j];
+      if (t && t.id === s.id && t.count < max) {
+        const give = Math.min(max - t.count, s.count);
+        t.count += give; s.count -= give; moved = true;
+      }
+    }
+    for (let j = lo; j < hi && s.count > 0; j++) {
+      if (!dst[j]) {
+        const give = Math.min(max, s.count);
+        dst[j] = { id: s.id, count: give, ...(s.dur !== undefined ? { dur: s.dur } : {}) };
+        s.count -= give; moved = true;
+      }
+    }
+    if (s.count <= 0) src[i] = null;
+    if (moved) this.audio.play('click');
+    return moved;
+  }
+
+  /** Shift-click from a player inventory/hotbar slot: into an open chest if any,
+   *  otherwise shuffle between the hotbar row and the main grid (vanilla feel). */
+  private quickMovePlayer(view: ContainerView, inv: Inventory, i: number): void {
+    let moved: boolean;
+    if (view.kind === 'chest' && view.chest) {
+      moved = this.transfer(inv.slots, i, view.chest.slots, 0, view.chest.slots.length);
+    } else if (i < 9) {
+      moved = this.transfer(inv.slots, i, inv.slots, 9, 36);
+    } else {
+      moved = this.transfer(inv.slots, i, inv.slots, 0, 9);
+    }
+    if (moved) inv.onChange();
   }
 
   /** Generic slot click with cursor-stack semantics. */
@@ -811,22 +928,32 @@ export class HUD {
     inv.onChange();
   }
 
-  private slotEl(parent: HTMLElement, item: Slot, onClick: (button: number) => void): void {
+  private slotEl(parent: HTMLElement, item: Slot, onClick: (button: number, shift: boolean) => void): void {
     const s = el('div', 'mc-slot', parent);
     if (item) {
       s.appendChild(this.iconCanvas(item));
-      s.title = def(item.id).label;
       if (item.count > 1) {
         const c = el('span', 'slot-count', s);
         c.textContent = String(item.count);
       }
+      // styled tooltip on hover (mouse only; touch uses tap-to-pick)
+      s.addEventListener('pointerenter', (e) => {
+        if (e.pointerType !== 'touch') this.showTooltip(item, e.clientX, e.clientY);
+      });
+      s.addEventListener('pointermove', (e) => {
+        if (e.pointerType !== 'touch' && !this.tooltipEl.classList.contains('hidden')) {
+          this.moveTooltip(e.clientX, e.clientY);
+        }
+      });
+      s.addEventListener('pointerleave', () => this.hideTooltip());
     }
     // pointerdown fires reliably on touch (a tap) and mouse; move the held-item
     // cursor to the tap point first so it's visible where the finger is
     s.addEventListener('pointerdown', (e) => {
       e.preventDefault();
+      this.hideTooltip();
       this.followCursor(e.clientX, e.clientY);
-      onClick(e.button);
+      onClick(e.button, e.shiftKey);
     });
   }
 
@@ -938,6 +1065,7 @@ export class HUD {
     if (!this.view || !this.inv) return;
     const view = this.view;
     const inv = this.inv;
+    this.hideTooltip();
     this.containerEl.innerHTML = '';
     const panel = el('div', 'mc-panel', this.containerEl);
     const rerender = (): void => { this.renderContainer(mode); this.renderCursor(); };
@@ -1007,8 +1135,10 @@ export class HUD {
       const grid = el('div', 'ctr-grid', sec);
       grid.style.gridTemplateColumns = 'repeat(9, 48px)';
       for (let i = 0; i < chest.slots.length; i++) {
-        this.slotEl(grid, chest.slots[i], (btn) => {
-          this.clickSlot(chest.slots, i, btn);
+        this.slotEl(grid, chest.slots[i], (btn, shift) => {
+          if (shift) this.transfer(chest.slots, i, inv.slots, 0, 36);
+          else this.clickSlot(chest.slots, i, btn);
+          inv.onChange();
           rerender();
         });
       }
@@ -1021,8 +1151,9 @@ export class HUD {
       if (view.kind === 'inventory') {
         const armorCol = el('div', 'ctr-section armor-col', craftArea);
         for (let i = 0; i < 4; i++) {
-          this.slotEl(armorCol, inv.armor[i], (btn) => {
-            this.clickArmorSlot(inv, i, btn);
+          this.slotEl(armorCol, inv.armor[i], (btn, shift) => {
+            if (shift) { if (this.transfer(inv.armor, i, inv.slots, 0, 36)) inv.onChange(); }
+            else this.clickArmorSlot(inv, i, btn);
             rerender();
           });
         }
@@ -1031,8 +1162,9 @@ export class HUD {
       const grid = el('div', 'ctr-grid', sec);
       grid.style.gridTemplateColumns = `repeat(${view.craftW}, 48px)`;
       for (let i = 0; i < view.craftGrid.length; i++) {
-        this.slotEl(grid, view.craftGrid[i], (btn) => {
-          this.clickSlot(view.craftGrid, i, btn);
+        this.slotEl(grid, view.craftGrid[i], (btn, shift) => {
+          if (shift) { if (this.transfer(view.craftGrid, i, inv.slots, 0, 36)) inv.onChange(); }
+          else this.clickSlot(view.craftGrid, i, btn);
           rerender();
         });
       }
@@ -1040,23 +1172,38 @@ export class HUD {
       arrow.textContent = '→';
       const result = matchRecipe(view.craftGrid, view.craftW);
       const resWrap = el('div', '', sec);
-      this.slotEl(resWrap, result ? { id: result.id, count: result.count } : null, (btn) => {
+      this.slotEl(resWrap, result ? { id: result.id, count: result.count } : null, (btn, shift) => {
         void btn;
         if (!result) return;
+        // a single consume of the grid (one craft); returns the result count made
+        const craftOnce = (): number => {
+          for (let i = 0; i < view.craftGrid.length; i++) {
+            const s = view.craftGrid[i];
+            if (s) { s.count--; if (s.count <= 0) view.craftGrid[i] = null; }
+          }
+          this.onCraft(result.id);
+          return result.count;
+        };
+        if (shift) {
+          // craft straight into the inventory, repeating while the grid still
+          // makes the same item and there's room — the classic bulk-craft
+          let made = false;
+          while (matchRecipe(view.craftGrid, view.craftW)?.id === result.id) {
+            const n = craftOnce();
+            if (inv.add(result.id, n) > 0) break; // inventory full
+            made = true;
+          }
+          if (made) { this.audio.play('craft'); inv.onChange(); }
+          rerender();
+          return;
+        }
         const fits = !this.cursor ||
           (this.cursor.id === result.id && this.cursor.count + result.count <= def(result.id).stack);
         if (!fits) return;
-        if (!this.cursor) this.cursor = { id: result.id, count: result.count };
-        else this.cursor.count += result.count;
-        for (let i = 0; i < view.craftGrid.length; i++) {
-          const s = view.craftGrid[i];
-          if (s) {
-            s.count--;
-            if (s.count <= 0) view.craftGrid[i] = null;
-          }
-        }
+        const n = craftOnce();
+        if (!this.cursor) this.cursor = { id: result.id, count: n };
+        else this.cursor.count += n;
         this.audio.play('craft');
-        this.onCraft(result.id);
         rerender();
       });
 
@@ -1146,18 +1293,22 @@ export class HUD {
       const sec = el('div', 'ctr-section ctr-flex', panel);
 
       const left = el('div', 'furnace-col', sec);
-      this.slotEl(left, f.input, (btn) => {
+      this.slotEl(left, f.input, (btn, shift) => {
         const arr: Slot[] = [f.input];
-        this.clickSlot(arr, 0, btn);
+        if (shift) this.transfer(arr, 0, inv.slots, 0, 36);
+        else this.clickSlot(arr, 0, btn);
         f.input = arr[0];
+        inv.onChange();
         rerender();
       });
       const flame = el('div', 'furnace-flame', left);
       el('div', 'fill', flame);
-      this.slotEl(left, f.fuel, (btn) => {
+      this.slotEl(left, f.fuel, (btn, shift) => {
         const arr: Slot[] = [f.fuel];
-        this.clickSlot(arr, 0, btn);
+        if (shift) this.transfer(arr, 0, inv.slots, 0, 36);
+        else this.clickSlot(arr, 0, btn);
         f.fuel = arr[0];
+        inv.onChange();
         rerender();
       });
 
@@ -1166,10 +1317,12 @@ export class HUD {
       el('div', 'fill', arrow);
 
       const right = el('div', 'furnace-col', sec);
-      this.slotEl(right, f.output, (btn) => {
+      this.slotEl(right, f.output, (btn, shift) => {
         const arr: Slot[] = [f.output];
-        this.clickSlot(arr, 0, btn, true);
+        if (shift) this.transfer(arr, 0, inv.slots, 0, 36);
+        else this.clickSlot(arr, 0, btn, true);
         f.output = arr[0];
+        inv.onChange();
         rerender();
       });
       this.furnaceSnapshot = JSON.stringify([f.input, f.fuel, f.output]);
@@ -1180,9 +1333,10 @@ export class HUD {
       const sec = el('div', 'ctr-section', panel);
       const grid = el('div', 'creative-grid', sec);
       for (const id of CREATIVE_ITEMS) {
-        this.slotEl(grid, { id, count: 1 }, (btn) => {
+        this.slotEl(grid, { id, count: 1 }, (btn, shift) => {
           this.audio.play('click');
           const d = def(id);
+          if (shift) { inv.add(id, d.stack); inv.onChange(); rerender(); return; }
           this.cursor = { id, count: btn === 2 ? 1 : d.stack };
           this.renderCursor();
         });
@@ -1202,9 +1356,9 @@ export class HUD {
     const mainGrid = el('div', 'ctr-grid', mainSec);
     mainGrid.style.gridTemplateColumns = 'repeat(9, 48px)';
     for (let i = 9; i < 36; i++) {
-      this.slotEl(mainGrid, inv.slots[i], (btn) => {
-        this.clickSlot(inv.slots, i, btn);
-        inv.onChange();
+      this.slotEl(mainGrid, inv.slots[i], (btn, shift) => {
+        if (shift) this.quickMovePlayer(view, inv, i);
+        else { this.clickSlot(inv.slots, i, btn); inv.onChange(); }
         rerender();
       });
     }
@@ -1213,9 +1367,9 @@ export class HUD {
     const hotGrid = el('div', 'ctr-grid', hotSec);
     hotGrid.style.gridTemplateColumns = 'repeat(9, 48px)';
     for (let i = 0; i < 9; i++) {
-      this.slotEl(hotGrid, inv.slots[i], (btn) => {
-        this.clickSlot(inv.slots, i, btn);
-        inv.onChange();
+      this.slotEl(hotGrid, inv.slots[i], (btn, shift) => {
+        if (shift) this.quickMovePlayer(view, inv, i);
+        else { this.clickSlot(inv.slots, i, btn); inv.onChange(); }
         rerender();
       });
     }

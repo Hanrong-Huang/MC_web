@@ -202,6 +202,7 @@ class Game {
       onTrade: () => this.adv.unlock('trade'),
       onDeath: () => this.onDeath(),
       onTeleport: () => this.teleportPlayerDimension(),
+      toast: (msg) => this.hud.toast(msg),
     });
 
     if (save) {
@@ -919,7 +920,7 @@ class Game {
           heldId === I.SEEDS || heldId === I.CARROT || heldId === I.POTATO || heldId === I.BEETROOT_SEEDS
             ? `${def(heldId).label} - plant on farmland` :
             def(heldId).label;
-        this.hud.showItemName(hint);
+        this.hud.showItemName(hint, heldId);
       }
       this.lastSelected = sel;
       this.lastHeldId = heldId;

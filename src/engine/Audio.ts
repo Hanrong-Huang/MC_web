@@ -6,7 +6,7 @@ import { SoundClass } from './Blocks';
 export type SfxName =
   | 'pop' | 'hurt' | 'hit' | 'eat' | 'burp' | 'click' | 'select' | 'fail' | 'craft' | 'level'
   | 'doorOpen' | 'doorClose' | 'plateOn' | 'plateOff'
-  | 'explode' | 'bow' | 'snap' | 'fuse' | 'arrowHit'
+  | 'explode' | 'bow' | 'snap' | 'fuse' | 'arrowHit' | 'whoosh' | 'lowdur'
   | 'thunder' | 'rain' | 'splash' | 'hoof' | 'mount'
   | 'submerge' | 'emerge';
 
@@ -33,7 +33,7 @@ interface PieceMood {
   density: number;          // melody note probability multiplier
 }
 
-interface AudioSettings { music: boolean; sound: boolean }
+interface AudioSettings { music: boolean; sound: boolean; volume: number }
 
 const SETTINGS_KEY = 'voxelcraft-audio';
 
@@ -47,7 +47,9 @@ export class AudioEngine {
   private musicT = 6;        // seconds until the next generated piece
   private atmosphereT = 12;  // sparse lonely wind/drone/bell cues between music
   private heartT = 0;        // low-health heartbeat pacing
-  private settings: AudioSettings = { music: true, sound: true };
+  private settings: AudioSettings = { music: true, sound: true, volume: 0.7 };
+  // master gain at volume=0.7 (the previous fixed 0.35), scaling linearly
+  private masterFor(v: number): number { return 0.5 * Math.max(0, Math.min(1, v)); }
   // continuous rain bed: a persistent looping noise source we fade in/out
   private rainSrc: AudioBufferSourceNode | null = null;
   private rainGain: GainNode | null = null;
@@ -71,6 +73,19 @@ export class AudioEngine {
 
   get musicOn(): boolean { return this.settings.music; }
   get soundOn(): boolean { return this.settings.sound; }
+  get volume(): number { return this.settings.volume; }
+
+  /** Master loudness 0..1; ramps smoothly and persists. */
+  setVolume(v: number): void {
+    this.settings.volume = Math.max(0, Math.min(1, v));
+    if (this.master && this.ctx) {
+      const t = this.ctx.currentTime;
+      this.master.gain.cancelScheduledValues(t);
+      this.master.gain.setValueAtTime(this.master.gain.value, t);
+      this.master.gain.linearRampToValueAtTime(this.masterFor(this.settings.volume), t + 0.1);
+    }
+    this.persist();
+  }
 
   setMusic(on: boolean): void {
     this.settings.music = on;
@@ -98,7 +113,7 @@ export class AudioEngine {
     try {
       this.ctx = new AudioContext();
       this.master = this.ctx.createGain();
-      this.master.gain.value = 0.35;
+      this.master.gain.value = this.masterFor(this.settings.volume);
       // master → underwater lowpass → speakers. The filter is transparent (20kHz)
       // until submerged, when it ramps down to a muffled ~600 Hz.
       this.uwFilter = this.ctx.createBiquadFilter();
@@ -307,6 +322,15 @@ export class AudioEngine {
         this.noiseBurst(0.12, 2400, 0.2, 'highpass');
         break;
       case 'fuse': this.noiseBurst(1.3, 3800, 0.22, 'highpass'); break;
+      case 'whoosh':
+        // a soft airy swish for swinging at empty air — short filtered noise sweep
+        this.noiseBurst(0.16, 1700, 0.12, 'bandpass', 520);
+        break;
+      case 'lowdur':
+        // a small worried two-tone chirp: your tool is nearly spent
+        this.tone(0.07, 880, 700, 0.12, 'square');
+        this.tone(0.09, 640, 460, 0.1, 'triangle', 0.07);
+        break;
       case 'arrowHit': this.tone(0.06, 950, 500, 0.2, 'triangle'); this.noiseBurst(0.05, 2000, 0.12, 'bandpass'); break;
       case 'splash':
         this.noiseBurst(0.22, 1400, 0.18, 'bandpass', 520);

@@ -366,6 +366,43 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   background: #9c9c9c; border: 2px solid; border-color: #373737 #fff #fff #373737;
 }
 
+/* --- item tooltip (hover) ------------------------------------------------- */
+#item-tooltip {
+  position: fixed; z-index: 105; pointer-events: none;
+  min-width: 90px; max-width: 240px;
+  padding: 6px 9px;
+  background: rgba(16,8,28,0.94);
+  border: 2px solid; border-color: #6a4fae #2a1746 #2a1746 #6a4fae;
+  box-shadow: 0 3px 10px rgba(0,0,0,0.55);
+}
+.tt-name {
+  font-size: 13px; color: #fff; font-weight: bold;
+  text-shadow: 1px 1px #000; margin-bottom: 2px;
+}
+.tt-line {
+  font-size: 11px; color: #b9b0c8;
+  text-shadow: 1px 1px #000; line-height: 1.4;
+}
+
+/* --- volume slider (pause menu) ------------------------------------------- */
+.vol-label { color: #ddd; font-size: 13px; text-shadow: 1px 1px #000; min-width: 96px; }
+.vol-slider {
+  flex: 1; max-width: 200px; height: 6px; cursor: pointer;
+  -webkit-appearance: none; appearance: none;
+  background: #2a2a2a; border: 2px solid; border-color: #1a1a1a #6e6e6e #6e6e6e #1a1a1a;
+}
+.vol-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 12px; height: 18px; cursor: pointer;
+  background: linear-gradient(#9ec79e, #5f8f5f);
+  border: 2px solid; border-color: #d6ecd6 #1f3a1f #1f3a1f #d6ecd6;
+}
+.vol-slider::-moz-range-thumb {
+  width: 12px; height: 18px; cursor: pointer; border-radius: 0;
+  background: linear-gradient(#9ec79e, #5f8f5f);
+  border: 2px solid; border-color: #d6ecd6 #1f3a1f #1f3a1f #d6ecd6;
+}
+
 #cursor-item {
   position: fixed; z-index: 100; pointer-events: none;
   width: 36px; height: 36px;
