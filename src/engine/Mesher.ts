@@ -686,7 +686,7 @@ function emitTrapdoor(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: 
 function emitBox(
   g: GeoBuilder, rect: UVRect, x: number, y: number, z: number,
   x0: number, x1: number, y0: number, y1: number, z0: number, z1: number,
-  sky: number, torch: number, tint = [1, 1, 1], topRect: UVRect = rect
+  sky: number, torch: number, tint = [1, 1, 1], topRect: UVRect = rect, topRot = 0
 ): void {
   const push = (px: number, py: number, pz: number, u: number, v: number): void => {
     g.positions.push(x + px, y + py, z + pz);
@@ -695,12 +695,18 @@ function emitBox(
     g.uvs.push(u, v);
   };
 
-  // +y top (may use a distinct texture, e.g. a bed's blanket)
+  // +y top (may use a distinct texture, e.g. a bed's blanket, rotated 90*topRot
+  // so an oriented texture like a pillow points the right way)
   let base = g.vertCount;
-  push(x0, y1, z0, topRect.u0, topRect.v0);
-  push(x1, y1, z0, topRect.u1, topRect.v0);
-  push(x1, y1, z1, topRect.u1, topRect.v1);
-  push(x0, y1, z1, topRect.u0, topRect.v1);
+  const tc: [number, number][] = [
+    [topRect.u0, topRect.v0], [topRect.u1, topRect.v0],
+    [topRect.u1, topRect.v1], [topRect.u0, topRect.v1],
+  ];
+  const tr = (i: number): [number, number] => tc[(i + topRot) & 3];
+  push(x0, y1, z0, ...tr(0));
+  push(x1, y1, z0, ...tr(1));
+  push(x1, y1, z1, ...tr(2));
+  push(x0, y1, z1, ...tr(3));
   g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
   g.vertCount += 4;
 
@@ -756,27 +762,19 @@ function emitPressurePlate(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number
   emitBox(g, rect, x, y, z, 0.0625, 0.9375, 0, h, 0.0625, 0.9375, sky, torch);
 }
 
-/** One half of a 2-block bed: a full-footprint mattress lifted on two legs at its
- *  OUTER end (away from the partner half), leaving the classic gap underneath.
- *  Foot halves get a plain blanket top, head halves a pillow. `facing` is the
- *  foot->head direction (0=-z,1=-x,2=+z,3=+x). */
+/** One half of a 2-block bed (Minecraft-style): a wooden base, a red mattress on
+ *  top, and — on the head half — a white pillow that the topRot rotation keeps
+ *  pointing away from the foot. `facing` is the foot->head direction
+ *  (0=-z,1=-x,2=+z,3=+x). */
 function emitBed(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, isHead: boolean, facing: number, sky: number, torch: number): void {
-  const side = atlas.rect('bed_side');
+  const red = atlas.rect('bed_side');       // red blanket on the mattress sides
+  const wood = atlas.rect('planks');        // wooden base
   const top = atlas.rect(isHead ? 'bed_head_top' : 'bed_foot_top');
-  const wood = atlas.rect('planks');
-  const legH = 0.1875, legW = 0.22;
-  // unit vector from this half toward its outer (legged) end
-  const fx = facing === 1 ? -1 : facing === 3 ? 1 : 0;
-  const fz = facing === 0 ? -1 : facing === 2 ? 1 : 0;
-  const ox = isHead ? fx : -fx, oz = isHead ? fz : -fz;
-  const legSpots: [number, number][] = oz !== 0
-    ? [[0, oz > 0 ? 1 - legW : 0], [1 - legW, oz > 0 ? 1 - legW : 0]]
-    : [[ox > 0 ? 1 - legW : 0, 0], [ox > 0 ? 1 - legW : 0, 1 - legW]];
-  for (const [lx, lz] of legSpots) {
-    emitBox(g, wood, x, y, z, lx, lx + legW, 0, legH, lz, lz + legW, sky, torch);
-  }
-  // mattress slab on the legs, spanning the whole block
-  emitBox(g, side, x, y, z, 0, 1, legH, 0.5625, 0, 1, sky, torch, [1, 1, 1], top);
+  const baseH = 0.1875;                      // 3/16 wooden base, 6/16 mattress on top
+  // solid wooden base (full footprint)
+  emitBox(g, wood, x, y, z, 0, 1, 0, baseH, 0, 1, sky, torch);
+  // red mattress; the head's pillow texture is rotated to face its outer end
+  emitBox(g, red, x, y, z, 0, 1, baseH, 0.5625, 0, 1, sky, torch, [1, 1, 1], top, isHead ? facing : 0);
 }
 
 function emitLever(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean, facing: number): void {

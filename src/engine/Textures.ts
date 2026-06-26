@@ -515,33 +515,32 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
     c.fillRect(x + 6, y + 6, 1, 4); c.fillRect(x + 9, y + 6, 1, 4); c.fillRect(x + 7, y + 7, 1, 1); c.fillRect(x + 8, y + 8, 1, 1);
     c.fillRect(x + 11, y + 6, 3, 1); c.fillRect(x + 12, y + 6, 1, 4);
   },
+  // full bed top (icon / held item): red blanket with a white pillow at one end
   bed_top: (c, x, y) => {
     noiseFill(c, x, y, ['#b02e2e', '#a02828', '#bd3737'], 126, 0);
-    c.fillStyle = '#efefef'; c.fillRect(x + 2, y + 1, 12, 4);
-    c.fillStyle = '#d8d8d8'; c.fillRect(x + 2, y + 4, 12, 1);
-    c.fillStyle = '#8a2222'; c.fillRect(x, y + 6, 16, 1);
-    c.fillStyle = '#6b5532';
-    c.fillRect(x, y, 1, 16); c.fillRect(x + 15, y, 1, 16); c.fillRect(x, y + 15, 16, 1);
+    c.fillStyle = '#ededed'; c.fillRect(x + 2, y + 1, 12, 5);
+    c.fillStyle = '#cfcfcf'; c.fillRect(x + 2, y + 5, 12, 1);
   },
-  // foot half: plain red blanket with a wooden rim
+  // foot half top: all red quilted blanket
   bed_foot_top: (c, x, y) => {
     noiseFill(c, x, y, ['#b02e2e', '#a02828', '#bd3737'], 126, 0);
-    c.fillStyle = '#6b5532';
-    c.fillRect(x, y, 1, 16); c.fillRect(x + 15, y, 1, 16);
+    // faint quilt seams
+    c.fillStyle = 'rgba(120,24,24,0.5)';
+    c.fillRect(x + 7, y, 1, 16); c.fillRect(x, y + 7, 16, 1);
   },
-  // head half: red blanket with a fat white pillow band toward the head end
+  // head half top: white pillow along the outer edge (low v), red blanket below.
+  // The mesher rotates this so the pillow always faces away from the foot.
   bed_head_top: (c, x, y) => {
     noiseFill(c, x, y, ['#b02e2e', '#a02828', '#bd3737'], 126, 0);
-    c.fillStyle = '#efefef'; c.fillRect(x + 2, y + 2, 12, 7);
-    c.fillStyle = '#d8d8d8'; c.fillRect(x + 2, y + 8, 12, 1);
-    c.fillStyle = '#6b5532';
-    c.fillRect(x, y, 1, 16); c.fillRect(x + 15, y, 1, 16); c.fillRect(x, y, 16, 1);
+    c.fillStyle = '#ededed'; c.fillRect(x + 1, y + 1, 14, 5);  // pillow
+    c.fillStyle = '#cfcfcf'; c.fillRect(x + 1, y + 5, 14, 1);  // pillow shadow seam
+    c.fillStyle = '#9a9a9a'; c.fillRect(x + 1, y + 1, 14, 1);  // pillow top edge
   },
+  // mattress side: red blanket with a brighter top edge and a darker base seam
   bed_side: (c, x, y) => {
-    TILE_PAINTERS.planks(c, x, y);
-    c.fillStyle = '#b02e2e'; c.fillRect(x, y + 2, 16, 5);
-    c.fillStyle = '#efefef'; c.fillRect(x + 1, y + 2, 4, 3);
-    c.fillStyle = '#8a2222'; c.fillRect(x, y + 6, 16, 1);
+    noiseFill(c, x, y, ['#b02e2e', '#a02828', '#bd3737'], 126, 0);
+    c.fillStyle = '#c64141'; c.fillRect(x, y, 16, 2);       // lit top edge
+    c.fillStyle = '#7e1f1f'; c.fillRect(x, y + 14, 16, 2);  // shaded lower seam
   },
   torch: (c, x, y) => {
     c.clearRect(x, y, 16, 16);
