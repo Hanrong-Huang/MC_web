@@ -768,22 +768,30 @@ function emitPressurePlate(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number
  *  (0=-z,1=-x,2=+z,3=+x). */
 function emitBed(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, isHead: boolean, facing: number, sky: number, torch: number): void {
   const red = atlas.rect('bed_side');       // red blanket on the mattress sides
+  const redTop = atlas.rect('bed_foot_top'); // flat red quilt top (both halves)
   const wood = atlas.rect('bed_leg');       // wooden corner legs
-  const top = atlas.rect(isHead ? 'bed_head_top' : 'bed_foot_top');
+  const white = atlas.rect('pillow');       // white pillow on the head end
   const L = 0.1875;                          // 3/16 legs (height + thickness)
   const mattTop = 0.5625;                    // 9/16 mattress top
-  // red mattress floating above the legs (open underside = the MC bed look);
-  // the head's pillow texture is rotated to face its outer end
-  emitBox(g, red, x, y, z, 0, 1, L, mattTop, 0, 1, sky, torch, [1, 1, 1], top, isHead ? facing : 0);
+  // flat red mattress slab floating above the legs (open underside = MC look)
+  emitBox(g, red, x, y, z, 0, 1, L, mattTop, 0, 1, sky, torch, [1, 1, 1], redTop, 0);
   // two wooden legs at this half's outer end, so the whole bed has 4 corner legs
   const axisIsZ = facing === 0 || facing === 2;
   const high = (facing === 0 || facing === 1) ? !isHead : isHead;
-  const a0 = high ? 1 - L : 0, a1 = high ? 1 : L;
+  const la0 = high ? 1 - L : 0, la1 = high ? 1 : L;
   const leg = (cMin: number): void => {
-    if (axisIsZ) emitBox(g, wood, x, y, z, cMin, cMin + L, 0, L, a0, a1, sky, torch);
-    else emitBox(g, wood, x, y, z, a0, a1, 0, L, cMin, cMin + L, sky, torch);
+    if (axisIsZ) emitBox(g, wood, x, y, z, cMin, cMin + L, 0, L, la0, la1, sky, torch);
+    else emitBox(g, wood, x, y, z, la0, la1, 0, L, cMin, cMin + L, sky, torch);
   };
   leg(0); leg(1 - L);
+  // head half: a soft white pillow raised slightly at the outer (head) end
+  if (isHead) {
+    const pa0 = high ? 0.40 : 0.08, pa1 = high ? 0.92 : 0.60; // along bed axis
+    const pc0 = 0.15, pc1 = 0.85;                              // inset across
+    const py0 = mattTop, py1 = mattTop + 0.125;                // raised ~2/16
+    if (axisIsZ) emitBox(g, white, x, y, z, pc0, pc1, py0, py1, pa0, pa1, sky, torch);
+    else emitBox(g, white, x, y, z, pa0, pa1, py0, py1, pc0, pc1, sky, torch);
+  }
 }
 
 function emitLever(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean, facing: number): void {

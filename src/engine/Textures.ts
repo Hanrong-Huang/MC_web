@@ -567,6 +567,13 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
     c.fillStyle = 'rgba(255,236,194,0.20)'; c.fillRect(x, y, 16, 3);
     c.fillStyle = 'rgba(0,0,0,0.24)'; c.fillRect(x, y + 13, 16, 3);
   },
+  // soft white pillow: top-lit with a faint seam, for the bed's head end
+  pillow: (c, x, y) => {
+    noiseFill(c, x, y, ['#ededed', '#e6e6e6', '#f4f4f4'], 134, 0);
+    c.fillStyle = '#f8f8f8'; c.fillRect(x, y, 16, 2);
+    c.fillStyle = '#d6d6d6'; c.fillRect(x, y + 14, 16, 2);
+    c.fillStyle = 'rgba(200,200,200,0.5)'; c.fillRect(x + 7, y, 1, 16); // centre crease
+  },
   // mattress side: red blanket with a brighter top edge and a darker base seam
   bed_side: (c, x, y) => {
     noiseFill(c, x, y, ['#b02e2e', '#a02828', '#bd3737'], 126, 0);
