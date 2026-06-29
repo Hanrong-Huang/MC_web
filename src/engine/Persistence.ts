@@ -1,7 +1,7 @@
 // Run-length chunk compression + promise-wrapped IndexedDB save-slot store.
 // (localStorage is deliberately not used: its ~5MB cap is too small for worlds.)
 
-export interface SlotData { id: number; count: number; dur?: number }
+export interface SlotData { id: number; count: number; dur?: number; mob?: string }
 export type MaybeSlot = SlotData | null;
 
 export interface FurnaceSave {

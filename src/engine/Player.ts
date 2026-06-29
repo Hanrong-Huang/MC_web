@@ -130,6 +130,11 @@ export class Player {
     return this.inventory.getSelected()?.id ?? 0;
   }
 
+  /** captured-mob kind on the held stack (filled catcher), else undefined. */
+  heldMob(): string | undefined {
+    return this.inventory.getSelected()?.mob;
+  }
+
   toggleFly(): void {
     this.flying = !this.flying;
     if (this.flying) this.vel.y = 0;
@@ -968,6 +973,43 @@ export class Player {
       return;
     }
 
+    // mob catcher: capture a wild mob / recall a pet (right-click on a mob)
+    if (heldDef?.id === I.MOB_CATCHER && !this.sneaking && this.placeCooldown <= 0) {
+      const hit = this.deps.entities.raycastMobs(
+        this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z,
+        this.lookDir().x, this.lookDir().y, this.lookDir().z, 3.5,
+      );
+      if (hit && hit.dist < (this.target?.dist ?? 4.5)) {
+        const ent = this.deps.entities;
+        // recalling an owned pet takes priority and does NOT consume the catcher
+        if (ent.isPet(hit.entity)) {
+          const kind = hit.entity.kind;
+          hit.entity.dead = true;
+          hit.entity.target = null;
+          const idx = this.inventory.firstEmpty();
+          if (idx >= 0) this.inventory.slots[idx] = { id: I.MOB_CATCHER_FILLED, count: 1, mob: kind };
+          else this.deps.entities.spawnDrop(this.pos.x, this.pos.y + 1, this.pos.z, I.MOB_CATCHER_FILLED, 1, undefined, kind);
+          audio.play('snap');
+          this.placeCooldown = 0.4;
+          this.deps.renderer.triggerSwing();
+          this.inventory.onChange();
+          return;
+        }
+        // otherwise try to capture a wild capturable mob (consumes the catcher)
+        const kind = ent.captureMob(hit.entity);
+        if (kind) {
+          this.placeCooldown = 0.4;
+          this.deps.renderer.triggerSwing();
+          if (this.mode === 'survival') this.inventory.consumeSelected();
+          const idx = this.inventory.firstEmpty();
+          if (idx >= 0) this.inventory.slots[idx] = { id: I.MOB_CATCHER_FILLED, count: 1, mob: kind };
+          else this.deps.entities.spawnDrop(this.pos.x, this.pos.y + 1, this.pos.z, I.MOB_CATCHER_FILLED, 1, undefined, kind);
+          this.inventory.onChange();
+          return;
+        }
+      }
+    }
+
     // mob interaction: tame wolves / open villager trades (before generic use)
     if (!this.sneaking && this.placeCooldown <= 0) {
       const hit = this.deps.entities.raycastMobs(
@@ -1044,6 +1086,18 @@ export class Player {
     if (held?.id === I.BUCKET && this.tryScoopLava()) return;
     if (held?.id === I.WATER_BUCKET && this.tryPlaceWater()) return;
     if (held?.id === I.LAVA_BUCKET && this.tryPlaceLava()) return;
+
+    // filled mob catcher: release the captured pet in front of the player
+    if (held?.id === I.MOB_CATCHER_FILLED && held.mob) {
+      const d = this.lookDir();
+      const fx = this.pos.x + d.x * 2, fy = this.pos.y, fz = this.pos.z + d.z * 2;
+      this.deps.entities.releaseMob(held.mob as never, fx, fy, fz, this.yaw);
+      this.placeCooldown = 0.4;
+      this.deps.renderer.triggerSwing();
+      if (this.mode === 'survival') this.inventory.consumeSelected();
+      this.inventory.onChange();
+      return;
+    }
 
     // interactive blocks
     if (this.target && !this.sneaking) {
@@ -1366,7 +1420,7 @@ export class Player {
         const en = hit.entity;
         this.deps.entities.spawnCritParticles(en.pos.x, en.pos.y + en.box.h * 0.6, en.pos.z);
       }
-      this.deps.entities.hurt(hit.entity, dmg, d.x, d.z);
+      this.deps.entities.hurt(hit.entity, dmg, d.x, d.z, this);
       this.addExhaustion(0.1);
       this.damageHeldTool();
     } else if (!this.target && (!hit || hit.entity === this.riding)) {
@@ -1437,10 +1491,12 @@ export class Player {
     if (this.mode === 'survival') this.exhaustion += amount;
   }
 
-  damage(amount: number): void {
+  damage(amount: number, source?: Entity): void {
     if (this.mode === 'creative' || this.dead) return;
     if (this.hurtCooldown > 0) return;
     this.hurtCooldown = 0.5;
+    // pets retaliate against whatever just hurt their owner
+    if (source) this.deps.entities.onOwnerHurt(source);
     // armor absorbs a share of the blow (MC: 4% per defense point, capped at 80%)
     // and each worn piece loses a point of durability.
     const ap = this.inventory.armorPoints();

@@ -24,7 +24,7 @@ import type { GeoArrays, MeshDoor, MeshRedstone } from './engine/Mesher';
 import { chunkGeometryFromArrays } from './engine/Renderer';
 import type { MeshJob, MeshChunkSnap } from './engine/mesh-worker';
 import { chunkKey, CX, CZ } from './engine/Chunk';
-import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef } from './engine/Blocks';
+import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef, mobLabel } from './engine/Blocks';
 import { Weather } from './engine/Weather';
 import { AdvancementTracker } from './engine/Advancements';
 import type { Entity } from './engine/EntityManager';
@@ -74,6 +74,7 @@ class Game {
   private camBob = 0;
   private lastSelected = -1;
   private lastHeldId = -1;
+  private lastHeldMob: string | undefined = undefined;
   /** block positions whose supports must be re-checked (sand falls, torches pop) */
   private supportQueue = new Set<string>();
   private autosaveT = 0;
@@ -902,8 +903,9 @@ class Game {
     if (n > 0) {
       // held item + hotbar use cached canvases; force a rebuild
       const held = this.player.heldId();
+      const mob = this.player.heldMob();
       this.renderer.setHeldItem(-2 as number);
-      this.renderer.setHeldItem(held);
+      this.renderer.setHeldItem(held, mob);
       this.onInventoryChange();
       this.hud.toast(`Resource pack applied (${n} textures)`);
     } else {
@@ -913,13 +915,16 @@ class Game {
 
   private onInventoryChange(): void {
     this.hud.refreshHotbar(this.player.inventory, this.player.mode);
-    this.renderer.setHeldItem(this.player.heldId());
+    this.renderer.setHeldItem(this.player.heldId(), this.player.heldMob());
     // item-name popup when the hotbar selection (or its item) changes
     const sel = this.player.inventory.selected;
     const heldId = this.player.heldId();
-    if (sel !== this.lastSelected || (heldId !== this.lastHeldId && heldId !== 0)) {
+    const heldMob = this.player.heldMob();
+    if (sel !== this.lastSelected || (heldId !== this.lastHeldId && heldId !== 0) || heldMob !== this.lastHeldMob) {
       if (heldId !== 0 && hasDef(heldId) && this.state !== 'container') {
         const hint =
+          heldId === I.MOB_CATCHER ? 'Mob Catcher - right-click a mob to capture it' :
+          heldId === I.MOB_CATCHER_FILLED && heldMob ? `Captured ${mobLabel(heldMob)} - right-click to release` :
           heldId === I.COMPASS ? 'Compass - carry it to show heading on the minimap' :
           heldId === I.CLOCK ? 'Clock - carry it to show world time' :
           heldId === I.HOE ? 'Hoe - right-click dirt or grass to make farmland' :
@@ -930,6 +935,7 @@ class Game {
       }
       this.lastSelected = sel;
       this.lastHeldId = heldId;
+      this.lastHeldMob = heldMob;
     }
   }
 

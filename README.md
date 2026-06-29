@@ -48,7 +48,8 @@ npm run dev        # open the printed localhost URL
   food, arrows, a bow if you're lucky) the first time they're opened; hut
   chests do the same.
 - **Ores & progression**: coal everywhere, iron below y=54, gold below y=30,
-  diamond below y=14, plus gravel pockets (flint). Tool tiers
+  diamond below y=14, rare **amethyst** (gold-tier rarity, stone pick or
+  better), plus gravel pockets (flint). Tool tiers
   wood → stone → iron → diamond with real Minecraft-style gates: stone needs a
   wooden pick, iron needs stone, gold/diamond need iron. Wrong tier = slow
   break, no drops. Tools have **durability** (bar shown on the icon) and snap
@@ -76,6 +77,13 @@ npm run dev        # open the printed localhost URL
   resource blocks (iron/gold/diamond, both directions), and 16 tools across
   4 tiers. Furnace smelts ores → ingots, sand → glass, cobble → stone,
   log → charcoal, and cooks 4 meats.
+- **Pets**: craft a **mob catcher** from 8 amethyst (hollow frame) and
+  right-click a hostile (zombie, skeleton, spider, creeper, cinderling,
+  ashstalker) to capture it — the filled catcher shows the trapped mob's
+  portrait and travels in your inventory. Right-click air to release it as a
+  loyal **pet** that follows you, locks onto whatever you attack or whatever
+  hurts you, fights it, and slowly heals back to full; right-click your pet
+  with an empty catcher to recall it.
 - **Storage & rest**: **chests** (27 slots, contents persist, spill when
   broken) and **beds** (set your respawn point; sleep to skip the night).
 - **Survival**: 10 hearts + 10 hunger shanks, exhaustion, regen, starvation,

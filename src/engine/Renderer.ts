@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 import { Atlas, extrudeSpriteGeometry } from './Textures';
 import type { ChunkMeshData, GeoArrays } from './Mesher';
-import { def, hasDef } from './Blocks';
+import { def, hasDef, spriteNameFor } from './Blocks';
 
 export interface ChunkGeometry {
   solid: THREE.BufferGeometry | null;
@@ -148,6 +148,8 @@ export class Renderer {
   /** resting rotation for the current held sprite (tools differ from the bow) */
   private heldIdleRot = new THREE.Euler(0.18, -0.35, -0.62);
   private heldId = -1;
+  /** captured-mob kind for the held item (filled catcher), drives its sprite */
+  private heldMob: string | undefined = undefined;
   private swingT = 1; // 0..1, 1 = idle
   private raiseT = 1; // 0..1, drives the raise-up when the held item changes
   private bowCharge = 0;
@@ -471,9 +473,10 @@ export class Renderer {
 
   // --- held item / arm ------------------------------------------------------
 
-  setHeldItem(id: number): void {
-    if (id === this.heldId) return;
+  setHeldItem(id: number, mob?: string): void {
+    if (id === this.heldId && mob === this.heldMob) return;
     this.heldId = id;
+    this.heldMob = mob;
     this.raiseT = 0; // animate the new item up into view
     if (this.heldMesh) {
       this.heldGroup.remove(this.heldMesh);
@@ -528,10 +531,10 @@ export class Renderer {
       // a slight 3/4 tilt so the top + two side faces all catch the light
       mesh.rotation.set(-0.16, 0.5, 0);
       this.heldMesh = mesh;
-    } else if (id !== 0 && hasDef(id) && def(id).sprite) {
+    } else if (id !== 0 && hasDef(id) && (def(id).sprite || spriteNameFor(id, this.heldMob))) {
       // pixel sprite extruded into a real 3D voxel model (Minecraft-style),
       // so tools/items in hand read with depth instead of as a flat card.
-      const sprite = this.atlas.sprite(def(id).sprite!);
+      const sprite = this.atlas.sprite(spriteNameFor(id, this.heldMob) ?? def(id).sprite!);
       const mesh = sprite ? this.buildExtrudedItem(sprite) : new THREE.Mesh(
         new THREE.PlaneGeometry(0.5, 0.5),
         new THREE.MeshBasicMaterial({ color: 0xff00ff }),

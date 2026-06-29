@@ -77,6 +77,12 @@ export class Inventory {
     return n;
   }
 
+  /** Index of the first empty slot, or -1 if the inventory is full. */
+  firstEmpty(): number {
+    for (let i = 0; i < INV_SIZE; i++) if (!this.slots[i]) return i;
+    return -1;
+  }
+
   serialize(): { slots: Slot[]; selected: number; armor?: Slot[] } {
     return {
       slots: this.slots.map((s) => (s ? { ...s } : null)),
@@ -91,7 +97,11 @@ export class Inventory {
     for (let i = 0; i < Math.min(INV_SIZE, data.slots.length); i++) {
       const s = data.slots[i];
       if (s && hasDef(s.id) && s.count > 0) {
-        this.slots[i] = { id: s.id, count: s.count, ...(s.dur !== undefined ? { dur: s.dur } : {}) };
+        this.slots[i] = {
+          id: s.id, count: s.count,
+          ...(s.dur !== undefined ? { dur: s.dur } : {}),
+          ...(s.mob !== undefined ? { mob: s.mob } : {}),
+        };
       }
     }
     this.armor = new Array(4).fill(null);
@@ -142,6 +152,7 @@ const FE = I.IRON_INGOT, AU = I.GOLD_INGOT, DI = I.DIAMOND;
 const W = B.WOOL, G = I.GUNPOWDER, SA = B.SAND, ST = I.STRING;
 const CA = I.CARROT, PO = I.POTATO, BE = I.BEETROOT, BO = I.BOWL;
 const LE = I.LEATHER;
+const AM = I.AMETHYST;
 
 function toolRecipes(mat: number, pick: number, axe: number, shovel: number, sword: number): Recipe[] {
   const M = mat;
@@ -222,6 +233,8 @@ const RECIPES: Recipe[] = [
   { shape: [[0, AU, 0], [AU, FE, AU], [0, AU, 0]], out: I.CLOCK, n: 1 },
   // bucket: three iron in a V
   { shape: [[FE, 0, FE], [0, FE, 0]], out: I.BUCKET, n: 1 },
+  // mob catcher: hollow amethyst frame (8 gems), like a chest shell
+  { shape: [[AM, AM, AM], [AM, 0, AM], [AM, AM, AM]], out: I.MOB_CATCHER, n: 1 },
   // saddle: leather seat with iron buckles
   { shape: [[LE, LE, LE], [FE, 0, FE]], out: I.SADDLE, n: 1 },
   // iron horse armor: iron barding around a leather lining

@@ -468,6 +468,7 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
   iron_ore: (c, x, y) => oreTile(c, x, y, 318, '#d8af93', '#b08a6e'),
   gold_ore: (c, x, y) => oreTile(c, x, y, 418, '#fcee4b', '#d9c52e'),
   diamond_ore: (c, x, y) => oreTile(c, x, y, 518, '#4aedd9', '#33c7c2'),
+  amethyst_ore: (c, x, y) => oreTile(c, x, y, 618, '#c9a4ff', '#9a6fd6'),
   gravel: (c, x, y) => {
     noiseFill(c, x, y, ['#7f7c78', '#8c8782', '#6e6a66', '#999390', '#5d5a57'], 119, 1);
     const rand = mulberry32(219);
@@ -1497,6 +1498,19 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     '.....OPPOO......', '......OWO.......', '......OWO.......', '.....OWWWO......',
     '......OOO.......', '................', '................', '................',
   ], { O: '#4a2a14', P: '#b5773a', p: '#d8a05a', W: '#f2e3d5' }),
+  amethyst: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '......OOO.......',
+    '.....OAAAPO.....', '....OAPaaAPO....', '....OAaPaaAO....', '....OaaaPPAO....',
+    '.....OAPaaAO....', '......OAAAPO....', '.......OAAO.....', '........OA......',
+    '................', '................', '................', '................',
+  ], { O: '#3a2a5a', A: '#9a6fd6', a: '#c9a4ff', P: '#6a4a96' }),
+  mob_catcher: (c) => catcherShell(c),
+  mob_catcher_filled_zombie: (c) => filledCatcher(c, '#4f7d4a', '#3f6a3c'),
+  mob_catcher_filled_skeleton: (c) => filledCatcher(c, '#d8d8d0', '#bfbfb5'),
+  mob_catcher_filled_spider: (c) => filledCatcher(c, '#2a2125', '#3a2e33'),
+  mob_catcher_filled_creeper: (c) => filledCatcher(c, '#58a84a', '#3f8a36'),
+  mob_catcher_filled_cinderling: (c) => filledCatcher(c, '#d65a16', '#2a2320'),
+  mob_catcher_filled_ashstalker: (c) => filledCatcher(c, '#b8501a', '#241e1c'),
 };
 
 /** Generic meat chop sprite with palette colors. */
@@ -1507,6 +1521,35 @@ function meatSprite(c: Ctx, dark: string, light: string): void {
     '....OPPPPPO.....', '.....OPPPOO.....', '......OOOWO.....', '.........OWO....',
     '..........OWO...', '...........O....', '................', '................',
   ], { O: '#2a1410', P: dark, p: light, W: '#f2e3d5' });
+}
+
+/** Empty mob catcher: a purple spherical capsule (the "ball" shell). */
+function catcherShell(c: Ctx): void {
+  pixmap(c, 0, 0, [
+    '................', '................', '.....kkkkk......', '....kKKKKKk.....',
+    '...kKAAAAAKk....', '..kKAAAppAAKk...', '..kKApAAApAAKk..', '..kKAAAppAAAKk..',
+    '..kKAAApAApAAK..', '..kKAAAppAAAKk..', '..kKApAAApAAKk..', '...kKAAAAAKk....',
+    '....kKmmmMKk....', '.....kmmmmk.....', '................', '................',
+  ], { k: '#2a1844', K: '#5a3a8a', A: '#9a6fd6', p: '#c9a4ff', m: '#3a2a5a' });
+}
+
+/** Filled mob catcher: shell + a simplified mob head portrait in the centre.
+ *  `base` is the mob's main body color, `accent` a darker shade for detail. */
+function filledCatcher(c: Ctx, base: string, accent: string): void {
+  // darker translucent-feeling shell first, then the mob portrait on top
+  pixmap(c, 0, 0, [
+    '................', '................', '.....kkkkk......', '....kKKKKKk.....',
+    '...kKAAAAAKk....', '..kKAA...AAKk...', '..kKA....AAAKk..', '..kKA....AAAKk..',
+    '..kKAA...AAAKk..', '..kKAAAAAAAKk...', '...kKAAAAAKk....', '....kKmmmMKk....',
+    '.....kmmmmk.....', '................', '................', '................',
+  ], { k: '#2a1844', K: '#3a2a5a', A: '#6a4a96', m: '#3a2a5a' });
+  // central mob head portrait (a 6x6 rounded block with two eyes)
+  pixmap(c, 0, 0, [
+    '................', '................', '................', '................',
+    '................', '....BBBBBB......', '...BBeBBpBB.....', '...BBeBBpBB.....',
+    '...BBBBBBBB.....', '....BBBBBB......', '................', '................',
+    '................', '................', '................', '................',
+  ], { B: base, e: '#1a1a1a', p: accent });
 }
 
 // ---------------------------------------------------------------------------
@@ -1635,6 +1678,7 @@ const PACK_MAP: Record<string, PackEntry> = {
   iron_ore: { paths: ['block/iron_ore'], kind: 'tile' },
   gold_ore: { paths: ['block/gold_ore'], kind: 'tile' },
   diamond_ore: { paths: ['block/diamond_ore'], kind: 'tile' },
+  amethyst_ore: { paths: ['block/amethyst_ore'], kind: 'tile' },
   gravel: { paths: ['block/gravel'], kind: 'tile' },
   sandstone_top: { paths: ['block/sandstone_top'], kind: 'tile' },
   sandstone_side: { paths: ['block/sandstone', 'block/sandstone_normal'], kind: 'tile' },
@@ -1744,6 +1788,9 @@ const PACK_MAP: Record<string, PackEntry> = {
   quartz: { paths: ['item/quartz'], kind: 'item' },
   nether_brick: { paths: ['item/netherbrick', 'item/nether_brick'], kind: 'item' },
   redstone: { paths: ['item/redstone_dust', 'item/redstone'], kind: 'item' },
+  amethyst: { paths: ['item/amethyst_shard', 'item/amethyst'], kind: 'item' },
+  mob_catcher: { paths: ['item/mob_catcher'], kind: 'item' },
+  mob_catcher_filled: { paths: ['item/mob_catcher_filled'], kind: 'item' },
 };
 for (let i = 0; i < 10; i++) {
   PACK_MAP[`crack_${i}`] = { paths: [`block/destroy_stage_${i}`], kind: 'crack' };

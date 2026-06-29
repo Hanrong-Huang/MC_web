@@ -86,6 +86,7 @@ export enum B {
   JUNGLE_LEAVES = 81,
   /** head half of a 2-block bed (foot half is B.BED) */
   BED_HEAD = 82,
+  AMETHYST_ORE = 83,
 }
 
 export enum I {
@@ -170,6 +171,9 @@ export enum I {
   QUARTZ = 178,
   REDSTONE = 179,
   NETHER_BRICK = 180,
+  AMETHYST = 181,
+  MOB_CATCHER = 182,
+  MOB_CATCHER_FILLED = 183,
 }
 
 /** Wearable-armor slot index: 0 head, 1 chest, 2 legs, 3 feet. */
@@ -325,6 +329,11 @@ blockDef({
   id: B.DIAMOND_ORE, name: 'diamond_ore', label: 'Diamond Ore', hardness: 3, tool: 'pickaxe', minTier: 6, sound: 'stone',
   faces: { top: 'diamond_ore', bottom: 'diamond_ore', sides: 'diamond_ore' },
   drop: { id: I.DIAMOND, min: 1, max: 1 },
+});
+blockDef({
+  id: B.AMETHYST_ORE, name: 'amethyst_ore', label: 'Amethyst Ore', hardness: 3, tool: 'pickaxe', minTier: 4, sound: 'stone',
+  faces: { top: 'amethyst_ore', bottom: 'amethyst_ore', sides: 'amethyst_ore' },
+  drop: { id: I.AMETHYST, min: 1, max: 2 },
 });
 blockDef({
   id: B.GRAVEL, name: 'gravel', label: 'Gravel', hardness: 0.6, tool: 'shovel', sound: 'sand',
@@ -734,6 +743,9 @@ itemDef({ id: I.FLINT_AND_STEEL, name: 'flint_and_steel', label: 'Flint and Stee
 itemDef({ id: I.QUARTZ, name: 'quartz', label: 'Nether Quartz', sprite: 'quartz', stack: 64 });
 itemDef({ id: I.REDSTONE, name: 'redstone', label: 'Redstone Dust', sprite: 'redstone', stack: 64 });
 itemDef({ id: I.NETHER_BRICK, name: 'nether_brick', label: 'Nether Brick', sprite: 'nether_brick', stack: 64 });
+itemDef({ id: I.AMETHYST, name: 'amethyst', label: 'Amethyst', sprite: 'amethyst', stack: 64 });
+itemDef({ id: I.MOB_CATCHER, name: 'mob_catcher', label: 'Mob Catcher', sprite: 'mob_catcher', stack: 16 });
+itemDef({ id: I.MOB_CATCHER_FILLED, name: 'mob_catcher_filled', label: 'Captured Mob', sprite: 'mob_catcher_filled', stack: 1 });
 
 export function def(id: number): Def {
   const d = DEFS.get(id);
@@ -742,6 +754,27 @@ export function def(id: number): Def {
 }
 export function hasDef(id: number): boolean { return DEFS.has(id); }
 export function allDefs(): Def[] { return [...DEFS.values()]; }
+
+/** Mobs that can be captured by a mob catcher (hostile + nether ground mobs). */
+export const CAPTURABLE = new Set<string>([
+  'zombie', 'skeleton', 'spider', 'creeper', 'cinderling', 'ashstalker',
+]);
+
+/** Friendly label for a captured mob kind. */
+export function mobLabel(kind: string): string {
+  const m: Record<string, string> = {
+    zombie: 'Zombie', skeleton: 'Skeleton', spider: 'Spider', creeper: 'Creeper',
+    cinderling: 'Cinderling', ashstalker: 'Ashstalker',
+  };
+  return m[kind] ?? kind;
+}
+
+/** Resolve the sprite name for a stack: filled catchers show a per-mob sprite. */
+export function spriteNameFor(id: number, mob?: string): string | undefined {
+  const d = def(id);
+  if (id === I.MOB_CATCHER_FILLED && mob && CAPTURABLE.has(mob)) return `mob_catcher_filled_${mob}`;
+  return d.sprite;
+}
 
 export function isSolid(id: number): boolean { return id !== B.AIR && def(id).solid; }
 export function isOpaque(id: number): boolean { return id !== B.AIR && def(id).opaque; }
@@ -824,7 +857,7 @@ export const PLACEABLE: number[] = [
   B.GLASS, B.TABLE, B.FURNACE, B.CHEST, B.TORCH, B.BED, B.TNT,
   B.SANDSTONE, B.STONE_BRICKS, B.WOOL, B.SNOW_GRASS,
   B.POPPY, B.DANDELION, B.TALL_GRASS, B.CACTUS, B.SUGAR_CANE, B.SAPLING, B.FARMLAND,
-  B.COAL_ORE, B.IRON_ORE, B.GOLD_ORE, B.DIAMOND_ORE,
+  B.COAL_ORE, B.IRON_ORE, B.GOLD_ORE, B.DIAMOND_ORE, B.AMETHYST_ORE,
   B.IRON_BLOCK, B.GOLD_BLOCK, B.DIAMOND_BLOCK, B.BEDROCK,
   B.LADDER, B.TRAPDOOR, B.OBSIDIAN,
   B.PORTAL, B.NETHERRACK, B.GLOWSTONE, B.SOUL_SAND, B.QUARTZ_ORE,
@@ -853,4 +886,5 @@ export const CREATIVE_ITEMS: number[] = [
   I.DIAMOND_HELMET, I.DIAMOND_CHEST, I.DIAMOND_LEGS, I.DIAMOND_BOOTS,
   I.BUCKET, I.WATER_BUCKET, I.LAVA_BUCKET,
   I.FLINT_AND_STEEL, I.QUARTZ, I.REDSTONE, I.NETHER_BRICK,
+  I.AMETHYST, I.MOB_CATCHER, I.MOB_CATCHER_FILLED,
 ];

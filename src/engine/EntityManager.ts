@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { World } from './World';
 import { moveEntity, inWater, rayAABB, Vec3, MoveResult } from './Physics';
-import { B, I, def, hasDef, CROSS_BLOCKS } from './Blocks';
+import { B, I, def, hasDef, CROSS_BLOCKS, spriteNameFor, CAPTURABLE } from './Blocks';
 import { Atlas, extrudeSpriteGeometry } from './Textures';
 import { AudioEngine } from './Audio';
 import { SEA_LEVEL } from './WorldGenerator';
@@ -132,6 +132,8 @@ export class Entity {
   // drop / falling fields
   itemId = 0;
   count = 0;
+  /** captured-mob kind for dropped filled catchers (mirrors SlotData.mob) */
+  mob?: string;
   // mob fields
   state: 'idle' | 'wander' | 'flee' | 'chase' | 'fuse' = 'idle';
   stateTime = 0;
@@ -182,6 +184,14 @@ export class Entity {
   hooked: Entity | null = null;
   inWaterT = 0;
   biteT = 0;
+  // captured-pet fields
+  /** the enemy a pet is currently focused on (null = follow owner) */
+  target: Entity | null = null;
+  /** seconds until the next auto-regen tick (pets heal slowly) */
+  regenT = 0;
+  /** scratch steering output from petChase (consumed by the caller) */
+  _wishX = 0;
+  _wishZ = 0;
 
   constructor(kind: EntityKind, pos: Vec3, box: { w: number; h: number }, mesh: THREE.Group) {
     this.kind = kind;
@@ -219,12 +229,13 @@ export class EntityManager {
 
   // --- spawning ---------------------------------------------------------------
 
-  spawnDrop(x: number, y: number, z: number, itemId: number, count: number, dur?: number): void {
-    const mesh = this.buildDropMesh(itemId);
+  spawnDrop(x: number, y: number, z: number, itemId: number, count: number, dur?: number, mob?: string): void {
+    const mesh = this.buildDropMesh(itemId, mob);
     const e = new Entity('drop', { x, y, z }, { w: 0.25, h: 0.25 }, mesh);
     e.itemId = itemId;
     e.count = count;
     if (dur !== undefined) e.dmg = dur; // reuse field for tool durability passthrough
+    if (mob !== undefined) e.mob = mob;
     e.vel = { x: (Math.random() - 0.5) * 2.4, y: 3.2, z: (Math.random() - 0.5) * 2.4 };
     this.entities.push(e);
     this.scene.add(mesh);
@@ -246,6 +257,39 @@ export class EntityManager {
     if (kind !== 'phantom' && kind !== 'emberghast') mesh.add(this.makeShadow(stats.box.w));
     this.entities.push(e);
     this.scene.add(mesh);
+    return e;
+  }
+
+  /** Is this entity a captured pet belonging to the player? (Excludes tamed
+   *  wolves/cats/horses, which have their own mechanics.) */
+  isPet(e: Entity): boolean {
+    return this.isMob(e) && e.tamed && e.ownerName === 'player'
+      && e.kind !== 'wolf' && e.kind !== 'cat' && e.kind !== 'horse';
+  }
+
+  /** Capture a wild capturable mob into a catcher. Returns the mob kind, or
+   *  null if this mob can't be captured. Marks the mob dead without loot. */
+  captureMob(e: Entity): string | null {
+    if (!this.isMob(e) || e.dead) return null;
+    if (!CAPTURABLE.has(e.kind)) return null;
+    const kind = e.kind;
+    e.dead = true;                 // removed by the update loop; skips loot/poof
+    e.target = null;
+    this.audio.play('snap');
+    return kind;
+  }
+
+  /** Release a captured mob as a pet at the given spot. Returns the new entity. */
+  releaseMob(kind: MobKind, x: number, y: number, z: number, yaw: number): Entity {
+    const e = this.spawnMob(kind, x, y, z);
+    e.tamed = true;
+    e.ownerName = 'player';
+    e.sitting = false;
+    e.target = null;
+    e.hp = MOB_STATS[kind].hp;     // release at full health
+    e.yaw = yaw;
+    this.spawnHearts(x, y + 0.7, z);
+    this.audio.play('pop');
     return e;
   }
 
@@ -723,6 +767,18 @@ export class EntityManager {
       if (left !== e.count) inv.onChange();
       return left;
     }
+    // filled mob catchers carry a captured-mob field that add() would drop
+    if (e.mob !== undefined) {
+      let left = e.count;
+      for (let i = 0; i < inv.slots.length && left > 0; i++) {
+        if (!inv.slots[i]) {
+          inv.slots[i] = { id: e.itemId, count: 1, mob: e.mob };
+          left--;
+        }
+      }
+      if (left !== e.count) inv.onChange();
+      return left;
+    }
     return inv.add(e.itemId, e.count);
   }
 
@@ -865,8 +921,19 @@ export class EntityManager {
     let wishX = 0, wishZ = 0;
     const distToPlayer = Math.hypot(p.pos.x - e.pos.x, p.pos.z - e.pos.z);
 
-    // tamed wolf/cat: follow the owner (sit = stay put)
-    if ((e.kind === 'wolf' || e.kind === 'cat') && e.tamed) {
+    // tamed wolf/cat + captured pets: follow the owner (sit = stay put)
+    const petFollow = (e.kind === 'wolf' || e.kind === 'cat') ? e.tamed : this.isPet(e);
+    if (petFollow) {
+      // a pet with a live target chases it instead of sticking to the owner
+      if (this.isPet(e) && e.target && !e.target.dead && this.isMob(e.target) && !e.sitting) {
+        this.petChase(e, dt);
+        const res2 = this.applyGroundMove(e, dt, e._wishX, e._wishZ, e.moveSpeed * 1.6);
+        if ((res2.hitX || res2.hitZ) && e.onGround && (e._wishX !== 0 || e._wishZ !== 0)) e.vel.y = JUMP_V;
+        this.animateMob(e, dt, p);
+        e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+        e.mesh.rotation.y = e.yaw;
+        return;
+      }
       if (e.sitting) {
         wishX = 0; wishZ = 0;
       } else if (distToPlayer > 24) {
@@ -881,6 +948,7 @@ export class EntityManager {
         e.yaw = Math.atan2(-dx, -dz);
       }
       if (e.kind === 'wolf') this.wWolfCombat(e, dt); // cats don't fight
+      else if (this.isPet(e)) this.petCombat(e, dt);
       const fspeed = e.moveSpeed * (distToPlayer > 8 ? 2.2 : 1);
       const res = this.applyGroundMove(e, dt, wishX, wishZ, fspeed);
       if ((res.hitX || res.hitZ) && e.onGround && (wishX !== 0 || wishZ !== 0)) e.vel.y = JUMP_V;
@@ -951,7 +1019,7 @@ export class EntityManager {
       if (Math.hypot(dx, dz) < reach && Math.abs(dy) < 2) {
         e.attackCooldown = e.kind === 'cinderling' ? 0.7 : 1;
         if (p.mode === 'survival') {
-          p.damage(dmg);
+          p.damage(dmg, e);
           p.applyKnockback(dx, dz, e.kind === 'ashstalker' ? 7 : 5);
         }
       }
@@ -1104,6 +1172,49 @@ export class EntityManager {
     }
   }
 
+  /** Per-pet melee damage (reuses the wild-mob contact-damage table). */
+  private petDamage(kind: MobKind): number {
+    if (kind === 'spider') return 2;
+    if (kind === 'cinderling') return 2;
+    if (kind === 'ashstalker') return 4;
+    return 3;
+  }
+
+  /** Captured pet: steer toward its locked target and bite when in reach. */
+  private petChase(e: Entity, _dt: number): void {
+    const t = e.target!;
+    const dx = t.pos.x - e.pos.x, dz = t.pos.z - e.pos.z;
+    const d = Math.hypot(dx, dz) || 1;
+    e._wishX = dx / d; e._wishZ = dz / d;
+    e.yaw = Math.atan2(-dx, -dz);
+    // bite when close enough (reach matches the wild mob contact range)
+    const reach = e.kind === 'spider' ? 1.4 : e.kind === 'ashstalker' ? 1.3 : 1.2;
+    if (d < reach && Math.abs(t.pos.y - e.pos.y) < 2 && e.attackCooldown <= 0) {
+      e.attackCooldown = e.kind === 'cinderling' ? 0.7 : 1;
+      this.hurt(t, this.petDamage(e.kind as MobKind), dx, dz, e);
+    }
+  }
+
+  /** Captured pet with no target: opportunistically bite adjacent hostiles
+   *  that are attacking the owner (kept as a fallback alongside targeting). */
+  private petCombat(e: Entity, dt: number): void {
+    e.attackCooldown = Math.max(0, e.attackCooldown - dt);
+    if (e.attackCooldown > 0 || e.sitting) return;
+    if (e.target) return; // handled by petChase when a target is set
+    for (const m of this.entities) {
+      if (!this.isMob(m) || m.dead) continue;
+      const stats = MOB_STATS[m.kind as MobKind];
+      if (!stats.hostile) continue;
+      const dx = m.pos.x - e.pos.x, dz = m.pos.z - e.pos.z;
+      const dy = m.pos.y - e.pos.y;
+      if (Math.hypot(dx, dz) < 1.5 && Math.abs(dy) < 1.5) {
+        e.attackCooldown = 0.7;
+        this.hurt(m, this.petDamage(e.kind as MobKind), dx, dz, e);
+        return;
+      }
+    }
+  }
+
   /** Phantom: flies in circles above the player and periodically swoops. */
   private updatePhantom(e: Entity, dt: number): void {
     const p = this.player!;
@@ -1235,6 +1346,16 @@ export class EntityManager {
 
     for (const e of this.entities) {
       if (!this.isMob(e)) continue;
+      const stats = MOB_STATS[e.kind as MobKind];
+      // captured pets slowly auto-heal back to full (unless killed outright)
+      if (this.isPet(e)) {
+        e.attackCooldown = Math.max(0, e.attackCooldown - 0.05);
+        if (e.regenT > 0) e.regenT -= 0.05;
+        if (e.regenT <= 0 && e.hp < stats.hp) {
+          e.hp = Math.min(stats.hp, e.hp + 1);
+          e.regenT = 4;
+        }
+      }
       // breeding + baby growth bookkeeping
       if (e.breedCooldown > 0) e.breedCooldown = Math.max(0, e.breedCooldown - 0.05);
       if (e.loveT > 0) {
@@ -1248,7 +1369,6 @@ export class EntityManager {
         e.box = { ...MOB_STATS[e.kind as MobKind].box };
       }
       e.stateTime -= 0.05;
-      const stats = MOB_STATS[e.kind as MobKind];
       const d = Math.hypot(p.pos.x - e.pos.x, p.pos.z - e.pos.z);
 
       // idle voices, attenuated by distance
@@ -1256,7 +1376,7 @@ export class EntityManager {
         this.audio.mobSound(e.kind, (1 - d / 24) * 0.9);
       }
 
-      if (stats.hostile && e.state !== 'fuse') {
+      if (stats.hostile && e.state !== 'fuse' && !this.isPet(e)) {
         // undead mobs burn off at dawn when the sky can see them
         if (!isNight && (e.kind === 'zombie' || e.kind === 'skeleton' || e.kind === 'phantom')) {
           const sky = this.world.skyLight(Math.floor(e.pos.x), Math.floor(e.pos.y + 1), Math.floor(e.pos.z));
@@ -1459,12 +1579,14 @@ export class EntityManager {
     return best;
   }
 
-  hurt(e: Entity, dmg: number, kbX: number, kbZ: number): void {
+  hurt(e: Entity, dmg: number, kbX: number, kbZ: number, attacker?: Entity | Player): void {
     if (e.dead || !this.isMob(e)) return;
     if (e.armorTier > 0) dmg *= 0.5; // iron horse barding halves damage
     e.hp -= dmg;
     e.hurtFlash = 0.35;
     if (e.kind === 'spider') e.angryT = 12;
+    // a hit pet pauses regen briefly before healing again
+    if (this.isPet(e)) e.regenT = 6;
     const len = Math.hypot(kbX, kbZ) || 1;
     e.vel.x += (kbX / len) * 7;
     e.vel.z += (kbZ / len) * 7;
@@ -1475,12 +1597,28 @@ export class EntityManager {
       e.stateTime = 5;
       e.yaw = Math.atan2(-kbX, -kbZ); // run along the knockback direction
     }
+    // owner (or an owned pet) hit this mob -> all idle pets lock onto it
+    const byOwner = attacker === this.player
+      || (attacker !== undefined && this.isMob(attacker as Entity) && (attacker as Entity).tamed);
+    if (byOwner) {
+      for (const pet of this.entities) {
+        if (this.isPet(pet) && !pet.target && !pet.sitting) pet.target = e;
+      }
+    }
     if (e.hp <= 0) {
       e.dead = true;
       this.audio.play('pop');
       this.spawnPoof(e.pos.x, e.pos.y, e.pos.z);
       this.dropLoot(e);
       this.onKill?.(e.kind as string);
+    }
+  }
+
+  /** The player was hurt by `source` -> all idle pets retaliate against it. */
+  onOwnerHurt(source: Entity): void {
+    if (!this.isMob(source)) return;
+    for (const pet of this.entities) {
+      if (this.isPet(pet) && !pet.target && !pet.sitting) pet.target = source;
     }
   }
 
@@ -2577,7 +2715,7 @@ export class EntityManager {
     return new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: this.atlas.texture, alphaTest: 0.35 }));
   }
 
-  private buildDropMesh(itemId: number): THREE.Group {
+  private buildDropMesh(itemId: number, mob?: string): THREE.Group {
     const g = new THREE.Group();
     const d = def(itemId);
     if (d.block && (CROSS_BLOCKS.has(itemId) || itemId === B.TORCH)) {
@@ -2591,9 +2729,9 @@ export class EntityManager {
       ));
     } else if (d.block && d.faces) {
       g.add(this.makeBlockMesh(itemId, 0.25));
-    } else if (d.sprite) {
+    } else if (d.sprite || spriteNameFor(itemId, mob)) {
       // dropped items tumble as real 3D voxel models
-      const sprite = this.atlas.sprite(d.sprite);
+      const sprite = this.atlas.sprite(spriteNameFor(itemId, mob) ?? d.sprite!);
       if (sprite) {
         g.add(new THREE.Mesh(
           extrudeSpriteGeometry(sprite, 0.34),

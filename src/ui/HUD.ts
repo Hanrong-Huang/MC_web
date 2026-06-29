@@ -5,7 +5,7 @@
 
 import { Atlas, drawHeart, drawShank, drawBubble, drawArmor } from '../engine/Textures';
 import { Inventory, Slot, matchRecipe, FurnaceState, ChestState, SMELT_TIME, allRecipes, RecipeView } from '../engine/Inventory';
-import { def, CREATIVE_ITEMS, I, B } from '../engine/Blocks';
+import { def, CREATIVE_ITEMS, I, B, spriteNameFor, mobLabel } from '../engine/Blocks';
 import { SaveSummary, SlotData } from '../engine/Persistence';
 import { AudioEngine } from '../engine/Audio';
 import type { GameMode } from '../engine/Player';
@@ -395,6 +395,7 @@ export class HUD {
     const n = d.name;
     if (n.includes('diamond')) return '#5decd5';
     if (n.includes('gold') || id === I.GOLDEN_CARROT) return '#ffe14a';
+    if (id === I.MOB_CATCHER || id === I.MOB_CATCHER_FILLED || id === I.AMETHYST) return '#c9a4ff';
     if (tier >= 6 || n.includes('iron')) return '#dfe6ee';
     if (d.food) return '#ffcf8a';
     if (d.bow || d.toolInfo) return '#e8d7b0';
@@ -761,6 +762,7 @@ export class HUD {
       lines.push(`Durability: ${cur} / ${d.durability}`);
     }
     if (d.fuel) lines.push(`Furnace fuel: ${d.fuel}s`);
+    if (item.mob) lines.push(`Captured: ${mobLabel(item.mob)}`);
     return lines;
   }
 
@@ -770,7 +772,7 @@ export class HUD {
     const d = def(item.id);
     this.tooltipEl.innerHTML = '';
     const name = el('div', 'tt-name', this.tooltipEl);
-    name.textContent = d.label;
+    name.textContent = item.mob ? `Captured ${mobLabel(item.mob)}` : d.label;
     name.style.color = this.itemAccent(item.id);
     for (const line of this.tooltipLines(item)) {
       el('div', 'tt-line', this.tooltipEl).textContent = line;
@@ -792,11 +794,18 @@ export class HUD {
   }
 
   private iconCanvas(item: SlotData): HTMLCanvasElement {
-    const src = this.atlas.icon(item.id);
     const c = document.createElement('canvas');
-    c.width = src.width; c.height = src.height;
+    c.width = 32; c.height = 32;
     const ctx = c.getContext('2d')!;
-    ctx.drawImage(src, 0, 0);
+    // filled mob catchers show a per-mob sprite instead of the generic icon
+    const mobSprite = spriteNameFor(item.id, item.mob);
+    if (item.mob !== undefined && mobSprite && mobSprite !== def(item.id).sprite) {
+      const s = this.atlas.sprite(mobSprite);
+      if (s) { ctx.imageSmoothingEnabled = false; ctx.drawImage(s, 0, 0, 16, 16, 0, 0, 32, 32); }
+    } else {
+      const src = this.atlas.icon(item.id);
+      ctx.drawImage(src, 0, 0);
+    }
     // durability bar for worn tools
     const d = def(item.id);
     if (d.durability && item.dur !== undefined && item.dur < d.durability) {
@@ -840,7 +849,7 @@ export class HUD {
     for (let j = lo; j < hi && s.count > 0; j++) {
       if (!dst[j]) {
         const give = Math.min(max, s.count);
-        dst[j] = { id: s.id, count: give, ...(s.dur !== undefined ? { dur: s.dur } : {}) };
+        dst[j] = { id: s.id, count: give, ...(s.dur !== undefined ? { dur: s.dur } : {}), ...(s.mob !== undefined ? { mob: s.mob } : {}) };
         s.count -= give; moved = true;
       }
     }
@@ -880,12 +889,12 @@ export class HUD {
       // right click: pick half / place one
       if (!this.cursor && s) {
         const half = Math.ceil(s.count / 2);
-        this.cursor = { id: s.id, count: half };
+        this.cursor = { id: s.id, count: half, ...(s.mob !== undefined ? { mob: s.mob } : {}) };
         s.count -= half;
         if (s.count <= 0) arr[i] = null;
       } else if (this.cursor) {
         if (!s) {
-          arr[i] = { id: this.cursor.id, count: 1 };
+          arr[i] = { id: this.cursor.id, count: 1, ...(this.cursor.mob !== undefined ? { mob: this.cursor.mob } : {}) };
           this.cursor.count--;
         } else if (s.id === this.cursor.id && s.count < def(s.id).stack) {
           s.count++;
