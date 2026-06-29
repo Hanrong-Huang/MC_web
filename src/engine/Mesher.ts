@@ -768,13 +768,22 @@ function emitPressurePlate(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number
  *  (0=-z,1=-x,2=+z,3=+x). */
 function emitBed(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, isHead: boolean, facing: number, sky: number, torch: number): void {
   const red = atlas.rect('bed_side');       // red blanket on the mattress sides
-  const wood = atlas.rect('planks');        // wooden base
+  const wood = atlas.rect('bed_leg');       // wooden corner legs
   const top = atlas.rect(isHead ? 'bed_head_top' : 'bed_foot_top');
-  const baseH = 0.1875;                      // 3/16 wooden base, 6/16 mattress on top
-  // solid wooden base (full footprint)
-  emitBox(g, wood, x, y, z, 0, 1, 0, baseH, 0, 1, sky, torch);
-  // red mattress; the head's pillow texture is rotated to face its outer end
-  emitBox(g, red, x, y, z, 0, 1, baseH, 0.5625, 0, 1, sky, torch, [1, 1, 1], top, isHead ? facing : 0);
+  const L = 0.1875;                          // 3/16 legs (height + thickness)
+  const mattTop = 0.5625;                    // 9/16 mattress top
+  // red mattress floating above the legs (open underside = the MC bed look);
+  // the head's pillow texture is rotated to face its outer end
+  emitBox(g, red, x, y, z, 0, 1, L, mattTop, 0, 1, sky, torch, [1, 1, 1], top, isHead ? facing : 0);
+  // two wooden legs at this half's outer end, so the whole bed has 4 corner legs
+  const axisIsZ = facing === 0 || facing === 2;
+  const high = (facing === 0 || facing === 1) ? !isHead : isHead;
+  const a0 = high ? 1 - L : 0, a1 = high ? 1 : L;
+  const leg = (cMin: number): void => {
+    if (axisIsZ) emitBox(g, wood, x, y, z, cMin, cMin + L, 0, L, a0, a1, sky, torch);
+    else emitBox(g, wood, x, y, z, a0, a1, 0, L, cMin, cMin + L, sky, torch);
+  };
+  leg(0); leg(1 - L);
 }
 
 function emitLever(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean, facing: number): void {

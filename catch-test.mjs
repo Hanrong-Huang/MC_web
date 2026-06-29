@@ -1,9 +1,10 @@
-// Feature check: mob catcher capture / release / recall + filled-catcher icon.
-// Drives the engine through window.__game (exposed under #debugmobs).
+// Feature check: mob catcher capture / release / recall, filled-catcher icon,
+// held orb, and the recipe-book entry. Drives the engine through window.__game
+// (exposed under #debugmobs).
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
 
-const I_MOB_CATCHER = 182, I_MOB_CATCHER_FILLED = 183;
+const I_AMETHYST = 181, I_MOB_CATCHER = 182, I_MOB_CATCHER_FILLED = 183;
 
 const server = await createServer({ root: process.cwd(), server: { port: 5213 } });
 await server.listen();
@@ -18,7 +19,7 @@ page.on('pageerror', (e) => errors.push(`PAGEERROR: ${e.message}`));
 
 await page.goto('http://localhost:5213/#debugmobs');
 await page.waitForTimeout(1000);
-await page.locator('.mode-pick button', { hasText: 'Creative' }).click();
+await page.locator('.mode-pick button', { hasText: 'Survival' }).click();
 await page.locator('.create-btn').click();
 await page.waitForSelector('#loading.hidden', { timeout: 60000, state: 'attached' });
 await page.waitForTimeout(2500);
@@ -26,10 +27,11 @@ await page.mouse.click(640, 360);
 await page.waitForTimeout(300);
 
 // 1) give the player an empty catcher, spawn a zombie right in front, capture it.
-const cap = await page.evaluate(({ CATCHER, FILLED }) => {
+const cap = await page.evaluate(({ AM, CATCHER, FILLED }) => {
   const g = window.__game;
   const p = g.player;
   p.inventory.slots[0] = { id: CATCHER, count: 16 };
+  p.inventory.slots[2] = { id: AM, count: 64 };
   p.inventory.selected = 0;
   g.onInventoryChange();
   const z = g.entities.spawnMob('zombie', p.pos.x + 1.2, p.pos.y, p.pos.z);
@@ -39,8 +41,8 @@ const cap = await page.evaluate(({ CATCHER, FILLED }) => {
   p.inventory.selected = 1;
   g.onInventoryChange();
   return { kind, zombieDead: z.dead, heldMob: p.heldMob() };
-}, { CATCHER: I_MOB_CATCHER, FILLED: I_MOB_CATCHER_FILLED });
-await page.waitForTimeout(600);
+}, { AM: I_AMETHYST, CATCHER: I_MOB_CATCHER, FILLED: I_MOB_CATCHER_FILLED });
+await page.waitForTimeout(800);
 await page.screenshot({ path: 'shot-catch-held.png' });
 
 // 2) release the captured zombie as a pet and confirm it follows (tamed).
@@ -67,13 +69,36 @@ const recall = await page.evaluate(() => {
   return { ok: true, kind: pet.kind };
 });
 
+// 3b) lay a daylit floor patch of amethyst ore and look down at it (tile check).
+await page.evaluate(() => {
+  const g = window.__game; const p = g.player; const B = window.__B;
+  const bx = Math.floor(p.pos.x), bz = Math.floor(p.pos.z), by = Math.floor(p.pos.y) - 1;
+  for (let ax = -2; ax <= 3; ax++)
+    for (let az = -2; az <= 3; az++)
+      g.world.setBlock(bx + ax, by, bz + az, B.AMETHYST_ORE);
+  p.pitch = -1.1; // look down at the floor
+});
+await page.waitForTimeout(700);
+await page.screenshot({ path: 'shot-catch-orb.png' });
+
+// 4) open the inventory and confirm the Mob Catcher shows in the recipe book.
+await page.evaluate(() => window.__game.player.selected);
+await page.keyboard.press('KeyE');
+await page.waitForTimeout(500);
+const bookHasCatcher = await page.evaluate(() => {
+  const names = [...document.querySelectorAll('.recipe-name')].map((n) => n.textContent);
+  return names.some((n) => n && n.toLowerCase().includes('catcher'));
+});
+await page.screenshot({ path: 'shot-catch-inventory.png' });
+
 console.log('CAPTURE:', JSON.stringify(cap));
 console.log('RELEASE:', JSON.stringify(rel));
 console.log('RECALL :', JSON.stringify(recall));
+console.log('RECIPE BOOK has catcher:', bookHasCatcher);
 const pass =
   cap.kind === 'zombie' && cap.zombieDead === true && cap.heldMob === 'zombie' &&
   rel.after === rel.before + 1 && rel.petTamed === true && rel.owner === 'player' && rel.isPet === true &&
-  recall.ok === true;
+  recall.ok === true && bookHasCatcher === true;
 console.log('--- console errors ---');
 console.log(errors.length ? errors.slice(0, 12).join('\n') : 'NONE');
 console.log(pass && !errors.length ? 'RESULT: PASS' : 'RESULT: FAIL');

@@ -4,7 +4,13 @@
 import * as THREE from 'three';
 import { Atlas, extrudeSpriteGeometry } from './Textures';
 import type { ChunkMeshData, GeoArrays } from './Mesher';
-import { def, hasDef, spriteNameFor } from './Blocks';
+import { def, hasDef, spriteNameFor, I } from './Blocks';
+
+/** Inner-core glow colors for the held filled-catcher orb, keyed by mob kind. */
+const MOB_ORB_COLORS: Record<string, number> = {
+  zombie: 0x5d9b54, skeleton: 0xe6e6dc, spider: 0x6a5560,
+  creeper: 0x6bcf57, cinderling: 0xf07a2a, ashstalker: 0xe06a2a,
+};
 
 export interface ChunkGeometry {
   solid: THREE.BufferGeometry | null;
@@ -150,6 +156,9 @@ export class Renderer {
   private heldId = -1;
   /** captured-mob kind for the held item (filled catcher), drives its sprite */
   private heldMob: string | undefined = undefined;
+  /** the held item is a capture orb, which gets a slow idle spin */
+  private heldIsOrb = false;
+  private orbSpin = 0;
   private swingT = 1; // 0..1, 1 = idle
   private raiseT = 1; // 0..1, drives the raise-up when the held item changes
   private bowCharge = 0;
@@ -477,6 +486,7 @@ export class Renderer {
     if (id === this.heldId && mob === this.heldMob) return;
     this.heldId = id;
     this.heldMob = mob;
+    this.heldIsOrb = false;
     this.raiseT = 0; // animate the new item up into view
     if (this.heldMesh) {
       this.heldGroup.remove(this.heldMesh);
@@ -531,6 +541,14 @@ export class Renderer {
       // a slight 3/4 tilt so the top + two side faces all catch the light
       mesh.rotation.set(-0.16, 0.5, 0);
       this.heldMesh = mesh;
+    } else if (id === I.MOB_CATCHER || id === I.MOB_CATCHER_FILLED) {
+      // the capture orb is a real little 3D sphere (glass shell + metal band),
+      // not a flat extruded card — it reads as a ball that gently spins in hand
+      const orb = this.buildCatcherOrb(id === I.MOB_CATCHER_FILLED ? this.heldMob : undefined);
+      this.heldIdleRot.set(0, 0, 0);
+      orb.rotation.copy(this.heldIdleRot);
+      this.heldMesh = orb;
+      this.heldIsOrb = true;
     } else if (id !== 0 && hasDef(id) && (def(id).sprite || spriteNameFor(id, this.heldMob))) {
       // pixel sprite extruded into a real 3D voxel model (Minecraft-style),
       // so tools/items in hand read with depth instead of as a flat card.
@@ -645,6 +663,13 @@ export class Renderer {
       0.25 + swingAngle * 0.5,
       swingAngle * 0.25,
     );
+    // the capture orb floats and slowly spins on its own axis in the hand
+    if (this.heldIsOrb && this.heldMesh) {
+      this.orbSpin += dt * 1.3;
+      this.heldMesh.rotation.set(0.12, this.orbSpin, 0);
+      // lift + pull the orb in so the whole ball sits in view, gently floating
+      this.heldMesh.position.set(-0.06, 0.06 + Math.sin(this.bobT * 0.6) * 0.012, 0.04);
+    }
   }
 
   private buildExtrudedItem(sprite: HTMLCanvasElement): THREE.Mesh {
@@ -659,6 +684,46 @@ export class Renderer {
       metalness: isMetallic ? 0.82 : 0.05,
     });
     return new THREE.Mesh(extrudeSpriteGeometry(sprite, 0.56), mat);
+  }
+
+  /** A held capture orb: glassy amethyst shell, dark metal equatorial band with
+   *  a glowing button, and (when filled) a glowing inner core in the mob color. */
+  private buildCatcherOrb(mob?: string): THREE.Group {
+    const g = new THREE.Group();
+    const R = 0.22;
+    const shell = new THREE.Mesh(
+      new THREE.SphereGeometry(R, 22, 18),
+      new THREE.MeshStandardMaterial({
+        color: 0x9a6fd6, roughness: 0.12, metalness: 0.1,
+        transparent: true, opacity: mob ? 0.6 : 0.74, depthWrite: false,
+        emissive: 0x3a2a5a, emissiveIntensity: 0.45,
+      }),
+    );
+    if (mob) {
+      // captured creature glowing inside the glass (drawn first, glass over it)
+      const col = MOB_ORB_COLORS[mob] ?? 0xffffff;
+      const core = new THREE.Mesh(
+        new THREE.SphereGeometry(R * 0.56, 14, 12),
+        new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.9, roughness: 0.5 }),
+      );
+      g.add(core);
+    }
+    shell.renderOrder = 2; // glass last so the core + band show through it
+    g.add(shell);
+    const band = new THREE.Mesh(
+      new THREE.TorusGeometry(R * 1.0, R * 0.11, 8, 26),
+      new THREE.MeshStandardMaterial({ color: 0x2a2038, roughness: 0.4, metalness: 0.65 }),
+    );
+    band.rotation.x = Math.PI / 2;
+    g.add(band);
+    const button = new THREE.Mesh(
+      new THREE.SphereGeometry(R * 0.17, 10, 8),
+      new THREE.MeshStandardMaterial({ color: 0xe0c9ff, emissive: 0x9a6fd6, emissiveIntensity: 0.6 }),
+    );
+    button.position.set(0, 0, R * 1.04);
+    g.add(button);
+    g.scale.setScalar(1.05);
+    return g;
   }
 
   private buildHeldArrow(): THREE.Group {

@@ -7,7 +7,7 @@ import { Input } from './Input';
 import { Renderer } from './Renderer';
 import { AudioEngine } from './Audio';
 import { moveEntity, hasSupport, inWater, eyeInWater, boxIntersectsBlock, Vec3 } from './Physics';
-import { B, I, def, hasDef, breakTime, attackDamage, isSolid, canHarvest, FLOOR_BLOCKS, SELF_STACKING } from './Blocks';
+import { B, I, def, hasDef, breakTime, attackDamage, isSolid, canHarvest, FLOOR_BLOCKS, SELF_STACKING, mobLabel } from './Blocks';
 import { DoorFacing } from './World';
 import { Inventory } from './Inventory';
 import type { EntityManager } from './EntityManager';
@@ -133,6 +133,13 @@ export class Player {
   /** captured-mob kind on the held stack (filled catcher), else undefined. */
   heldMob(): string | undefined {
     return this.inventory.getSelected()?.mob;
+  }
+
+  /** Put a freshly filled catcher into the first empty slot, or drop it if full. */
+  private giveFilledCatcher(kind: string): void {
+    const idx = this.inventory.firstEmpty();
+    if (idx >= 0) this.inventory.slots[idx] = { id: I.MOB_CATCHER_FILLED, count: 1, mob: kind };
+    else this.deps.entities.spawnDrop(this.pos.x, this.pos.y + 1, this.pos.z, I.MOB_CATCHER_FILLED, 1, undefined, kind);
   }
 
   toggleFly(): void {
@@ -984,14 +991,14 @@ export class Player {
         // recalling an owned pet takes priority and does NOT consume the catcher
         if (ent.isPet(hit.entity)) {
           const kind = hit.entity.kind;
+          ent.spawnCaptureSparkle(hit.entity.pos.x, hit.entity.pos.y + hit.entity.box.h * 0.5, hit.entity.pos.z);
           hit.entity.dead = true;
           hit.entity.target = null;
-          const idx = this.inventory.firstEmpty();
-          if (idx >= 0) this.inventory.slots[idx] = { id: I.MOB_CATCHER_FILLED, count: 1, mob: kind };
-          else this.deps.entities.spawnDrop(this.pos.x, this.pos.y + 1, this.pos.z, I.MOB_CATCHER_FILLED, 1, undefined, kind);
+          this.giveFilledCatcher(kind);
           audio.play('snap');
           this.placeCooldown = 0.4;
           this.deps.renderer.triggerSwing();
+          this.deps.toast(`Recalled ${mobLabel(kind)}`);
           this.inventory.onChange();
           return;
         }
@@ -1001,9 +1008,8 @@ export class Player {
           this.placeCooldown = 0.4;
           this.deps.renderer.triggerSwing();
           if (this.mode === 'survival') this.inventory.consumeSelected();
-          const idx = this.inventory.firstEmpty();
-          if (idx >= 0) this.inventory.slots[idx] = { id: I.MOB_CATCHER_FILLED, count: 1, mob: kind };
-          else this.deps.entities.spawnDrop(this.pos.x, this.pos.y + 1, this.pos.z, I.MOB_CATCHER_FILLED, 1, undefined, kind);
+          this.giveFilledCatcher(kind);
+          this.deps.toast(`Captured ${mobLabel(kind)}!`);
           this.inventory.onChange();
           return;
         }
@@ -1089,12 +1095,14 @@ export class Player {
 
     // filled mob catcher: release the captured pet in front of the player
     if (held?.id === I.MOB_CATCHER_FILLED && held.mob) {
+      const kind = held.mob;
       const d = this.lookDir();
       const fx = this.pos.x + d.x * 2, fy = this.pos.y, fz = this.pos.z + d.z * 2;
-      this.deps.entities.releaseMob(held.mob as never, fx, fy, fz, this.yaw);
+      this.deps.entities.releaseMob(kind as never, fx, fy, fz, this.yaw);
       this.placeCooldown = 0.4;
       this.deps.renderer.triggerSwing();
       if (this.mode === 'survival') this.inventory.consumeSelected();
+      this.deps.toast(`Released ${mobLabel(kind)}`);
       this.inventory.onChange();
       return;
     }

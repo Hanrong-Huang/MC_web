@@ -394,16 +394,29 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
       }
     }
   },
+  // Minecraft-style glass: a light blue-white border frame around a fully
+  // transparent pane (the alpha-test pass keeps the opaque frame, drops the
+  // clear centre), with the signature corner glint + diagonal reflection.
   glass: (c, x, y) => {
     c.clearRect(x, y, 16, 16);
-    c.fillStyle = '#dbe9ec';
+    // border frame (opaque so it survives the alpha cutout)
+    c.fillStyle = '#a7c9d4';
     c.fillRect(x, y, 16, 1); c.fillRect(x, y + 15, 16, 1);
     c.fillRect(x, y, 1, 16); c.fillRect(x + 15, y, 1, 16);
+    // top + left edges read brighter (top-lit pane)
+    c.fillStyle = '#dcecf2';
+    c.fillRect(x, y, 16, 1); c.fillRect(x, y, 1, 16);
+    // a couple of broken inner-border ticks, like the real texture
+    c.fillStyle = '#c2dee6';
+    c.fillRect(x + 4, y + 1, 1, 1); c.fillRect(x + 11, y + 14, 1, 1);
+    c.fillRect(x + 1, y + 9, 1, 1); c.fillRect(x + 14, y + 5, 1, 1);
+    // bright top-left corner glint
     c.fillStyle = '#ffffff';
-    for (let i = 0; i < 5; i++) c.fillRect(x + 10 - i, y + 2 + i, 1, 1);
-    for (let i = 0; i < 3; i++) c.fillRect(x + 13 - i, y + 2 + i, 1, 1);
-    c.fillStyle = 'rgba(200,225,235,0.25)';
-    c.fillRect(x + 1, y + 1, 14, 14);
+    c.fillRect(x + 1, y + 1, 3, 1); c.fillRect(x + 1, y + 1, 1, 3);
+    // signature diagonal reflection streak across the pane
+    for (let i = 0; i < 5; i++) c.fillRect(x + 11 - i, y + 3 + i, 1, 1);
+    c.fillStyle = '#cfe8ef';
+    for (let i = 0; i < 3; i++) c.fillRect(x + 12 - i, y + 4 + i, 1, 1);
   },
   table_top: (c, x, y) => {
     TILE_PAINTERS.planks(c, x, y);
@@ -468,7 +481,16 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
   iron_ore: (c, x, y) => oreTile(c, x, y, 318, '#d8af93', '#b08a6e'),
   gold_ore: (c, x, y) => oreTile(c, x, y, 418, '#fcee4b', '#d9c52e'),
   diamond_ore: (c, x, y) => oreTile(c, x, y, 518, '#4aedd9', '#33c7c2'),
-  amethyst_ore: (c, x, y) => oreTile(c, x, y, 618, '#c9a4ff', '#9a6fd6'),
+  amethyst_ore: (c, x, y) => {
+    noiseFill(c, x, y, STONE_PAL, 618, 1);
+    // small faceted amethyst crystals embedded in the stone (highlight -> shadow)
+    const gem = (gx: number, gy: number): void => {
+      c.fillStyle = '#c9a4ff'; c.fillRect(x + gx, y + gy, 1, 1);
+      c.fillStyle = '#9a6fd6'; c.fillRect(x + gx + 1, y + gy, 1, 1); c.fillRect(x + gx, y + gy + 1, 1, 1);
+      c.fillStyle = '#5a3f86'; c.fillRect(x + gx + 1, y + gy + 1, 1, 1);
+    };
+    gem(3, 4); gem(9, 3); gem(6, 8); gem(11, 9); gem(4, 11); gem(12, 13);
+  },
   gravel: (c, x, y) => {
     noiseFill(c, x, y, ['#7f7c78', '#8c8782', '#6e6a66', '#999390', '#5d5a57'], 119, 1);
     const rand = mulberry32(219);
@@ -538,6 +560,12 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
     c.fillStyle = '#f6f6f6'; c.fillRect(x, y, 16, 2);         // bright outer edge
     c.fillStyle = '#d2d2d2'; c.fillRect(x, y + 9, 16, 2);     // pillow shadow seam
     c.fillStyle = '#8a2222'; c.fillRect(x, y + 11, 16, 1);    // red seam at the join
+  },
+  // bed leg: a small solid oak post (cleaner than plank lines at leg scale)
+  bed_leg: (c, x, y) => {
+    noiseFill(c, x, y, ['#6b4f2a', '#5e4524', '#735730'], 131, 0);
+    c.fillStyle = 'rgba(255,236,194,0.20)'; c.fillRect(x, y, 16, 3);
+    c.fillStyle = 'rgba(0,0,0,0.24)'; c.fillRect(x, y + 13, 16, 3);
   },
   // mattress side: red blanket with a brighter top edge and a darker base seam
   bed_side: (c, x, y) => {
@@ -1499,18 +1527,20 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     '......OOO.......', '................', '................', '................',
   ], { O: '#4a2a14', P: '#b5773a', p: '#d8a05a', W: '#f2e3d5' }),
   amethyst: (c) => pixmap(c, 0, 0, [
-    '................', '................', '................', '......OOO.......',
-    '.....OAAAPO.....', '....OAPaaAPO....', '....OAaPaaAO....', '....OaaaPPAO....',
-    '.....OAPaaAO....', '......OAAAPO....', '.......OAAO.....', '........OA......',
-    '................', '................', '................', '................',
-  ], { O: '#3a2a5a', A: '#9a6fd6', a: '#c9a4ff', P: '#6a4a96' }),
+    '.......k........', '......khk.......', '......kahk......', '.....kaaAk......',
+    '.....kaaAAk.....', '....kaaAAADk....', '....kaaAADDk....', '....kaaAADDk....',
+    '....kaaAADDk....', '....kaAAADDk....', '.....kAADDk.....', '.....kADDDk.....',
+    '......kDDk......', '.......kk.......', '................', '................',
+  ], { k: '#2a1d44', h: '#f3ecff', a: '#c9a4ff', A: '#9a6fd6', D: '#5a3f86' }),
   mob_catcher: (c) => catcherShell(c),
-  mob_catcher_filled_zombie: (c) => filledCatcher(c, '#4f7d4a', '#3f6a3c'),
-  mob_catcher_filled_skeleton: (c) => filledCatcher(c, '#d8d8d0', '#bfbfb5'),
-  mob_catcher_filled_spider: (c) => filledCatcher(c, '#2a2125', '#3a2e33'),
-  mob_catcher_filled_creeper: (c) => filledCatcher(c, '#58a84a', '#3f8a36'),
-  mob_catcher_filled_cinderling: (c) => filledCatcher(c, '#d65a16', '#2a2320'),
-  mob_catcher_filled_ashstalker: (c) => filledCatcher(c, '#b8501a', '#241e1c'),
+  // generic fallback (a filled catcher always carries a mob kind in practice)
+  mob_catcher_filled: (c) => filledCatcher(c, '#9a6fd6', '#6a4a96', '#e0c9ff'),
+  mob_catcher_filled_zombie: (c) => filledCatcher(c, '#4f7d4a', '#3a5e37', '#7dba6e'),
+  mob_catcher_filled_skeleton: (c) => filledCatcher(c, '#d8d8d0', '#aaaaa0', '#ffffff'),
+  mob_catcher_filled_spider: (c) => filledCatcher(c, '#3a2e33', '#221a1e', '#6a5560'),
+  mob_catcher_filled_creeper: (c) => filledCatcher(c, '#58a84a', '#3f8a36', '#88d878'),
+  mob_catcher_filled_cinderling: (c) => filledCatcher(c, '#d65a16', '#8a3a10', '#ffb060'),
+  mob_catcher_filled_ashstalker: (c) => filledCatcher(c, '#b8501a', '#6a2e12', '#ff8a40'),
 };
 
 /** Generic meat chop sprite with palette colors. */
@@ -1523,33 +1553,48 @@ function meatSprite(c: Ctx, dark: string, light: string): void {
   ], { O: '#2a1410', P: dark, p: light, W: '#f2e3d5' });
 }
 
-/** Empty mob catcher: a purple spherical capsule (the "ball" shell). */
+// A polished amethyst capture orb: glassy upper hemisphere with a top-left
+// highlight, a dark metal equatorial band with a glowing button, and a deeper
+// amethyst lower hemisphere. Shared by the empty + filled catcher sprites.
+const ORB_ROWS = [
+  '......kkkk......',
+  '....kaaaaaak....',
+  '...kahhaaaaak...',
+  '..kahhaaaaaaAk..',
+  '.kaahaaaaaaAAAk.',
+  '.kaaaaaaaaAAAAk.',
+  'kaaaaaAAAAAAAAAk',
+  'kbbbbbbrrbbbbbbk',
+  'kBBBBBBrrBBBBBBk',
+  'kAAAAAADDDDDDDDk',
+  '.kAAAADDDDDDDDk.',
+  '.kAAADDDDDDDDDk.',
+  '..kAADDDDDDDDk..',
+  '...kADDDDDDDk...',
+  '....kDDDDDDk....',
+  '......kkkk......',
+];
+const ORB_PAL: Record<string, string> = {
+  k: '#241830', h: '#f3ecff', a: '#c9a4ff', A: '#9a6fd6', D: '#5a3f86',
+  b: '#4a3a64', B: '#2a2038', r: '#e0c9ff',
+};
+
+/** Empty mob catcher: the bare amethyst capture orb. */
 function catcherShell(c: Ctx): void {
-  pixmap(c, 0, 0, [
-    '................', '................', '.....kkkkk......', '....kKKKKKk.....',
-    '...kKAAAAAKk....', '..kKAAAppAAKk...', '..kKApAAApAAKk..', '..kKAAAppAAAKk..',
-    '..kKAAApAApAAK..', '..kKAAAppAAAKk..', '..kKApAAApAAKk..', '...kKAAAAAKk....',
-    '....kKmmmMKk....', '.....kmmmmk.....', '................', '................',
-  ], { k: '#2a1844', K: '#5a3a8a', A: '#9a6fd6', p: '#c9a4ff', m: '#3a2a5a' });
+  pixmap(c, 0, 0, ORB_ROWS, ORB_PAL);
 }
 
-/** Filled mob catcher: shell + a simplified mob head portrait in the centre.
- *  `base` is the mob's main body color, `accent` a darker shade for detail. */
-function filledCatcher(c: Ctx, base: string, accent: string): void {
-  // darker translucent-feeling shell first, then the mob portrait on top
+/** Filled mob catcher: the orb with the captured creature glowing in the glass
+ *  upper hemisphere. `base` is its body color, `accent` a shade, `glow` a tint. */
+function filledCatcher(c: Ctx, base: string, accent: string, glow: string): void {
+  pixmap(c, 0, 0, ORB_ROWS, ORB_PAL);
+  // the trapped creature, peering out through the glass above the band
   pixmap(c, 0, 0, [
-    '................', '................', '.....kkkkk......', '....kKKKKKk.....',
-    '...kKAAAAAKk....', '..kKAA...AAKk...', '..kKA....AAAKk..', '..kKA....AAAKk..',
-    '..kKAA...AAAKk..', '..kKAAAAAAAKk...', '...kKAAAAAKk....', '....kKmmmMKk....',
-    '.....kmmmmk.....', '................', '................', '................',
-  ], { k: '#2a1844', K: '#3a2a5a', A: '#6a4a96', m: '#3a2a5a' });
-  // central mob head portrait (a 6x6 rounded block with two eyes)
-  pixmap(c, 0, 0, [
+    '................', '................', '................', '......BBBB......',
+    '.....GBBBBB.....', '.....BeBBeB.....', '......BAAB......', '................',
     '................', '................', '................', '................',
-    '................', '....BBBBBB......', '...BBeBBpBB.....', '...BBeBBpBB.....',
-    '...BBBBBBBB.....', '....BBBBBB......', '................', '................',
     '................', '................', '................', '................',
-  ], { B: base, e: '#1a1a1a', p: accent });
+  ], { B: base, A: accent, G: glow, e: '#15151a' });
 }
 
 // ---------------------------------------------------------------------------

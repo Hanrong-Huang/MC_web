@@ -275,6 +275,7 @@ export class EntityManager {
     const kind = e.kind;
     e.dead = true;                 // removed by the update loop; skips loot/poof
     e.target = null;
+    this.spawnCaptureSparkle(e.pos.x, e.pos.y + e.box.h * 0.5, e.pos.z);
     this.audio.play('snap');
     return kind;
   }
@@ -288,6 +289,7 @@ export class EntityManager {
     e.target = null;
     e.hp = MOB_STATS[kind].hp;     // release at full health
     e.yaw = yaw;
+    this.spawnCaptureSparkle(x, y + 0.4, z);
     this.spawnHearts(x, y + 0.7, z);
     this.audio.play('pop');
     return e;
@@ -1905,6 +1907,38 @@ export class EntityManager {
       e.vel = { x: Math.cos(a) * sp, y: 0.5 + Math.random() * 0.6, z: Math.sin(a) * sp };
       e.maxLife = e.life = 0.4 + Math.random() * 0.25;
       e.pGrav = 8; // arc up then fall back
+      this.entities.push(e);
+      this.scene.add(mesh);
+    }
+  }
+
+  /** Amethyst swirl burst for capturing / recalling a mob into a catcher. */
+  spawnCaptureSparkle(x: number, y: number, z: number): void {
+    let mat = this.particleMats.get('capture');
+    if (!mat) {
+      const c = document.createElement('canvas');
+      c.width = 6; c.height = 6;
+      const ctx = c.getContext('2d')!;
+      ctx.clearRect(0, 0, 6, 6);
+      ctx.fillStyle = '#c9a4ff';
+      ctx.fillRect(2, 0, 2, 6); ctx.fillRect(0, 2, 6, 2); // amethyst spark
+      ctx.fillStyle = '#f3ecff'; ctx.fillRect(2, 2, 2, 2);
+      const tex = new THREE.CanvasTexture(c);
+      tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter;
+      mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
+      this.particleMats.set('capture', mat);
+    }
+    // particles spiral up out of the capture point in a tight amethyst ring
+    for (let i = 0; i < 12; i++) {
+      const mesh = new THREE.Group();
+      mesh.add(new THREE.Mesh(new THREE.PlaneGeometry(0.16, 0.16), mat));
+      const a = (i / 12) * Math.PI * 2, sp = 1.2 + Math.random() * 0.6;
+      const e = new Entity('particle',
+        { x: x + Math.cos(a) * 0.5, y: y + Math.random() * 0.3, z: z + Math.sin(a) * 0.5 },
+        { w: 0.04, h: 0.04 }, mesh);
+      e.vel = { x: -Math.cos(a) * sp, y: 1.1 + Math.random() * 0.5, z: -Math.sin(a) * sp };
+      e.maxLife = e.life = 0.45 + Math.random() * 0.25;
+      e.pGrav = -3; // drift upward as they converge
       this.entities.push(e);
       this.scene.add(mesh);
     }
