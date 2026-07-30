@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { World } from './World';
 import { moveEntity, inWater, rayAABB, Vec3, MoveResult } from './Physics';
-import { B, I, def, hasDef, CROSS_BLOCKS, spriteNameFor, CAPTURABLE } from './Blocks';
+import { B, I, def, hasDef, CROSS_BLOCKS, spriteNameFor, CAPTURABLE, mobLabel } from './Blocks';
 import { Atlas, extrudeSpriteGeometry } from './Textures';
 import { AudioEngine } from './Audio';
 import { SEA_LEVEL } from './WorldGenerator';
@@ -17,7 +17,7 @@ export type MobKind =
   | 'zombie' | 'skeleton' | 'spider' | 'creeper'
   | 'wolf' | 'villager' | 'phantom' | 'horse' | 'cat'
   | 'cinderling' | 'ashstalker' | 'emberghast';
-export type EntityKind = 'drop' | MobKind | 'arrow' | 'tnt' | 'falling' | 'particle' | 'bobber';
+export type EntityKind = 'drop' | MobKind | 'arrow' | 'tnt' | 'falling' | 'particle' | 'bobber' | 'catcher';
 
 const MOB_KINDS = new Set<EntityKind>([
   'pig', 'chicken', 'sheep', 'cow',
@@ -146,8 +146,9 @@ export class Entity {
   fuseT = 0;         // creeper / tnt
   shootCooldown = 0; // skeleton
   materials: THREE.MeshLambertMaterial[] = [];
-  // arrow fields
-  owner: 'player' | 'skeleton' | 'emberghast' = 'player';
+  // arrow fields ('pet'/'petghast' = fired by a captured pet: hurts hostiles,
+  // never the owner or another pet)
+  owner: 'player' | 'skeleton' | 'emberghast' | 'pet' | 'petghast' = 'player';
   dmg = 0;
   // particle fields
   life = 0;
@@ -187,6 +188,8 @@ export class Entity {
   // captured-pet fields
   /** the enemy a pet is currently focused on (null = follow owner) */
   target: Entity | null = null;
+  /** a wild hostile's non-player quarry (a pet it is trading blows with) */
+  foe: Entity | null = null;
   /** seconds until the next auto-regen tick (pets heal slowly) */
   regenT = 0;
   /** scratch steering output from petChase (consumed by the caller) */
@@ -210,6 +213,10 @@ export class EntityManager {
   private player: Player | null = null;
   /** fired when any mob dies (mobKind string) */
   onKill: ((mobKind: string) => void) | null = null;
+  /** HUD toast hook (thrown-catcher feedback happens outside the input path) */
+  onToast: ((msg: string) => void) | null = null;
+  /** fired when a mob is captured into a catcher (mobKind string) */
+  onCapture: ((mobKind: string) => void) | null = null;
   private skinCache = new Map<string, THREE.Texture>();
   private shadowTex: THREE.CanvasTexture | null = null;
   private particleMats = new Map<string, THREE.MeshBasicMaterial>();
@@ -267,6 +274,48 @@ export class EntityManager {
       && e.kind !== 'wolf' && e.kind !== 'cat' && e.kind !== 'horse';
   }
 
+  /** Save shape for the player's pets (wild mobs are not persisted). */
+  savePets(): { kind: string; x: number; y: number; z: number; hp: number; sitting: boolean }[] {
+    const out: { kind: string; x: number; y: number; z: number; hp: number; sitting: boolean }[] = [];
+    for (const e of this.entities) {
+      if (!this.isPet(e) || e.dead) continue;
+      out.push({
+        kind: e.kind as string, x: e.pos.x, y: e.pos.y, z: e.pos.z,
+        hp: e.hp, sitting: e.sitting,
+      });
+    }
+    return out;
+  }
+
+  /** Re-create pets from a save. Unknown kinds are skipped. */
+  loadPets(pets: { kind: string; x: number; y: number; z: number; hp: number; sitting: boolean }[]): void {
+    for (const s of pets) {
+      if (!MOB_KINDS.has(s.kind as MobKind)) continue;
+      const e = this.spawnMob(s.kind as MobKind, s.x, s.y, s.z);
+      e.tamed = true;
+      e.ownerName = 'player';
+      e.sitting = s.sitting;
+      e.hp = Math.max(1, Math.min(MOB_STATS[s.kind as MobKind].hp, s.hp));
+      e.target = null;
+    }
+  }
+
+  /** Live roster of the player's captured pets, for the HUD strip. */
+  petStatus(): { kind: string; hp: number; maxHp: number; sitting: boolean; fighting: boolean }[] {
+    const out: { kind: string; hp: number; maxHp: number; sitting: boolean; fighting: boolean }[] = [];
+    for (const e of this.entities) {
+      if (!this.isPet(e) || e.dead) continue;
+      out.push({
+        kind: e.kind as string,
+        hp: Math.max(0, e.hp),
+        maxHp: MOB_STATS[e.kind as MobKind].hp,
+        sitting: e.sitting,
+        fighting: !!(e.target && !e.target.dead),
+      });
+    }
+    return out;
+  }
+
   /** Capture a wild capturable mob into a catcher. Returns the mob kind, or
    *  null if this mob can't be captured. Marks the mob dead without loot. */
   captureMob(e: Entity): string | null {
@@ -275,9 +324,31 @@ export class EntityManager {
     const kind = e.kind;
     e.dead = true;                 // removed by the update loop; skips loot/poof
     e.target = null;
+    this.clearFoe(e);
+    this.spawnCaptureSparkle(e.pos.x, e.pos.y + e.box.h * 0.5, e.pos.z);
+    this.audio.play('snap');
+    this.onCapture?.(kind as string);
+    return kind;
+  }
+
+  /** Recall an owned pet back into a catcher. Returns its kind (or null). */
+  recallPet(e: Entity): string | null {
+    if (!this.isPet(e) || e.dead) return null;
+    const kind = e.kind;
+    e.dead = true;
+    e.target = null;
+    this.clearFoe(e);
     this.spawnCaptureSparkle(e.pos.x, e.pos.y + e.box.h * 0.5, e.pos.z);
     this.audio.play('snap');
     return kind;
+  }
+
+  /** Drop any references to a removed entity so nothing chases a ghost. */
+  private clearFoe(gone: Entity): void {
+    for (const o of this.entities) {
+      if (o.foe === gone) o.foe = null;
+      if (o.target === gone) o.target = null;
+    }
   }
 
   /** Release a captured mob as a pet at the given spot. Returns the new entity. */
@@ -293,6 +364,119 @@ export class EntityManager {
     this.spawnHearts(x, y + 0.7, z);
     this.audio.play('pop');
     return e;
+  }
+
+  // --- thrown capture orb -------------------------------------------------------
+
+  /** How far off-centre a thrown orb may pass a mob and still catch it. Generous
+   *  on purpose: the orb arcs, so a strict hitbox made every throw a coin flip. */
+  private static readonly CATCH_SLACK = 0.85;
+
+  /** Throw a capture orb along a direction. Captures the first capturable mob it
+   *  brushes past, recalls an owned pet, and drops back as a pickup on a miss. */
+  throwCatcher(x: number, y: number, z: number, dx: number, dy: number, dz: number): Entity {
+    const mesh = this.buildThrownOrb();
+    const e = new Entity('catcher', { x, y, z }, { w: 0.3, h: 0.3 }, mesh);
+    const len = Math.hypot(dx, dy, dz) || 1;
+    const speed = 17;
+    e.vel = { x: (dx / len) * speed, y: (dy / len) * speed + 1.2, z: (dz / len) * speed };
+    this.entities.push(e);
+    this.scene.add(mesh);
+    this.audio.play('bow');
+    return e;
+  }
+
+  /** Small amethyst orb model for the thrown ball (glass shell + metal band). */
+  private buildThrownOrb(): THREE.Group {
+    const g = new THREE.Group();
+    const R = 0.15;
+    g.add(new THREE.Mesh(
+      new THREE.SphereGeometry(R, 12, 10),
+      new THREE.MeshLambertMaterial({ color: 0xb794ec, emissive: 0x5a3f86, transparent: true, opacity: 0.9 }),
+    ));
+    const band = new THREE.Mesh(
+      new THREE.TorusGeometry(R * 1.02, R * 0.16, 6, 16),
+      new THREE.MeshLambertMaterial({ color: 0x2b2138 }),
+    );
+    band.rotation.x = Math.PI / 2;
+    g.add(band);
+    return g;
+  }
+
+  /** The mob a flying orb should act on, or null. Capturable mobs and owned pets
+   *  win over animals standing in the way, so a stray cow can't body-block. */
+  private catcherTarget(e: Entity): Entity | null {
+    const slack = EntityManager.CATCH_SLACK;
+    let best: Entity | null = null, bestD = Infinity, bestOk = false;
+    for (const m of this.entities) {
+      if (!this.isMob(m) || m.dead) continue;
+      const hw = m.box.w / 2 + slack;
+      const dx = e.pos.x - m.pos.x, dz = e.pos.z - m.pos.z;
+      if (Math.hypot(dx, dz) > hw) continue;
+      if (e.pos.y < m.pos.y - slack || e.pos.y > m.pos.y + m.box.h + slack) continue;
+      const ok = this.isPet(m) || CAPTURABLE.has(m.kind);
+      const d = Math.hypot(dx, e.pos.y - (m.pos.y + m.box.h * 0.5), dz);
+      // prefer a valid catch; among equals, the closest
+      if ((ok && !bestOk) || ((ok === bestOk) && d < bestD)) { best = m; bestD = d; bestOk = ok; }
+    }
+    return best;
+  }
+
+  private updateCatcher(e: Entity, dt: number): void {
+    const speed = Math.hypot(e.vel.x, e.vel.y, e.vel.z);
+    const steps = Math.max(1, Math.ceil(speed * dt / 0.25));
+    const sdt = dt / steps;
+    for (let s = 0; s < steps && !e.dead; s++) {
+      e.vel.y -= 13 * sdt;
+      const px = e.pos.x, py = e.pos.y, pz = e.pos.z;
+      e.pos.x += e.vel.x * sdt;
+      e.pos.y += e.vel.y * sdt;
+      e.pos.z += e.vel.z * sdt;
+      const mob = this.catcherTarget(e);
+      if (mob) { this.resolveCatcherHit(e, mob); return; }
+      const id = this.world.getBlock(Math.floor(e.pos.x), Math.floor(e.pos.y), Math.floor(e.pos.z));
+      if (id !== B.AIR && id !== B.WATER && id !== B.TORCH && def(id).solid) {
+        // clanged off the terrain: the orb survives and lands as a pickup
+        e.dead = true;
+        this.audio.play('click');
+        this.spawnDrop(px, py, pz, I.MOB_CATCHER, 1);
+        return;
+      }
+    }
+    // amethyst sparkle trail so the arc is easy to read in flight
+    if (Math.random() < 0.5) this.spawnCaptureSparkle(e.pos.x, e.pos.y, e.pos.z, 1);
+    e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+    e.mesh.rotation.x += dt * 9;
+    e.mesh.rotation.y += dt * 5;
+    if (e.age > 8 || e.pos.y < -8) {
+      e.dead = true;
+      if (e.pos.y > -8) this.spawnDrop(e.pos.x, e.pos.y, e.pos.z, I.MOB_CATCHER, 1);
+    }
+  }
+
+  /** A thrown orb reached a mob: recall a pet, capture a hostile, or bounce off
+   *  a peaceful animal (which keeps the orb, dropped at its feet). */
+  private resolveCatcherHit(e: Entity, m: Entity): void {
+    e.dead = true;
+    const p = this.player;
+    if (this.isPet(m)) {
+      const kind = this.recallPet(m);
+      if (kind && p) {
+        p.giveFilledCatcher(kind);
+        this.onToast?.(`Recalled ${mobLabel(kind)}`);
+      }
+      return;
+    }
+    const kind = this.captureMob(m);
+    if (kind && p) {
+      p.giveFilledCatcher(kind);
+      this.onToast?.(`Captured ${mobLabel(kind)}!`);
+      return;
+    }
+    // peaceful mob: bounces off, orb recoverable on the ground
+    this.audio.play('fail');
+    this.spawnDrop(m.pos.x, m.pos.y + m.box.h * 0.5, m.pos.z, I.MOB_CATCHER, 1);
+    this.onToast?.('Catchers only work on hostile mobs');
   }
 
   /** A soft round contact shadow plane, parented under a mob. */
@@ -710,6 +894,7 @@ export class EntityManager {
         case 'falling': this.updateFalling(e, dt); break;
         case 'particle': this.updateParticle(e, dt, camQ); break;
         case 'bobber': this.updateBobber(e, dt); break;
+        case 'catcher': this.updateCatcher(e, dt); break;
         default: this.updateMob(e, dt); break;
       }
     }
@@ -788,7 +973,9 @@ export class EntityManager {
     const speed = Math.hypot(e.vel.x, e.vel.y, e.vel.z);
     const steps = Math.max(1, Math.ceil(speed * dt / 0.45));
     const sdt = dt / steps;
-    const fireball = e.owner === 'emberghast';
+    const fireball = e.owner === 'emberghast' || e.owner === 'petghast';
+    const hurtsPlayer = e.owner === 'skeleton' || e.owner === 'emberghast';
+    const fromPet = e.owner === 'pet' || e.owner === 'petghast';
     for (let s = 0; s < steps && !e.dead; s++) {
       if (!fireball) e.vel.y -= 16 * sdt; // fireballs fly flat
       e.pos.x += e.vel.x * sdt;
@@ -806,7 +993,7 @@ export class EntityManager {
         return;
       }
       // entity hit
-      if (e.owner === 'skeleton' || e.owner === 'emberghast') {
+      if (hurtsPlayer) {
         const p = this.player!;
         const hw = 0.3;
         if (!p.dead && p.mode === 'survival' &&
@@ -819,15 +1006,30 @@ export class EntityManager {
           if (fireball) this.fireballBurst(e.pos.x, e.pos.y, e.pos.z);
           return;
         }
+        // pets fight on the player's side, so hostile shots wound them too
+        for (const m of this.entities) {
+          if (!this.isPet(m) || m.dead) continue;
+          const mw = m.box.w / 2;
+          if (e.pos.x > m.pos.x - mw && e.pos.x < m.pos.x + mw &&
+            e.pos.y > m.pos.y && e.pos.y < m.pos.y + m.box.h &&
+            e.pos.z > m.pos.z - mw && e.pos.z < m.pos.z + mw) {
+            this.hurt(m, e.dmg, e.vel.x, e.vel.z);
+            e.dead = true;
+            if (fireball) this.fireballBurst(e.pos.x, e.pos.y, e.pos.z);
+            return;
+          }
+        }
       } else {
         for (const m of this.entities) {
           if (!this.isMob(m) || m.dead) continue;
+          if (fromPet && this.isPet(m)) continue; // pets don't shoot each other
           const hw = m.box.w / 2;
           if (e.pos.x > m.pos.x - hw && e.pos.x < m.pos.x + hw &&
             e.pos.y > m.pos.y && e.pos.y < m.pos.y + m.box.h &&
             e.pos.z > m.pos.z - hw && e.pos.z < m.pos.z + hw) {
-            this.hurt(m, e.dmg, e.vel.x, e.vel.z);
+            this.hurt(m, e.dmg, e.vel.x, e.vel.z, fromPet ? undefined : this.player ?? undefined);
             e.dead = true;
+            if (fireball) this.fireballBurst(e.pos.x, e.pos.y, e.pos.z);
             return;
           }
         }
@@ -888,6 +1090,11 @@ export class EntityManager {
     e.hurtFlash = Math.max(0, e.hurtFlash - dt);
     e.angryT = Math.max(0, e.angryT - dt);
 
+    // captured flyers escort their owner instead of hunting them
+    if ((e.kind === 'phantom' || e.kind === 'emberghast') && this.isPet(e)) {
+      this.updateFlyingPet(e, dt);
+      return;
+    }
     // phantom: flying mob, circles + swoops the player
     if (e.kind === 'phantom') { this.updatePhantom(e, dt); return; }
     // emberghast: floats at range and spits fireballs
@@ -926,8 +1133,10 @@ export class EntityManager {
     // tamed wolf/cat + captured pets: follow the owner (sit = stay put)
     const petFollow = (e.kind === 'wolf' || e.kind === 'cat') ? e.tamed : this.isPet(e);
     if (petFollow) {
-      // a pet with a live target chases it instead of sticking to the owner
-      if (this.isPet(e) && e.target && !e.target.dead && this.isMob(e.target) && !e.sitting) {
+      if (this.isPet(e)) this.retargetPet(e);
+      // a pet with a live (wild) target chases it instead of sticking to the owner
+      if (this.isPet(e) && e.target && !e.target.dead && this.isMob(e.target)
+        && !e.target.tamed && !e.sitting) {
         this.petChase(e, dt);
         const res2 = this.applyGroundMove(e, dt, e._wishX, e._wishZ, e.moveSpeed * 1.6);
         if ((res2.hitX || res2.hitZ) && e.onGround && (e._wishX !== 0 || e._wishZ !== 0)) e.vel.y = JUMP_V;
@@ -972,13 +1181,18 @@ export class EntityManager {
       if (distToPlayer > 2.2) { wishX = dx / d; wishZ = dz / d; }
     }
 
+    // a hostile trading blows with a pet chases the pet instead of the player
+    const foe = e.foe && !e.foe.dead ? e.foe : null;
+    const qx = foe ? foe.pos.x : p.pos.x, qz = foe ? foe.pos.z : p.pos.z;
+    const qy = foe ? foe.pos.y : p.pos.y;
+
     if (lured) {
       // steering handled above
     } else if (e.state === 'wander' || e.state === 'flee') {
       wishX = -Math.sin(e.yaw);
       wishZ = -Math.cos(e.yaw);
     } else if (e.state === 'chase') {
-      const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
+      const dx = qx - e.pos.x, dz = qz - e.pos.z;
       const d = Math.hypot(dx, dz) || 1;
       let dir = 1;
       if (e.kind === 'skeleton') {
@@ -991,11 +1205,11 @@ export class EntityManager {
       e.yaw = Math.atan2(-(dx / d), -(dz / d));
     } else if (e.state === 'fuse') {
       // creeper stands its ground while hissing
-      const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
+      const dx = qx - e.pos.x, dz = qz - e.pos.z;
       e.yaw = Math.atan2(-dx, -dz);
       e.fuseT -= dt;
-      if (distToPlayer > 5) {
-        e.state = 'chase'; // player escaped: cancel
+      if (Math.hypot(dx, dz) > 5) {
+        e.state = 'chase'; // quarry escaped: cancel
       } else if (e.fuseT <= 0) {
         e.dead = true;
         this.explode(e.pos.x, e.pos.y + 0.6, e.pos.z, 2.6);
@@ -1011,23 +1225,28 @@ export class EntityManager {
       e.vel.y = JUMP_V;
     }
 
-    // melee contact attacks
-    if (MELEE_MOBS.has(e.kind as MobKind) && !p.dead && e.attackCooldown <= 0 && e.state === 'chase') {
-      const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
-      const dy = p.pos.y - e.pos.y;
+    // melee contact attacks — on the pet it is fighting, else on the player
+    if (MELEE_MOBS.has(e.kind as MobKind) && e.attackCooldown <= 0 && e.state === 'chase'
+      && (foe || !p.dead)) {
+      const dx = qx - e.pos.x, dz = qz - e.pos.z;
+      const dy = qy - e.pos.y;
       const reach = e.kind === 'spider' ? 1.4 : e.kind === 'ashstalker' ? 1.3 : 1.1;
       const dmg = e.kind === 'spider' ? 2 : e.kind === 'cinderling' ? 2
         : e.kind === 'ashstalker' ? 4 : 3;
-      if (Math.hypot(dx, dz) < reach && Math.abs(dy) < 2) {
+      if (Math.hypot(dx, dz) < reach + (foe ? foe.box.w * 0.5 : 0) && Math.abs(dy) < 2) {
         e.attackCooldown = e.kind === 'cinderling' ? 0.7 : 1;
-        if (p.mode === 'survival') {
+        if (foe) {
+          this.hurt(foe, dmg, dx, dz, e);
+        } else if (p.mode === 'survival') {
           p.damage(dmg, e);
           p.applyKnockback(dx, dz, e.kind === 'ashstalker' ? 7 : 5);
         }
       }
     }
-    // creeper trigger
-    if (e.kind === 'creeper' && e.state === 'chase' && distToPlayer < 2.6 && !p.dead && p.mode === 'survival') {
+    // creeper trigger (a creeper mobbed by pets blows up on them just the same)
+    const fuseDist = foe ? Math.hypot(foe.pos.x - e.pos.x, foe.pos.z - e.pos.z) : distToPlayer;
+    if (e.kind === 'creeper' && e.state === 'chase' && fuseDist < 2.6
+      && (foe || (!p.dead && p.mode === 'survival'))) {
       e.state = 'fuse';
       e.fuseT = 1.5;
       this.audio.play('fuse');
@@ -1161,7 +1380,7 @@ export class EntityManager {
     e.attackCooldown = Math.max(0, e.attackCooldown - dt);
     if (e.attackCooldown > 0 || e.sitting) return;
     for (const m of this.entities) {
-      if (!this.isMob(m) || m.dead) continue;
+      if (m === e || !this.isMob(m) || m.dead || m.tamed) continue; // never the owner's own
       const stats = MOB_STATS[m.kind as MobKind];
       if (!stats.hostile) continue;
       const dx = m.pos.x - e.pos.x, dz = m.pos.z - e.pos.z;
@@ -1179,7 +1398,82 @@ export class EntityManager {
     if (kind === 'spider') return 2;
     if (kind === 'cinderling') return 2;
     if (kind === 'ashstalker') return 4;
+    if (kind === 'phantom') return 3;
+    if (kind === 'emberghast') return 4;
     return 3;
+  }
+
+  /** Keep a pet's quarry sane: forget dead/captured/far-away targets so it
+   *  trots back to the owner, and fight back at whatever picked a fight. */
+  private retargetPet(e: Entity): void {
+    const p = this.player!;
+    const t = e.target;
+    if (t) {
+      const strayed = Math.hypot(t.pos.x - p.pos.x, t.pos.z - p.pos.z) > 22;
+      if (t.dead || !this.isMob(t) || t.tamed || strayed) e.target = null;
+    }
+    // a wild mob that singled this pet out is fair game even if the owner
+    // hasn't swung yet (it is already being attacked)
+    if (!e.target) {
+      for (const m of this.entities) {
+        if (m.foe === e && !m.dead && this.isMob(m)) { e.target = m; break; }
+      }
+    }
+  }
+
+  /** A captured phantom / emberghast: escorts the owner overhead, dives (or
+   *  lobs fireballs) at its locked target, and never turns on the owner. */
+  private updateFlyingPet(e: Entity, dt: number): void {
+    const p = this.player!;
+    this.retargetPet(e);
+    const t = e.sitting ? null : e.target;
+    e.attackCooldown = Math.max(0, e.attackCooldown - dt);
+    for (const m of e.materials) m.emissive.setRGB(e.hurtFlash > 0 ? 0.55 : 0.06, 0.02, 0.01);
+
+    // escort slot: hover above and slightly behind the owner; in combat, close
+    // on the target (the ghast keeps a shooting stand-off)
+    const standoff = e.kind === 'emberghast' ? 6 : 0.8;
+    const ax = t ? t.pos.x : p.pos.x, az = t ? t.pos.z : p.pos.z;
+    const ay = t ? t.pos.y + t.box.h * 0.6 + 1.2 : p.pos.y + 3.4 + Math.sin(e.age * 1.2) * 0.4;
+    const dx = ax - e.pos.x, dz = az - e.pos.z;
+    const distH = Math.hypot(dx, dz) || 1;
+    // approach until `want` blocks out, then hold station
+    const want = t ? standoff : 2.2;
+    const radial = distH > want + 1 ? 1 : distH < want - 1 ? -1 : 0;
+    const speed = e.moveSpeed * (t ? 1.4 : 1.1);
+    const wishX = (dx / distH) * radial, wishZ = (dz / distH) * radial;
+    e.vel.x += (wishX * speed - e.vel.x) * Math.min(1, 3 * dt);
+    e.vel.z += (wishZ * speed - e.vel.z) * Math.min(1, 3 * dt);
+    e.vel.y += ((ay - e.pos.y) * 0.9 - e.vel.y) * Math.min(1, 2 * dt);
+    if (Math.hypot(p.pos.x - e.pos.x, p.pos.z - e.pos.z) > 26) {
+      e.pos.x = p.pos.x + (Math.random() - 0.5) * 2;   // left behind: catch up
+      e.pos.z = p.pos.z + (Math.random() - 0.5) * 2;
+      e.pos.y = p.pos.y + 3;
+    }
+    e.pos.x += e.vel.x * dt;
+    e.pos.y += e.vel.y * dt;
+    e.pos.z += e.vel.z * dt;
+    e.yaw = Math.atan2(-dx, -dz);
+
+    if (t && e.attackCooldown <= 0) {
+      if (e.kind === 'emberghast' && distH < 16) {
+        e.attackCooldown = 2.4;
+        this.spawnFireball(e.pos.x, e.pos.y, e.pos.z,
+          t.pos.x - e.pos.x, (t.pos.y + t.box.h * 0.5) - e.pos.y, t.pos.z - e.pos.z, 'petghast');
+      } else if (e.kind === 'phantom' && distH < 1.8
+        && Math.abs(t.pos.y + t.box.h * 0.5 - e.pos.y) < 2.2) {
+        e.attackCooldown = 1.1;
+        this.hurt(t, this.petDamage(e.kind as MobKind), dx, dz, e);
+      }
+    }
+    // wing flap
+    if (e.limbs) {
+      for (let i = 0; i < e.limbs.legs.length; i++) {
+        e.limbs.legs[i].rotation.z = (i % 2 === 0 ? 1 : -1) * (Math.sin(e.age * 12) * 0.4 - 0.2);
+      }
+    }
+    e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+    e.mesh.rotation.y = e.yaw;
   }
 
   /** Captured pet: steer toward its locked target and bite when in reach. */
@@ -1204,7 +1498,9 @@ export class EntityManager {
     if (e.attackCooldown > 0 || e.sitting) return;
     if (e.target) return; // handled by petChase when a target is set
     for (const m of this.entities) {
-      if (!this.isMob(m) || m.dead) continue;
+      // skip itself and every other tamed mob: a pet is a hostile *kind*, so
+      // without this a released pet chewed on itself (3 dmg/0.7s) until it died
+      if (m === e || !this.isMob(m) || m.dead || m.tamed) continue;
       const stats = MOB_STATS[m.kind as MobKind];
       if (!stats.hostile) continue;
       const dx = m.pos.x - e.pos.x, dz = m.pos.z - e.pos.z;
@@ -1309,8 +1605,10 @@ export class EntityManager {
     e.mesh.rotation.y = e.yaw;
   }
 
-  /** Launch a slow, flat-flying fireball toward a direction (owner emberghast). */
-  spawnFireball(x: number, y: number, z: number, dx: number, dy: number, dz: number): void {
+  /** Launch a slow, flat-flying fireball toward a direction. `owner` decides who
+   *  it can hurt: 'emberghast' burns the player, 'petghast' burns hostile mobs. */
+  spawnFireball(x: number, y: number, z: number, dx: number, dy: number, dz: number,
+    owner: 'emberghast' | 'petghast' = 'emberghast'): void {
     const mesh = new THREE.Group();
     const core = new THREE.Mesh(
       new THREE.BoxGeometry(0.3, 0.3, 0.3),
@@ -1325,7 +1623,7 @@ export class EntityManager {
     const speed = 8;
     const e = new Entity('arrow', { x, y, z }, { w: 0.3, h: 0.3 }, mesh);
     e.vel = { x: (dx / len) * speed, y: (dy / len) * speed, z: (dz / len) * speed };
-    e.owner = 'emberghast';
+    e.owner = owner;
     e.dmg = 4;
     this.entities.push(e);
     this.scene.add(mesh);
@@ -1390,19 +1688,37 @@ export class EntityManager {
         }
         const dark = this.world.skyLight(Math.floor(e.pos.x), Math.floor(e.pos.y + 1), Math.floor(e.pos.z)) < 0.7;
         const aggressive = e.kind === 'spider' ? (isNight || dark || e.angryT > 0) : true;
-        if (aggressive && d < 16 && !p.dead && p.mode === 'survival') {
+        // a pet that has engaged this mob becomes its quarry (they brawl while
+        // the owner keeps their distance); dropped when it dies or runs off
+        if (e.foe && (e.foe.dead || !this.isPet(e.foe)
+          || Math.hypot(e.foe.pos.x - e.pos.x, e.foe.pos.z - e.pos.z) > 18)) e.foe = null;
+        if (!e.foe) {
+          for (const pet of this.entities) {
+            if (!this.isPet(pet) || pet.dead || pet.target !== e) continue;
+            e.foe = pet;
+            break;
+          }
+        }
+        const foeD = e.foe ? Math.hypot(e.foe.pos.x - e.pos.x, e.foe.pos.z - e.pos.z) : Infinity;
+        if (e.foe && foeD < 20) {
+          e.state = 'chase';
+        } else if (aggressive && d < 16 && !p.dead && p.mode === 'survival') {
           e.state = 'chase';
         } else if (e.state === 'chase') {
           e.state = 'wander';
           e.stateTime = 3;
         }
 
-        // skeleton archery
+        // skeleton archery (at its pet quarry if it has one, else the player)
         if (e.kind === 'skeleton' && e.state === 'chase') {
+          const aim = e.foe && !e.foe.dead ? e.foe : null;
+          const aimD = aim ? foeD : d;
           e.shootCooldown -= 0.05;
-          if (e.shootCooldown <= 0 && d > 3.5 && d < 15) {
+          if (e.shootCooldown <= 0 && aimD > 3.5 && aimD < 15) {
             const ex = e.pos.x, ey = e.pos.y + 1.5, ez = e.pos.z;
-            const tx = p.pos.x, ty = p.pos.y + 1.4, tz = p.pos.z;
+            const tx = aim ? aim.pos.x : p.pos.x;
+            const ty = aim ? aim.pos.y + aim.box.h * 0.6 : p.pos.y + 1.4;
+            const tz = aim ? aim.pos.z : p.pos.z;
             const dist3 = Math.hypot(tx - ex, ty - ey, tz - ez);
             const hit = this.world.raycast(ex, ey, ez, (tx - ex) / dist3, (ty - ey) / dist3, (tz - ez) / dist3, dist3);
             if (!hit) {
@@ -1602,16 +1918,26 @@ export class EntityManager {
     // owner (or an owned pet) hit this mob -> all idle pets lock onto it
     const byOwner = attacker === this.player
       || (attacker !== undefined && this.isMob(attacker as Entity) && (attacker as Entity).tamed);
-    if (byOwner) {
+    if (byOwner && !this.isPet(e)) {
       for (const pet of this.entities) {
         if (this.isPet(pet) && !pet.target && !pet.sitting) pet.target = e;
       }
     }
+    // a wild mob mauled a pet -> the pet fights back and the pair lock on
+    if (this.isPet(e) && attacker !== undefined && attacker !== this.player
+      && this.isMob(attacker as Entity) && !(attacker as Entity).tamed) {
+      const wild = attacker as Entity;
+      if (!e.sitting) e.target = wild;
+      wild.foe = e;
+    }
     if (e.hp <= 0) {
+      const wasPet = this.isPet(e);
       e.dead = true;
       this.audio.play('pop');
       this.spawnPoof(e.pos.x, e.pos.y, e.pos.z);
       this.dropLoot(e);
+      this.clearFoe(e);
+      if (wasPet) this.onToast?.(`Your ${mobLabel(e.kind as string)} was slain`);
       this.onKill?.(e.kind as string);
     }
   }
@@ -1691,6 +2017,12 @@ export class EntityManager {
    *  Returns the interaction kind (the player consumes items / opens UI). */
   interactMob(e: Entity, heldId: number):
     'tamed' | 'sit' | 'trade' | 'mount' | 'love' | 'saddle' | 'armor' | null {
+    // a captured pet obeys stay/follow like a tamed wolf does
+    if (this.isPet(e)) {
+      e.sitting = !e.sitting;
+      if (e.sitting) e.target = null;
+      return 'sit';
+    }
     // feeding an adult its breeding food puts it into love mode
     if (this.canBreed(e, heldId)) {
       e.loveT = 22;
@@ -1912,8 +2244,9 @@ export class EntityManager {
     }
   }
 
-  /** Amethyst swirl burst for capturing / recalling a mob into a catcher. */
-  spawnCaptureSparkle(x: number, y: number, z: number): void {
+  /** Amethyst swirl burst for capturing / recalling a mob into a catcher.
+   *  `n` trades burst size for trail sparkles (a thrown orb emits 1 at a time). */
+  spawnCaptureSparkle(x: number, y: number, z: number, n = 12): void {
     let mat = this.particleMats.get('capture');
     if (!mat) {
       const c = document.createElement('canvas');
@@ -1929,12 +2262,14 @@ export class EntityManager {
       this.particleMats.set('capture', mat);
     }
     // particles spiral up out of the capture point in a tight amethyst ring
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < n; i++) {
       const mesh = new THREE.Group();
       mesh.add(new THREE.Mesh(new THREE.PlaneGeometry(0.16, 0.16), mat));
-      const a = (i / 12) * Math.PI * 2, sp = 1.2 + Math.random() * 0.6;
+      const a = n === 1 ? Math.random() * Math.PI * 2 : (i / n) * Math.PI * 2;
+      const sp = 1.2 + Math.random() * 0.6;
+      const rad = n === 1 ? 0.12 : 0.5; // trail sparks hug the orb
       const e = new Entity('particle',
-        { x: x + Math.cos(a) * 0.5, y: y + Math.random() * 0.3, z: z + Math.sin(a) * 0.5 },
+        { x: x + Math.cos(a) * rad, y: y + Math.random() * 0.3, z: z + Math.sin(a) * rad },
         { w: 0.04, h: 0.04 }, mesh);
       e.vel = { x: -Math.cos(a) * sp, y: 1.1 + Math.random() * 0.5, z: -Math.sin(a) * sp };
       e.maxLife = e.life = 0.45 + Math.random() * 0.25;

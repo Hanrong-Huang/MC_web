@@ -24,7 +24,7 @@ import type { GeoArrays, MeshDoor, MeshRedstone } from './engine/Mesher';
 import { chunkGeometryFromArrays } from './engine/Renderer';
 import type { MeshJob, MeshChunkSnap } from './engine/mesh-worker';
 import { chunkKey, CX, CZ } from './engine/Chunk';
-import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef, mobLabel } from './engine/Blocks';
+import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef, isSolid, mobLabel } from './engine/Blocks';
 import { Weather } from './engine/Weather';
 import { AdvancementTracker } from './engine/Advancements';
 import type { Entity } from './engine/EntityManager';
@@ -71,6 +71,10 @@ class Game {
   private disposed = false;
   /** bed respawn point, if set */
   private spawnPoint: { x: number; y: number; z: number } | null = null;
+  /** bed the player is lying in (drives the sleeping camera), else null */
+  private sleepBed: { cx: number; cz: number; y: number; yaw: number } | null = null;
+  private sleepT = 0;
+  private sleepSkipped = false;
   private camBob = 0;
   private lastSelected = -1;
   private lastHeldId = -1;
@@ -110,6 +114,9 @@ class Game {
     this.entities.onKill = (kind) => {
       if (['zombie', 'skeleton', 'spider', 'creeper'].includes(kind)) this.adv.unlock('kill_mob');
     };
+    // thrown catchers resolve inside the entity update, away from the input path
+    this.entities.onToast = (msg) => this.hud.toast(msg);
+    this.entities.onCapture = () => this.adv.unlock('catch');
 
     this.weather = new Weather(this.renderer.scene, this.world, {
       onStrike: (x, y, z) => this.onLightning(x, y, z),
@@ -284,6 +291,8 @@ class Game {
       }
       // restore known village dwelling spots so villagers repopulate on revisit
       if (save.villageSpawns) this.world.generator.villageSpawns = save.villageSpawns.map((s) => ({ ...s }));
+      // captured pets come back with the player (wild mobs respawn naturally)
+      if (save.pets?.length) this.entities.loadPets(save.pets);
     } else {
       this.player.mode = fresh!.mode;
       const spawn = this.world.generator.findSpawn();
@@ -375,12 +384,35 @@ class Game {
       wall(bx, by + 1, bz + 1, 2);
       wall(bx, by + 1, bz - 1, 3);
       this.world.setBlock(bx, by + 2, bz, B.TORCH); // floor torch on top
-      // a reachable bed right in front for sleep testing
+      // a reachable, complete 2-block bed right in front for sleep testing
       const bedX = Math.floor(p.x) + 1, bedY = Math.floor(p.y), bedZ = Math.floor(p.z);
-      this.world.setBlock(bedX, bedY - 1, bedZ, B.STONE);
+      for (const dz of [0, -1]) {
+        this.world.setBlock(bedX, bedY - 1, bedZ + dz, B.STONE);
+        this.world.setBlock(bedX, bedY + 1, bedZ + dz, B.AIR);
+        this.world.setBlock(bedX, bedY + 2, bedZ + dz, B.AIR);
+        this.world.bedFacings.set(`${bedX},${bedY},${bedZ + dz}`, 0); // head toward -z
+      }
       this.world.setBlock(bedX, bedY, bedZ, B.BED);
-      this.world.setBlock(bedX, bedY + 1, bedZ, B.AIR);
-      this.world.setBlock(bedX, bedY + 2, bedZ, B.AIR);
+      this.world.setBlock(bedX, bedY, bedZ - 1, B.BED_HEAD);
+    }
+    // dev helper: #debugcatch stocks catchers and lines up throwable targets
+    if (location.hash.includes('debugcatch')) {
+      (window as unknown as { __game: unknown; __B: unknown }).__game = this;
+      (window as unknown as { __B: unknown }).__B = B;
+      const p = this.player.pos;
+      this.player.inventory.slots[0] = { id: I.MOB_CATCHER, count: 16 };
+      this.player.inventory.slots[1] = { id: I.AMETHYST, count: 64 };
+      this.player.inventory.slots[2] = { id: I.DIAMOND_SWORD, count: 1 };
+      this.player.inventory.selected = 0;
+      this.onInventoryChange();
+      this.player.yaw = -Math.PI / 2; // look toward +x, down the target line
+      this.player.pitch = 0;
+      const line: [string, number, number][] = [
+        ['zombie', 7, -2], ['creeper', 8, 0], ['skeleton', 9, 2], ['spider', 6, 3], ['cow', 6, -4],
+      ];
+      for (const [kind, dx, dz] of line) {
+        this.entities.spawnMob(kind as never, p.x + dx, p.y + 1, p.z + dz);
+      }
     }
     if (location.hash.includes('fluidtest')) this.setupFluidTestScene();
     if (location.hash.includes('bowtest')) this.setupBowTest();
@@ -504,6 +536,7 @@ class Game {
           // with pointer lock active the browser eats Esc; this handles menus
           if (this.state === 'container') this.closeContainer();
           else if (this.hud.isAdvancementsOpen()) this.hud.hideAdvancements();
+          else if (this.state === 'sleeping') this.leaveBed();
           else if (this.state === 'paused') this.resume();
           break;
       }
@@ -679,47 +712,127 @@ class Game {
     }
   }
 
-  /** Right-clicking a bed: set the respawn point, and (at night, with no
-   *  monsters nearby) sleep through to morning with a fade transition. */
+  /** Both cells of the bed the given half belongs to, plus its facing. */
+  private bedHalves(x: number, y: number, z: number): {
+    foot: { x: number; z: number }; head: { x: number; z: number }; facing: number;
+  } {
+    const facing = this.world.bedFacings.get(`${x},${y},${z}`) ?? 0;
+    const dvx = facing === 1 ? -1 : facing === 3 ? 1 : 0;
+    const dvz = facing === 0 ? -1 : facing === 2 ? 1 : 0;
+    const isHead = this.world.getBlock(x, y, z) === B.BED_HEAD;
+    return {
+      foot: isHead ? { x: x - dvx, z: z - dvz } : { x, z },
+      head: isHead ? { x, z } : { x: x + dvx, z: z + dvz },
+      facing,
+    };
+  }
+
+  /** Right-clicking a bed, following vanilla's rules: beds detonate outside the
+   *  Overworld, you may only sleep from dusk until just before dawn (or through
+   *  a thunderstorm), the bed must be unobstructed, and no monster may be within
+   *  8 blocks. Using a bed always sets the respawn point. */
   private useBed(x: number, y: number, z: number): void {
+    // Nether: no sleeping — the bed explodes in your face (vanilla behaviour)
+    if (this.world.dimension !== 'overworld') {
+      const { foot, head } = this.bedHalves(x, y, z);
+      this.world.setBlock(foot.x, y, foot.z, B.AIR);
+      this.world.setBlock(head.x, y, head.z, B.AIR);
+      this.world.bedFacings.delete(`${foot.x},${y},${foot.z}`);
+      this.world.bedFacings.delete(`${head.x},${y},${head.z}`);
+      this.entities.explode(x + 0.5, y + 0.5, z + 0.5, 3.2);
+      this.hud.toast('The bed exploded!');
+      return;
+    }
     this.spawnPoint = { x: x + 0.5, y: y + 1, z: z + 0.5 };
     this.adv.unlock('bed');
-    const isNight = Math.sin(this.dayTime * Math.PI * 2) < 0.0;
-    if (!isNight) {
-      this.hud.toast('You can only sleep at night. Spawn point set.');
+    // sleep window: dusk (0.52) until just before dawn (0.98), or any time in a
+    // thunderstorm — mirrors Minecraft's 12542..23459 tick window
+    const storming = this.weather.kind === 'thunder' && this.weather.intensity > 0.2;
+    const canSleep = (this.dayTime > 0.52 && this.dayTime < 0.98) || storming;
+    if (!canSleep) {
+      this.hud.toast('You can only sleep at night or during a thunderstorm');
+      this.audio.play('fail');
+      return;
+    }
+    const { foot, head, facing } = this.bedHalves(x, y, z);
+    if (isSolid(this.world.getBlock(foot.x, y + 1, foot.z))
+      || isSolid(this.world.getBlock(head.x, y + 1, head.z))) {
+      this.hud.toast('This bed is obstructed');
+      this.audio.play('fail');
       return;
     }
     const p = this.player.pos;
-    if (this.entities.hostileNear(p.x, p.y + 1, p.z, 12)) {
+    if (this.entities.hostileNear(p.x, p.y + 1, p.z, 8)) {
       this.hud.toast('You may not rest now; there are monsters nearby');
       this.audio.play('fail');
       return;
     }
-    this.startSleep();
+    // camera hovers over the pillow looking down the bed. It stays inside the
+    // bed's own column so a headboard wall can never clip into view.
+    const dvx = facing === 1 ? -1 : facing === 3 ? 1 : 0;
+    const dvz = facing === 0 ? -1 : facing === 2 ? 1 : 0;
+    this.startSleep({ cx: head.x + 0.5, cz: head.z + 0.5, y, yaw: Math.atan2(dvx, dvz) });
   }
 
-  /** Fade to black, jump to dawn, then fade back in. */
-  private startSleep(): void {
+  /** Get into bed: lie down, then fade out, skip to dawn and fade back in. The
+   *  whole sequence is driven from the frame loop so Leave Bed can cancel it. */
+  private startSleep(bed: { cx: number; cz: number; y: number; yaw: number }): void {
     if (this.state !== 'playing') return;
     this.state = 'sleeping';
+    this.sleepBed = bed;
+    this.sleepT = 0;
+    this.sleepSkipped = false;
     this.input.exitLock();
     this.player.vel.x = 0; this.player.vel.z = 0;
-    this.hud.sleepFade(
-      () => {
-        if (this.disposed) return;
-        this.dayTime = 0.0; // sunrise
-        this.nightsAwake = 0; // sleeping clears phantom insomnia
-        this.wasNight = false;
-        this.survivedNight = false;
-        this.audio.play('level');
-      },
-      () => {
-        if (this.disposed) return;
-        this.state = 'playing';
-        this.hud.toast('Good morning');
-        this.input.requestLock();
-      },
-    );
+    this.audio.play('click');
+    this.hud.showSleepPrompt(() => this.leaveBed());
+    this.hud.setCrosshairVisible(false);
+    this.renderer.setHeldVisible(false);
+  }
+
+  /** Out of bed — either by choice (Leave Bed / Esc) or after waking at dawn. */
+  private leaveBed(): void {
+    if (this.state !== 'sleeping') return;
+    this.state = 'playing';
+    this.sleepBed = null;
+    this.hud.hideSleepPrompt();
+    this.hud.setSleepFade(0);
+    this.hud.setCrosshairVisible(true);
+    this.renderer.setHeldVisible(true);
+    this.input.requestLock();
+  }
+
+  /** Sleep timeline (seconds): 0–1.2 lying awake, 1.2–1.9 fade to black, the
+   *  night skips at 1.9, 1.9–2.7 fade back in, wake at 2.7. */
+  private updateSleep(dt: number): void {
+    if (!this.sleepBed) return;
+    this.sleepT += dt;
+    const t = this.sleepT;
+    this.player.vel.x = 0; this.player.vel.z = 0;
+    if (t < 1.2) {
+      this.hud.setSleepFade(0);
+      return;
+    }
+    if (t < 1.9) {
+      this.hud.setSleepFade((t - 1.2) / 0.7);
+      return;
+    }
+    if (!this.sleepSkipped) {
+      this.sleepSkipped = true;
+      this.dayTime = 0.0;       // sunrise
+      this.nightsAwake = 0;     // sleeping clears phantom insomnia
+      this.wasNight = false;
+      this.survivedNight = false;
+      this.weather.setKind('clear'); // vanilla: sleeping clears rain/thunder
+      this.hud.hideSleepPrompt();
+      this.audio.play('level');
+    }
+    if (t < 2.7) {
+      this.hud.setSleepFade(1 - (t - 1.9) / 0.8);
+      return;
+    }
+    this.leaveBed();
+    this.hud.toast('Good morning');
   }
 
   /** Lightning struck at (x,y,z): ignite TNT, scorch mobs, flash + thunder. */
@@ -923,8 +1036,8 @@ class Game {
     if (sel !== this.lastSelected || (heldId !== this.lastHeldId && heldId !== 0) || heldMob !== this.lastHeldMob) {
       if (heldId !== 0 && hasDef(heldId) && this.state !== 'container') {
         const hint =
-          heldId === I.MOB_CATCHER ? 'Mob Catcher - right-click a mob to capture it' :
-          heldId === I.MOB_CATCHER_FILLED && heldMob ? `Captured ${mobLabel(heldMob)} - right-click to release` :
+          heldId === I.MOB_CATCHER ? 'Mob Catcher - right-click to throw it at a hostile mob' :
+          heldId === I.MOB_CATCHER_FILLED && heldMob ? `Captured ${mobLabel(heldMob)} - right-click to release your pet` :
           heldId === I.COMPASS ? 'Compass - carry it to show heading on the minimap' :
           heldId === I.CLOCK ? 'Clock - carry it to show world time' :
           heldId === I.HOE ? 'Hoe - right-click dirt or grass to make farmland' :
@@ -1001,6 +1114,7 @@ class Game {
       
       environment: { dayTime: this.dayTime },
       villageSpawns: this.world.generator.villageSpawns.map((s) => ({ ...s })),
+      pets: this.entities.savePets(),
       advancements: this.adv.serialize(),
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
       lastPlayed: Date.now(),
@@ -1051,6 +1165,7 @@ class Game {
     if (!paused) {
       this.dayTime = (this.dayTime + dt / DAY_LENGTH) % 1;
 
+      if (this.state === 'sleeping') this.updateSleep(dt);
       this.player.update(dt);
       if (location.hash.includes('bowtest')) this.player.bowCharge = 0.9;
       // mounting hint when the player climbs onto a horse
@@ -1141,8 +1256,15 @@ class Game {
       this.camBob += hSpeed * dt * 1.7;
       bobY = Math.sin(this.camBob * 2) * 0.045 * Math.min(1, hSpeed / 4.3);
     }
-    cam.position.set(this.player.pos.x, this.player.pos.y + this.player.eyeHeight() + bobY, this.player.pos.z);
-    cam.rotation.set(this.player.pitch, this.player.yaw, 0);
+    if (this.sleepBed) {
+      // lying on the pillow: the view sits above the bed looking down its length
+      const b = this.sleepBed;
+      cam.position.set(b.cx, b.y + 1.45, b.cz);
+      cam.rotation.set(-0.38, b.yaw, 0);
+    } else {
+      cam.position.set(this.player.pos.x, this.player.pos.y + this.player.eyeHeight() + bobY, this.player.pos.z);
+      cam.rotation.set(this.player.pitch, this.player.yaw, 0);
+    }
     let targetFov = this.player.sprinting ? 80.5 : 70;
     targetFov -= 12 * Math.min(1, this.player.bowCharge / 0.9); // bow-draw zoom
     if (Math.abs(cam.fov - targetFov) > 0.1) {
@@ -1163,6 +1285,7 @@ class Game {
     this.renderer.updateChunkFades(dt);
     this.renderer.updateHeld(dt, this.player.isMoving());
     this.hud.updateStats(this.player.hp, this.player.hunger, this.player.air, this.player.mode, this.player.inventory.armorPoints());
+    this.hud.updatePets(this.entities.petStatus());
     if (this.state === 'container' && this.container?.kind === 'furnace') this.hud.updateFurnace();
     // minimap redraw (throttled; block sampling is relatively expensive)
     this.minimapT -= dt;

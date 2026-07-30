@@ -135,8 +135,9 @@ export class Player {
     return this.inventory.getSelected()?.mob;
   }
 
-  /** Put a freshly filled catcher into the first empty slot, or drop it if full. */
-  private giveFilledCatcher(kind: string): void {
+  /** Put a freshly filled catcher into the first empty slot, or drop it if full.
+   *  Called by the player and by a thrown orb that found its mark. */
+  giveFilledCatcher(kind: string): void {
     const idx = this.inventory.firstEmpty();
     if (idx >= 0) this.inventory.slots[idx] = { id: I.MOB_CATCHER_FILLED, count: 1, mob: kind };
     else this.deps.entities.spawnDrop(this.pos.x, this.pos.y + 1, this.pos.z, I.MOB_CATCHER_FILLED, 1, undefined, kind);
@@ -980,40 +981,35 @@ export class Player {
       return;
     }
 
-    // mob catcher: capture a wild mob / recall a pet (right-click on a mob)
+    // mob catcher: point-blank recall of your own pet, otherwise throw the orb
+    // at whatever you are aiming at (see EntityManager.throwCatcher)
     if (heldDef?.id === I.MOB_CATCHER && !this.sneaking && this.placeCooldown <= 0) {
-      const hit = this.deps.entities.raycastMobs(
-        this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z,
-        this.lookDir().x, this.lookDir().y, this.lookDir().z, 3.5,
+      const ent = this.deps.entities;
+      const d = this.lookDir();
+      const hit = ent.raycastMobs(
+        this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z, d.x, d.y, d.z, 3.5,
       );
-      if (hit && hit.dist < (this.target?.dist ?? 4.5)) {
-        const ent = this.deps.entities;
-        // recalling an owned pet takes priority and does NOT consume the catcher
-        if (ent.isPet(hit.entity)) {
-          const kind = hit.entity.kind;
-          ent.spawnCaptureSparkle(hit.entity.pos.x, hit.entity.pos.y + hit.entity.box.h * 0.5, hit.entity.pos.z);
-          hit.entity.dead = true;
-          hit.entity.target = null;
+      // recalling a pet you are looking straight at doesn't need a throw
+      if (hit && hit.dist < (this.target?.dist ?? 4.5) && ent.isPet(hit.entity)) {
+        const kind = ent.recallPet(hit.entity);
+        if (kind) {
           this.giveFilledCatcher(kind);
-          audio.play('snap');
           this.placeCooldown = 0.4;
           this.deps.renderer.triggerSwing();
           this.deps.toast(`Recalled ${mobLabel(kind)}`);
           this.inventory.onChange();
           return;
         }
-        // otherwise try to capture a wild capturable mob (consumes the catcher)
-        const kind = ent.captureMob(hit.entity);
-        if (kind) {
-          this.placeCooldown = 0.4;
-          this.deps.renderer.triggerSwing();
-          if (this.mode === 'survival') this.inventory.consumeSelected();
-          this.giveFilledCatcher(kind);
-          this.deps.toast(`Captured ${mobLabel(kind)}!`);
-          this.inventory.onChange();
-          return;
-        }
       }
+      // throw: the orb arcs out and captures the first hostile it brushes past;
+      // a miss lands on the ground as a pickup, so nothing is wasted
+      const ey = this.pos.y + this.eyeHeight();
+      ent.throwCatcher(this.pos.x + d.x * 0.4, ey + d.y * 0.4 - 0.1, this.pos.z + d.z * 0.4, d.x, d.y, d.z);
+      this.placeCooldown = 0.35;
+      this.deps.renderer.triggerSwing();
+      if (this.mode === 'survival') this.inventory.consumeSelected();
+      this.inventory.onChange();
+      return;
     }
 
     // mob interaction: tame wolves / open villager trades (before generic use)
@@ -1093,16 +1089,24 @@ export class Player {
     if (held?.id === I.WATER_BUCKET && this.tryPlaceWater()) return;
     if (held?.id === I.LAVA_BUCKET && this.tryPlaceLava()) return;
 
-    // filled mob catcher: release the captured pet in front of the player
+    // filled mob catcher: release the captured pet in front of the player. Step
+    // the spot back toward the player if the far one is inside terrain, so a pet
+    // never pops out stuck in a wall.
     if (held?.id === I.MOB_CATCHER_FILLED && held.mob) {
       const kind = held.mob;
       const d = this.lookDir();
-      const fx = this.pos.x + d.x * 2, fy = this.pos.y, fz = this.pos.z + d.z * 2;
-      this.deps.entities.releaseMob(kind as never, fx, fy, fz, this.yaw);
+      let fx = this.pos.x, fz = this.pos.z;
+      for (const reach of [2, 1.4, 0.8, 0]) {
+        const tx = this.pos.x + d.x * reach, tz = this.pos.z + d.z * reach;
+        const clear = !isSolid(world.getBlock(Math.floor(tx), Math.floor(this.pos.y), Math.floor(tz)))
+          && !isSolid(world.getBlock(Math.floor(tx), Math.floor(this.pos.y) + 1, Math.floor(tz)));
+        if (clear) { fx = tx; fz = tz; break; }
+      }
+      this.deps.entities.releaseMob(kind as never, fx, this.pos.y, fz, this.yaw);
       this.placeCooldown = 0.4;
       this.deps.renderer.triggerSwing();
       if (this.mode === 'survival') this.inventory.consumeSelected();
-      this.deps.toast(`Released ${mobLabel(kind)}`);
+      this.deps.toast(`Released ${mobLabel(kind)} — it will fight for you`);
       this.inventory.onChange();
       return;
     }

@@ -32,6 +32,7 @@ export const ADVANCEMENTS: AdvancementDef[] = [
   { id: 'survive_night', label: 'Survivor', desc: 'Live through a full night', icon: '🌙', requires: ['root'] },
   { id: 'fish', label: 'Catch of the Day', desc: 'Reel in a fish with a fishing rod', icon: '🐟', requires: ['root'] },
   { id: 'wolf', label: 'Best Friends Forever', desc: 'Tame a wolf with bones', icon: '🐺', requires: ['root'] },
+  { id: 'catch', label: 'Monster Wrangler', desc: 'Capture a hostile mob with a mob catcher', icon: '🔮', requires: ['root'] },
   { id: 'trade', label: 'What a Deal!', desc: 'Trade with a villager', icon: '💱', requires: ['root'] },
   { id: 'village', label: 'Civilization', desc: 'Discover a village', icon: '🏘️', requires: ['root'] },
 ];

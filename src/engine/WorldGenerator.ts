@@ -290,7 +290,9 @@ export class WorldGenerator {
             // distance below the surface as before the world got deeper
             else if (y <= 46 && r < 0.0035) id = B.DIAMOND_ORE;
             else if (y <= 62 && r >= 0.01 && r < 0.0135) id = B.GOLD_ORE;
-            else if (y <= 62 && r >= 0.04 && r < 0.0435) id = B.AMETHYST_ORE;
+            // amethyst (mob-catcher gem) is as common as iron in its band, so
+            // catchers stay craftable without a dedicated mining expedition
+            else if (y <= 62 && r >= 0.04 && r < 0.048) id = B.AMETHYST_ORE;
             else if (y <= 86 && r >= 0.02 && r < 0.028) id = B.IRON_ORE;
             else if (y <= 128 && r >= 0.03 && r < 0.04) id = B.COAL_ORE;
             // rare isolated lava pockets in the deep stone

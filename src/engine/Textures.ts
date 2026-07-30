@@ -544,22 +544,26 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
     c.fillStyle = '#ededed'; c.fillRect(x + 2, y + 1, 12, 5);
     c.fillStyle = '#cfcfcf'; c.fillRect(x + 2, y + 5, 12, 1);
   },
-  // foot half top: all red quilted blanket
+  // foot half top: red quilted blanket, seams in a 2x2 quilt grid
   bed_foot_top: (c, x, y) => {
     noiseFill(c, x, y, ['#b02e2e', '#a02828', '#bd3737'], 126, 0);
-    // faint quilt seams
-    c.fillStyle = 'rgba(120,24,24,0.5)';
-    c.fillRect(x + 7, y, 1, 16); c.fillRect(x, y + 7, 16, 1);
+    c.fillStyle = 'rgba(122,26,26,0.55)';
+    c.fillRect(x + 7, y, 2, 16); c.fillRect(x, y + 7, 16, 2);
+    c.fillStyle = 'rgba(214,96,96,0.30)';                     // lit side of each seam
+    c.fillRect(x + 6, y, 1, 16); c.fillRect(x, y + 6, 16, 1);
   },
-  // head half top: a big white pillow over the outer ~2/3 (low v), with a thin
-  // red blanket strip at the inner edge. The mesher rotates this so the pillow
-  // always faces away from the foot.
+  // head half top: the white pillow over the outer 11/16 (low v) at full bed
+  // width, matching the raised pillow box in Mesher.emitBed exactly. The mesher
+  // rotates this by `facing` so the pillow always points away from the foot half.
   bed_head_top: (c, x, y) => {
     noiseFill(c, x, y, ['#b02e2e', '#a02828', '#bd3737'], 126, 0);
-    c.fillStyle = '#ededed'; c.fillRect(x, y, 16, 11);        // big pillow
-    c.fillStyle = '#f6f6f6'; c.fillRect(x, y, 16, 2);         // bright outer edge
-    c.fillStyle = '#d2d2d2'; c.fillRect(x, y + 9, 16, 2);     // pillow shadow seam
-    c.fillStyle = '#8a2222'; c.fillRect(x, y + 11, 16, 1);    // red seam at the join
+    c.fillStyle = 'rgba(122,26,26,0.55)'; c.fillRect(x, y + 13, 16, 1); // blanket seam
+    noiseFill(c, x, y, ['#ededed', '#e7e7e7', '#f4f4f4'], 134, 0);      // pillow body
+    c.fillStyle = '#b02e2e'; c.fillRect(x, y + 11, 16, 5);              // blanket below it
+    c.fillStyle = 'rgba(122,26,26,0.55)'; c.fillRect(x, y + 13, 16, 1);
+    c.fillStyle = '#f8f8f6'; c.fillRect(x + 1, y, 14, 4);               // top-lit crown
+    c.fillStyle = '#cdcdc8'; c.fillRect(x, y + 9, 16, 2);               // shaded fold
+    c.fillStyle = 'rgba(198,198,192,0.5)'; c.fillRect(x + 7, y + 1, 1, 9); // centre crease
   },
   // bed leg: a small solid oak post (cleaner than plank lines at leg scale)
   bed_leg: (c, x, y) => {
@@ -1541,13 +1545,18 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
   ], { k: '#2a1d44', h: '#f3ecff', a: '#c9a4ff', A: '#9a6fd6', D: '#5a3f86' }),
   mob_catcher: (c) => catcherShell(c),
   // generic fallback (a filled catcher always carries a mob kind in practice)
-  mob_catcher_filled: (c) => filledCatcher(c, '#9a6fd6', '#6a4a96', '#e0c9ff'),
-  mob_catcher_filled_zombie: (c) => filledCatcher(c, '#4f7d4a', '#3a5e37', '#7dba6e'),
-  mob_catcher_filled_skeleton: (c) => filledCatcher(c, '#d8d8d0', '#aaaaa0', '#ffffff'),
-  mob_catcher_filled_spider: (c) => filledCatcher(c, '#3a2e33', '#221a1e', '#6a5560'),
-  mob_catcher_filled_creeper: (c) => filledCatcher(c, '#58a84a', '#3f8a36', '#88d878'),
-  mob_catcher_filled_cinderling: (c) => filledCatcher(c, '#d65a16', '#8a3a10', '#ffb060'),
-  mob_catcher_filled_ashstalker: (c) => filledCatcher(c, '#b8501a', '#6a2e12', '#ff8a40'),
+  mob_catcher_filled: (c) => filledCatcher(c, 'zombie'),
+  mob_catcher_filled_zombie: (c) => filledCatcher(c, 'zombie'),
+  mob_catcher_filled_skeleton: (c) => filledCatcher(c, 'skeleton'),
+  mob_catcher_filled_spider: (c) => filledCatcher(c, 'spider'),
+  mob_catcher_filled_creeper: (c) => filledCatcher(c, 'creeper'),
+  mob_catcher_filled_cinderling: (c) => filledCatcher(c, 'cinderling'),
+  mob_catcher_filled_ashstalker: (c) => filledCatcher(c, 'ashstalker'),
+  mob_catcher_filled_emberghast: (c) => filledCatcher(c, 'emberghast'),
+  mob_catcher_filled_phantom: (c) => filledCatcher(c, 'phantom'),
+  // bed: a 3/4-view pixel bed (legs, red mattress, white pillow) — reads far
+  // better in the hotbar than an isometric slice of the block tiles
+  bed: (c) => bedSprite(c),
 };
 
 /** Generic meat chop sprite with palette colors. */
@@ -1560,48 +1569,125 @@ function meatSprite(c: Ctx, dark: string, light: string): void {
   ], { O: '#2a1410', P: dark, p: light, W: '#f2e3d5' });
 }
 
-// A polished amethyst capture orb: glassy upper hemisphere with a top-left
-// highlight, a dark metal equatorial band with a glowing button, and a deeper
-// amethyst lower hemisphere. Shared by the empty + filled catcher sprites.
+// A capture orb on a clean 14px circle: clear glass dome up top (so whatever is
+// inside reads at hotbar size), a dark metal equator band with a round glowing
+// button, and a polished amethyst base. Shared by the empty + filled sprites.
 const ORB_ROWS = [
-  '......kkkk......',
-  '....kaaaaaak....',
-  '...kahhaaaaak...',
-  '..kahhaaaaaaAk..',
-  '.kaahaaaaaaAAAk.',
-  '.kaaaaaaaaAAAAk.',
-  'kaaaaaAAAAAAAAAk',
-  'kbbbbbbrrbbbbbbk',
-  'kBBBBBBrrBBBBBBk',
-  'kAAAAAADDDDDDDDk',
-  '.kAAAADDDDDDDDk.',
-  '.kAAADDDDDDDDDk.',
-  '..kAADDDDDDDDk..',
-  '...kADDDDDDDk...',
-  '....kDDDDDDk....',
-  '......kkkk......',
+  '................',
+  '.....kkkkkk.....',
+  '...kkhhaaaakk...',
+  '..khhhaaaaaask..',
+  '..khhaaaaaassk..',
+  '.khaaaaaaaassck.',
+  '.kaaaaappaaassk.',
+  '.kBBBBpwwpBBBBk.',
+  '.kBBBBpwwpBBBBk.',
+  '.kAAAAAppAAAAAk.',
+  '.kAAAAAADDDDDDk.',
+  '..kAAAADDDDDDk..',
+  '..kADDDDDDDEEk..',
+  '...kkDDDEEEkk...',
+  '.....kkkkkk.....',
+  '................',
 ];
 const ORB_PAL: Record<string, string> = {
-  k: '#241830', h: '#f3ecff', a: '#c9a4ff', A: '#9a6fd6', D: '#5a3f86',
-  b: '#4a3a64', B: '#2a2038', r: '#e0c9ff',
+  k: '#20142e', h: '#ffffff', a: '#e3d5fa', s: '#c2a9e4', c: '#a98fd0',
+  B: '#241b30', p: '#a97fe0', w: '#fff4ff',
+  A: '#8f63cf', D: '#5f4189', E: '#43305f',
 };
 
-/** Empty mob catcher: the bare amethyst capture orb. */
+/** Empty mob catcher: the bare capture orb. */
 function catcherShell(c: Ctx): void {
   pixmap(c, 0, 0, ORB_ROWS, ORB_PAL);
 }
 
-/** Filled mob catcher: the orb with the captured creature glowing in the glass
- *  upper hemisphere. `base` is its body color, `accent` a shade, `glow` a tint. */
-function filledCatcher(c: Ctx, base: string, accent: string, glow: string): void {
+/** Per-mob occupant drawn inside the glass dome (8 wide x 4 tall, placed at
+ *  x=4,y=2). 'B' body, 'A' shade, 'e' dark eye, 'g' glowing eye. */
+const ORB_OCCUPANTS: Record<string, { rows: string[]; base: string; accent: string; glow: string }> = {
+  zombie: {
+    rows: ['..BBBB..', '.BBBBBB.', '.BeBBeB.', '.BBAABB.'],
+    base: '#5c9455', accent: '#3f6b3b', glow: '#8fd67e',
+  },
+  skeleton: {
+    rows: ['..BBBB..', '.BBBBBB.', '.BeBBeB.', '..BAAB..'],
+    base: '#e2e2d8', accent: '#a8a89e', glow: '#ffffff',
+  },
+  spider: {
+    rows: ['.BBBBBB.', 'BBgBBgBB', '.BBBBBB.', '..BAAB..'],
+    base: '#4a3a41', accent: '#251d21', glow: '#e2564a',
+  },
+  creeper: {
+    rows: ['.BBBBBB.', '.BeBBeB.', '.BBeeBB.', '.BeeeeB.'],
+    base: '#62b552', accent: '#2f6b2a', glow: '#8ede78',
+  },
+  cinderling: {
+    rows: ['.B.BB.B.', '.BBBBBB.', '.BgBBgB.', '.BBAABB.'],
+    base: '#df6a1f', accent: '#8a3a10', glow: '#ffd777',
+  },
+  ashstalker: {
+    rows: ['..BBBB..', '.BBBBBB.', '.BgBBgB.', '.BAAAAB.'],
+    base: '#c25a1f', accent: '#5f2a10', glow: '#ffb44a',
+  },
+  emberghast: {
+    rows: ['.BBBBBB.', '.BeBBeB.', '.BBBBBB.', '.BeeeeB.'],
+    base: '#ece6e0', accent: '#b5aca4', glow: '#ff9040',
+  },
+  phantom: {
+    rows: ['A.BBBB.A', '.BBBBBB.', '.BgBBgB.', '..BBBB..'],
+    base: '#5b8b9b', accent: '#315764', glow: '#a6f2ff',
+  },
+};
+
+/** Filled mob catcher: the orb with its captive showing through the glass dome,
+ *  plus a colored haze so the ball reads as "occupied" at a glance. */
+function filledCatcher(c: Ctx, kind: string): void {
+  const occ = ORB_OCCUPANTS[kind] ?? ORB_OCCUPANTS.zombie;
   pixmap(c, 0, 0, ORB_ROWS, ORB_PAL);
-  // the trapped creature, peering out through the glass above the band
+  // faint tint of the captive's color across the dome interior (glass haze)
+  c.save();
+  c.globalAlpha = 0.3;
+  c.fillStyle = occ.base;
+  c.fillRect(2, 2, 12, 5);
+  c.restore();
+  pixmap(c, 4, 2, occ.rows, {
+    B: occ.base, A: occ.accent, g: occ.glow, e: '#161318',
+  });
+  // glass specular back on top so the dome still reads as glass over the mob
+  c.save();
+  c.globalAlpha = 0.6;
+  c.fillStyle = '#f7f2ff';
+  c.fillRect(3, 3, 2, 1);
+  c.fillRect(3, 4, 1, 1);
+  c.restore();
+}
+
+/** Bed item sprite: a 3/4 view with two wooden legs, a red mattress and a
+ *  white pillow at the head end — the vanilla bed item silhouette. */
+function bedSprite(c: Ctx): void {
   pixmap(c, 0, 0, [
-    '................', '................', '................', '......BBBB......',
-    '.....GBBBBB.....', '.....BeBBeB.....', '......BAAB......', '................',
-    '................', '................', '................', '................',
-    '................', '................', '................', '................',
-  ], { B: base, A: accent, G: glow, e: '#15151a' });
+    '................',
+    '................',
+    '...WWWWWkkkkkk..',
+    '..WwwwwWRRRRRRk.',
+    '..WwwwwWRrRRrRk.',
+    '..kWWWWkRRRRRRk.',
+    '..kSSSSkSSSSSSk.',
+    '..kssssksssssSk.',
+    '..kkkkkkkkkkkkk.',
+    '..kLLk......kLk.',
+    '..kllk......klk.',
+    '..kllk......klk.',
+    '...kk........kk.',
+    '................',
+    '................',
+    '................',
+  ], {
+    k: '#241a12',              // dark outline
+    W: '#d8d8d2', w: '#f2f2ee', // pillow (shade + lit)
+    R: '#b02e2e', r: '#c64141', // blanket top (quilt seams brighter)
+    S: '#8e2323', s: '#7a1e1e', // mattress side in shadow
+    L: '#7a5a30', l: '#5e4524', // oak legs
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1954,29 +2040,12 @@ export class Atlas {
     if (cached) return cached;
     const d = def(id);
     const [c, ctx] = makeCanvas(32, 32);
-    if (d.name === 'bed' && d.faces) {
-      // the bed is a flat (9/16) block, so draw a low isometric slab — a wide top
-      // diamond (blanket + pillow) over short side rims — not a full cube
+    if (d.name === 'bed') {
+      // hand-drawn 3/4-view bed sprite (legs + mattress + pillow); an isometric
+      // slice of the block tiles never read as a bed at hotbar size
+      const s = this.itemSprites.get('bed');
       ctx.imageSmoothingEnabled = false;
-      const top = this.tileCanvas('bed_top'); // full bed (blanket + pillow) for the item
-      const side = this.tileCanvas(d.faces.sides);
-      ctx.fillStyle = 'rgba(0,0,0,0.2)';
-      ctx.beginPath();
-      ctx.moveTo(16, 27); ctx.lineTo(29, 20.5); ctx.lineTo(16, 14); ctx.lineTo(3, 20.5);
-      ctx.closePath(); ctx.fill();
-      // top face, lowered so the slab reads as flat
-      ctx.setTransform(0.93, 0.47, -0.93, 0.47, 16, 7.4);
-      ctx.drawImage(top, 0, 0, 16, 16, 0, 0, 16, 16);
-      // left rim (short), darkened
-      ctx.setTransform(0.93, 0.47, 0, 0.55, 1.1, 15);
-      ctx.filter = 'brightness(78%)';
-      ctx.drawImage(side, 0, 0, 16, 16, 0, 0, 16, 16);
-      // right rim, darker
-      ctx.setTransform(0.93, -0.47, 0, 0.55, 16, 22.4);
-      ctx.filter = 'brightness(58%)';
-      ctx.drawImage(side, 0, 0, 16, 16, 0, 0, 16, 16);
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.filter = 'none';
+      if (s) ctx.drawImage(s, 0, 0, 16, 16, 0, 0, 32, 32);
     } else if (d.block && d.faces && !d.solid) {
       // non-cube decorations (torch, flowers, crops, cane, sapling, ladder,
       // doors, water) read better as a flat tile than as an isometric cube

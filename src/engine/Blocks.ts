@@ -755,9 +755,11 @@ export function def(id: number): Def {
 export function hasDef(id: number): boolean { return DEFS.has(id); }
 export function allDefs(): Def[] { return [...DEFS.values()]; }
 
-/** Mobs that can be captured by a mob catcher (hostile + nether ground mobs). */
+/** Mobs a catcher can capture: every hostile mob. Peaceful animals are tamed
+ *  or bred instead, so throwing a catcher at one just bounces off. */
 export const CAPTURABLE = new Set<string>([
-  'zombie', 'skeleton', 'spider', 'creeper', 'cinderling', 'ashstalker',
+  'zombie', 'skeleton', 'spider', 'creeper',
+  'cinderling', 'ashstalker', 'emberghast', 'phantom',
 ]);
 
 /** Friendly label for a captured mob kind. */
@@ -765,6 +767,7 @@ export function mobLabel(kind: string): string {
   const m: Record<string, string> = {
     zombie: 'Zombie', skeleton: 'Skeleton', spider: 'Spider', creeper: 'Creeper',
     cinderling: 'Cinderling', ashstalker: 'Ashstalker',
+    emberghast: 'Emberghast', phantom: 'Phantom',
   };
   return m[kind] ?? kind;
 }

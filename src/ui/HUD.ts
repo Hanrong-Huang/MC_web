@@ -89,7 +89,12 @@ export class HUD {
   private tooltipEl!: HTMLElement;
   private vignette: HTMLElement;
   private lowhpEl!: HTMLElement;
+  private crosshairEl!: HTMLElement;
   private sleepEl!: HTMLElement;
+  private sleepPromptEl!: HTMLElement;
+  private petsEl!: HTMLElement;
+  /** last rendered pet roster signature (skips per-frame DOM rebuilds) */
+  private petSig = '';
   private portalEl!: HTMLElement;
   private netherTintEl!: HTMLElement;
   private lowHealthEl!: HTMLElement;
@@ -125,6 +130,7 @@ export class HUD {
     this.hud = el('div', 'hidden', root);
     this.hud.id = 'hud';
     const cross = el('div', '', this.hud); cross.id = 'crosshair';
+    this.crosshairEl = cross;
     this.hotbarEl = el('div', '', this.hud); this.hotbarEl.id = 'hotbar';
     this.statsEl = el('div', '', this.hud); this.statsEl.id = 'stats';
     this.armorEl = el('div', '', this.statsEl); this.armorEl.id = 'armor-bar';
@@ -146,6 +152,8 @@ export class HUD {
     this.lowhpEl = el('div', '', root); this.lowhpEl.id = 'lowhp';
     this.vignette = el('div', '', root); this.vignette.id = 'vignette';
     this.sleepEl = el('div', '', root); this.sleepEl.id = 'sleep-fade';
+    this.sleepPromptEl = el('div', 'hidden', root); this.sleepPromptEl.id = 'sleep-prompt';
+    this.petsEl = el('div', 'hidden', root); this.petsEl.id = 'pet-strip';
     this.portalEl = el('div', '', root); this.portalEl.id = 'portal-fade';
     this.netherTintEl = el('div', '', root); this.netherTintEl.id = 'nether-tint';
     this.lowHealthEl = el('div', '', root); this.lowHealthEl.id = 'low-health';
@@ -411,17 +419,71 @@ export class HUD {
     this.itemNameTimer = setTimeout(() => this.itemNameEl.classList.remove('show'), 1400);
   }
 
-  /** Black-screen sleep transition: fade to black, run `onDark` (skip to
-   *  morning) at the darkest point, then fade back in and run `onWake`. */
-  sleepFade(onDark: () => void, onWake: () => void): void {
-    this.sleepEl.classList.add('on');
-    window.setTimeout(() => {
-      onDark();
-      window.setTimeout(() => {
-        this.sleepEl.classList.remove('on');
-        window.setTimeout(onWake, 700);
-      }, 400);
-    }, 700);
+  /** Sleep blackout, driven frame-by-frame from the game loop so getting out of
+   *  bed early can cancel it mid-fade. 0 = clear, 1 = fully black. */
+  setSleepFade(amount: number): void {
+    const a = Math.max(0, Math.min(1, amount));
+    this.sleepEl.style.opacity = String(a);
+    this.sleepEl.classList.toggle('instant', a > 0);
+  }
+
+  /** Hidden while lying in bed — nothing to aim at from the pillow. */
+  setCrosshairVisible(v: boolean): void {
+    this.crosshairEl.style.display = v ? '' : 'none';
+  }
+
+  /** "Sleeping…" banner with a Leave Bed button (vanilla's bed screen). */
+  showSleepPrompt(onLeave: () => void): void {
+    this.sleepPromptEl.innerHTML = '';
+    el('div', 'sleep-zzz', this.sleepPromptEl).textContent = 'Zzz…';
+    el('div', 'sleep-text', this.sleepPromptEl).textContent = 'Sleeping through the night';
+    const btn = el('button', 'sleep-leave', this.sleepPromptEl);
+    btn.textContent = 'Leave Bed';
+    btn.onclick = () => onLeave();
+    this.sleepPromptEl.classList.remove('hidden');
+  }
+
+  hideSleepPrompt(): void {
+    this.sleepPromptEl.classList.add('hidden');
+    this.sleepPromptEl.innerHTML = '';
+  }
+
+  /** Roster strip for captured pets: icon + health pips + stay/fight state. */
+  updatePets(pets: { kind: string; hp: number; maxHp: number; sitting: boolean; fighting: boolean }[]): void {
+    if (pets.length === 0) {
+      if (!this.petsEl.classList.contains('hidden')) {
+        this.petsEl.classList.add('hidden');
+        this.petsEl.innerHTML = '';
+        this.petSig = '';
+      }
+      return;
+    }
+    const sig = pets.map((p) => `${p.kind}:${Math.ceil(p.hp)}/${p.maxHp}:${p.sitting}${p.fighting}`).join('|');
+    if (sig === this.petSig) return;   // nothing changed: skip the DOM churn
+    this.petSig = sig;
+    this.petsEl.classList.remove('hidden');
+    this.petsEl.innerHTML = '';
+    for (const p of pets) {
+      const row = el('div', 'pet-row', this.petsEl);
+      const icon = el('div', 'pet-icon', row);
+      const sprite = this.atlas.sprite(`mob_catcher_filled_${p.kind}`);
+      if (sprite) {
+        const c = document.createElement('canvas');
+        c.width = 24; c.height = 24;
+        const ctx = c.getContext('2d')!;
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(sprite, 0, 0, 16, 16, 0, 0, 24, 24);
+        icon.appendChild(c);
+      }
+      const meta = el('div', 'pet-meta', row);
+      const label = el('div', 'pet-name', meta);
+      label.textContent = mobLabel(p.kind) + (p.sitting ? ' · staying' : p.fighting ? ' · fighting' : '');
+      const bar = el('div', 'pet-bar', meta);
+      const fill = el('div', 'pet-bar-fill', bar);
+      const frac = Math.max(0, Math.min(1, p.hp / p.maxHp));
+      fill.style.width = `${Math.round(frac * 100)}%`;
+      fill.style.background = frac > 0.5 ? '#4ad24a' : frac > 0.25 ? '#e0c341' : '#e34a4a';
+    }
   }
 
   setPortalFade(amount: number): void {

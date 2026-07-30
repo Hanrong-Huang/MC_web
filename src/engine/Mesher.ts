@@ -694,6 +694,15 @@ function emitBox(
     g.tints.push(tint[0], tint[1], tint[2]);
     g.uvs.push(u, v);
   };
+  // Each face pushes its 4 corners in clockwise order as seen from outside the
+  // box, so the triangles are wound 0,2,1 / 0,3,2 to face outward. (Winding them
+  // the other way renders every partial block inside-out: the top face gets
+  // culled and you see the bottom plate through it, which reads as a hollow
+  // trough — that was the long-standing look of the bed and pressure plate.)
+  const quad = (b: number): void => {
+    g.indices.push(b, b + 2, b + 1, b, b + 3, b + 2);
+    g.vertCount += 4;
+  };
 
   // +y top (may use a distinct texture, e.g. a bed's blanket, rotated 90*topRot
   // so an oriented texture like a pillow points the right way)
@@ -707,8 +716,7 @@ function emitBox(
   push(x1, y1, z0, ...tr(1));
   push(x1, y1, z1, ...tr(2));
   push(x0, y1, z1, ...tr(3));
-  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-  g.vertCount += 4;
+  quad(base);
 
   // -y bottom
   base = g.vertCount;
@@ -716,8 +724,7 @@ function emitBox(
   push(x0, y0, z1, rect.u0, rect.v1);
   push(x1, y0, z1, rect.u1, rect.v1);
   push(x1, y0, z0, rect.u1, rect.v0);
-  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-  g.vertCount += 4;
+  quad(base);
 
   // +x side
   base = g.vertCount;
@@ -725,8 +732,7 @@ function emitBox(
   push(x1, y0, z1, rect.u1, rect.v1);
   push(x1, y1, z1, rect.u1, rect.v0);
   push(x1, y1, z0, rect.u0, rect.v0);
-  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-  g.vertCount += 4;
+  quad(base);
 
   // -x side
   base = g.vertCount;
@@ -734,8 +740,7 @@ function emitBox(
   push(x0, y0, z0, rect.u1, rect.v1);
   push(x0, y1, z0, rect.u1, rect.v0);
   push(x0, y1, z1, rect.u0, rect.v0);
-  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-  g.vertCount += 4;
+  quad(base);
 
   // +z side
   base = g.vertCount;
@@ -743,8 +748,7 @@ function emitBox(
   push(x0, y1, z1, rect.u0, rect.v0);
   push(x1, y1, z1, rect.u1, rect.v0);
   push(x1, y0, z1, rect.u1, rect.v1);
-  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-  g.vertCount += 4;
+  quad(base);
 
   // -z side
   base = g.vertCount;
@@ -752,8 +756,7 @@ function emitBox(
   push(x1, y1, z0, rect.u0, rect.v0);
   push(x0, y1, z0, rect.u1, rect.v0);
   push(x0, y0, z0, rect.u1, rect.v1);
-  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-  g.vertCount += 4;
+  quad(base);
 }
 
 function emitPressurePlate(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean): void {
@@ -767,30 +770,36 @@ function emitPressurePlate(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number
  *  pointing away from the foot. `facing` is the foot->head direction
  *  (0=-z,1=-x,2=+z,3=+x). */
 function emitBed(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, isHead: boolean, facing: number, sky: number, torch: number): void {
-  const red = atlas.rect('bed_side');       // red blanket on the mattress sides
-  const redTop = atlas.rect('bed_foot_top'); // flat red quilt top (both halves)
-  const wood = atlas.rect('bed_leg');       // wooden corner legs
-  const white = atlas.rect('pillow');       // white pillow on the head end
+  const red = atlas.rect('bed_side');        // red blanket on the mattress sides
+  const footTop = atlas.rect('bed_foot_top'); // quilted blanket (foot half)
+  const headTop = atlas.rect('bed_head_top'); // blanket + painted pillow (head half)
+  const wood = atlas.rect('bed_leg');        // wooden corner legs
+  const white = atlas.rect('pillow');        // white pillow on the head end
   const L = 0.1875;                          // 3/16 legs (height + thickness)
-  const mattTop = 0.5625;                    // 9/16 mattress top
-  // flat red mattress slab floating above the legs (open underside = MC look)
-  emitBox(g, red, x, y, z, 0, 1, L, mattTop, 0, 1, sky, torch, [1, 1, 1], redTop, 0);
-  // two wooden legs at this half's outer end, so the whole bed has 4 corner legs
+  const mattTop = 0.5625;                    // 9/16 mattress top (vanilla height)
   const axisIsZ = facing === 0 || facing === 2;
+  // does this half's outer end sit at coordinate 1 (vs 0) along the bed axis?
   const high = (facing === 0 || facing === 1) ? !isHead : isHead;
+  // flat red mattress slab floating above the legs (open underside = MC look).
+  // topRot = facing keeps the painted pillow pointing at the head end for all
+  // four orientations (see the tile comment in Textures.ts).
+  emitBox(g, red, x, y, z, 0, 1, L, mattTop, 0, 1, sky, torch, [1, 1, 1],
+    isHead ? headTop : footTop, isHead ? facing : 0);
+  // two wooden legs at this half's outer end, so the whole bed has 4 corner legs
   const la0 = high ? 1 - L : 0, la1 = high ? 1 : L;
   const leg = (cMin: number): void => {
     if (axisIsZ) emitBox(g, wood, x, y, z, cMin, cMin + L, 0, L, la0, la1, sky, torch);
     else emitBox(g, wood, x, y, z, la0, la1, 0, L, cMin, cMin + L, sky, torch);
   };
   leg(0); leg(1 - L);
-  // head half: a soft white pillow raised slightly at the outer (head) end
+  // head half: the pillow puffs 1.5/16 above the blanket over the outer 11/16 of
+  // the half, full bed width — the same area bed_head_top paints white, so the
+  // raised box and the texture read as one cushion
   if (isHead) {
-    const pa0 = high ? 0.40 : 0.08, pa1 = high ? 0.92 : 0.60; // along bed axis
-    const pc0 = 0.15, pc1 = 0.85;                              // inset across
-    const py0 = mattTop, py1 = mattTop + 0.125;                // raised ~2/16
-    if (axisIsZ) emitBox(g, white, x, y, z, pc0, pc1, py0, py1, pa0, pa1, sky, torch);
-    else emitBox(g, white, x, y, z, pa0, pa1, py0, py1, pc0, pc1, sky, torch);
+    const pa0 = high ? 0.3125 : 0, pa1 = high ? 1 : 0.6875; // along bed axis
+    const py0 = mattTop, py1 = mattTop + 0.09375;           // +1.5/16
+    if (axisIsZ) emitBox(g, white, x, y, z, 0, 1, py0, py1, pa0, pa1, sky, torch);
+    else emitBox(g, white, x, y, z, pa0, pa1, py0, py1, 0, 1, sky, torch);
   }
 }
 

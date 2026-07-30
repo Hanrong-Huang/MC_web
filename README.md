@@ -77,15 +77,27 @@ npm run dev        # open the printed localhost URL
   resource blocks (iron/gold/diamond, both directions), and 16 tools across
   4 tiers. Furnace smelts ores → ingots, sand → glass, cobble → stone,
   log → charcoal, and cooks 4 meats.
-- **Pets**: craft a **mob catcher** from 8 amethyst (hollow frame) and
-  right-click a hostile (zombie, skeleton, spider, creeper, cinderling,
-  ashstalker) to capture it — the filled catcher shows the trapped mob's
-  portrait and travels in your inventory. Right-click air to release it as a
-  loyal **pet** that follows you, locks onto whatever you attack or whatever
-  hurts you, fights it, and slowly heals back to full; right-click your pet
-  with an empty catcher to recall it.
-- **Storage & rest**: **chests** (27 slots, contents persist, spill when
-  broken) and **beds** (set your respawn point; sleep to skip the night).
+- **Pets**: craft a **mob catcher** from 8 amethyst (hollow frame — amethyst ore
+  is about as common as iron below y=62) and **throw it** with right-click. Any
+  hostile it brushes past (zombie, skeleton, spider, creeper, cinderling,
+  ashstalker, phantom, emberghast) is captured, with a generous ~0.85-block
+  catch radius; peaceful animals bounce it off, and a miss simply lands on the
+  ground to be picked back up. The filled catcher shows the trapped mob peering
+  through the glass. Right-click air to release it as a loyal **pet** that
+  follows you (wolf-style, teleporting if left behind), locks onto whatever you
+  attack or whatever hurts you, fights it — wild mobs fight back, so pets take
+  real damage and heal back up between scraps — and can be told to stay with a
+  bare-handed right-click. Captured flyers escort you overhead; a pet emberghast
+  lobs fireballs at your target. A HUD strip lists each pet with its health and
+  whether it is staying or fighting, and pets are saved with the world. Aim an
+  empty catcher at your own pet and right-click to recall it.
+- **Storage & rest**: **chests** (27 slots, contents persist, spill when broken)
+  and **beds**. A bed sets your respawn point; sleeping follows the vanilla
+  rules — only from dusk until just before dawn (or any time in a thunderstorm),
+  never with a monster within 8 blocks or a block on top of the bed, and a bed
+  used outside the Overworld **explodes**. While asleep the view lies on the
+  pillow with a *Zzz…* banner and a **Leave Bed** button (Esc also works); the
+  night skips to dawn and clears the weather.
 - **Survival**: 10 hearts + 10 hunger shanks, exhaustion, regen, starvation,
   **drowning with an air-bubble meter**, cactus contact damage, 7 foods
   (incl. apples from oak leaves and rotten flesh from zombies), death/respawn
@@ -152,5 +164,12 @@ src/ui/HUD.ts                menus, hotbar, hearts, durability bars, container s
   serialization, and tool-tier/break-time math.
 - `npx esbuild light-test.ts --bundle --format=esm --platform=node --outfile=t.mjs && node t.mjs`
   — deterministic torch flood-fill test (placement, attenuation, removal).
+- `node catch-throw-test.mjs` — thrown mob catcher: capture inside the catch
+  radius, misses landing as pickups, animals bouncing it off, pet follow/fight,
+  the stay toggle, idle pets keeping full health, and pet save data.
+- `node verify-bed-catcher.mjs` — screenshots the placed bed from four angles and
+  all four facings, the bed/orb sprites at 8x, the held bed and orb, and the
+  sleeping (bed) screen.
 
-Dev helper: open the game with `#night` in the URL to start just after sundown.
+Dev helpers: open the game with `#night` to start just after sundown, or
+`#debugcatch` for a stocked hotbar of catchers and a line of throwable targets.

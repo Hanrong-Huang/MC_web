@@ -190,6 +190,51 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   transition: opacity 0.7s ease;
 }
 #sleep-fade.on { opacity: 1; }
+/* the game loop drives the fade frame-by-frame while sleeping, so the CSS
+   transition has to stand aside (it would lag and fight the animation) */
+#sleep-fade.instant { transition: none; }
+
+/* bed screen: Zzz banner + Leave Bed button, above the blackout */
+#sleep-prompt {
+  position: absolute; left: 50%; bottom: 16%; transform: translateX(-50%);
+  z-index: 61; display: flex; flex-direction: column; align-items: center; gap: 10px;
+  font-family: inherit; text-align: center; pointer-events: auto;
+}
+#sleep-prompt.hidden { display: none; }
+#sleep-prompt .sleep-zzz {
+  font-size: 30px; color: #dcd6ff; letter-spacing: 4px;
+  text-shadow: 2px 2px 0 rgba(0,0,0,0.8);
+  animation: zzzfloat 2.2s ease-in-out infinite;
+}
+@keyframes zzzfloat { 0%, 100% { opacity: 0.55; transform: translateY(2px); } 50% { opacity: 1; transform: translateY(-3px); } }
+#sleep-prompt .sleep-text {
+  font-size: 14px; color: #e8e8e8; text-shadow: 2px 2px 0 rgba(0,0,0,0.8);
+}
+#sleep-prompt .sleep-leave {
+  font-family: inherit; font-size: 13px; color: #fff; cursor: pointer;
+  padding: 8px 22px; background: #6a6a6a; border: 2px solid #1d1d1d;
+  box-shadow: inset 2px 2px 0 rgba(255,255,255,0.25), inset -2px -2px 0 rgba(0,0,0,0.35);
+}
+#sleep-prompt .sleep-leave:hover { background: #7e8ea0; }
+
+/* captured-pet roster: icon, name and a health bar per following pet */
+#pet-strip {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  z-index: 12; display: flex; flex-direction: column; gap: 5px; pointer-events: none;
+}
+#pet-strip.hidden { display: none; }
+#pet-strip .pet-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 7px 3px 4px; background: rgba(12,10,18,0.55);
+  border: 1px solid rgba(180,150,230,0.35);
+}
+#pet-strip .pet-icon { width: 24px; height: 24px; image-rendering: pixelated; }
+#pet-strip .pet-meta { display: flex; flex-direction: column; gap: 2px; min-width: 92px; }
+#pet-strip .pet-name {
+  font-size: 9px; color: #e4dcff; text-shadow: 1px 1px 0 rgba(0,0,0,0.85);
+}
+#pet-strip .pet-bar { width: 100%; height: 4px; background: rgba(0,0,0,0.6); }
+#pet-strip .pet-bar-fill { height: 100%; background: #4ad24a; }
 
 #portal-fade {
   position: absolute; inset: 0; background: radial-gradient(circle, rgba(140,43,176,0.3) 0%, rgba(74,14,78,0.85) 100%);

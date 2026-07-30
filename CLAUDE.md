@@ -57,8 +57,12 @@ See the table in `README.md` for the full per-file breakdown. The big/hot files:
 - **`extrudeSpriteGeometry`** in `Textures.ts` is shared between in-hand items and dropped items — change it once, both update.
 - **Mob skins**: `skin(key, base, speckle, face?)` paints an 8×8 canvas — clean flat base + gentle top-lit vertical shading + sparse speckle (intentionally *not* heavy noise; heavy noise made mobs unrecognizable). Face details are drawn after the base loop. Per-mob features (snouts, patches, markings) are added as extra boxes in `buildMobMesh`.
 - **Wall torches**: a single `B.TORCH` id; orientation lives in `world.torchFacings` (Map keyed `"x,y,z"` → 0..3). Keep it in sync on place/break and in persistence.
+- **`emitBox` winding** (`Mesher.ts`): its six faces push corners *clockwise as seen from outside*, so the triangles are wound `0,2,1 / 0,3,2` via the local `quad()` helper. Winding them the other way renders every partial block (bed, pressure plate, lever, button, piston head) inside-out — the top face gets culled and you see the bottom plate through it, which reads as a hollow trough. The single-quad emitters (trapdoor panel, redstone wire, torch flame tip) are *not* routed through `quad()` and still use the plain `0,1,2 / 0,2,3` push.
+- **Pets are hostile *kinds*.** `isPet()` is `tamed && ownerName === 'player'` minus wolf/cat/horse, but a pet zombie still hits `MOB_STATS[kind].hostile`. Every "scan for a hostile to bite" loop must skip `m === self` and `m.tamed`, or pets bite themselves to death (3 dmg/0.7 s). `catch-throw-test.mjs` guards this.
+- **Wild mob ↔ pet combat** uses `Entity.foe` (a wild hostile's non-player quarry) alongside `Entity.target` (a pet's quarry). `clearFoe()` drops both references when an entity is removed; forget that and mobs chase ghosts.
 - **Persistence**: RLE chunk diffs + state in IndexedDB across 3 slots (`Persistence.ts`, `SaveState`). When you add persistent state, extend `SaveState` and both the save and load paths.
-- **Dev URL hooks**: `#night` starts just after sundown; `#debugmobs` spawns tameable/rideable mobs at spawn, stocks a tool kit, builds a torch pillar + a bed. Note `#debugmobs` places the bed directly in front of the player, which occludes forward screenshots — pan or reposition when capturing mobs.
+- **Dev URL hooks**: `#night` starts just after sundown; `#debugmobs` spawns tameable/rideable mobs at spawn, stocks a tool kit, builds a torch pillar + a full 2-block bed; `#debugcatch` stocks catchers/amethyst and lines up throwable targets (zombie, creeper, skeleton, spider + a cow for the bounce case). Note `#debugmobs` places the bed directly in front of the player, which occludes forward screenshots — pan or reposition when capturing mobs. Both hooks expose `window.__game` / `window.__B`.
+- **`GameUIState.sleeping`** is frame-driven from `main.updateSleep(dt)`: 0–1.2 s lying awake, 1.2–1.9 s fade to black, night skips at 1.9 s, 1.9–2.7 s fade in, wake at 2.7 s. `leaveBed()` can cancel at any point (Leave Bed button / Esc), which is why the fade is an opacity the loop sets rather than a chain of `setTimeout`s.
 
 ## Testing
 
@@ -66,14 +70,24 @@ Headless harnesses (`node <name>.mjs`) boot the game in Edge/SwiftShader and fai
 - `smoke-test.mjs` — boot + create world + assert no console errors (run this after engine changes).
 - `persist-test.mjs` — save/quit/reload position restoration.
 - `ride-test.mjs`, `held-test.mjs`, `sleep-test.mjs`, `mob-test.mjs`, `visual-test.mjs` — feature-specific screenshot checks.
+- `catch-test.mjs` (direct capture/release/recall API) and `catch-throw-test.mjs` (the thrown orb end-to-end, plus the pet self-damage guard) — both assert, not just screenshot.
+- `verify-bed-catcher.mjs` — bed model from four angles/facings, sprite sheet at 8x, held bed + orb, bed screen. Builds its arena on a **stone platform at y=108** so framing is identical whatever world the fresh Playwright profile rolled — terrain-relative arenas produce camera-buried screenshots.
+
+Two harness gotchas worth remembering: editing `src/` while a harness runs triggers a Vite HMR reload that wipes `window.__game` mid-test, and a zombie/skeleton spawned under open sky in daylight burns away before a thrown orb reaches it (set `g.dayTime = 0.72` first).
 
 Pure-logic unit tests bundle with esbuild to `t.mjs` then run under node (RLE codec, recipes, smelting, torch flood-fill) — see the Tests section of `README.md` for exact commands. `t.mjs` is a throwaway bundle output; don't commit meaningful work to it.
 
 When adding a feature, prefer adding/extending a `.mjs` harness and capturing a screenshot to confirm rendering, then clean up `shot-*.png` before committing.
 
-## Current status (2026-06)
+## Current status (2026-07)
 
-Feature-complete sandbox (see `README.md`). Recent polish passes: chunk fade-in, 3D extruded held/dropped items, wall-mounted torches, ambient particles, mob shadows, breeding + babies, horse riding, wolf/cat taming, bed sleep-to-morning, mob-silhouette recognizability pass + beveled tool/weapon sprites. Newest additions:
+Latest pass — thrown mob catcher + bed/sleep rework:
+- **Catcher is a projectile** (`EntityManager` kind `'catcher'`, `throwCatcher`/`updateCatcher`/`resolveCatcherHit`). Right-click throws; `CATCH_SLACK = 0.85` expands the mob AABB for the hit test; block hits, timeouts and animal bounces all drop the orb back as a pickup. Point-blank right-click on your own pet still recalls without a throw (`Player.use` handles that before throwing). `CAPTURABLE` is now every hostile kind, including the two flyers.
+- **Pet combat is two-sided**: wild hostiles pick a pet as `foe` and melee/shoot it, `hurt()` wires up mutual aggro, hostile arrows/fireballs damage pets, and pets regen between fights. Flying pets use `updateFlyingPet` (escort overhead, dive/fireball the target). Pets persist via `SaveState.pets` + `savePets`/`loadPets`, show in a HUD roster (`HUD.updatePets` ← `EntityManager.petStatus`), and toggle stay/follow through `interactMob`.
+- **Bed**: dedicated `bed` item sprite (icon + extruded held model), head-half top texture with a full-width painted pillow matching a 1.5/16 raised pillow box, and the `emitBox` winding fix that finally makes partial-block top faces visible.
+- **Sleep** follows vanilla: dusk→pre-dawn window or thunderstorm, 8-block monster check, obstruction check, bed explodes outside the Overworld, lying-in-bed camera + Leave Bed button, weather cleared on waking.
+
+Earlier polish passes: chunk fade-in, 3D extruded held/dropped items, wall-mounted torches, ambient particles, mob shadows, breeding + babies, horse riding, wolf/cat taming, bed sleep-to-morning, mob-silhouette recognizability pass + beveled tool/weapon sprites. Before those: chunk fade-in, 3D extruded held/dropped items, wall-mounted torches, ambient particles, mob shadows, breeding + babies, horse riding, wolf/cat taming, bed sleep-to-morning, mob-silhouette recognizability pass + beveled tool/weapon sprites. Newest additions:
 - **Player armor** (`Blocks.ts` `armor` field, `Inventory.armor[4]`, `Player.equipArmor/damageArmor`): 12 pieces (leather/iron/diamond × helmet/chest/legs/boots), 4%/point damage reduction (cap 80%), durability, HUD armor bar, inventory armor column, right-click to equip.
 - **Flowing water** (`World.ts` `waterLevels` + `tickWater`, a pull-model cellular automaton ticked ~5 Hz from `main.tick20`): sources spread/recede; absent-from-map water = permanent source. **Bucket** (`Player.tryScoopWater/tryPlaceWater`) scoops/pours sources. Swimming hops you onto 1-block ledges; touching water cancels fall damage.
 - **Title screen**: unlimited named worlds (IndexedDB keyed by name) with create/delete + UI sounds.

@@ -57,6 +57,8 @@ export interface SaveState {
   villageSpawns?: { x: number; y: number; z: number }[];
   /** bed spawn point, if set */
   spawn?: { x: number; y: number; z: number };
+  /** captured pets following the player (wild mobs are not persisted) */
+  pets?: { kind: string; x: number; y: number; z: number; hp: number; sitting: boolean }[];
   /** unlocked advancement ids */
   advancements?: string[];
   lastPlayed: number;

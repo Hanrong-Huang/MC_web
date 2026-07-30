@@ -10,6 +10,7 @@ import { def, hasDef, spriteNameFor, I } from './Blocks';
 const MOB_ORB_COLORS: Record<string, number> = {
   zombie: 0x5d9b54, skeleton: 0xe6e6dc, spider: 0x6a5560,
   creeper: 0x6bcf57, cinderling: 0xf07a2a, ashstalker: 0xe06a2a,
+  emberghast: 0xf0e6dc, phantom: 0x6fb6c8,
 };
 
 export interface ChunkGeometry {
@@ -505,7 +506,20 @@ export class Renderer {
       });
       this.bowArrow = null;
     }
-    if (id !== 0 && hasDef(id) && def(id).block && !def(id).opaque && !def(id).solid) {
+    if (id !== 0 && hasDef(id) && def(id).name === 'bed') {
+      // the bed holds as its extruded item sprite (a real little 3/4-view bed),
+      // which reads far better in hand than a textured 9/16 slab
+      const sprite = this.atlas.sprite('bed');
+      // 0.34 across: the bed sprite fills its 16x16 box, so the usual 0.56 item
+      // size would swallow a third of the screen in first person
+      const mesh = sprite
+        ? new THREE.Mesh(extrudeSpriteGeometry(sprite, 0.34),
+          new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.03 }))
+        : new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.3), new THREE.MeshLambertMaterial({ color: 0xb02e2e }));
+      this.heldIdleRot.set(0.1, -0.3, -0.2);
+      mesh.rotation.copy(this.heldIdleRot);
+      this.heldMesh = mesh;
+    } else if (id !== 0 && hasDef(id) && def(id).block && !def(id).opaque && !def(id).solid) {
       // cutout decorations (torch): hold the flat tile, not a black cube
       const d = def(id);
       const tile = this.atlas.tileCanvas(d.faces!.sides);
@@ -520,13 +534,11 @@ export class Renderer {
       this.heldMesh = mesh;
     } else if (id !== 0 && hasDef(id) && def(id).block) {
       const d = def(id);
-      // the bed holds as a flat 9/16 slab, not a full cube (matches the world mesh)
-      const flatBed = d.name === 'bed';
-      const geo = new THREE.BoxGeometry(1, flatBed ? 0.5625 : 1, 1);
+      const geo = new THREE.BoxGeometry(1, 1, 1);
       const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
       // BoxGeometry face order: +x,-x,+y,-y,+z,-z; 4 uvs per face
       const faceNames = [
-        d.faces!.sides, d.faces!.sides, flatBed ? 'bed_top' : d.faces!.top,
+        d.faces!.sides, d.faces!.sides, d.faces!.top,
         d.faces!.bottom, d.faces!.front ?? d.faces!.sides, d.faces!.sides,
       ];
       for (let f = 0; f < 6; f++) {
@@ -537,7 +549,7 @@ export class Renderer {
       }
       uv.needsUpdate = true;
       const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: this.atlas.texture, alphaTest: 0.35 }));
-      mesh.scale.setScalar(flatBed ? 0.42 : 0.34);
+      mesh.scale.setScalar(0.34);
       // a slight 3/4 tilt so the top + two side faces all catch the light
       mesh.rotation.set(-0.16, 0.5, 0);
       this.heldMesh = mesh;
@@ -582,6 +594,11 @@ export class Renderer {
 
   triggerSwing(): void {
     this.swingT = 0;
+  }
+
+  /** Hide the first-person hand rig (used while lying in a bed). */
+  setHeldVisible(v: boolean): void {
+    this.heldGroup.visible = v;
   }
 
   setBowCharge(charge: number): void {
@@ -690,7 +707,9 @@ export class Renderer {
    *  a glowing button, and (when filled) a glowing inner core in the mob color. */
   private buildCatcherOrb(mob?: string): THREE.Group {
     const g = new THREE.Group();
-    const R = 0.22;
+    // the held rig sits 0.58 from the eye, so a 0.44-wide ball filled half the
+    // screen; 0.28 across reads as a ball in the fist without blocking the view
+    const R = 0.14;
     const shell = new THREE.Mesh(
       new THREE.SphereGeometry(R, 22, 18),
       new THREE.MeshStandardMaterial({
