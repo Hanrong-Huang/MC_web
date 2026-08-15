@@ -100,6 +100,12 @@ export class Player {
   private regenT = 0;
   private starveT = 0;
   private hurtCooldown = 0;
+  /** human-readable cause of the last damage taken (shown on the death screen) */
+  lastDamageCause = '';
+  /** camera shake: remaining time, total duration, and max offset in blocks */
+  shakeT = 0;
+  shakeDur = 0.3;
+  shakeMag = 0;
   private airT = 0;
   private drownT = 0;
   private cactusT = 0;
@@ -242,7 +248,7 @@ export class Player {
     if (underFeet === B.MAGMA && this.onGround && !this.flying && !this.sneaking &&
         this.mode === 'survival' && this.lavaT <= 0) {
       this.lavaT = 0.5;
-      this.damage(1);
+      this.damage(1, undefined, 'Burned by a magma block');
       this.deps.entities.spawnBlockParticles(
         Math.floor(this.pos.x), Math.floor(this.pos.y), Math.floor(this.pos.z), B.MAGMA, 2);
     }
@@ -325,7 +331,7 @@ export class Player {
         }
         const dmg = Math.floor(this.fallDist - 3);
         if (dmg > 0 && this.mode === 'survival') {
-          this.damage(dmg);
+          this.damage(dmg, undefined, 'Fell from a high place');
           this.addExhaustion(0.3);
         }
         this.fallDist = 0;
@@ -358,7 +364,7 @@ export class Player {
           for (let bx = x0; bx <= x1; bx++) {
             if (world.getBlock(bx, by, bz) === B.CACTUS) {
               this.cactusT = 0.8;
-              this.damage(1);
+              this.damage(1, undefined, 'Pricked to death by a cactus');
               break outer;
             }
           }
@@ -383,7 +389,7 @@ export class Player {
       }
       if (inLava) {
         this.lavaT = 0.5;
-        this.damage(3);
+        this.damage(3, undefined, 'Tried to swim in lava');
         // rising embers around the player
         const px = this.pos.x, py = this.pos.y + 0.5, pz = this.pos.z;
         for (let i = 0; i < 4; i++) {
@@ -425,7 +431,7 @@ export class Player {
 
     // void rescue: respawn-style safety net if the player escapes the world floor
     if (this.pos.y < -16) {
-      if (this.mode === 'survival') this.damage(4);
+      if (this.mode === 'survival') this.damage(4, undefined, 'Fell out of the world');
       this.pos.y = 130;
       this.vel.y = 0;
     }
@@ -1432,7 +1438,7 @@ export class Player {
         const en = hit.entity;
         this.deps.entities.spawnCritParticles(en.pos.x, en.pos.y + en.box.h * 0.6, en.pos.z);
       }
-      this.deps.entities.hurt(hit.entity, dmg, d.x, d.z, this);
+      this.deps.entities.hurt(hit.entity, dmg, d.x, d.z, this, crit);
       this.addExhaustion(0.1);
       this.damageHeldTool();
     } else if (!this.target && (!hit || hit.entity === this.riding)) {
@@ -1444,6 +1450,7 @@ export class Player {
   // --- health & hunger (20 Hz tick) -------------------------------------------
 
   tick(dts: number): void {
+    this.shakeT = Math.max(0, this.shakeT - dts);
     if (this.mode === 'creative') {
       this.hp = 20;
       this.hunger = 20;
@@ -1463,7 +1470,7 @@ export class Player {
         this.drownT += dts;
         if (this.drownT >= 1) {
           this.drownT = 0;
-          this.damage(2);
+          this.damage(2, undefined, 'Drowned');
         }
       }
     } else {
@@ -1492,7 +1499,7 @@ export class Player {
       this.starveT += dts;
       if (this.starveT >= 4) {
         this.starveT = 0;
-        if (this.hp > 2) this.damage(1);
+        if (this.hp > 2) this.damage(1, undefined, 'Starved to death');
       }
     } else {
       this.starveT = 0;
@@ -1503,10 +1510,11 @@ export class Player {
     if (this.mode === 'survival') this.exhaustion += amount;
   }
 
-  damage(amount: number, source?: Entity): void {
+  damage(amount: number, source?: Entity, cause?: string): void {
     if (this.mode === 'creative' || this.dead) return;
     if (this.hurtCooldown > 0) return;
     this.hurtCooldown = 0.5;
+    if (cause) this.lastDamageCause = cause;
     // pets retaliate against whatever just hurt their owner
     if (source) this.deps.entities.onOwnerHurt(source);
     // armor absorbs a share of the blow (MC: 4% per defense point, capped at 80%)
@@ -1518,6 +1526,9 @@ export class Player {
     }
     this.hp = Math.max(0, this.hp - amount);
     this.deps.audio.play('hurt');
+    // screen shake scaled by the blow (capped so explosions don't nauseate)
+    this.shakeT = this.shakeDur = 0.3;
+    this.shakeMag = Math.min(0.5, 0.14 + amount * 0.04);
     document.getElementById('vignette')?.classList.remove('flash');
     void document.getElementById('vignette')?.offsetWidth;
     document.getElementById('vignette')?.classList.add('flash');
@@ -1546,6 +1557,8 @@ export class Player {
     this.fallDist = 0;
     this.dead = false;
     this.flying = false;
+    this.lastDamageCause = '';
+    this.shakeT = 0;
   }
 
   serialize() {

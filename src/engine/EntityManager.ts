@@ -217,6 +217,8 @@ export class EntityManager {
   onToast: ((msg: string) => void) | null = null;
   /** fired when a mob is captured into a catcher (mobKind string) */
   onCapture: ((mobKind: string) => void) | null = null;
+  /** fired when the player damages a mob (hit marker + damage number feedback) */
+  onPlayerHit: ((pos: Vec3, dmg: number, crit: boolean, killed: boolean) => void) | null = null;
   private skinCache = new Map<string, THREE.Texture>();
   private shadowTex: THREE.CanvasTexture | null = null;
   private particleMats = new Map<string, THREE.MeshBasicMaterial>();
@@ -797,7 +799,7 @@ export class EntityManager {
 
   // --- explosions -----------------------------------------------------------------
 
-  explode(x: number, y: number, z: number, power: number): void {
+  explode(x: number, y: number, z: number, power: number, cause = 'Blown up by TNT'): void {
     this.audio.play('explode');
     const r = Math.ceil(power);
     const cx = Math.floor(x), cy = Math.floor(y), cz = Math.floor(z);
@@ -844,7 +846,7 @@ export class EntityManager {
     if (p && !p.dead) {
       const d = Math.hypot(p.pos.x - x, p.pos.y + 0.9 - y, p.pos.z - z);
       if (d < range) {
-        p.damage(Math.ceil((1 - d / range) * power * 7));
+        p.damage(Math.ceil((1 - d / range) * power * 7), undefined, cause);
         p.applyKnockback(p.pos.x - x, p.pos.z - z, (1 - d / range) * 14);
       }
     }
@@ -864,7 +866,7 @@ export class EntityManager {
     if (p && !p.dead && p.mode === 'survival') {
       const d = Math.hypot(p.pos.x - x, p.pos.y + 0.9 - y, p.pos.z - z);
       if (d < range) {
-        p.damage(5);
+        p.damage(5, undefined, 'Struck by lightning');
         p.applyKnockback(p.pos.x - x, p.pos.z - z, 6);
       }
     }
@@ -1000,7 +1002,7 @@ export class EntityManager {
           e.pos.x > p.pos.x - hw && e.pos.x < p.pos.x + hw &&
           e.pos.y > p.pos.y && e.pos.y < p.pos.y + 1.8 &&
           e.pos.z > p.pos.z - hw && e.pos.z < p.pos.z + hw) {
-          p.damage(e.dmg);
+          p.damage(e.dmg, undefined, fireball ? 'Fireballed by an Emberghast' : 'Shot by a Skeleton');
           p.applyKnockback(e.vel.x, e.vel.z, 5);
           e.dead = true;
           if (fireball) this.fireballBurst(e.pos.x, e.pos.y, e.pos.z);
@@ -1053,7 +1055,7 @@ export class EntityManager {
     e.mesh.position.set(e.pos.x, e.pos.y + 0.48, e.pos.z);
     if (e.fuseT <= 0) {
       e.dead = true;
-      this.explode(e.pos.x, e.pos.y + 0.5, e.pos.z, 3.2);
+      this.explode(e.pos.x, e.pos.y + 0.5, e.pos.z, 3.2, 'Blown up by TNT');
     }
   }
 
@@ -1212,7 +1214,7 @@ export class EntityManager {
         e.state = 'chase'; // quarry escaped: cancel
       } else if (e.fuseT <= 0) {
         e.dead = true;
-        this.explode(e.pos.x, e.pos.y + 0.6, e.pos.z, 2.6);
+        this.explode(e.pos.x, e.pos.y + 0.6, e.pos.z, 2.6, 'Blown up by a Creeper');
         return;
       }
     }
@@ -1238,7 +1240,7 @@ export class EntityManager {
         if (foe) {
           this.hurt(foe, dmg, dx, dz, e);
         } else if (p.mode === 'survival') {
-          p.damage(dmg, e);
+          p.damage(dmg, e, `Slain by ${mobLabel(e.kind as string)}`);
           p.applyKnockback(dx, dz, e.kind === 'ashstalker' ? 7 : 5);
         }
       }
@@ -1547,7 +1549,7 @@ export class EntityManager {
     // contact damage during a dive
     if (dive && distH < 1.4 && Math.abs(dy) < 2 && !p.dead && p.mode === 'survival' && e.attackCooldown <= 0) {
       e.attackCooldown = 1.2;
-      p.damage(3);
+      p.damage(3, undefined, 'Slain by a Phantom');
       p.applyKnockback(dx, dz, 5);
     }
     e.attackCooldown = Math.max(0, e.attackCooldown - dt);
@@ -1897,7 +1899,7 @@ export class EntityManager {
     return best;
   }
 
-  hurt(e: Entity, dmg: number, kbX: number, kbZ: number, attacker?: Entity | Player): void {
+  hurt(e: Entity, dmg: number, kbX: number, kbZ: number, attacker?: Entity | Player, crit = false): void {
     if (e.dead || !this.isMob(e)) return;
     if (e.armorTier > 0) dmg *= 0.5; // iron horse barding halves damage
     e.hp -= dmg;
@@ -1940,6 +1942,7 @@ export class EntityManager {
       if (wasPet) this.onToast?.(`Your ${mobLabel(e.kind as string)} was slain`);
       this.onKill?.(e.kind as string);
     }
+    if (attacker === this.player) this.onPlayerHit?.(e.pos, dmg, crit, e.dead);
   }
 
   /** The player was hurt by `source` -> all idle pets retaliate against it. */

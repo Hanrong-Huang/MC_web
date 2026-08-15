@@ -90,6 +90,8 @@ export class HUD {
   private vignette: HTMLElement;
   private lowhpEl!: HTMLElement;
   private crosshairEl!: HTMLElement;
+  private hitmarkerEl!: HTMLElement;
+  private dmgNums: HTMLElement[] = [];
   private sleepEl!: HTMLElement;
   private sleepPromptEl!: HTMLElement;
   private petsEl!: HTMLElement;
@@ -131,6 +133,8 @@ export class HUD {
     this.hud.id = 'hud';
     const cross = el('div', '', this.hud); cross.id = 'crosshair';
     this.crosshairEl = cross;
+    const hm = el('div', '', this.hud); hm.id = 'hitmarker';
+    this.hitmarkerEl = hm;
     this.hotbarEl = el('div', '', this.hud); this.hotbarEl.id = 'hotbar';
     this.statsEl = el('div', '', this.hud); this.statsEl.id = 'stats';
     this.armorEl = el('div', '', this.statsEl); this.armorEl.id = 'armor-bar';
@@ -740,11 +744,19 @@ export class HUD {
   // Death
   // =========================================================================
 
-  showDeath(onRespawn: () => void, onTitle: () => void): void {
+  showDeath(onRespawn: () => void, onTitle: () => void, cause = '', at?: { x: number; y: number; z: number }): void {
     this.deathEl.classList.remove('hidden');
     this.deathEl.innerHTML = '';
     const t = el('div', 'death-title', this.deathEl);
     t.textContent = 'You died!';
+    if (cause) {
+      const c = el('div', 'death-cause', this.deathEl);
+      c.textContent = cause;
+    }
+    if (at) {
+      const p = el('div', 'death-pos', this.deathEl);
+      p.textContent = `Died at ${Math.floor(at.x)}, ${Math.floor(at.y)}, ${Math.floor(at.z)}`;
+    }
     const col = el('div', 'menu-col', this.deathEl);
     const r = el('button', 'mc-btn', col);
     r.textContent = 'Respawn';
@@ -754,6 +766,35 @@ export class HUD {
     q.onclick = () => { this.audio.play('click'); onTitle(); };
   }
   hideDeath(): void { this.deathEl.classList.add('hidden'); }
+
+  // =========================================================================
+  // Combat feedback (hit marker + floating damage numbers)
+  // =========================================================================
+
+  /** brief crosshair tick when the player damages a mob (gold on crit, red on kill) */
+  flashHitMarker(crit: boolean, killed: boolean): void {
+    const hm = this.hitmarkerEl;
+    hm.classList.remove('hit', 'crit', 'kill');
+    void hm.offsetWidth; // restart the CSS animation
+    hm.classList.add('hit');
+    if (crit) hm.classList.add('crit');
+    if (killed) hm.classList.add('kill');
+  }
+
+  /** floating damage number at screen coords (px); drifts up and fades out */
+  showDamageNumber(sx: number, sy: number, dmg: number, crit: boolean): void {
+    if (this.dmgNums.length > 14) this.dmgNums.shift()?.remove();
+    const n = el('div', `dmg-num${crit ? ' crit' : ''}`, this.hud);
+    n.textContent = String(dmg);
+    n.style.left = `${sx}px`;
+    n.style.top = `${sy}px`;
+    this.dmgNums.push(n);
+    n.addEventListener('animationend', () => {
+      n.remove();
+      const i = this.dmgNums.indexOf(n);
+      if (i >= 0) this.dmgNums.splice(i, 1);
+    });
+  }
 
   // =========================================================================
   // Containers

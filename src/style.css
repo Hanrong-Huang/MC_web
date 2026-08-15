@@ -105,6 +105,54 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 #crosshair::before { left: 8px; top: 0; width: 2px; height: 18px; }
 #crosshair::after { left: 0; top: 8px; width: 18px; height: 2px; }
 
+/* --- Hit marker (X tick on the crosshair when the player damages a mob) ----- */
+#hitmarker {
+  position: absolute; left: 50%; top: 50%;
+  width: 26px; height: 26px;
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 11;
+}
+#hitmarker::before, #hitmarker::after {
+  content: ''; position: absolute;
+  left: 11px; top: 0;
+  width: 4px; height: 26px;
+  background: #fff;
+  box-shadow: 0 0 4px rgba(0,0,0,0.8);
+}
+#hitmarker::before { transform: rotate(45deg); }
+#hitmarker::after { transform: rotate(-45deg); }
+#hitmarker.hit { animation: hitmark 0.28s ease-out; }
+#hitmarker.kill { animation: hitmark 0.5s ease-out; }
+#hitmarker.kill::before, #hitmarker.kill::after { background: #ff4a3d; width: 6px; left: 10px; }
+#hitmarker.crit::before, #hitmarker.crit::after { background: #ffd83d; }
+@keyframes hitmark {
+  0% { opacity: 1; transform: translate(-50%, -50%) scale(0.6); }
+  60% { opacity: 1; transform: translate(-50%, -50%) scale(1.15); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(1.3); }
+}
+
+/* --- Floating damage numbers ------------------------------------------------- */
+.dmg-num {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  color: #fff;
+  font-family: 'Consolas', monospace;
+  font-size: 15px;
+  font-weight: bold;
+  text-shadow: 1px 1px #000, -1px -1px #000, 1px -1px #000, -1px 1px #000;
+  pointer-events: none;
+  z-index: 11;
+  animation: dmgnum 0.7s ease-out forwards;
+}
+.dmg-num.crit { color: #ffd83d; font-size: 19px; }
+@keyframes dmgnum {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
+  15% { opacity: 1; transform: translate(-50%, -55%) scale(1.1); }
+  100% { opacity: 0; transform: translate(-50%, -140%) scale(1); }
+}
+
 #hotbar {
   position: absolute; left: 50%; bottom: 6px;
   transform: translateX(-50%);
@@ -455,7 +503,9 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 #cursor-item canvas { width: 36px; height: 36px; }
 #cursor-item .slot-count { right: -2px; bottom: -4px; }
 
-.death-title { color: #fff; font-size: 42px; text-shadow: 3px 3px #3f0000; margin-bottom: 24px; }
+.death-title { color: #fff; font-size: 42px; text-shadow: 3px 3px #3f0000; margin-bottom: 10px; }
+.death-cause { color: #ff8a8a; font-size: 16px; text-shadow: 2px 2px #3f0000; margin-bottom: 4px; }
+.death-pos { color: #bbb; font-size: 13px; text-shadow: 1px 1px #000; margin-bottom: 20px; font-family: 'Consolas', monospace; }
 
 .saving-note { color: #ddd; margin-top: 14px; font-size: 13px; text-shadow: 1px 1px #000; }
 

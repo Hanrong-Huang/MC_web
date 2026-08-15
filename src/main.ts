@@ -3,6 +3,7 @@
 // pointer-lock state machine, and save/load via IndexedDB.
 
 import './style.css';
+import * as THREE from 'three';
 import { Atlas } from './engine/Textures';
 import { World } from './engine/World';
 import type { DoorState } from './engine/World';
@@ -117,6 +118,20 @@ class Game {
     // thrown catchers resolve inside the entity update, away from the input path
     this.entities.onToast = (msg) => this.hud.toast(msg);
     this.entities.onCapture = () => this.adv.unlock('catch');
+    // combat feedback: hit marker + a damage number projected at the mob's screen position
+    this.entities.onPlayerHit = (pos, dmg, crit, killed) => {
+      if (this.state !== 'playing') return;
+      this.hud.flashHitMarker(crit, killed);
+      const v = new THREE.Vector3(pos.x, pos.y + 0.9, pos.z).project(this.renderer.camera);
+      if (v.z < 1) { // in front of the camera
+        const canvas = this.renderer.canvas;
+        this.hud.showDamageNumber(
+          (v.x * 0.5 + 0.5) * canvas.clientWidth + (Math.random() * 14 - 7),
+          (-v.y * 0.5 + 0.5) * canvas.clientHeight + (Math.random() * 10 - 5),
+          dmg, crit,
+        );
+      }
+    };
 
     this.weather = new Weather(this.renderer.scene, this.world, {
       onStrike: (x, y, z) => this.onLightning(x, y, z),
@@ -889,6 +904,8 @@ class Game {
         this.input.requestLock();
       },
       () => void this.saveAndQuit(),
+      this.player.lastDamageCause,
+      deathPos,
     );
   }
 
@@ -1264,6 +1281,14 @@ class Game {
     } else {
       cam.position.set(this.player.pos.x, this.player.pos.y + this.player.eyeHeight() + bobY, this.player.pos.z);
       cam.rotation.set(this.player.pitch, this.player.yaw, 0);
+    }
+    // damage screen shake: a decaying random offset while shakeT counts down
+    if (this.player.shakeT > 0) {
+      const k = this.player.shakeT / this.player.shakeDur;
+      const m = this.player.shakeMag * k;
+      cam.position.x += (Math.random() - 0.5) * m;
+      cam.position.y += (Math.random() - 0.5) * m;
+      cam.position.z += (Math.random() - 0.5) * m;
     }
     let targetFov = this.player.sprinting ? 80.5 : 70;
     targetFov -= 12 * Math.min(1, this.player.bowCharge / 0.9); // bow-draw zoom
