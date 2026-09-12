@@ -124,7 +124,13 @@ export class AudioEngine {
       this.uwFilter.connect(this.ctx.destination);
       this.sfx = this.ctx.createGain();
       this.sfx.gain.value = this.settings.sound ? 1 : 0;
-      this.sfx.connect(this.master);
+      const comp = this.ctx.createDynamicsCompressor();
+      comp.threshold.value = -20;
+      comp.knee.value = 10;
+      comp.ratio.value = 3;
+      comp.attack.value = 0.003;
+      comp.release.value = 0.12;
+      this.sfx.connect(comp).connect(this.master);
       this.musicBus = this.ctx.createGain();
       this.musicBus.gain.value = this.settings.music ? 1 : 0;
       // dry path
@@ -176,13 +182,13 @@ export class AudioEngine {
     } catch { /* ignore */ }
   }
 
-  private noiseBurst(dur: number, freq: number, vol: number, type: BiquadFilterType = 'lowpass', freqEnd?: number): void {
+  private noiseBurst(dur: number, freq: number, vol: number, type: BiquadFilterType = 'lowpass', freqEnd?: number, pitch = 1): void {
     if (!this.ctx || !this.sfx || !this.noiseBuf) return;
     const t = this.ctx.currentTime;
     const src = this.ctx.createBufferSource();
     src.buffer = this.noiseBuf;
     src.loop = true;
-    src.playbackRate.value = 0.7 + Math.random() * 0.6;
+    src.playbackRate.value = (0.7 + Math.random() * 0.6) * pitch;
     const filter = this.ctx.createBiquadFilter();
     filter.type = type;
     filter.frequency.setValueAtTime(freq, t);
@@ -195,13 +201,15 @@ export class AudioEngine {
     src.stop(t + dur + 0.02);
   }
 
-  private tone(dur: number, f0: number, f1: number, vol: number, type: OscillatorType = 'sine', when = 0): void {
+  private tone(dur: number, f0: number, f1: number, vol: number, type: OscillatorType = 'sine', when = 0, pitch = 1): void {
     if (!this.ctx || !this.sfx) return;
     const t = this.ctx.currentTime + when;
     const osc = this.ctx.createOscillator();
     osc.type = type;
-    osc.frequency.setValueAtTime(f0, t);
-    osc.frequency.exponentialRampToValueAtTime(Math.max(30, f1), t + dur);
+    const p0 = f0 * pitch;
+    const p1 = Math.max(30, f1 * pitch);
+    osc.frequency.setValueAtTime(p0, t);
+    osc.frequency.exponentialRampToValueAtTime(p1, t + dur);
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(0.0001, t);
     g.gain.exponentialRampToValueAtTime(vol, t + 0.012);
@@ -212,43 +220,44 @@ export class AudioEngine {
   }
 
   /** Dig/place sound for a block sound class — MC-style layered hits. */
-  dig(cls: SoundClass, vol: number): void {
+  dig(cls: SoundClass, vol: number, pitch = 1): void {
     this.ensure();
     switch (cls) {
       case 'stone':
         // crisp double-tap: body thud + gritty scrape
-        this.noiseBurst(0.09, 1100, 0.45 * vol, 'lowpass', 400);
-        this.noiseBurst(0.06, 2600, 0.18 * vol, 'bandpass', 1400);
-        this.tone(0.05, 140, 90, 0.1 * vol, 'sine');
+        this.noiseBurst(0.09, 1100, 0.45 * vol, 'lowpass', 400, pitch);
+        this.noiseBurst(0.06, 2600, 0.18 * vol, 'bandpass', 1400, pitch);
+        this.tone(0.05, 140, 90, 0.1 * vol, 'sine', 0, pitch);
         break;
       case 'wood':
         // hollow knock + woody body
-        this.noiseBurst(0.08, 800, 0.36 * vol, 'lowpass', 300);
-        this.tone(0.07, 200, 130, 0.14 * vol, 'triangle');
-        this.tone(0.05, 95, 70, 0.08 * vol, 'sine');
+        this.noiseBurst(0.08, 800, 0.36 * vol, 'lowpass', 300, pitch);
+        this.tone(0.07, 200, 130, 0.14 * vol, 'triangle', 0, pitch);
+        this.tone(0.05, 95, 70, 0.08 * vol, 'sine', 0, pitch);
         break;
       case 'grass':
         // soft squelch
-        this.noiseBurst(0.1, 1800, 0.26 * vol, 'bandpass', 700);
-        this.noiseBurst(0.05, 600, 0.1 * vol, 'lowpass', 250);
+        this.noiseBurst(0.1, 1800, 0.26 * vol, 'bandpass', 700, pitch);
+        this.noiseBurst(0.05, 600, 0.1 * vol, 'lowpass', 250, pitch);
         break;
       case 'sand':
         // gritty crunch
-        this.noiseBurst(0.14, 3000, 0.22 * vol, 'highpass', 1200);
-        this.noiseBurst(0.06, 1400, 0.1 * vol, 'bandpass');
+        this.noiseBurst(0.14, 3000, 0.22 * vol, 'highpass', 1200, pitch);
+        this.noiseBurst(0.06, 1400, 0.1 * vol, 'bandpass', undefined, pitch);
         break;
       case 'glass':
         // bright shatter
-        this.noiseBurst(0.18, 4400, 0.32 * vol, 'highpass');
-        this.tone(0.12, 2100, 900, 0.1 * vol, 'triangle');
-        this.tone(0.08, 3200, 1600, 0.05 * vol, 'sine');
+        this.noiseBurst(0.18, 4400, 0.32 * vol, 'highpass', undefined, pitch);
+        this.tone(0.12, 2100, 900, 0.1 * vol, 'triangle', 0, pitch);
+        this.tone(0.08, 3200, 1600, 0.05 * vol, 'sine', 0, pitch);
         break;
       case 'none': break;
     }
   }
 
   step(cls: SoundClass): void {
-    this.dig(cls === 'none' ? 'stone' : cls, 0.16);
+    const pitch = 0.9 + Math.random() * 0.22;
+    this.dig(cls === 'none' ? 'stone' : cls, 0.16, pitch);
   }
 
   play(name: SfxName): void {
@@ -271,8 +280,9 @@ export class AudioEngine {
       case 'burp': this.tone(0.25, 220, 80, 0.3, 'sawtooth'); break;
       case 'click': this.tone(0.035, 850, 700, 0.18, 'square'); break;
       case 'select':
-        this.tone(0.045, 620, 820, 0.12, 'triangle');
-        this.tone(0.05, 930, 760, 0.08, 'sine', 0.035);
+        this.tone(0.04, 540, 720, 0.11, 'triangle');
+        this.tone(0.055, 880, 1020, 0.07, 'sine', 0.028);
+        this.noiseBurst(0.03, 2200, 0.04, 'highpass');
         break;
       case 'fail':
         this.tone(0.09, 180, 125, 0.16, 'square');

@@ -27,6 +27,7 @@ import type { MeshJob, MeshChunkSnap } from './engine/mesh-worker';
 import { chunkKey, CX, CZ } from './engine/Chunk';
 import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef, isSolid, mobLabel } from './engine/Blocks';
 import { Weather } from './engine/Weather';
+import { getControls, setControls } from './engine/ControlsSettings';
 import { AdvancementTracker } from './engine/Advancements';
 import type { Entity } from './engine/EntityManager';
 
@@ -619,6 +620,10 @@ class Game {
       musicOn: () => this.audio.musicOn,
       soundOn: () => this.audio.soundOn,
       onPack: (files: File[]) => void this.applyPack(files),
+      mouseSens: () => getControls().mouseSens,
+      touchLook: () => getControls().touchLook,
+      onMouseSens: (mult: number) => { setControls({ mouseSens: mult }); },
+      onTouchLook: (mult: number) => { setControls({ touchLook: mult }); },
     };
   }
 
@@ -1309,12 +1314,21 @@ class Game {
     this.renderer.setEating(this.player.eating);
     this.renderer.updateChunkFades(dt);
     this.renderer.updateHeld(dt, this.player.isMoving());
+    if (this.state === 'playing') {
+      const br = this.player.breaking;
+      const t = this.player.target;
+      if (br) this.hud.updateCrosshair('breaking', br.progress);
+      else if (t && t.id !== B.AIR && def(t.id).hardness >= 0) this.hud.updateCrosshair('target');
+      else this.hud.updateCrosshair('idle');
+    }
     this.hud.updateStats(this.player.hp, this.player.hunger, this.player.air, this.player.mode, this.player.inventory.armorPoints());
     this.hud.updatePets(this.entities.petStatus());
     if (this.state === 'container' && this.container?.kind === 'furnace') this.hud.updateFurnace();
+    const showMinimap = this.player.inventory.count(I.COMPASS) > 0 || this.player.mode === 'creative';
+    this.hud.setMinimapVisible(showMinimap);
     // minimap redraw (throttled; block sampling is relatively expensive)
     this.minimapT -= dt;
-    if (this.minimapT <= 0) {
+    if (showMinimap && this.minimapT <= 0) {
       this.minimapT = 0.22;
       const p = this.player.pos;
       this.hud.updateMinimap(

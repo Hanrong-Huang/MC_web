@@ -4,6 +4,7 @@
 // Input fields the keyboard/mouse path uses. Shown only on touch while playing.
 
 import { Input } from '../engine/Input';
+import { touchLookSens } from '../engine/ControlsSettings';
 
 export interface TouchHooks {
   onInventory: () => void;
@@ -18,15 +19,176 @@ export function isTouchDevice(): boolean {
 }
 
 const JOY_RADIUS = 52;     // px throw of the movement knob
-const LOOK_SCALE = 1.3;    // drag pixels → look "mouse" pixels
 
-function el(tag: string, cls: string, parent: HTMLElement, text = ''): HTMLElement {
+function el(tag: string, cls: string, parent: HTMLElement): HTMLElement {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
-  if (text) e.textContent = text;
   parent.appendChild(e);
   return e;
 }
+
+/** 16×16 procedural button icon (one char per pixel, '.' = transparent). */
+function touchPix(rows: string[], pal: Record<string, string>): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = 16; c.height = 16;
+  c.className = 'touch-pix';
+  const ctx = c.getContext('2d')!;
+  let minY = 16; let maxY = -1;
+  for (let y = 0; y < rows.length; y++) {
+    const row = rows[y];
+    for (let x = 0; x < row.length; x++) {
+      if (!pal[row[x]]) continue;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  const dy = maxY >= minY ? Math.floor((16 - (maxY - minY + 1)) / 2) - minY : 0;
+  for (let y = 0; y < rows.length; y++) {
+    const row = rows[y];
+    for (let x = 0; x < row.length; x++) {
+      const col = pal[row[x]];
+      if (!col) continue;
+      ctx.fillStyle = col;
+      ctx.fillRect(x, y + dy, 1, 1);
+    }
+  }
+  return c;
+}
+
+const W = '#e8e0c8';
+const D = '#4a4030';
+const G = '#6a9a4a';
+const I = '#c8c8d0';
+const K = '#8b5a2b';
+
+const ICONS = {
+  mine: touchPix([
+    '......dd........',
+    '.....ddd........',
+    '....ddwwd.......',
+    '...ddwwwwd......',
+    '..ddwwwwwwd.....',
+    '.ddwwwwwwwwd....',
+    'ddwwwwwwwwwwd...',
+    '.ddwwwwwwwwd....',
+    '..ddwwwwwwd.....',
+    '...ddwwwwd......',
+    '....ddwwd.......',
+    '.....ddd........',
+    '......dd........',
+    '.......d........',
+    '................',
+    '................',
+  ], { d: D, w: W }),
+  place: touchPix([
+    '................',
+    '....gggg........',
+    '...gggggg.......',
+    '..gggggggg......',
+    '..gggggggg......',
+    '..gggggggg......',
+    '..gggggggg......',
+    '...gggggg.......',
+    '....gggg........',
+    '.....gg.........',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+  ], { g: G }),
+  jump: touchPix([
+    '.......ww.......',
+    '......wwww......',
+    '.....wwwwww.....',
+    '....wwwwwwww....',
+    '...wwwwwwwwww...',
+    '......wwww......',
+    '......wwww......',
+    '......wwww......',
+    '......wwww......',
+    '......wwww......',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+  ], { w: W }),
+  down: touchPix([
+    '................',
+    '......wwww......',
+    '......wwww......',
+    '......wwww......',
+    '......wwww......',
+    '...wwwwwwwwww...',
+    '....wwwwwwww....',
+    '.....wwwwww.....',
+    '......wwww......',
+    '.......ww.......',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+  ], { w: W }),
+  inv: touchPix([
+    '....kkkkkk......',
+    '...kkkkkkkk.....',
+    '...kkwwwwkk.....',
+    '...kwwwwwwk.....',
+    '...kwwwwwwk.....',
+    '...kwwwwwwk.....',
+    '...kkwwwwkk.....',
+    '...kkkkkkkk.....',
+    '....kkkkkk......',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+  ], { k: K, w: W }),
+  fly: touchPix([
+    '................',
+    '..ii......ii....',
+    '.iiii....iiii...',
+    'iiiiii..iiiiii..',
+    '.iiii....iiii...',
+    '..ii......ii....',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+  ], { i: I }),
+  pause: touchPix([
+    '................',
+    '....ww....ww....',
+    '....ww....ww....',
+    '....ww....ww....',
+    '....ww....ww....',
+    '....ww....ww....',
+    '....ww....ww....',
+    '....ww....ww....',
+    '....ww....ww....',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+  ], { w: W }),
+};
 
 export class TouchControls {
   readonly el: HTMLElement;
@@ -81,8 +243,9 @@ export class TouchControls {
     });
     look.addEventListener('pointermove', (e) => {
       if (e.pointerId !== lookId) return;
-      input.mouseDX += (e.clientX - lx) * LOOK_SCALE;
-      input.mouseDY += (e.clientY - ly) * LOOK_SCALE;
+      const scale = touchLookSens();
+      input.mouseDX += (e.clientX - lx) * scale;
+      input.mouseDY += (e.clientY - ly) * scale;
       lx = e.clientX; ly = e.clientY;
     });
     const endLook = (e: PointerEvent): void => { if (e.pointerId === lookId) lookId = -1; };
@@ -90,16 +253,13 @@ export class TouchControls {
     look.addEventListener('pointercancel', endLook);
     this.resets.push(() => { lookId = -1; });
 
-    // RIGHT action buttons (same thumb as look). Mine also fires a left-click so
-    // it attacks mobs; place drives the right-click (place / use / eat / bow).
-    this.hold('tb tb-mine', '⛏', () => { input.leftDown = true; input.onMouseDown(0); }, () => { input.leftDown = false; });
-    this.hold('tb tb-place', '✋', () => { input.rightDown = true; input.queueRightClick(); }, () => { input.rightDown = false; });
-    this.hold('tb tb-jump', '⏶', () => { input.keys.add('Space'); }, () => { input.keys.delete('Space'); });
-    this.hold('tb tb-down', '⏷', () => { input.keys.add('ControlLeft'); }, () => { input.keys.delete('ControlLeft'); });
-    // utility (top)
-    this.tap('tb tb-inv', '🎒', hooks.onInventory);
-    this.tap('tb tb-fly', '✈', hooks.onFly);
-    this.tap('tb tb-pause', '⏸', hooks.onPause);
+    this.hold('tb tb-mine', ICONS.mine, () => { input.leftDown = true; input.onMouseDown(0); }, () => { input.leftDown = false; }, 'Mine / attack');
+    this.hold('tb tb-place', ICONS.place, () => { input.rightDown = true; input.queueRightClick(); }, () => { input.rightDown = false; }, 'Place / use');
+    this.hold('tb tb-jump', ICONS.jump, () => { input.keys.add('Space'); }, () => { input.keys.delete('Space'); }, 'Jump');
+    this.hold('tb tb-down', ICONS.down, () => { input.keys.add('ControlLeft'); }, () => { input.keys.delete('ControlLeft'); }, 'Sneak / descend');
+    this.tap('tb tb-inv', ICONS.inv, hooks.onInventory, 'Inventory');
+    this.tap('tb tb-fly', ICONS.fly, hooks.onFly, 'Toggle flight');
+    this.tap('tb tb-pause', ICONS.pause, hooks.onPause, 'Pause');
   }
 
   /** Map the movement-stick vector to WASD (+ sprint on a full forward push). */
@@ -115,8 +275,10 @@ export class TouchControls {
 
   private buzz(): void { try { navigator.vibrate?.(8); } catch { /* unsupported */ } }
 
-  private hold(cls: string, label: string, onDown: () => void, onUp: () => void): void {
-    const b = el('div', cls, this.el, label);
+  private hold(cls: string, icon: HTMLCanvasElement, onDown: () => void, onUp: () => void, tip = ''): void {
+    const b = el('div', cls, this.el);
+    b.appendChild(icon);
+    if (tip) b.title = tip;
     b.addEventListener('pointerdown', (e) => {
       e.preventDefault(); b.setPointerCapture(e.pointerId); b.classList.add('held'); this.buzz(); onDown();
     });
@@ -126,8 +288,10 @@ export class TouchControls {
     this.resets.push(up);
   }
 
-  private tap(cls: string, label: string, onTap: () => void): void {
-    const b = el('div', cls, this.el, label);
+  private tap(cls: string, icon: HTMLCanvasElement, onTap: () => void, tip = ''): void {
+    const b = el('div', cls, this.el);
+    b.appendChild(icon);
+    if (tip) b.title = tip;
     b.addEventListener('pointerdown', (e) => {
       e.preventDefault(); b.classList.add('held'); this.buzz(); onTap();
     });
