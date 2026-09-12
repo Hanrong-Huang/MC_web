@@ -362,11 +362,15 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   flex-direction: column;
   z-index: 20;
 }
-#pause-overlay, #death-overlay, #confirm-overlay {
+#pause-overlay, #death-overlay {
+  background: rgba(8,10,14,0.78);
+}
+#confirm-overlay {
+  z-index: 45;
   background: rgba(8,10,14,0.78);
 }
 .confirm-panel { min-width: min(92vw, 360px); text-align: center; }
-.confirm-msg { color: #eee; font-size: 14px; margin-bottom: 14px; text-shadow: 1px 1px #000; line-height: 1.45; }
+.confirm-msg { color: #3f3f3f; font-size: 14px; margin-bottom: 14px; line-height: 1.45; }
 .pause-panel { min-width: min(94vw, 380px); text-align: center; }
 .pause-panel .pause-title {
   color: #fff; text-shadow: 2px 2px #3f3f3f; margin: 0 0 14px; font-size: 24px;

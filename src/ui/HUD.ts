@@ -119,6 +119,7 @@ export class HUD {
   private recipeSearchFocused = false;
   private creativeFilter: RecipeFilter = 'all';
   private creativeSearchQuery = '';
+  private creativeSearchFocused = false;
   private confirmEl: HTMLElement;
   private pauseBuilt = false;
   private pauseH: PauseHandlers | null = null;
@@ -1210,6 +1211,13 @@ export class HUD {
     // cursor to the tap point first so it's visible where the finger is
     let pressTimer: ReturnType<typeof setTimeout> | null = null;
     let longFired = false;
+    let mouseLmbPending = false;
+    const cancelPress = (): void => {
+      if (pressTimer !== null) {
+        clearTimeout(pressTimer);
+        pressTimer = null;
+      }
+    };
     s.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       this.hideTooltip();
@@ -1220,28 +1228,41 @@ export class HUD {
       }
       if (e.button !== 0) return;
       longFired = false;
-      pressTimer = setTimeout(() => {
-        pressTimer = null;
-        longFired = true;
-        onClick(2, e.shiftKey);
-      }, 480);
-    });
-    const cancelPress = (): void => {
-      if (pressTimer !== null) {
-        clearTimeout(pressTimer);
-        pressTimer = null;
+      mouseLmbPending = false;
+      if (e.pointerType === 'touch') {
+        pressTimer = setTimeout(() => {
+          pressTimer = null;
+          longFired = true;
+          onClick(2, e.shiftKey);
+        }, 480);
+      } else {
+        mouseLmbPending = true;
       }
-    };
+    });
     s.addEventListener('pointerup', (e) => {
       if (e.button !== 0) return;
-      if (pressTimer !== null) {
-        cancelPress();
-        if (!longFired) onClick(0, e.shiftKey);
+      if (e.pointerType === 'touch') {
+        if (pressTimer !== null) {
+          cancelPress();
+          if (!longFired) onClick(0, e.shiftKey);
+        }
+        longFired = false;
+        return;
       }
+      if (mouseLmbPending && !longFired) onClick(0, e.shiftKey);
+      mouseLmbPending = false;
+    });
+    s.addEventListener('pointermove', (e) => {
+      if (e.pointerType === 'touch') cancelPress();
+    });
+    s.addEventListener('pointerleave', () => {
+      cancelPress();
+      mouseLmbPending = false;
       longFired = false;
     });
     s.addEventListener('pointercancel', () => {
       cancelPress();
+      mouseLmbPending = false;
       longFired = false;
     });
   }
@@ -1624,10 +1645,18 @@ export class HUD {
       searchBox.type = 'search';
       searchBox.placeholder = 'Search blocks & items…';
       searchBox.value = this.creativeSearchQuery;
+      searchBox.onfocus = () => { this.creativeSearchFocused = true; };
+      searchBox.onblur = () => { this.creativeSearchFocused = false; };
       searchBox.oninput = () => {
-        this.creativeSearchQuery = searchBox.value.trim().toLowerCase();
+        this.creativeSearchQuery = searchBox.value;
         rerender();
       };
+      if (this.creativeSearchFocused) {
+        setTimeout(() => {
+          searchBox.focus();
+          searchBox.selectionStart = searchBox.selectionEnd = searchBox.value.length;
+        }, 0);
+      }
       const filters = el('div', 'recipe-filters', sec);
       const cfilters: { id: RecipeFilter; label: string }[] = [
         { id: 'all', label: 'All' },
@@ -1646,11 +1675,11 @@ export class HUD {
         };
       }
       const grid = el('div', 'creative-grid', sec);
-      const q = this.creativeSearchQuery;
+      const q = this.creativeSearchQuery.trim().toLowerCase();
       for (const id of CREATIVE_ITEMS) {
         const d = def(id);
         const label = d.label.toLowerCase();
-        if (q && !label.includes(q) && !d.name.includes(q)) continue;
+        if (q && !label.includes(q) && !d.name.toLowerCase().includes(q)) continue;
         const cat = d.toolInfo || d.bow || id === I.FISHING_ROD ? 'tools'
           : d.food ? 'food'
           : d.block || id === I.WOOD_DOOR ? 'blocks'

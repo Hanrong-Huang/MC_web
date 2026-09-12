@@ -33,13 +33,23 @@ function touchPix(rows: string[], pal: Record<string, string>): HTMLCanvasElemen
   c.width = 16; c.height = 16;
   c.className = 'touch-pix';
   const ctx = c.getContext('2d')!;
+  let minY = 16; let maxY = -1;
+  for (let y = 0; y < rows.length; y++) {
+    const row = rows[y];
+    for (let x = 0; x < row.length; x++) {
+      if (!pal[row[x]]) continue;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  const dy = maxY >= minY ? Math.floor((16 - (maxY - minY + 1)) / 2) - minY : 0;
   for (let y = 0; y < rows.length; y++) {
     const row = rows[y];
     for (let x = 0; x < row.length; x++) {
       const col = pal[row[x]];
       if (!col) continue;
       ctx.fillStyle = col;
-      ctx.fillRect(x, y, 1, 1);
+      ctx.fillRect(x, y + dy, 1, 1);
     }
   }
   return c;
