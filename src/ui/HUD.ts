@@ -1212,6 +1212,9 @@ export class HUD {
     let pressTimer: ReturnType<typeof setTimeout> | null = null;
     let longFired = false;
     let mouseLmbPending = false;
+    let touchOx = 0;
+    let touchOy = 0;
+    const TOUCH_LONG_PRESS_CANCEL_PX = 12;
     const cancelPress = (): void => {
       if (pressTimer !== null) {
         clearTimeout(pressTimer);
@@ -1230,6 +1233,8 @@ export class HUD {
       longFired = false;
       mouseLmbPending = false;
       if (e.pointerType === 'touch') {
+        touchOx = e.clientX;
+        touchOy = e.clientY;
         pressTimer = setTimeout(() => {
           pressTimer = null;
           longFired = true;
@@ -1242,10 +1247,8 @@ export class HUD {
     s.addEventListener('pointerup', (e) => {
       if (e.button !== 0) return;
       if (e.pointerType === 'touch') {
-        if (pressTimer !== null) {
-          cancelPress();
-          if (!longFired) onClick(0, e.shiftKey);
-        }
+        cancelPress();
+        if (!longFired) onClick(0, e.shiftKey);
         longFired = false;
         return;
       }
@@ -1253,12 +1256,14 @@ export class HUD {
       mouseLmbPending = false;
     });
     s.addEventListener('pointermove', (e) => {
-      if (e.pointerType === 'touch') cancelPress();
+      if (e.pointerType !== 'touch' || pressTimer === null) return;
+      if (Math.hypot(e.clientX - touchOx, e.clientY - touchOy) > TOUCH_LONG_PRESS_CANCEL_PX) {
+        cancelPress();
+      }
     });
     s.addEventListener('pointerleave', () => {
       cancelPress();
       mouseLmbPending = false;
-      longFired = false;
     });
     s.addEventListener('pointercancel', () => {
       cancelPress();
