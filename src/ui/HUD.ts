@@ -49,6 +49,10 @@ export interface PauseHandlers {
   musicOn: () => boolean;
   soundOn: () => boolean;
   onPack: (files: File[]) => void;
+  onMouseSens: (mult: number) => void;
+  onTouchLook: (mult: number) => void;
+  mouseSens: () => number;
+  touchLook: () => number;
 }
 
 type RecipeFilter = 'all' | 'ready' | 'tools' | 'blocks' | 'food' | 'utility';
@@ -108,6 +112,7 @@ export class HUD {
   private inv: Inventory | null = null;
   private furnaceSnapshot = '';
   private lastHearts = '';
+  private lastHotbarSel = -1;
   private recipeFilter: RecipeFilter = 'all';
   private recipeSearchQuery = '';
   private recipeSearchFocused = false;
@@ -337,9 +342,12 @@ export class HUD {
   onCloseContainer: () => void = () => {};
 
   refreshHotbar(inv: Inventory, mode: GameMode): void {
+    const selChanged = inv.selected !== this.lastHotbarSel;
+    this.lastHotbarSel = inv.selected;
     this.hotbarEl.innerHTML = '';
     for (let i = 0; i < 9; i++) {
-      const s = el('div', `hotbar-slot${i === inv.selected ? ' selected' : ''}`, this.hotbarEl);
+      const picked = selChanged && i === inv.selected;
+      const s = el('div', `hotbar-slot${i === inv.selected ? ' selected' : ''}${picked ? ' picked' : ''}`, this.hotbarEl);
       const item = inv.slots[i];
       if (item) {
         s.appendChild(this.iconCanvas(item));
@@ -434,6 +442,19 @@ export class HUD {
   /** Hidden while lying in bed — nothing to aim at from the pillow. */
   setCrosshairVisible(v: boolean): void {
     this.crosshairEl.style.display = v ? '' : 'none';
+  }
+
+  /** Crosshair emphasis while aiming at a block or mining. */
+  updateCrosshair(mode: 'idle' | 'target' | 'breaking', breakFrac = 0): void {
+    this.crosshairEl.classList.remove('on-target', 'breaking');
+    if (mode === 'target') this.crosshairEl.classList.add('on-target');
+    if (mode === 'breaking') {
+      this.crosshairEl.classList.add('breaking', 'on-target');
+      const s = 1 + Math.min(1, breakFrac) * 0.14;
+      this.crosshairEl.style.transform = `translate(-50%, -50%) scale(${s})`;
+    } else {
+      this.crosshairEl.style.transform = 'translate(-50%, -50%)';
+    }
   }
 
   /** "Sleeping…" banner with a Leave Bed button (vanilla's bed screen). */
@@ -672,9 +693,10 @@ export class HUD {
   showPause(h: PauseHandlers, mode: GameMode, viewDist: number): void {
     this.pauseEl.classList.remove('hidden');
     this.pauseEl.innerHTML = '';
-    const title = el('h2', '', this.pauseEl);
+    const panel = el('div', 'mc-panel pause-panel', this.pauseEl);
+    const title = el('h2', 'pause-title', panel);
     title.textContent = 'Game Paused';
-    const col = el('div', 'menu-col', this.pauseEl);
+    const col = el('div', 'menu-col pause-col', panel);
 
     const resume = el('button', 'mc-btn', col);
     resume.textContent = 'Back to Game';
@@ -722,6 +744,36 @@ export class HUD {
     vol.value = String(Math.round(this.audio.volume * 100));
     vol.oninput = () => { this.audio.setVolume(parseInt(vol.value, 10) / 100); setVolLabel(); };
     vol.onchange = () => this.audio.play('click');
+
+    const sensRow = el('div', 'menu-row', col);
+    const sensLbl = el('span', 'vol-label', sensRow);
+    const setSensLabel = (): void => {
+      sensLbl.textContent = `Look: ${Math.round(h.mouseSens() * 100)}%`;
+    };
+    setSensLabel();
+    const sens = el('input', 'vol-slider', sensRow) as HTMLInputElement;
+    sens.type = 'range'; sens.min = '50'; sens.max = '200'; sens.step = '5';
+    sens.value = String(Math.round(h.mouseSens() * 100));
+    sens.oninput = () => {
+      h.onMouseSens(parseInt(sens.value, 10) / 100);
+      setSensLabel();
+    };
+    sens.onchange = () => this.audio.play('click');
+
+    const touchRow = el('div', 'menu-row', col);
+    const touchLbl = el('span', 'vol-label', touchRow);
+    const setTouchLabel = (): void => {
+      touchLbl.textContent = `Touch look: ${Math.round(h.touchLook() * 100)}%`;
+    };
+    setTouchLabel();
+    const touch = el('input', 'vol-slider', touchRow) as HTMLInputElement;
+    touch.type = 'range'; touch.min = '60'; touch.max = '220'; touch.step = '5';
+    touch.value = String(Math.round(h.touchLook() * 100));
+    touch.oninput = () => {
+      h.onTouchLook(parseInt(touch.value, 10) / 100);
+      setTouchLabel();
+    };
+    touch.onchange = () => this.audio.play('click');
 
     const pack = el('button', 'mc-btn', col);
     pack.textContent = 'Load Resource Pack';

@@ -13,6 +13,7 @@ import { Inventory } from './Inventory';
 import type { EntityManager } from './EntityManager';
 import type { Entity } from './EntityManager';
 import type { RayHit } from './World';
+import { mouseLookSens } from './ControlsSettings';
 
 export type GameMode = 'survival' | 'creative';
 
@@ -156,7 +157,9 @@ export class Player {
   }
 
   selectSlot(i: number): void {
-    this.inventory.selected = ((i % 9) + 9) % 9;
+    const next = ((i % 9) + 9) % 9;
+    if (next !== this.inventory.selected) this.deps.audio.play('select');
+    this.inventory.selected = next;
     this.inventory.onChange();
   }
 
@@ -169,7 +172,7 @@ export class Player {
     // mouse look (pointer-lock on desktop, touch-drag on mobile)
     if (input.active && !uiOpen) {
       const [dx, dy] = input.consumeMouse();
-      const sens = 0.0023;
+      const sens = mouseLookSens();
       this.yaw -= dx * sens;
       this.pitch -= dy * sens;
       const lim = Math.PI / 2 - 0.001;

@@ -4,6 +4,7 @@
 // Input fields the keyboard/mouse path uses. Shown only on touch while playing.
 
 import { Input } from '../engine/Input';
+import { touchLookSens } from '../engine/ControlsSettings';
 
 export interface TouchHooks {
   onInventory: () => void;
@@ -18,7 +19,6 @@ export function isTouchDevice(): boolean {
 }
 
 const JOY_RADIUS = 52;     // px throw of the movement knob
-const LOOK_SCALE = 1.3;    // drag pixels → look "mouse" pixels
 
 function el(tag: string, cls: string, parent: HTMLElement, text = ''): HTMLElement {
   const e = document.createElement(tag);
@@ -81,8 +81,9 @@ export class TouchControls {
     });
     look.addEventListener('pointermove', (e) => {
       if (e.pointerId !== lookId) return;
-      input.mouseDX += (e.clientX - lx) * LOOK_SCALE;
-      input.mouseDY += (e.clientY - ly) * LOOK_SCALE;
+      const scale = touchLookSens();
+      input.mouseDX += (e.clientX - lx) * scale;
+      input.mouseDY += (e.clientY - ly) * scale;
       lx = e.clientX; ly = e.clientY;
     });
     const endLook = (e: PointerEvent): void => { if (e.pointerId === lookId) lookId = -1; };
@@ -92,14 +93,14 @@ export class TouchControls {
 
     // RIGHT action buttons (same thumb as look). Mine also fires a left-click so
     // it attacks mobs; place drives the right-click (place / use / eat / bow).
-    this.hold('tb tb-mine', '⛏', () => { input.leftDown = true; input.onMouseDown(0); }, () => { input.leftDown = false; });
-    this.hold('tb tb-place', '✋', () => { input.rightDown = true; input.queueRightClick(); }, () => { input.rightDown = false; });
-    this.hold('tb tb-jump', '⏶', () => { input.keys.add('Space'); }, () => { input.keys.delete('Space'); });
-    this.hold('tb tb-down', '⏷', () => { input.keys.add('ControlLeft'); }, () => { input.keys.delete('ControlLeft'); });
+    this.hold('tb tb-mine', '⛏', () => { input.leftDown = true; input.onMouseDown(0); }, () => { input.leftDown = false; }, 'Mine / attack');
+    this.hold('tb tb-place', '✋', () => { input.rightDown = true; input.queueRightClick(); }, () => { input.rightDown = false; }, 'Place / use');
+    this.hold('tb tb-jump', '⏶', () => { input.keys.add('Space'); }, () => { input.keys.delete('Space'); }, 'Jump');
+    this.hold('tb tb-down', '⏷', () => { input.keys.add('ControlLeft'); }, () => { input.keys.delete('ControlLeft'); }, 'Sneak / descend');
     // utility (top)
-    this.tap('tb tb-inv', '🎒', hooks.onInventory);
-    this.tap('tb tb-fly', '✈', hooks.onFly);
-    this.tap('tb tb-pause', '⏸', hooks.onPause);
+    this.tap('tb tb-inv', '🎒', hooks.onInventory, 'Inventory');
+    this.tap('tb tb-fly', '✈', hooks.onFly, 'Toggle flight');
+    this.tap('tb tb-pause', '⏸', hooks.onPause, 'Pause');
   }
 
   /** Map the movement-stick vector to WASD (+ sprint on a full forward push). */
@@ -115,8 +116,9 @@ export class TouchControls {
 
   private buzz(): void { try { navigator.vibrate?.(8); } catch { /* unsupported */ } }
 
-  private hold(cls: string, label: string, onDown: () => void, onUp: () => void): void {
+  private hold(cls: string, label: string, onDown: () => void, onUp: () => void, tip = ''): void {
     const b = el('div', cls, this.el, label);
+    if (tip) b.title = tip;
     b.addEventListener('pointerdown', (e) => {
       e.preventDefault(); b.setPointerCapture(e.pointerId); b.classList.add('held'); this.buzz(); onDown();
     });
@@ -126,8 +128,9 @@ export class TouchControls {
     this.resets.push(up);
   }
 
-  private tap(cls: string, label: string, onTap: () => void): void {
+  private tap(cls: string, label: string, onTap: () => void, tip = ''): void {
     const b = el('div', cls, this.el, label);
+    if (tip) b.title = tip;
     b.addEventListener('pointerdown', (e) => {
       e.preventDefault(); b.classList.add('held'); this.buzz(); onTap();
     });
