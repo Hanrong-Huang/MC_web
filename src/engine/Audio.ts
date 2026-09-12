@@ -103,13 +103,37 @@ export class AudioEngine {
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings)); } catch { /* ignore */ }
   }
 
-  /** Must be called from a user gesture at least once. */
+  /** Must be called from a user gesture at least once (safe to call repeatedly). */
   ensure(): void {
-    if (this.ctx) {
-      if (this.ctx.state !== 'running') void this.ctx.resume();
-      this.unlock();
-      return;
+    void this.ensureRunning();
+  }
+
+  /** True once the Web Audio context is running (unlocked after a user gesture). */
+  get isRunning(): boolean {
+    return this.ctx?.state === 'running';
+  }
+
+  private async ensureRunning(): Promise<void> {
+    if (!this.ctx) {
+      if (!this.initContext()) return;
     }
+    if (!this.ctx) return;
+    if (this.ctx.state !== 'running') this.unlocked = false;
+    await this.resumeUntilRunning();
+    if (this.ctx?.state === 'running') this.unlock();
+  }
+
+  private async resumeUntilRunning(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    for (let i = 0; i < 24; i++) {
+      if (ctx.state === 'running') return;
+      try { await ctx.resume(); } catch { /* gesture may be required */ }
+      await new Promise<void>(r => setTimeout(r, 25));
+    }
+  }
+
+  private initContext(): boolean {
     try {
       this.ctx = new AudioContext();
       this.master = this.ctx.createGain();
@@ -153,27 +177,25 @@ export class AudioEngine {
       this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
       const data = this.noiseBuf.getChannelData(0);
       for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
-      // mobile browsers create the context "suspended" — resume + play a silent
-      // buffer now, while we're still inside the user gesture, or there's no sound
-      if (this.ctx.state !== 'running') void this.ctx.resume();
-      this.unlock();
+      return true;
     } catch {
       this.ctx = null;
+      return false;
     }
   }
 
-  /** iOS/Safari unlock trick: play a one-sample silent buffer inside a gesture so
-   *  the audio hardware is actually started. Harmless elsewhere; runs once. */
+  /** iOS/Safari unlock trick: play a one-sample silent buffer while the context
+   *  is running inside a user gesture. Only marked done when state is 'running'. */
   private unlocked = false;
   private unlock(): void {
-    if (this.unlocked || !this.ctx) return;
+    if (this.unlocked || !this.ctx || this.ctx.state !== 'running') return;
     try {
       const b = this.ctx.createBufferSource();
       b.buffer = this.ctx.createBuffer(1, 1, 22050);
       b.connect(this.ctx.destination);
       b.start(0);
       this.unlocked = true;
-    } catch { /* ignore */ }
+    } catch { /* ignore — ensure() will retry on the next gesture */ }
   }
 
   private noiseBurst(dur: number, freq: number, vol: number, type: BiquadFilterType = 'lowpass', freqEnd?: number): void {
