@@ -2123,9 +2123,10 @@ class App {
     this.hud = new HUD(this.root, this.atlas, this.audio);
     // resume audio on the first user gesture (mobile needs a touch to unlock the
     // AudioContext; the menu buttons help, but this guarantees it everywhere)
-    const unlock = (): void => this.audio.ensure();
-    window.addEventListener('pointerdown', unlock);
-    window.addEventListener('touchend', unlock);
+    const unlock = (): void => { this.audio.ensure(); };
+    window.addEventListener('pointerdown', unlock, { capture: true });
+    window.addEventListener('keydown', unlock, { capture: true });
+    window.addEventListener('touchend', unlock, { capture: true });
     // resume audio when returning to the tab (mobile suspends it in the background)
     document.addEventListener('visibilitychange', () => { if (!document.hidden) this.audio.ensure(); });
     void this.showMenu();
