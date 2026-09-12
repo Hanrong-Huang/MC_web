@@ -1501,7 +1501,7 @@ export class HUD {
       const bookTitle = el('div', 'ctr-label', bookWrap);
       bookTitle.textContent = 'Recipe Book';
 
-      const searchBox = el('input', 'recipe-search', bookWrap) as HTMLInputElement;
+      const searchBox = el('input', 'recipe-search menu-input', bookWrap) as HTMLInputElement;
       searchBox.type = 'text';
       searchBox.placeholder = 'Search...';
       searchBox.value = this.recipeSearchQuery;
