@@ -1324,9 +1324,11 @@ class Game {
     this.hud.updateStats(this.player.hp, this.player.hunger, this.player.air, this.player.mode, this.player.inventory.armorPoints());
     this.hud.updatePets(this.entities.petStatus());
     if (this.state === 'container' && this.container?.kind === 'furnace') this.hud.updateFurnace();
+    const showMinimap = this.player.inventory.count(I.COMPASS) > 0 || this.player.mode === 'creative';
+    this.hud.setMinimapVisible(showMinimap);
     // minimap redraw (throttled; block sampling is relatively expensive)
     this.minimapT -= dt;
-    if (this.minimapT <= 0) {
+    if (showMinimap && this.minimapT <= 0) {
       this.minimapT = 0.22;
       const p = this.player.pos;
       this.hud.updateMinimap(

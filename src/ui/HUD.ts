@@ -9,6 +9,7 @@ import { def, CREATIVE_ITEMS, I, B, spriteNameFor, mobLabel } from '../engine/Bl
 import { SaveSummary, SlotData } from '../engine/Persistence';
 import { AudioEngine } from '../engine/Audio';
 import type { GameMode } from '../engine/Player';
+import { isTouchDevice } from './TouchControls';
 
 export type ContainerKind = 'inventory' | 'table' | 'furnace' | 'chest' | 'creative' | 'trade';
 
@@ -116,6 +117,21 @@ export class HUD {
   private recipeFilter: RecipeFilter = 'all';
   private recipeSearchQuery = '';
   private recipeSearchFocused = false;
+  private creativeFilter: RecipeFilter = 'all';
+  private creativeSearchQuery = '';
+  private confirmEl: HTMLElement;
+  private pauseBuilt = false;
+  private pauseH: PauseHandlers | null = null;
+  private pauseModeBtn: HTMLButtonElement | null = null;
+  private pauseMusicBtn: HTMLButtonElement | null = null;
+  private pauseSoundBtn: HTMLButtonElement | null = null;
+  private pauseVdBtns: HTMLButtonElement[] = [];
+  private pauseVolLbl: HTMLElement | null = null;
+  private pauseVolSlider: HTMLInputElement | null = null;
+  private pauseSensLbl: HTMLElement | null = null;
+  private pauseSensSlider: HTMLInputElement | null = null;
+  private pauseTouchLbl: HTMLElement | null = null;
+  private pauseTouchSlider: HTMLInputElement | null = null;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private packHandler: (files: File[]) => void = () => {};
   private importHandler: (file: File) => void = () => {};
@@ -173,6 +189,11 @@ export class HUD {
     this.toastEl = el('div', '', root); this.toastEl.id = 'toast';
     this.cursorEl = el('div', 'hidden', root); this.cursorEl.id = 'cursor-item';
     this.tooltipEl = el('div', 'hidden', root); this.tooltipEl.id = 'item-tooltip';
+
+    this.confirmEl = el('div', 'overlay hidden', root);
+    this.confirmEl.id = 'confirm-overlay';
+
+    this.minimapEl.classList.add('hidden');
 
     this.packInput = el('input') as HTMLInputElement;
     this.packInput.type = 'file';
@@ -295,7 +316,12 @@ export class HUD {
       exp.onclick = () => handlers.onExport(info.slot);
       const del = wire(el('button', 'mc-btn small danger', row));
       del.textContent = 'Delete';
-      del.onclick = () => { if (confirm(`Delete "${info.slot}"? This cannot be undone.`)) handlers.onDelete(info.slot); };
+      del.onclick = () => {
+        this.showConfirm(
+          `Delete "${info.slot}"? This cannot be undone.`,
+          () => handlers.onDelete(info.slot),
+        );
+      };
     }
 
     const toolRow = el('div', 'menu-row', this.menu);
@@ -311,9 +337,15 @@ export class HUD {
 
     // concise control hints (full details live in F3 / tooltips)
     const help = el('div', 'menu-help', this.menu);
-    help.innerHTML =
-      '<b>WASD</b> move · <b>Space</b> jump · <b>Shift</b> sprint · <b>F</b> fly · <b>E</b> inventory<br>' +
-      '<b>LMB</b> break · <b>RMB</b> place / use · <b>1–9</b> + scroll hotbar · <b>Esc</b> pause';
+    if (isTouchDevice()) {
+      help.innerHTML =
+        '<b>Left stick</b> move · <b>Drag right</b> look · <b>Jump / Sneak</b> buttons<br>' +
+        '<b>Dig</b> break · <b>Place</b> use · tap hotbar to switch · <b>Pause</b> top-left';
+    } else {
+      help.innerHTML =
+        '<b>WASD</b> move · <b>Space</b> jump · <b>Shift</b> sprint · <b>F</b> fly · <b>E</b> inventory<br>' +
+        '<b>LMB</b> break · <b>RMB</b> place / use · <b>1–9</b> + scroll hotbar · <b>Esc</b> pause';
+    }
 
     const foot = el('div', 'menu-foot', this.menu);
     foot.textContent = 'Voxelcraft — a from-scratch Minecraft in TypeScript + Three.js. Every texture, sound & world is generated in code.';
@@ -363,13 +395,10 @@ export class HUD {
   updateStats(hp: number, hunger: number, air: number, mode: GameMode, armor = 0): void {
     if (mode === 'creative') {
       this.statsEl.style.visibility = 'hidden';
-      this.lowhpEl.classList.remove('on');
       this.hungerEl.classList.remove('shake');
       return;
     }
     this.statsEl.style.visibility = 'visible';
-    // low-health red pulse + starving hunger shake
-    this.lowhpEl.classList.toggle('on', hp > 0 && hp <= 6);
     this.hungerEl.classList.toggle('shake', hunger > 0 && hunger <= 6);
     const key = `${hp}|${hunger}|${air}|${armor}`;
     if (key === this.lastHearts) return;
@@ -532,6 +561,11 @@ export class HUD {
     this.debugEl.innerHTML = lines.map((l) => `<span>${l}</span>`).join('<br>');
   }
 
+  /** Show the minimap chrome only while carrying a compass (or in creative). */
+  setMinimapVisible(visible: boolean): void {
+    this.minimapEl.classList.toggle('hidden', !visible);
+  }
+
   /** Redraw the minimap: a top-down block sample around the player, a facing
    *  arrow, and compass/clock text readouts. */
   updateMinimap(
@@ -654,11 +688,17 @@ export class HUD {
     this.advPanel = el('div', 'overlay', this.root);
     this.advPanel.id = 'adv-panel';
     const panel = el('div', 'mc-panel', this.advPanel);
-    const title = el('div', 'ctr-label', panel);
+    const head = el('div', 'ctr-header', panel);
+    const title = el('div', 'ctr-label', head);
     title.style.fontSize = '16px';
-    title.style.marginBottom = '12px';
+    title.style.marginBottom = '0';
     const done = list.filter((a) => a.done).length;
     title.textContent = `Advancements  (${done}/${list.length})`;
+    const close = el('button', 'ctr-close', head) as HTMLButtonElement;
+    close.type = 'button';
+    close.textContent = '✕';
+    close.title = 'Close';
+    close.onclick = () => { this.audio.play('click'); this.hideAdvancements(); };
     const listEl = el('div', 'adv-list', panel);
     for (const a of list) {
       const row = el('div', `adv-row${a.done ? ' done' : ''}`, listEl);
@@ -671,7 +711,27 @@ export class HUD {
       desc.textContent = a.desc;
     }
     const hint = el('div', 'adv-hint', panel);
-    hint.textContent = 'Press L to close';
+    hint.textContent = 'Press L or ✕ to close';
+  }
+
+  /** In-menu confirm (replaces native confirm for world delete, etc.). */
+  showConfirm(message: string, onConfirm: () => void): void {
+    this.confirmEl.classList.remove('hidden');
+    this.confirmEl.innerHTML = '';
+    const panel = el('div', 'mc-panel confirm-panel', this.confirmEl);
+    const msg = el('div', 'confirm-msg', panel);
+    msg.textContent = message;
+    const row = el('div', 'menu-row', panel);
+    const yes = el('button', 'mc-btn danger', row) as HTMLButtonElement;
+    yes.textContent = 'Delete';
+    yes.onclick = () => {
+      this.audio.play('click');
+      this.confirmEl.classList.add('hidden');
+      onConfirm();
+    };
+    const no = el('button', 'mc-btn', row) as HTMLButtonElement;
+    no.textContent = 'Cancel';
+    no.onclick = () => { this.audio.play('click'); this.confirmEl.classList.add('hidden'); };
   }
 
   hideAdvancements(): void {
@@ -691,16 +751,21 @@ export class HUD {
   // =========================================================================
 
   showPause(h: PauseHandlers, mode: GameMode, viewDist: number): void {
+    this.pauseH = h;
     this.pauseEl.classList.remove('hidden');
+    if (!this.pauseBuilt) this.buildPauseMenu();
+    this.syncPauseUi(mode, viewDist);
+  }
+
+  private buildPauseMenu(): void {
     this.pauseEl.innerHTML = '';
     const panel = el('div', 'mc-panel pause-panel', this.pauseEl);
-    const title = el('h2', 'pause-title', panel);
-    title.textContent = 'Game Paused';
+    el('h2', 'pause-title', panel).textContent = 'Game Paused';
     const col = el('div', 'menu-col pause-col', panel);
 
     const resume = el('button', 'mc-btn', col);
     resume.textContent = 'Back to Game';
-    resume.onclick = () => { this.audio.play('click'); h.onResume(); };
+    resume.onclick = () => { this.audio.play('click'); this.pauseH?.onResume(); };
 
     const save = el('button', 'mc-btn', col) as HTMLButtonElement;
     save.textContent = 'Save Game';
@@ -708,76 +773,63 @@ export class HUD {
       this.audio.play('click');
       save.textContent = 'Saving...';
       save.disabled = true;
-      const ok = await h.onSave();
+      const ok = await this.pauseH?.onSave();
       save.textContent = ok ? 'Saved ✓' : 'Save failed';
       setTimeout(() => { save.textContent = 'Save Game'; save.disabled = false; }, 1200);
     };
 
-    const modeBtn = el('button', 'mc-btn', col);
-    modeBtn.textContent = `Mode: ${mode === 'survival' ? 'Survival' : 'Creative'}`;
-    modeBtn.onclick = () => { this.audio.play('click'); h.onToggleMode(); };
+    this.pauseModeBtn = el('button', 'mc-btn', col) as HTMLButtonElement;
+    this.pauseModeBtn.onclick = () => { this.audio.play('click'); this.pauseH?.onToggleMode(); };
 
     const vd = el('div', 'menu-row', col);
     vd.append('Render distance: ');
+    this.pauseVdBtns = [];
     for (const n of [6, 8, 10, 12]) {
-      const b = el('button', `mc-btn small${n === viewDist ? ' on' : ''}`, vd);
+      const b = el('button', 'mc-btn small', vd) as HTMLButtonElement;
       b.textContent = String(n);
-      b.onclick = () => { this.audio.play('click'); h.onViewDist(n); };
-      if (n === viewDist) b.style.background = 'linear-gradient(#5f8f5f, #4d7a4d)';
+      b.onclick = () => { this.audio.play('click'); this.pauseH?.onViewDist(n); };
+      this.pauseVdBtns.push(b);
     }
 
     const av = el('div', 'menu-row', col);
-    const music = el('button', 'mc-btn small', av);
-    music.textContent = `Music: ${h.musicOn() ? 'On' : 'Off'}`;
-    music.onclick = () => { this.audio.play('click'); h.onToggleMusic(); };
-    const sound = el('button', 'mc-btn small', av);
-    sound.textContent = `Sounds: ${h.soundOn() ? 'On' : 'Off'}`;
-    sound.onclick = () => { this.audio.play('click'); h.onToggleSound(); };
+    this.pauseMusicBtn = el('button', 'mc-btn small', av) as HTMLButtonElement;
+    this.pauseMusicBtn.onclick = () => { this.audio.play('click'); this.pauseH?.onToggleMusic(); };
+    this.pauseSoundBtn = el('button', 'mc-btn small', av) as HTMLButtonElement;
+    this.pauseSoundBtn.onclick = () => { this.audio.play('click'); this.pauseH?.onToggleSound(); };
 
-    // master volume slider
     const volRow = el('div', 'menu-row', col);
-    const volLbl = el('span', 'vol-label', volRow);
-    const setVolLabel = (): void => { volLbl.textContent = `Volume: ${Math.round(this.audio.volume * 100)}%`; };
-    setVolLabel();
-    const vol = el('input', 'vol-slider', volRow) as HTMLInputElement;
-    vol.type = 'range'; vol.min = '0'; vol.max = '100'; vol.step = '5';
-    vol.value = String(Math.round(this.audio.volume * 100));
-    vol.oninput = () => { this.audio.setVolume(parseInt(vol.value, 10) / 100); setVolLabel(); };
-    vol.onchange = () => this.audio.play('click');
+    this.pauseVolLbl = el('span', 'vol-label', volRow);
+    this.pauseVolSlider = el('input', 'vol-slider', volRow) as HTMLInputElement;
+    this.pauseVolSlider.type = 'range'; this.pauseVolSlider.min = '0'; this.pauseVolSlider.max = '100'; this.pauseVolSlider.step = '5';
+    this.pauseVolSlider.oninput = () => {
+      this.audio.setVolume(parseInt(this.pauseVolSlider!.value, 10) / 100);
+      this.syncPauseVolumeLabel();
+    };
+    this.pauseVolSlider.onchange = () => this.audio.play('click');
 
     const sensRow = el('div', 'menu-row', col);
-    const sensLbl = el('span', 'vol-label', sensRow);
-    const setSensLabel = (): void => {
-      sensLbl.textContent = `Look: ${Math.round(h.mouseSens() * 100)}%`;
+    this.pauseSensLbl = el('span', 'vol-label', sensRow);
+    this.pauseSensSlider = el('input', 'vol-slider', sensRow) as HTMLInputElement;
+    this.pauseSensSlider.type = 'range'; this.pauseSensSlider.min = '50'; this.pauseSensSlider.max = '200'; this.pauseSensSlider.step = '5';
+    this.pauseSensSlider.oninput = () => {
+      this.pauseH?.onMouseSens(parseInt(this.pauseSensSlider!.value, 10) / 100);
+      this.syncPauseSensLabels();
     };
-    setSensLabel();
-    const sens = el('input', 'vol-slider', sensRow) as HTMLInputElement;
-    sens.type = 'range'; sens.min = '50'; sens.max = '200'; sens.step = '5';
-    sens.value = String(Math.round(h.mouseSens() * 100));
-    sens.oninput = () => {
-      h.onMouseSens(parseInt(sens.value, 10) / 100);
-      setSensLabel();
-    };
-    sens.onchange = () => this.audio.play('click');
+    this.pauseSensSlider.onchange = () => this.audio.play('click');
 
     const touchRow = el('div', 'menu-row', col);
-    const touchLbl = el('span', 'vol-label', touchRow);
-    const setTouchLabel = (): void => {
-      touchLbl.textContent = `Touch look: ${Math.round(h.touchLook() * 100)}%`;
+    this.pauseTouchLbl = el('span', 'vol-label', touchRow);
+    this.pauseTouchSlider = el('input', 'vol-slider', touchRow) as HTMLInputElement;
+    this.pauseTouchSlider.type = 'range'; this.pauseTouchSlider.min = '60'; this.pauseTouchSlider.max = '220'; this.pauseTouchSlider.step = '5';
+    this.pauseTouchSlider.oninput = () => {
+      this.pauseH?.onTouchLook(parseInt(this.pauseTouchSlider!.value, 10) / 100);
+      this.syncPauseSensLabels();
     };
-    setTouchLabel();
-    const touch = el('input', 'vol-slider', touchRow) as HTMLInputElement;
-    touch.type = 'range'; touch.min = '60'; touch.max = '220'; touch.step = '5';
-    touch.value = String(Math.round(h.touchLook() * 100));
-    touch.oninput = () => {
-      h.onTouchLook(parseInt(touch.value, 10) / 100);
-      setTouchLabel();
-    };
-    touch.onchange = () => this.audio.play('click');
+    this.pauseTouchSlider.onchange = () => this.audio.play('click');
 
     const pack = el('button', 'mc-btn', col);
     pack.textContent = 'Load Resource Pack';
-    pack.onclick = () => { this.packHandler = h.onPack; this.packInput.click(); };
+    pack.onclick = () => { this.packHandler = this.pauseH!.onPack; this.packInput.click(); };
 
     const quit = el('button', 'mc-btn', col);
     quit.textContent = 'Save and Quit to Title';
@@ -785,8 +837,51 @@ export class HUD {
       this.audio.play('click');
       quit.textContent = 'Saving...';
       (quit as HTMLButtonElement).disabled = true;
-      h.onSaveQuit();
+      this.pauseH?.onSaveQuit();
     };
+
+    this.pauseBuilt = true;
+  }
+
+  private syncPauseVolumeLabel(): void {
+    if (this.pauseVolLbl) this.pauseVolLbl.textContent = `Volume: ${Math.round(this.audio.volume * 100)}%`;
+  }
+
+  private syncPauseSensLabels(): void {
+    if (this.pauseSensLbl && this.pauseH) {
+      this.pauseSensLbl.textContent = `Look: ${Math.round(this.pauseH.mouseSens() * 100)}%`;
+    }
+    if (this.pauseTouchLbl && this.pauseH) {
+      this.pauseTouchLbl.textContent = `Touch look: ${Math.round(this.pauseH.touchLook() * 100)}%`;
+    }
+  }
+
+  private syncPauseUi(mode: GameMode, viewDist: number): void {
+    if (this.pauseModeBtn) {
+      this.pauseModeBtn.textContent = `Mode: ${mode === 'survival' ? 'Survival' : 'Creative'}`;
+    }
+    if (this.pauseMusicBtn && this.pauseH) {
+      this.pauseMusicBtn.textContent = `Music: ${this.pauseH.musicOn() ? 'On' : 'Off'}`;
+    }
+    if (this.pauseSoundBtn && this.pauseH) {
+      this.pauseSoundBtn.textContent = `Sounds: ${this.pauseH.soundOn() ? 'On' : 'Off'}`;
+    }
+    const vdVals = [6, 8, 10, 12];
+    this.pauseVdBtns.forEach((b, i) => {
+      const n = vdVals[i];
+      const on = n === viewDist;
+      b.classList.toggle('on', on);
+      b.style.background = on ? 'linear-gradient(#5f8f5f, #4d7a4d)' : '';
+    });
+    if (this.pauseVolSlider) this.pauseVolSlider.value = String(Math.round(this.audio.volume * 100));
+    if (this.pauseSensSlider && this.pauseH) {
+      this.pauseSensSlider.value = String(Math.round(this.pauseH.mouseSens() * 100));
+    }
+    if (this.pauseTouchSlider && this.pauseH) {
+      this.pauseTouchSlider.value = String(Math.round(this.pauseH.touchLook() * 100));
+    }
+    this.syncPauseVolumeLabel();
+    this.syncPauseSensLabels();
   }
 
   hidePause(): void { this.pauseEl.classList.add('hidden'); }
@@ -1113,11 +1208,41 @@ export class HUD {
     }
     // pointerdown fires reliably on touch (a tap) and mouse; move the held-item
     // cursor to the tap point first so it's visible where the finger is
+    let pressTimer: ReturnType<typeof setTimeout> | null = null;
+    let longFired = false;
     s.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       this.hideTooltip();
       this.followCursor(e.clientX, e.clientY);
-      onClick(e.button, e.shiftKey);
+      if (e.button === 2) {
+        onClick(2, e.shiftKey);
+        return;
+      }
+      if (e.button !== 0) return;
+      longFired = false;
+      pressTimer = setTimeout(() => {
+        pressTimer = null;
+        longFired = true;
+        onClick(2, e.shiftKey);
+      }, 480);
+    });
+    const cancelPress = (): void => {
+      if (pressTimer !== null) {
+        clearTimeout(pressTimer);
+        pressTimer = null;
+      }
+    };
+    s.addEventListener('pointerup', (e) => {
+      if (e.button !== 0) return;
+      if (pressTimer !== null) {
+        cancelPress();
+        if (!longFired) onClick(0, e.shiftKey);
+      }
+      longFired = false;
+    });
+    s.addEventListener('pointercancel', () => {
+      cancelPress();
+      longFired = false;
     });
   }
 
@@ -1495,8 +1620,42 @@ export class HUD {
     // --- creative panel ---------------------------------------------------------
     if (view.kind === 'creative') {
       const sec = el('div', 'ctr-section', panel);
+      const searchBox = el('input', 'recipe-search menu-input', sec) as HTMLInputElement;
+      searchBox.type = 'search';
+      searchBox.placeholder = 'Search blocks & items…';
+      searchBox.value = this.creativeSearchQuery;
+      searchBox.oninput = () => {
+        this.creativeSearchQuery = searchBox.value.trim().toLowerCase();
+        rerender();
+      };
+      const filters = el('div', 'recipe-filters', sec);
+      const cfilters: { id: RecipeFilter; label: string }[] = [
+        { id: 'all', label: 'All' },
+        { id: 'blocks', label: 'Blocks' },
+        { id: 'tools', label: 'Tools' },
+        { id: 'food', label: 'Food' },
+        { id: 'utility', label: 'Other' },
+      ];
+      for (const f of cfilters) {
+        const b = el('button', `recipe-filter${this.creativeFilter === f.id ? ' on' : ''}`, filters);
+        b.textContent = f.label;
+        b.onclick = () => {
+          this.audio.play('click');
+          this.creativeFilter = f.id;
+          rerender();
+        };
+      }
       const grid = el('div', 'creative-grid', sec);
+      const q = this.creativeSearchQuery;
       for (const id of CREATIVE_ITEMS) {
+        const d = def(id);
+        const label = d.label.toLowerCase();
+        if (q && !label.includes(q) && !d.name.includes(q)) continue;
+        const cat = d.toolInfo || d.bow || id === I.FISHING_ROD ? 'tools'
+          : d.food ? 'food'
+          : d.block || id === I.WOOD_DOOR ? 'blocks'
+          : 'utility';
+        if (this.creativeFilter !== 'all' && cat !== this.creativeFilter) continue;
         this.slotEl(grid, { id, count: 1 }, (btn, shift) => {
           this.audio.play('click');
           const d = def(id);
