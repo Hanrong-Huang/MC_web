@@ -50,7 +50,7 @@ const DIR_Z = [-1, 0, 1, 0];
 /** direction index → World.torchFacings code (0=+x, 1=-x, 2=+z, 3=-z) */
 const TORCH_FACING = [3, 1, 2, 0];
 
-type PieceKind = 'well' | 'plaza' | 'house' | 'smithy' | 'farm' | 'lamp' | 'tower';
+type PieceKind = 'well' | 'plaza' | 'house' | 'smithy' | 'farm' | 'lamp' | 'tower' | 'hay';
 interface Piece {
   kind: PieceKind;
   x0: number; z0: number; sx: number; sz: number; // world footprint
@@ -1223,6 +1223,8 @@ export class WorldGenerator {
       v.minZ = Math.min(v.minZ, rz0 - 2); v.maxZ = Math.max(v.maxZ, rz1 + 2);
     }
     if (houses < 2) return null;
+    // a few hay bales piled at a free plaza corner (temperate villages)
+    if (!style.flat) v.pieces.push({ kind: 'hay', x0: cx + 4, z0: cz - 4, sx: 1, sz: 1, y: plazaY, side: 0, v: rnd() });
     // lamps flanking the plaza
     for (const [dx, dz] of [[-4, -4], [4, 4]]) {
       v.pieces.push({ kind: 'lamp', x0: cx + dx, z0: cz + dz, sx: 1, sz: 1, y: this.heightAt(cx + dx, cz + dz), side: 0, v: 0 });
@@ -1254,6 +1256,15 @@ export class WorldGenerator {
           case 'lamp': this.buildLamp(chunk, p.x0, p.y, p.z0, v.style); break;
           case 'farm': this.buildFarm(chunk, p, v.style); break;
           case 'tower': this.buildBellTower(chunk, p, v.style); break;
+          case 'hay':
+            for (const [dx, dz, dy] of [[0, 0, 1], [-1, 0, 1], [0, 1, 1], [0, 0, 2]]) {
+              if (dy === 2 && p.v < 0.5) continue;
+              const wx = p.x0 + dx, wz = p.z0 + dz;
+              if (!this.inChunk(chunk, wx, wz)) continue;
+              this.underpin(chunk, wx, wz, p.y, B.DIRT);
+              this.put(chunk, wx, p.y + dy, wz, B.HAY_BALE);
+            }
+            break;
           default: this.buildHouse(chunk, p, v.style); break;
         }
       }
@@ -1329,7 +1340,16 @@ export class WorldGenerator {
         this.underpin(chunk, wx, wz, y - 1, B.DIRT);
         this.clearCol(chunk, wx, wz, y + 1, y + 6);
         const edge = dx === 0 || dx === p.sx - 1 || dz === 0 || dz === p.sz - 1;
-        if (edge) { this.put(chunk, wx, y, wz, st.farmEdge); continue; }
+        if (edge) {
+          this.put(chunk, wx, y, wz, st.farmEdge);
+          // hay bales stacked on the far corners of the field
+          const farCorner = (dx === 0 || dx === p.sx - 1) && (alongX ? dz === p.sz - 1 : dx === p.sx - 1) && (dz === 0 || dz === p.sz - 1);
+          if (farCorner && p.v > 0.35) {
+            this.put(chunk, wx, y + 1, wz, B.HAY_BALE);
+            if (p.v > 0.7) this.put(chunk, wx, y + 2, wz, B.HAY_BALE);
+          }
+          continue;
+        }
         if ((alongX ? wz : wx) === mid) { this.put(chunk, wx, y, wz, B.WATER); continue; }
         this.put(chunk, wx, y, wz, B.FARMLAND);
         // one or two crop types per field, planted in rows
@@ -1430,10 +1450,21 @@ export class WorldGenerator {
       this.put(chunk, toX(iu, iv), y + 1, toZ(iu, iv), B.CHEST_LOOT);
       this.put(chunk, toX(iu, 1), y + 1, toZ(iu, 1), B.TABLE);
       this.put(chunk, toX(1, 1), y + 1, toZ(1, 1), B.STONE_BRICKS); // anvil-ish block
+      this.put(chunk, toX(3, iv), y + 1, toZ(3, iv), B.COAL_BLOCK);  // fuel pile by the forge
       // chimney over the furnaces
       for (let yy = y + 2; yy <= top + Math.ceil(Math.min(W, D) / 2) + 2; yy++) {
         this.put(chunk, toX(1, D - 1), yy, toZ(1, D - 1), B.COBBLE);
       }
+    } else if (W >= 7 && p.v >= 0.3 && p.v < 0.55) {
+      // librarian's house: bookshelves lining the back wall, a reading table
+      for (let u = 1; u <= W - 2; u++) {
+        if (u === doorU) continue; // keep the back-wall torch clear
+        this.put(chunk, toX(u, iv), y + 1, toZ(u, iv), B.BOOKSHELF);
+        this.put(chunk, toX(u, iv), y + 2, toZ(u, iv), B.BOOKSHELF);
+      }
+      this.put(chunk, toX(doorU, iv), y + 1, toZ(doorU, iv), B.TABLE);
+      this.putBed(chunk, toX(1, 1), y + 1, toZ(1, 1), inward);
+      this.put(chunk, toX(iu, 1), y + 1, toZ(iu, 1), B.CHEST_LOOT);
     } else {
       this.putBed(chunk, toX(1, iv - 1), y + 1, toZ(1, iv - 1), inward);
       this.put(chunk, toX(iu, iv), y + 1, toZ(iu, iv), B.TABLE);
@@ -1793,7 +1824,7 @@ export class WorldGenerator {
         for (let dz = 0; dz < d; dz++) {
           for (let dy = 0; dy < 5; dy++) {
             const edge = dx === 0 || dx === w - 1 || dz === 0 || dz === d - 1 || dy === 0 || dy === 4;
-            const id = edge ? (dy === 0 || dy === 4 ? B.STONE_BRICKS : B.COBBLE) : B.AIR;
+            const id = edge ? (dy === 0 ? B.SMOOTH_STONE : dy === 4 ? B.STONE_BRICKS : B.COBBLE) : B.AIR;
             this.put(chunk, ox + rx + dx, oy + dy, oz + rz + dz, id);
           }
         }
@@ -2287,7 +2318,7 @@ export class WorldGenerator {
           this.put(chunk, ox + dx, oy + dy, oz + dz, id);
         }
         if (!edge && !tower) this.put(chunk, ox + dx, oy + H, oz + dz, B.PLANKS);
-        if (!edge && !tower) this.put(chunk, ox + dx, oy, oz + dz, B.PLANKS);
+        if (!edge && !tower) this.put(chunk, ox + dx, oy, oz + dz, (dx + dz) & 1 ? B.SMOOTH_STONE : B.STONE_BRICKS);
       }
     }
     // wall-walk crenellations on the curtain walls
