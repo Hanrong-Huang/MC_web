@@ -1027,15 +1027,23 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
   tall_grass: (c, x, y) => {
     c.clearRect(x, y, 16, 16);
     const rand = mulberry32(337);
-    const cols = ['#3f7a2a', '#4c8c32', '#5a9e3a', '#68ae44'];
-    for (let i = 0; i < 13; i++) {
-      const bx = 1 + ((rand() * 14) | 0);
-      const h = 4 + ((rand() * 10) | 0);
-      const lean = rand() < 0.5 ? -1 : 1;
-      for (let j = 0; j < h; j++) {
-        const px = bx + (j > h * 0.6 ? lean : 0) + (j > h * 0.85 ? lean : 0);
-        c.fillStyle = cols[Math.min(3, ((j / h) * 3.5) | 0)];
-        c.fillRect(x + Math.max(0, Math.min(15, px)), y + 15 - j, 1, 1);
+    const cols = ['#2f5e20', '#3f7a2a', '#4c8c32', '#5a9e3a', '#68ae44', '#7cc052'];
+    // a tuft: short blades behind, tall arching ones in front, shaded dark at
+    // the root and catching light toward the tips
+    for (let pass = 0; pass < 2; pass++) {
+      const n = pass === 0 ? 8 : 11;
+      for (let i = 0; i < n; i++) {
+        const bx = 1 + ((rand() * 14) | 0);
+        const h = pass === 0 ? 3 + ((rand() * 6) | 0) : 6 + ((rand() * 9) | 0);
+        const lean = rand() < 0.5 ? -1 : 1;
+        const bend = 0.45 + rand() * 0.35; // where the blade starts to arch over
+        for (let j = 0; j < h; j++) {
+          const t = j / h;
+          const px = bx + (t > bend ? lean : 0) + (t > bend + 0.3 ? lean : 0);
+          const k = Math.min(cols.length - 1, ((t * 4.2) | 0) + pass);
+          c.fillStyle = cols[k];
+          c.fillRect(x + Math.max(0, Math.min(15, px)), y + 15 - j, 1, 1);
+        }
       }
     }
   },

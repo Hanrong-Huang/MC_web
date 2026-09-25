@@ -69,6 +69,16 @@ export const SHEEP_COATS: [string, string, number][] = [
   ['#f2a3bc', '#e493ad', 0.2],  // pink (rare!)
 ];
 
+/** Rabbit coats: [fur, speckle, belly/tail]. Brown, white (snow), gold
+ *  (desert), black-and-white, salt-and-pepper. */
+export const RABBIT_COATS: [string, string, string][] = [
+  ['#8a6a4c', '#7a5c40', '#e8dccb'],
+  ['#f0f0ec', '#e2e2dc', '#ffffff'],
+  ['#d9b77a', '#c9a669', '#f3e6c6'],
+  ['#2a2a2a', '#1f1f1f', '#f0f0ec'],
+  ['#7a766e', '#66625a', '#d6d2c8'],
+];
+
 /** Villager outfits: [robe, robe speckle, trim]. */
 export const VILLAGER_OUTFITS: [string, string, string][] = [
   ['#6e4c31', '#62432b', '#4a3222'], // plains (brown robe)
@@ -83,6 +93,7 @@ export function rollVariant(kind: MobKind): number {
   if (kind === 'horse') return (Math.random() * HORSE_COATS.length) | 0;
   if (kind === 'cat') return (Math.random() * CAT_COATS.length) | 0;
   if (kind === 'villager') return (Math.random() * VILLAGER_OUTFITS.length) | 0;
+  if (kind === 'rabbit') return (Math.random() * RABBIT_COATS.length) | 0;
   if (kind === 'sheep') {
     const total = SHEEP_COATS.reduce((s, c) => s + c[2], 0);
     let r = Math.random() * total;
@@ -208,10 +219,12 @@ export class MobModels {
       ({ mesh: g, limbs: { ...limbs, ...l } as LimbSet, mats });
 
     switch (kind) {
-      case 'pig': return this.pig(g, mats, limbs, done);
-      case 'cow': return this.cow(g, mats, limbs, done);
+      case 'pig': return this.pig(g, mats, limbs, done, variant);
+      case 'cow': return this.cow(g, mats, limbs, done, variant);
       case 'sheep': return this.sheep(g, mats, limbs, done, variant);
-      case 'chicken': return this.chicken(g, mats, limbs, done);
+      case 'chicken': return this.chicken(g, mats, limbs, done, variant);
+      case 'rabbit': return this.rabbit(g, mats, limbs, done, variant);
+      case 'bat': return this.bat(g, mats, limbs, done);
       case 'zombie': return this.zombie(g, mats, limbs, done);
       case 'skeleton': return this.skeleton(g, mats, limbs, done);
       case 'creeper': return this.creeper(g, mats, limbs, done);
@@ -229,11 +242,17 @@ export class MobModels {
 
   // --- farm animals -------------------------------------------------------------
 
-  private pig(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done): Built {
-    const pink = '#f0a5a2', pinkD = '#e2908f';
-    const bodyM = this.mat(this.skin('pig', pink, pinkD), mats);
-    const faceM = this.face('pig_face', pink, pinkD, (ctx, closed) => {
-      if (closed) { px(ctx, '#d4817f', 1, 3, 2, 1); px(ctx, '#d4817f', 5, 3, 2, 1); return; }
+  private pig(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done, variant = 0): Built {
+    // climate variants: temperate pink, warm ginger with dark spots, cold pale with grey patches
+    const [pink, pinkD] = variant === 1 ? ['#d88d63', '#c97d55'] : variant === 2 ? ['#f3cfc6', '#e6bfb6'] : ['#f0a5a2', '#e2908f'];
+    const spot = variant === 1 ? '#5a3424' : '#6a6260';
+    const spots = variant !== 0 ? (ctx: Ctx): void => {
+      px(ctx, spot, 1, 1, 2, 2); px(ctx, spot, 5, 4, 2, 1); px(ctx, spot, 6, 5, 1, 1); px(ctx, spot, 2, 6, 1, 1);
+    } : undefined;
+    const bodyM = this.mat(this.skin(`pig_${variant}`, pink, pinkD, spots), mats);
+    const faceM = this.face(`pig_face_${variant}`, pink, pinkD, (ctx, closed) => {
+      if (variant === 2) px(ctx, spot, 5, 0, 3, 2); // eye patch
+      if (closed) { px(ctx, pinkD, 1, 3, 2, 1); px(ctx, pinkD, 5, 3, 2, 1); return; }
       px(ctx, '#ffffff', 1, 3); px(ctx, '#2b2530', 2, 3);   // white + pupil, like vanilla
       px(ctx, '#2b2530', 5, 3); px(ctx, '#ffffff', 6, 3);
     }, mats, limbs);
@@ -258,20 +277,25 @@ export class MobModels {
     return done({ legs, head, legLen: 6 * P });
   }
 
-  private cow(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done): Built {
-    const brown = '#4b3424', brownD = '#402c1e', white = '#ebe7df';
+  private cow(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done, variant = 0): Built {
+    // climate variants: temperate holstein, warm red-brown hereford, cold shaggy dun
+    const [brown, brownD, white] = variant === 1 ? ['#8e4a2a', '#7e3f22', '#efe4d2']
+      : variant === 2 ? ['#6a5440', '#5c4836', '#b8a58a'] : ['#4b3424', '#402c1e', '#ebe7df'];
+    const V = `_${variant}`;
     // Holstein blotches painted into the hide (wraps every face of the torso)
-    const hide = this.skin('cow', brown, brownD, (ctx) => {
+    const hide = this.skin('cow' + V, brown, brownD, (ctx) => {
+      if (variant === 1) { px(ctx, white, 0, 6, 8, 2); return; } // pale belly only
       px(ctx, white, 1, 1, 3, 2); px(ctx, white, 2, 3, 1, 1);
       px(ctx, white, 5, 4, 3, 3); px(ctx, white, 6, 3, 1, 1);
       px(ctx, white, 0, 6, 2, 1);
     });
     const bodyM = this.mat(hide, mats);
-    const headM = this.mat(this.skin('cow_head', brown, brownD, (ctx) => {
+    const headM = this.mat(this.skin('cow_head' + V, brown, brownD, (ctx) => {
       px(ctx, white, 3, 0, 2, 3); // white blaze runs over the crown
     }), mats);
-    const faceM = this.face('cow_face', brown, brownD, (ctx, closed) => {
-      px(ctx, white, 3, 0, 2, 4);                    // blaze down the forehead
+    const faceM = this.face('cow_face' + V, brown, brownD, (ctx, closed) => {
+      if (variant === 1) px(ctx, white, 1, 0, 6, 8); // white-faced hereford
+      else px(ctx, white, 3, 0, 2, 4);               // blaze down the forehead
       if (closed) { px(ctx, '#2e2016', 1, 3, 2, 1); px(ctx, '#2e2016', 5, 3, 2, 1); }
       else {
         px(ctx, '#ffffff', 1, 3); px(ctx, '#161111', 2, 3);
@@ -283,7 +307,7 @@ export class MobModels {
       px(ctx, '#5a3f36', 1, 3, 2, 2); px(ctx, '#5a3f36', 5, 3, 2, 2); // nostrils
     }, 0), mats);
     const hornM = this.mat(this.skin('cow_horn', '#e0dace', '#d0c9bb', (ctx) => px(ctx, '#a8a090', 0, 0, 8, 2)), mats);
-    const legM = this.mat(this.skin('cow_leg', brown, brownD, (ctx) => {
+    const legM = this.mat(this.skin('cow_leg' + V, brown, brownD, (ctx) => {
       px(ctx, white, 0, 4, 8, 3);   // white socks
       px(ctx, '#2a1f18', 0, 7, 8, 1); // hooves
     }), mats);
@@ -292,6 +316,12 @@ export class MobModels {
     // 12×10×18 torso on 12 px legs
     g.add(this.box(12 * P, 10 * P, 18 * P, bodyM, 0, 17 * P, P));
     g.add(this.box(4 * P, 1.5 * P, 6 * P, udderM, 0, 11.4 * P, 5 * P)); // udder
+    if (variant === 2) {
+      // cold-climate cattle: a shaggy coat hangs off the flanks and the neck
+      const shagM = this.mat(this.skin('cow_shag', brownD, brown, undefined, 0.35), mats);
+      g.add(this.box(13 * P, 4 * P, 17 * P, shagM, 0, 13 * P, 1.5 * P));
+      g.add(this.box(9 * P, 5 * P, 3 * P, shagM, 0, 16 * P, -8 * P));
+    }
     const head = new THREE.Group();
     head.position.set(0, 20 * P, -8 * P);
     head.add(this.box(8 * P, 8 * P, 6 * P, [headM, headM, headM, headM, headM, faceM], 0, 0, -3 * P));
@@ -354,11 +384,12 @@ export class MobModels {
     return done({ legs, head, wool: woolParts, legLen: 12 * P });
   }
 
-  private chicken(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done): Built {
-    const white = '#f6f6f2', whiteS = '#e6e6e0';
-    const bodyM = this.mat(this.skin('chicken', white, whiteS), mats);
-    const faceM = this.face('chicken_face', white, whiteS, (ctx, closed) => {
-      const c = closed ? '#cfcfc8' : '#1b1b20';
+  private chicken(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done, variant = 0): Built {
+    // climate variants: white leghorn, warm ginger hen, cold speckled grey
+    const [white, whiteS] = variant === 1 ? ['#c9793c', '#a95f2c'] : variant === 2 ? ['#a9adb3', '#6f737a'] : ['#f6f6f2', '#e6e6e0'];
+    const bodyM = this.mat(this.skin(`chicken_${variant}`, white, whiteS, undefined, variant === 2 ? 0.35 : 0.12), mats);
+    const faceM = this.face(`chicken_face_${variant}`, white, whiteS, (ctx, closed) => {
+      const c = closed ? whiteS : '#1b1b20';
       px(ctx, c, 0, 2, 2, closed ? 1 : 2); px(ctx, c, 6, 2, 2, closed ? 1 : 2);
     }, mats, limbs);
     const beakM = this.mat(this.skin('chk_beak', '#f2b33a', '#e3a22c'), mats);
@@ -890,6 +921,88 @@ export class MobModels {
     }
     return done({ legs, legLen: 0.34 });
   }
+
+  // --- ambient critters -----------------------------------------------------------
+
+  private rabbit(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done, variant: number): Built {
+    const [fur, furS, belly] = RABBIT_COATS[variant] ?? RABBIT_COATS[0];
+    const bodyM = this.mat(this.skin(`rabbit_${variant}`, fur, furS, variant === 3 ? (ctx) => {
+      px(ctx, belly, 0, 3, 8, 3); // black-and-white: a white saddle band
+    } : undefined), mats);
+    const faceM = this.face(`rabbit_face_${variant}`, fur, furS, (ctx, closed) => {
+      if (closed) { px(ctx, furS, 1, 3, 2, 1); px(ctx, furS, 5, 3, 2, 1); }
+      else {
+        const eye = variant === 1 ? '#c8283a' : '#1a1414'; // white rabbits have ruby eyes
+        px(ctx, eye, 1, 3, 2, 2); px(ctx, eye, 5, 3, 2, 2);
+        px(ctx, '#ffffff', 1, 3); px(ctx, '#ffffff', 6, 3);
+      }
+      px(ctx, belly, 2, 5, 4, 3);      // pale muzzle
+      px(ctx, '#e89aa6', 3, 5, 2, 1); // pink nose
+    }, mats, limbs);
+    const earM = this.mat(this.skin(`rabbit_ear_${variant}`, fur, furS, (ctx) => px(ctx, '#e7a9b0', 3, 1, 2, 6)), mats);
+    const tailM = this.mat(this.skin(`rabbit_tail_${variant}`, belly, belly), mats);
+    // a hunched 5×5×7 body sitting low on big hind feet
+    const body = new THREE.Group();
+    body.add(this.box(5 * P, 5 * P, 7 * P, bodyM, 0, 4.5 * P, 0.5 * P));
+    body.add(this.box(3 * P, 3 * P, 2 * P, tailM, 0, 5 * P, 4.8 * P)); // cotton tail
+    g.add(body);
+    const head = new THREE.Group();
+    head.position.set(0, 6.5 * P, -3 * P);
+    head.add(this.box(5 * P, 4 * P, 5 * P, this.front(bodyM, faceM), 0, 1.5 * P, -2.5 * P));
+    const ears: THREE.Object3D[] = [];
+    for (const sx of [-1, 1]) {
+      const ear = new THREE.Group();
+      ear.position.set(sx * 1.2 * P, 3.5 * P, -2 * P);
+      ear.add(this.box(1.6 * P, 5 * P, 1 * P, earM, sx * 0.3 * P, 2.5 * P, 0));
+      head.add(ear);
+      ears.push(ear);
+    }
+    g.add(head);
+    // legs: short forepaws, long hind feet laid flat
+    const legs = [
+      this.leg(1.5 * P, 3 * P, bodyM, -1.5 * P, 3 * P, -2.5 * P),
+      this.leg(1.5 * P, 3 * P, bodyM, 1.5 * P, 3 * P, -2.5 * P),
+      this.leg(2 * P, 2 * P, bodyM, 2 * P, 2 * P, 2.5 * P, 5 * P),
+      this.leg(2 * P, 2 * P, bodyM, -2 * P, 2 * P, 2.5 * P, 5 * P),
+    ];
+    g.add(...legs);
+    return done({ legs, head, body, ears, legLen: 3 * P });
+  }
+
+  private bat(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done): Built {
+    const fur = '#4a3a2c', furS = '#3c2e22';
+    const bodyM = this.mat(this.skin('bat', fur, furS), mats);
+    const faceM = this.face('bat_face', fur, furS, (ctx, closed) => {
+      const c = closed ? furS : '#101010';
+      px(ctx, c, 1, 3, 2, 1); px(ctx, c, 5, 3, 2, 1);
+      px(ctx, '#e8e0d0', 3, 6); px(ctx, '#e8e0d0', 4, 6); // tiny fangs
+    }, mats, limbs);
+    const wingM = this.mat(this.skin('bat_wing', '#2a2019', '#21190f', (ctx) => {
+      px(ctx, '#3a2c20', 0, 0, 8, 1); px(ctx, '#3a2c20', 2, 0, 1, 8); px(ctx, '#3a2c20', 5, 0, 1, 8); // finger bones
+    }), mats);
+    const body = new THREE.Group();
+    body.add(this.box(4 * P, 7 * P, 3 * P, bodyM, 0, 4 * P, 0));
+    g.add(body);
+    const head = new THREE.Group();
+    head.position.set(0, 8 * P, 0);
+    head.add(this.box(4.5 * P, 4 * P, 4 * P, this.front(bodyM, faceM), 0, 2 * P, 0));
+    for (const sx of [-1, 1]) head.add(this.box(1.5 * P, 2.5 * P, 1 * P, bodyM, sx * 1.6 * P, 5 * P, 0));
+    g.add(head);
+    const wings: THREE.Group[] = [];
+    for (const sx of [-1, 1]) {
+      const w = new THREE.Group();
+      w.position.set(sx * 2 * P, 7 * P, 0);
+      w.add(this.box(8 * P, 7 * P, 0.6 * P, wingM, sx * 4 * P, -3 * P, 0));
+      const tip = new THREE.Group();
+      tip.position.set(sx * 8 * P, 0, 0);
+      tip.add(this.box(6 * P, 5 * P, 0.5 * P, wingM, sx * 3 * P, -2 * P, 0));
+      w.add(tip);
+      wings.push(w);
+    }
+    g.add(...wings);
+    return done({ legs: [], head, body, wings, legLen: 4 * P });
+  }
+
 
   private phantom(g: THREE.Group, mats: THREE.MeshLambertMaterial[], done: Done): Built {
     const bodyM = this.mat(this.skin('phantom', '#4a5a7a', '#3c4a68'), mats);
