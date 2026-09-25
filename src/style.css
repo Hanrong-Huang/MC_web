@@ -768,6 +768,7 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   padding-right: 2px;
 }
 .creative-hotrow { display: flex; align-items: center; gap: 10px; }
+.trash-slot { order: 2; }
 .trash-slot > canvas { width: 24px; height: 18px; }
 .armor-col.horizontal { flex-direction: row; }
 
@@ -1010,11 +1011,11 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   pointer-events: none;
 }
 .minimap.hidden { display: none !important; }
-.minimap canvas { width: 104px; height: 104px; image-rendering: pixelated; display: block; }
+.minimap canvas { width: 96px; height: 96px; image-rendering: pixelated; display: block; }
 .compass-readout, .clock-readout {
   color: #e8e8e8; font-family: inherit; font-size: 11px;
   text-shadow: 1px 1px #000; margin-top: 3px;
-  width: 104px; text-align: center; white-space: nowrap;
+  width: 96px; text-align: center; white-space: nowrap;
   display: none;
   letter-spacing: 0.5px;
 }

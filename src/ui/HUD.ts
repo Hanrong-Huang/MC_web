@@ -1438,7 +1438,21 @@ export class HUD {
     this.moveTooltip(x, y);
   }
 
-  hideTooltip(): void { this.tooltipEl.classList.add('hidden'); }
+  hideTooltip(): void {
+    this.tooltipEl.classList.add('hidden');
+    if (this.touchTipTimer) { clearTimeout(this.touchTipTimer); this.touchTipTimer = null; }
+  }
+
+  private touchTipTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Brief tooltip for a tapped stack on touch screens (placed above the finger). */
+  private flashTouchTooltip(item: SlotData, x: number, y: number): void {
+    this.showTooltip(item, x, y);
+    const r = this.tooltipEl.getBoundingClientRect();
+    this.tooltipEl.style.left = `${Math.max(4, Math.min(window.innerWidth - r.width - 4, x - r.width / 2))}px`;
+    this.tooltipEl.style.top = `${Math.max(4, y - r.height - 36)}px`;
+    this.touchTipTimer = setTimeout(() => { this.touchTipTimer = null; this.hideTooltip(); }, 1400);
+  }
 
   private moveTooltip(x: number, y: number): void {
     // keep the box on screen: flip to the left/up near the right/bottom edges
@@ -1642,6 +1656,8 @@ export class HUD {
         touchOx = e.clientX;
         touchOy = e.clientY;
         s.classList.add('pressing');
+        // touch has no hover: flash the tooltip above the finger instead
+        if (item) this.flashTouchTooltip(item, e.clientX, e.clientY);
         pressTimer = setTimeout(() => {
           pressTimer = null;
           longFired = true;
@@ -1939,7 +1955,7 @@ export class HUD {
     const view = this.view;
     const inv = this.inv;
     this.viewMode = mode;
-    this.hideTooltip();
+    if (!this.touchTipTimer) this.hideTooltip(); // a tapped stack's tooltip outlives the re-render
     this.hoverSlot = null;
     const scroll = (this.containerEl.querySelector('.main-panel') as HTMLElement | null)?.scrollTop ?? 0;
     const bookScroll = (this.containerEl.querySelector('.book-panel .recipe-grid') as HTMLElement | null)?.scrollTop ?? 0;
@@ -2269,9 +2285,9 @@ export class HUD {
         for (let i = 9; i < 36; i++) playerSlot(mainGrid, i);
       }
       // hotbar row + the destroy-item slot (vanilla bottom-right trash)
+      // (trash comes first in the DOM, CSS order puts it on the right, so the
+      // hotbar stays the panel's last nine slots like every other screen)
       const hotRow = el('div', 'creative-hotrow', panel);
-      const hotGrid = this.grid(hotRow, 9, 'hotbar-grid');
-      for (let i = 0; i < 9; i++) playerSlot(hotGrid, i);
       const trash = this.slotEl(hotRow, null, () => {
         if (this.cursor) this.audio.play('click');
         this.cursor = null;
@@ -2280,6 +2296,8 @@ export class HUD {
       trash.title = 'Destroy Item';
       trash.setAttribute('aria-label', 'Destroy item');
       trash.appendChild(scaled(GUI_ICONS.trash(), 2));
+      const hotGrid = this.grid(hotRow, 9, 'hotbar-grid');
+      for (let i = 0; i < 9; i++) playerSlot(hotGrid, i);
       this.renderCursor();
       return;
     }
