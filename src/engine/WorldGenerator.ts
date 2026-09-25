@@ -37,6 +37,11 @@ export interface GenStateSink {
 // tree and slope lookups hit neighbouring columns many times per chunk.
 const CACHE_N = 256 * 256;
 
+/** Blocks the vegetation pass writes above ground (cleared around structures). */
+const TREE_BLOCKS = new Set<number>([
+  B.LOG, B.BIRCH_LOG, B.SPRUCE_LOG, B.JUNGLE_LOG, B.LEAVES, B.BIRCH_LEAVES, B.SPRUCE_LEAVES, B.JUNGLE_LEAVES,
+]);
+
 // --- structure layout ------------------------------------------------------
 const VILLAGE_CELL = 176;
 /** unit steps for direction/side index 0=-z, 1=-x, 2=+z, 3=+x (door/bed facing codes) */
@@ -364,7 +369,7 @@ export class WorldGenerator {
     }
     const beach = h <= SEA_LEVEL + 2 && slope <= 2 && b !== SWAMP && peak < 0.3 && pat > -0.35;
     if (beach) {
-      if (pat > 0.5) { this.sTop = B.GRAVEL; this.sFill = B.GRAVEL; this.sDepth = 3; return; }
+      if (pat > 0.62) { this.sTop = B.GRAVEL; this.sFill = B.GRAVEL; this.sDepth = 3; return; }
       this.sTop = B.SAND; this.sFill = B.SAND; this.sUnder = B.SANDSTONE; this.sUnderDepth = 2;
       return;
     }
@@ -385,6 +390,12 @@ export class WorldGenerator {
       return;
     }
     this.sTop = B.GRASS; this.sFill = B.DIRT;
+    // bare rock outcrops breaking through upland turf
+    if (h > SEA_LEVEL + 12 && pat > 0.6 && b !== SWAMP && b !== JUNGLE) {
+      this.sTop = r < 0.2 ? B.COBBLE : r < 0.3 ? B.GRAVEL : B.STONE;
+      this.sFill = B.STONE;
+      return;
+    }
     if (b === TAIGA && pat > 0.55 && slope <= 1) this.sTop = B.DIRT; // bare needle-litter patches
     if (b === SWAMP && h <= SEA_LEVEL && pat < -0.2) this.sTop = B.DIRT; // mud flats at the waterline
     // highland soil is a thin skin: where a step face is exposed, show rock
@@ -1512,6 +1523,21 @@ export class WorldGenerator {
     this.villageSpawns.push({ x, y, z });
   }
 
+  /** Strip tree blocks (logs, leaves, jungle understory) from a box around a
+   *  structure so crowns don't grow through its walls. */
+  private clearTrees(chunk: Chunk, x0: number, z0: number, x1: number, z1: number, fromY: number): void {
+    const bx = chunk.cx * CX, bz = chunk.cz * CZ;
+    const ax = Math.max(x0, bx), az = Math.max(z0, bz), ex = Math.min(x1, bx + CX - 1), ez = Math.min(z1, bz + CZ - 1);
+    for (let wz = az; wz <= ez; wz++) {
+      for (let wx = ax; wx <= ex; wx++) {
+        for (let y = Math.max(1, fromY); y < Math.min(CY, fromY + 34); y++) {
+          const id = chunk.get(wx - bx, y, wz - bz);
+          if (TREE_BLOCKS.has(id)) chunk.setRaw(wx - bx, y, wz - bz, B.AIR);
+        }
+      }
+    }
+  }
+
   /** Roll and draw the structures anchored in origin chunk (scx, scz). */
   private structuresFrom(chunk: Chunk, scx: number, scz: number): void {
     const S = this.seed;
@@ -1528,6 +1554,7 @@ export class WorldGenerator {
       if (lo > SEA_LEVEL && hi - lo <= 4 && hi <= SEA_LEVEL + 34 && b !== SWAMP && b !== MOUNTAINS &&
         !this.inVillage(ox, oz, 12)) {
         const st = b === DESERT ? STYLE_DESERT : b === TAIGA || b === SNOW ? STYLE_SPRUCE : STYLE_OAK;
+        this.clearTrees(chunk, ox - 2, oz - 2, ox + sx + 1, oz + sz + 1, lo);
         this.buildHouse(chunk, { kind: 'house', x0: ox, z0: oz, sx, sz, y: Math.ceil((lo + hi) / 2), side, v: roll(0xbef1) }, st);
       }
     }
@@ -1559,6 +1586,7 @@ export class WorldGenerator {
       const b = this.biomeIdx(ox + 3, oz + 2);
       if ((b === PLAINS || b === FOREST || b === TAIGA || b === JUNGLE) && oy > SEA_LEVEL && oy <= 96 &&
         !this.inVillage(ox, oz, 10)) {
+        this.clearTrees(chunk, ox - 1, oz - 1, ox + 9, oz + 8, oy - 3);
         this.placeRuin(chunk, ox, oy, oz);
       }
     }
@@ -1602,6 +1630,7 @@ export class WorldGenerator {
       const b = this.biomeIdx(ox + 3, oz + 3);
       if ((b === PLAINS || b === FOREST || b === TAIGA || b === DESERT || b === SNOW) && lo > SEA_LEVEL &&
         hi - lo <= 5 && hi <= 100 && !this.inVillage(ox, oz, 12)) {
+        this.clearTrees(chunk, ox - 3, oz - 3, ox + 9, oz + 9, lo);
         this.placeWatchtower(chunk, ox, Math.round((lo + hi) / 2), oz, b === DESERT);
       }
     }
@@ -1612,6 +1641,7 @@ export class WorldGenerator {
       const b = this.biomeIdx(ox + 6, oz + 6);
       if ((b === MOUNTAINS || b === PLAINS || b === TAIGA || b === SNOW) && lo > SEA_LEVEL + 3 && hi <= 112 &&
         hi - lo <= 7 && !this.inVillage(ox, oz, 16)) {
+        this.clearTrees(chunk, ox - 3, oz - 3, ox + 15, oz + 15, lo);
         this.placeKeep(chunk, ox, Math.round((lo + hi) / 2) + 1, oz);
       }
     }
@@ -1630,6 +1660,7 @@ export class WorldGenerator {
       const ox = at(0x9072, 8, scx * CX + 4), oz = at(0x9073, 8, scz * CZ + 4);
       const [lo, hi] = this.groundRange(ox - 1, oz - 1, 6, 3);
       if (lo > SEA_LEVEL && hi - lo <= 3 && hi <= 110 && !this.inVillage(ox, oz, 10)) {
+        this.clearTrees(chunk, ox - 5, oz - 5, ox + 6, oz + 6, lo - 2);
         this.placeRuinedPortal(chunk, ox, lo, oz, roll(0x9074) < 0.5);
       }
     }
@@ -1647,6 +1678,7 @@ export class WorldGenerator {
       const ox = at(0x1e3c, 6, scx * CX + 2), oz = at(0x1e3d, 6, scz * CZ + 2);
       const [lo, hi] = this.groundRange(ox, oz, 9, 11);
       if (this.biomeIdx(ox + 4, oz + 5) === JUNGLE && lo > SEA_LEVEL && hi - lo <= 6) {
+        this.clearTrees(chunk, ox - 3, oz - 3, ox + 11, oz + 13, lo);
         this.placeJungleTemple(chunk, ox, Math.round((lo + hi) / 2), oz);
       }
     }
