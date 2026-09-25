@@ -191,6 +191,8 @@ export class Entity {
   kbZ = 0;
   /** ticks toward the next point of fire damage */
   burnTick = 0;
+  /** contact shadow (stays on the ground under a jumping/falling mob) */
+  shadow: THREE.Mesh | null = null;
   /** mesh handed to the death-topple animation; don't dispose on removal */
   corpse = false;
 
@@ -270,7 +272,10 @@ export class EntityManager {
     mesh.position.set(x, y, z);
     mesh.rotation.y = e.yaw;
     // soft contact shadow under grounded mobs (flyers get none)
-    if (kind !== 'phantom' && kind !== 'emberghast') mesh.add(this.makeShadow(stats.box.w));
+    if (kind !== 'phantom' && kind !== 'emberghast') {
+      e.shadow = this.makeShadow(stats.box.w);
+      mesh.add(e.shadow);
+    }
     this.entities.push(e);
     this.scene.add(mesh);
     return e;
@@ -1337,6 +1342,19 @@ export class EntityManager {
     const lx = e.kbX * c - e.kbZ * s, lz = e.kbX * s + e.kbZ * c;
     m.rotation.x = lz * k;
     m.rotation.z = -lx * k;
+    // airborne: the shadow stays on the ground below and fades with height
+    const sh = e.shadow;
+    if (sh) {
+      let drop = 0;
+      if (!e.onGround) {
+        const x = Math.floor(e.pos.x), z = Math.floor(e.pos.z);
+        let y = Math.floor(e.pos.y);
+        while (drop < 6 && !this.world.isSolidAt(x, y - 1, z)) { y--; drop++; }
+        drop = Math.min(6, e.pos.y - y);
+      }
+      sh.position.y = 0.02 - drop / m.scale.y;
+      (sh.material as THREE.MeshBasicMaterial).opacity = 0.5 * Math.max(0, 1 - drop / 6);
+    }
   }
 
   /** Would a wandering mob stepping along (dx,dz) walk off a >3-block drop, or
@@ -1475,7 +1493,9 @@ export class EntityManager {
       }
       const aggro = e.state === 'chase' || e.state === 'fuse';
       const tempted = !aggro && this.isLureFood(e.kind as MobKind, p.heldId()) && distH < 10;
-      const watch = !p.dead && !e.ridden && (aggro || tempted
+      // villagers and pets always meet the eye of a player standing close by
+      const close = distH < 4 && (e.kind === 'villager' || e.tamed);
+      const watch = !p.dead && !e.ridden && (aggro || tempted || close
         || (e.watching && distH < 8 && e.state !== 'flee' && e.grazeT <= 0));
       let tx = e.lookPitch, ty = e.lookYaw, tz = 0;
       if (hSpeed > 0.5 && !watch) { tx = 0; ty = 0; } // walking: eyes on the path
@@ -1902,6 +1922,11 @@ export class EntityManager {
           e.state = 'wander';
           e.stateTime = 3;
         }
+        // creepers are terrified of cats (vanilla): bolt away from one within 6
+        if (e.kind === 'creeper') {
+          const cat = this.nearestOf(e, 'cat', 6);
+          if (cat) this.fleeFrom(e, cat);
+        }
 
         // skeleton archery (at its pet quarry if it has one, else the player)
         if (e.kind === 'skeleton' && e.state === 'chase') {
@@ -1943,6 +1968,12 @@ export class EntityManager {
           this.audio.play('hit');
           if (e.hp <= 0) { this.killMob(e); continue; }
         }
+      }
+
+      // villagers scatter from zombies
+      if (e.kind === 'villager') {
+        const z = this.nearestOf(e, 'zombie', 8);
+        if (z) this.fleeFrom(e, z);
       }
 
       // grazing: sheep put their head down in the turf for two seconds, then the
@@ -2011,6 +2042,25 @@ export class EntityManager {
     if (!n) return null;
     const cx = sx / n, cz = sz / n;
     return Math.hypot(cx - e.pos.x, cz - e.pos.z) > 5 ? { x: cx, z: cz } : null;
+  }
+
+  /** Nearest wild mob of `kind` within `r` blocks of `e` (pets don't count). */
+  private nearestOf(e: Entity, kind: MobKind, r: number): Entity | null {
+    let best: Entity | null = null, bestD = r * r;
+    for (const o of this.entities) {
+      if (o === e || o.kind !== kind || o.dead || (o.tamed && kind !== 'cat')) continue;
+      const d = (o.pos.x - e.pos.x) ** 2 + (o.pos.z - e.pos.z) ** 2;
+      if (d < bestD) { bestD = d; best = o; }
+    }
+    return best;
+  }
+
+  /** Run directly away from `threat` for a couple of seconds. */
+  private fleeFrom(e: Entity, threat: Entity): void {
+    e.state = 'flee';
+    e.stateTime = 1.5;
+    e.grazeT = 0;
+    e.yaw = Math.atan2(-(e.pos.x - threat.pos.x), -(e.pos.z - threat.pos.z));
   }
 
   private nearestAdult(e: Entity): Entity | null {
