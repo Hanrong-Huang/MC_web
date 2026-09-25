@@ -1204,8 +1204,14 @@ export class HUD {
     this.mcSlider(grid, 0, 100, 5, () => Math.round(this.audio.volume * 100),
       (v) => `Master Volume: ${v === 0 ? 'OFF' : `${v}%`}`,
       (v) => this.audio.setVolume(v / 100), 'span2');
+    // per-bus loudness (relative to master), each paired with its on/off toggle
+    const pct = (label: string) => (v: number): string => `${label}: ${v === 0 ? 'OFF' : `${v}%`}`;
+    this.mcSlider(grid, 0, 100, 5, () => Math.round(this.audio.musicVolume * 100),
+      pct('Music Volume'), (v) => this.audio.setMusicVolume(v / 100));
     const musicBtn = this.pauseButton(grid, '', () => this.pauseH?.onToggleMusic());
     this.pauseSyncers.push(() => { musicBtn.textContent = `Music: ${this.pauseH?.musicOn() ? 'ON' : 'OFF'}`; });
+    this.mcSlider(grid, 0, 100, 5, () => Math.round(this.audio.soundVolume * 100),
+      pct('Sounds Volume'), (v) => this.audio.setSoundVolume(v / 100));
     const soundBtn = this.pauseButton(grid, '', () => this.pauseH?.onToggleSound());
     this.pauseSyncers.push(() => { soundBtn.textContent = `Sounds: ${this.pauseH?.soundOn() ? 'ON' : 'OFF'}`; });
 

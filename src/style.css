@@ -943,7 +943,7 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 .recipe-badge { position: absolute; left: 1px; top: 1px; line-height: 0; z-index: 2; }
 .recipe-badge canvas { width: 9px; height: 7px; }
 .recipe-detail {
-  height: 118px; overflow: hidden;
+  height: 132px; overflow: hidden;
   padding: 6px;
   background: #b0b0b0;
   border: 2px solid; border-color: #373737 #fff #fff #373737;
