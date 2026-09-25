@@ -18,27 +18,83 @@ export interface WeatherHooks {
 }
 
 const MAX_DROPS = 1400;
+const SPAN = 70;
+
+/** Ground height (top of the highest light-blocking block) for columns
+ *  around the camera, refreshed as the camera moves, so drops stop at roofs,
+ *  tree canopies and overhangs instead of falling through them indoors. */
+class RoofGrid {
+  private h = new Int16Array(SPAN * SPAN);
+  private ox = 1e9;
+  private oz = 1e9;
+  private age = 99;
+
+  refresh(world: World, cx: number, cz: number, dt: number): void {
+    this.age += dt;
+    const nx = Math.floor(cx) - SPAN / 2, nz = Math.floor(cz) - SPAN / 2;
+    if (this.age < 1 && Math.abs(nx - this.ox) < 4 && Math.abs(nz - this.oz) < 4) return;
+    this.age = 0; this.ox = nx; this.oz = nz;
+    for (let z = 0; z < SPAN; z++) {
+      for (let x = 0; x < SPAN; x++) {
+        const wx = nx + x, wz = nz + z;
+        const c = world.getChunk(Math.floor(wx / 16), Math.floor(wz / 16));
+        this.h[z * SPAN + x] = c && c.ready ? c.heightmap[(wz & 15) * 16 + (wx & 15)] : -999;
+      }
+    }
+  }
+
+  /** Height a drop at (x,z) lands on (-999 when unknown). */
+  at(x: number, z: number): number {
+    const gx = Math.floor(x) - this.ox, gz = Math.floor(z) - this.oz;
+    if (gx < 0 || gz < 0 || gx >= SPAN || gz >= SPAN) return -999;
+    return this.h[gz * SPAN + gx];
+  }
+}
+
+/** Soft round flake sprite for snow. */
+function flakeTexture(): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = 16; c.height = 16;
+  const ctx = c.getContext('2d')!;
+  const g = ctx.createRadialGradient(8, 8, 0, 8, 8, 8);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.45, 'rgba(255,255,255,0.85)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 16, 16);
+  return new THREE.CanvasTexture(c);
+}
 
 class DropField {
-  points: THREE.Points;
+  points: THREE.Object3D;
   protected pos: Float32Array;
   protected vel: Float32Array;
+  /** rain: 2 vertices per drop (a short streak along its velocity) */
+  protected verts: Float32Array;
   count = 0;
   protected geo: THREE.BufferGeometry;
-  protected material: THREE.PointsMaterial;
+  protected material: THREE.PointsMaterial | THREE.LineBasicMaterial;
   protected fallSpeed: number;
   protected drift: number;
+  private streak: boolean;
 
-  constructor(color: number, size: number, fallSpeed: number, drift: number, opacity: number) {
+  constructor(color: number, size: number, fallSpeed: number, drift: number, opacity: number, streak: boolean) {
+    this.streak = streak;
     this.pos = new Float32Array(MAX_DROPS * 3);
     this.vel = new Float32Array(MAX_DROPS * 3);
+    this.verts = streak ? new Float32Array(MAX_DROPS * 6) : this.pos;
     this.geo = new THREE.BufferGeometry();
-    this.geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
-    this.material = new THREE.PointsMaterial({
-      color, size, transparent: true, opacity, depthWrite: false,
-      fog: false, sizeAttenuation: true,
-    });
-    this.points = new THREE.Points(this.geo, this.material);
+    this.geo.setAttribute('position', new THREE.BufferAttribute(this.verts, 3));
+    if (streak) {
+      this.material = new THREE.LineBasicMaterial({ color, transparent: true, opacity, depthWrite: false, fog: false });
+      this.points = new THREE.LineSegments(this.geo, this.material);
+    } else {
+      this.material = new THREE.PointsMaterial({
+        color, size, transparent: true, opacity, depthWrite: false,
+        fog: false, sizeAttenuation: true, map: flakeTexture(), alphaTest: 0.05,
+      });
+      this.points = new THREE.Points(this.geo, this.material);
+    }
     this.points.frustumCulled = false;
     this.fallSpeed = fallSpeed;
     this.drift = drift;
@@ -56,22 +112,31 @@ class DropField {
       this.vel[i * 3 + 2] = (Math.random() - 0.5) * this.drift;
     }
     this.geo.attributes.position.needsUpdate = true;
-    this.geo.setDrawRange(0, n);
+    this.geo.setDrawRange(0, this.streak ? n * 2 : n);
   }
 
-  update(dt: number, cx: number, cy: number, cz: number, span: number): void {
+  update(dt: number, cx: number, cy: number, cz: number, span: number, roof: RoofGrid, t: number): void {
     const half = span / 2;
+    const P = this.pos, V = this.vel;
     for (let i = 0; i < this.count; i++) {
       const ix = i * 3;
-      this.pos[ix] += this.vel[ix] * dt;
-      this.pos[ix + 1] += this.vel[ix + 1] * dt;
-      this.pos[ix + 2] += this.vel[ix + 2] * dt;
-      // recycle when below the camera feet or out of the box
-      if (this.pos[ix + 1] < cy - 4 || Math.abs(this.pos[ix] - cx) > half ||
-        Math.abs(this.pos[ix + 2] - cz) > half) {
-        this.pos[ix] = cx + (Math.random() - 0.5) * span;
-        this.pos[ix + 1] = cy + 18 + Math.random() * 6;
-        this.pos[ix + 2] = cz + (Math.random() - 0.5) * span;
+      // snow flutters side to side as it falls
+      const sway = this.streak ? 0 : Math.sin(t * 1.3 + i * 0.7) * 0.6;
+      P[ix] += (V[ix] + sway) * dt;
+      P[ix + 1] += V[ix + 1] * dt;
+      P[ix + 2] += V[ix + 2] * dt;
+      // recycle when below the camera feet, under a roof, or out of the box
+      if (P[ix + 1] < cy - 4 || P[ix + 1] < roof.at(P[ix], P[ix + 2]) ||
+        Math.abs(P[ix] - cx) > half || Math.abs(P[ix + 2] - cz) > half) {
+        P[ix] = cx + (Math.random() - 0.5) * span;
+        P[ix + 1] = cy + 18 + Math.random() * 6;
+        P[ix + 2] = cz + (Math.random() - 0.5) * span;
+      }
+      if (this.streak) {
+        const o = i * 6, k = 0.045; // streak length ~ velocity * 45 ms
+        this.verts[o] = P[ix]; this.verts[o + 1] = P[ix + 1]; this.verts[o + 2] = P[ix + 2];
+        this.verts[o + 3] = P[ix] - V[ix] * k; this.verts[o + 4] = P[ix + 1] - V[ix + 1] * k;
+        this.verts[o + 5] = P[ix + 2] - V[ix + 2] * k;
       }
     }
     this.geo.attributes.position.needsUpdate = true;
@@ -79,7 +144,12 @@ class DropField {
 
   setVisible(v: boolean): void { this.points.visible = v; }
   setOpacity(o: number): void { this.material.opacity = o; }
-  dispose(): void { this.geo.dispose(); this.material.dispose(); }
+  dispose(): void {
+    this.geo.dispose();
+    const m = this.material as THREE.PointsMaterial;
+    if (m.map) m.map.dispose();
+    this.material.dispose();
+  }
 }
 
 export class Weather {
@@ -93,6 +163,8 @@ export class Weather {
   /** seconds until the next strike attempt (only during thunder) */
   private nextStrike = 6 + Math.random() * 8;
   private rain: DropField;
+  private roof = new RoofGrid();
+  private t = 0;
   private snow: DropField;
   private scene: THREE.Scene;
   private world: World;
@@ -107,8 +179,8 @@ export class Weather {
     this.world = world;
     this.hooks = hooks;
     // rain: small streaks; snow: slower, drifting dots
-    this.rain = new DropField(0x9fb8d8, 0.16, 22, 1.4, 0.55);
-    this.snow = new DropField(0xffffff, 0.16, 4.5, 0.9, 0.85);
+    this.rain = new DropField(0xa9bfdc, 0, 22, 1.4, 0.5, true);
+    this.snow = new DropField(0xffffff, 0.12, 3.2, 0.9, 0.9, false);
     this.rain.setVisible(false);
     this.snow.setVisible(false);
     scene.add(this.rain.points);
@@ -151,15 +223,17 @@ export class Weather {
     if (active) {
       const cold = this.hooks.isColdAt(camX, camZ);
       const total = Math.floor(MAX_DROPS * this.intensity);
-      const span = 70;
+      const span = SPAN;
+      this.t += dt;
+      this.roof.refresh(this.world, camX, camZ, dt);
       const rainN = cold ? 0 : total;
       const snowN = cold ? total : 0;
       if (this.rain.count !== rainN) this.rain.seed(rainN, camX, camY + 6, camZ, span);
       if (this.snow.count !== snowN) this.snow.seed(snowN, camX, camY + 6, camZ, span);
-      this.rain.setOpacity(0.55 * this.intensity);
-      this.snow.setOpacity(0.85 * this.intensity);
-      if (rainN > 0) this.rain.update(dt, camX, camY, camZ, span); else this.rain.setVisible(false);
-      if (snowN > 0) this.snow.update(dt, camX, camY, camZ, span); else this.snow.setVisible(false);
+      this.rain.setOpacity(0.5 * this.intensity);
+      this.snow.setOpacity(0.9 * this.intensity);
+      if (rainN > 0) this.rain.update(dt, camX, camY, camZ, span, this.roof, this.t); else this.rain.setVisible(false);
+      if (snowN > 0) this.snow.update(dt, camX, camY, camZ, span, this.roof, this.t); else this.snow.setVisible(false);
       this.rain.setVisible(rainN > 0);
       this.snow.setVisible(snowN > 0);
     } else {
