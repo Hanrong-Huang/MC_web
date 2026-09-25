@@ -329,7 +329,7 @@ export class Player {
           if (below !== B.AIR && hasDef(below)) {
             this.deps.entities.spawnBlockParticles(
               Math.floor(this.pos.x), Math.floor(this.pos.y), Math.floor(this.pos.z), below, 6);
-            this.deps.audio.step(def(below).sound);
+            this.deps.audio.step(def(below).sound, below);
           }
         }
         const dmg = Math.floor(this.fallDist - 3);
@@ -349,7 +349,7 @@ export class Player {
       if (this.stepDist > 2.1) {
         this.stepDist = 0;
         const below = world.getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y - 0.5), Math.floor(this.pos.z));
-        if (below !== B.AIR && hasDef(below)) this.deps.audio.step(def(below).sound);
+        if (below !== B.AIR && hasDef(below)) this.deps.audio.step(def(below).sound, below);
       }
       this.addExhaustion(Math.hypot(this.vel.x, this.vel.z) * dt * (this.sprinting ? 0.02 : 0.002));
     }
@@ -591,7 +591,7 @@ export class Player {
     if (this.swingRepeat <= 0) {
       this.swingRepeat = 0.26;
       renderer.triggerSwing();
-      audio.dig(def(t.id).sound, 0.25);
+      audio.dig(def(t.id).sound, 0.25, 1, t.id);
       this.deps.entities.spawnHitParticles(t.x, t.y, t.z, t.nx, t.ny, t.nz, t.id);
     }
 
@@ -659,7 +659,7 @@ export class Player {
     }
 
     world.setBlock(x, y, z, B.AIR);
-    audio.dig(def(id).sound, 1);
+    audio.dig(def(id).sound, 1, 1, id);
     entities.spawnBlockParticles(x, y, z, id, 12);
     this.deps.onBreak(id);
 
@@ -771,7 +771,7 @@ export class Player {
     if (this.mode !== 'creative') this.inventory.slots[sel] = prev ?? null;
     this.placeCooldown = 0.35;
     this.deps.renderer.triggerSwing();
-    this.deps.audio.play('level');
+    this.deps.audio.play('equip');
     this.inventory.onChange();
   }
 
@@ -1390,7 +1390,7 @@ export class Player {
       }
       this.placeCooldown = 0.22;
       this.deps.renderer.triggerSwing();
-      audio.dig(heldDef.sound, 0.8);
+      audio.dig(heldDef.sound, 0.8, 1, placeId);
       if (this.mode === 'survival') this.inventory.consumeSelected();
       else this.inventory.onChange();
     }
