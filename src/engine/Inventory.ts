@@ -1,7 +1,7 @@
 // Inventory slots, shaped crafting recipes (2x2 and 3x3), furnace smelting,
 // and chest storage.
 
-import { B, B2, I, def, hasDef } from './Blocks';
+import { B, B2, I, def, hasDef, SLAB_KINDS, WOOL_COLORS } from './Blocks';
 import { MaybeSlot, FurnaceSave, ChestSave } from './Persistence';
 
 export type Slot = MaybeSlot;
@@ -101,6 +101,7 @@ export class Inventory {
           id: s.id, count: s.count,
           ...(s.dur !== undefined ? { dur: s.dur } : {}),
           ...(s.mob !== undefined ? { mob: s.mob } : {}),
+          ...(s.ench ? { ench: { ...s.ench } } : {}),
         };
       }
     }
@@ -108,7 +109,9 @@ export class Inventory {
     for (let i = 0; i < 4 && data.armor && i < data.armor.length; i++) {
       const s = data.armor[i];
       if (s && hasDef(s.id) && def(s.id).armor) {
-        this.armor[i] = { id: s.id, count: 1, ...(s.dur !== undefined ? { dur: s.dur } : {}) };
+        this.armor[i] = {
+          id: s.id, count: 1, ...(s.dur !== undefined ? { dur: s.dur } : {}), ...(s.ench ? { ench: { ...s.ench } } : {}),
+        };
       }
     }
     this.selected = Math.max(0, Math.min(8, data.selected | 0));
@@ -172,6 +175,80 @@ function armorRecipes(mat: number, helmet: number, chest: number, legs: number, 
     { shape: [[M, M, M], [M, 0, M], [M, 0, M]], out: legs, n: 1 },
     { shape: [[M, 0, M], [M, 0, M]], out: boots, n: 1 },
   ];
+}
+
+// --- building + decoration pass ----------------------------------------------
+const FG = B.GLASS, SU = I.SUGAR, WH = I.WHEAT, PA = I.PAPER, WB = I.WATER_BOTTLE;
+const DECOR_RECIPES: Recipe[] = [
+  // masonry
+  { shape: [[I.CLAY_BALL, I.CLAY_BALL], [I.CLAY_BALL, I.CLAY_BALL]], out: B.CLAY, n: 1 },
+  { shape: [[I.BRICK, I.BRICK], [I.BRICK, I.BRICK]], out: B.BRICKS, n: 1 },
+  { shape: [[C, B.LEAVES]], out: B.MOSSY_COBBLE, n: 1 },
+  { shape: [[B.STONE_BRICKS, B.LEAVES]], out: B.MOSSY_STONE_BRICKS, n: 1 },
+  { shape: [[B.STONE_BRICK_SLAB], [B.STONE_BRICK_SLAB]], out: B.CHISELED_STONE_BRICKS, n: 1 },
+  { shape: [[I.SNOWBALL, I.SNOWBALL], [I.SNOWBALL, I.SNOWBALL]], out: B.SNOW_BLOCK, n: 1 },
+  { shape: [[B.ICE, B.ICE, B.ICE], [B.ICE, B.ICE, B.ICE], [B.ICE, B.ICE, B.ICE]], out: B.PACKED_ICE, n: 1 },
+  // slabs (3 -> 6) and stairs (6 -> 4)
+  ...SLAB_KINDS.flatMap(([slab, stairs, full]): Recipe[] => [
+    { shape: [[full, full, full]], out: slab, n: 6 },
+    ...(stairs ? [{ shape: [[full, 0, 0], [full, full, 0], [full, full, full]], out: stairs, n: 4 }] : []),
+  ]),
+  // fencing, glazing, lighting
+  { shape: [[P, S, P], [P, S, P]], out: B.OAK_FENCE, n: 3 },
+  { shape: [[S, P, S], [S, P, S]], out: B.FENCE_GATE, n: 1 },
+  { shape: [[FG, FG, FG], [FG, FG, FG]], out: B.GLASS_PANE, n: 16 },
+  { shape: [[0, FE, 0], [FE, B.TORCH, FE], [0, FE, 0]], out: B.LANTERN, n: 2 },
+  { shape: [[B.PUMPKIN], [B.TORCH]], out: B.JACK_O_LANTERN, n: 1 },
+  // workshop blocks
+  { shape: [[B.IRON_BLOCK, B.IRON_BLOCK, B.IRON_BLOCK], [0, FE, 0], [FE, FE, FE]], out: B.ANVIL, n: 1 },
+  { shape: [[0, I.BOOK, 0], [DI, B.OBSIDIAN, DI], [B.OBSIDIAN, B.OBSIDIAN, B.OBSIDIAN]], out: B.ENCHANTING_TABLE, n: 1 },
+  { shape: [[P, B.OAK_SLAB, P], [P, 0, P], [P, B.OAK_SLAB, P]], out: B.BARREL, n: 1 },
+  ...[B.LOG, B.BIRCH_LOG, B.SPRUCE_LOG, B.JUNGLE_LOG].map((log): Recipe =>
+    ({ shape: [[0, S, 0], [S, I.COAL, S], [log, log, log]], out: B.CAMPFIRE, n: 1 })),
+  { shape: [[I.BRICK, 0, I.BRICK], [0, I.BRICK, 0]], out: B.FLOWER_POT, n: 1 },
+  { shape: [[B.OAK_SLAB, 0, B.OAK_SLAB], [B.OAK_SLAB, 0, B.OAK_SLAB], [B.OAK_SLAB, B.OAK_SLAB, B.OAK_SLAB]], out: B.COMPOSTER, n: 1 },
+  // garden produce + kitchen
+  { shape: [[B.PUMPKIN]], out: I.PUMPKIN_SEEDS, n: 4 },
+  { shape: [[I.MELON_SLICE]], out: I.MELON_SEEDS, n: 1 },
+  { shape: [[I.MELON_SLICE, I.MELON_SLICE, I.MELON_SLICE], [I.MELON_SLICE, I.MELON_SLICE, I.MELON_SLICE], [I.MELON_SLICE, I.MELON_SLICE, I.MELON_SLICE]], out: B.MELON, n: 1 },
+  { shape: [[B.SUGAR_CANE]], out: I.SUGAR, n: 1 },
+  { shape: [[WH, SU, WH]], out: I.COOKIE, n: 8 },
+  { shape: [[B.PUMPKIN, SU, WH]], out: I.PUMPKIN_PIE, n: 1 },
+  { shape: [[I.MILK_BUCKET, I.MILK_BUCKET, I.MILK_BUCKET], [SU, I.APPLE, SU], [WH, WH, WH]], out: B.CAKE, n: 1 },
+  { shape: [[B.BROWN_MUSHROOM, B.RED_MUSHROOM], [BO, 0]], out: I.MUSHROOM_STEW, n: 1 },
+  { shape: [[0, AU, 0], [AU, I.MELON_SLICE, AU], [0, AU, 0]], out: I.GLISTERING_MELON, n: 1 },
+  // dyes + coloured wool
+  { shape: [[B.POPPY]], out: I.RED_DYE, n: 1 },
+  { shape: [[BE]], out: I.RED_DYE, n: 1 },
+  { shape: [[B.DANDELION]], out: I.YELLOW_DYE, n: 1 },
+  { shape: [[B.CORNFLOWER]], out: I.BLUE_DYE, n: 1 },
+  { shape: [[B.ALLIUM]], out: I.PURPLE_DYE, n: 1 },
+  { shape: [[I.COAL]], out: I.BLACK_DYE, n: 1 },
+  { shape: [[I.RED_DYE, I.YELLOW_DYE]], out: I.ORANGE_DYE, n: 2 },
+  { shape: [[I.RED_DYE, I.BLUE_DYE]], out: I.PURPLE_DYE, n: 2 },
+  { shape: [[I.BLUE_DYE, I.LIME_DYE]], out: I.CYAN_DYE, n: 2 },
+  ...WOOL_COLORS.map(([wool, dye]): Recipe => ({ shape: [[dye, W]], out: wool, n: 1 })),
+  // brewing-lite: a water bottle plus one ingredient
+  { shape: [[FG, 0, FG], [0, FG, 0]], out: I.GLASS_BOTTLE, n: 3 },
+  { shape: [[WB, I.GLISTERING_MELON]], out: I.POTION_HEALING, n: 1 },
+  { shape: [[WB, SU]], out: I.POTION_SWIFTNESS, n: 1 },
+  { shape: [[WB, I.GOLDEN_CARROT]], out: I.POTION_NIGHT_VISION, n: 1 },
+  { shape: [[WB, I.RAW_FISH]], out: I.POTION_WATER_BREATHING, n: 1 },
+  { shape: [[WB, B.MAGMA]], out: I.POTION_FIRE_RESISTANCE, n: 1 },
+  { shape: [[WB, I.QUARTZ]], out: I.POTION_STRENGTH, n: 1 },
+  { shape: [[WB, I.FEATHER]], out: I.POTION_LEAPING, n: 1 },
+  { shape: [[WB, AM]], out: I.POTION_REGENERATION, n: 1 },
+  // exploration
+  { shape: [[PA, PA, PA], [PA, I.COMPASS, PA], [PA, PA, PA]], out: I.MAP, n: 1 },
+  { shape: [[AM, AM, AM], [AM, I.COMPASS, AM], [AM, AM, AM]], out: I.RECOVERY_COMPASS, n: 1 },
+  { shape: [[LE, S, LE], [I.FEATHER, S, I.FEATHER], [I.FEATHER, 0, I.FEATHER]], out: I.GLIDER, n: 1 },
+  { shape: [[PA, G]], out: I.FIREWORK_ROCKET, n: 3 },
+  { shape: [[0, AM, 0], [AM, I.EMERALD, AM], [0, AM, 0]], out: I.WARP_PEARL, n: 2 },
+];
+
+/** Containers handed back when a recipe uses up their contents (milk -> bucket). */
+export function craftRemainders(out: number): { id: number; count: number }[] {
+  return out === B.CAKE ? [{ id: I.BUCKET, count: 3 }] : [];
 }
 
 const RECIPES: Recipe[] = [
@@ -269,6 +346,7 @@ const RECIPES: Recipe[] = [
   { shape: [[B.SUGAR_CANE, B.SUGAR_CANE, B.SUGAR_CANE]], out: I.PAPER, n: 3 },
   { shape: [[I.PAPER, I.PAPER], [I.PAPER, LE]], out: I.BOOK, n: 1 },
   { shape: [[P, P, P], [I.BOOK, I.BOOK, I.BOOK], [P, P, P]], out: B.BOOKSHELF, n: 1 },
+  ...DECOR_RECIPES,
 ];
 
 function mirror(shape: number[][]): number[][] {
@@ -346,6 +424,10 @@ const SMELT = new Map<number, number>([
   [I.POTATO, I.BAKED_POTATO],
   [B.NETHERRACK, I.NETHER_BRICK],
   [B.STONE, B.SMOOTH_STONE],
+  [I.CLAY_BALL, I.BRICK],
+  [B.CLAY, B.TERRACOTTA],
+  [B.STONE_BRICKS, B.CRACKED_STONE_BRICKS],
+  [B.CACTUS, I.LIME_DYE],
 ]);
 
 export function smeltResult(id: number): number | undefined { return SMELT.get(id); }

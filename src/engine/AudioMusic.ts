@@ -1,13 +1,17 @@
 // Generative score for the Web Audio engine: turns a seed + mood into a list
 // of timed notes (pure data — Audio.ts schedules them just ahead of the clock).
 // The aim is C418's calm Minecraft sound: sparse felt piano, wide pads, long
-// silences, small motifs that come back slightly changed.
+// silences, small motifs that come back changed — inverted, sequenced,
+// fragmented — over a long arc, with a palette (harp, flute, music box,
+// strings, cello…) and a key/tempo that follow the place you're in.
 
-export type MusicEnv = 'day' | 'night' | 'cave' | 'nether' | 'menu';
+export type MusicEnv = 'day' | 'night' | 'cave' | 'nether' | 'menu' | 'underwater' | 'creative';
 export type MusicBiomeKey =
-  'plains' | 'forest' | 'desert' | 'snow' | 'taiga' | 'swamp' | 'mountains' | 'jungle';
+  'plains' | 'forest' | 'desert' | 'snow' | 'taiga' | 'swamp' | 'mountains' | 'jungle'
+  | 'ocean' | 'beach' | 'village' | 'peak';
 
-export type Inst = 'piano' | 'epiano' | 'bell' | 'celesta' | 'pad' | 'bass' | 'drone';
+export type Inst = 'piano' | 'epiano' | 'bell' | 'celesta' | 'pad' | 'bass' | 'drone'
+  | 'harp' | 'musicbox' | 'flute' | 'ocarina' | 'strings' | 'cello' | 'tom';
 
 /** One scheduled note: time (s from piece start), instrument, MIDI pitch,
  *  velocity 0..1, hold time (s), optional stereo pan. */
@@ -16,11 +20,19 @@ export interface MNote { t: number; i: Inst; m: number; v: number; d: number; p?
 export interface Composition {
   name: string;
   notes: MNote[];
-  len: number;   // seconds until the last note starts ringing out
-  beat: number;  // seconds per beat (the delay line is synced to it)
+  len: number;     // seconds until the last note starts ringing out
+  beat: number;    // seconds per beat (the delay line is synced to it)
+  tonic: number;   // MIDI tonic (octave 3) — stingers + the combat layer play in key
+  minor: boolean;  // the piece's third is flat
 }
 
-type Style = 'hymn' | 'flow' | 'lullaby' | 'ambient' | 'title' | 'cave' | 'nether';
+export interface ComposeOpts {
+  /** it's raining: lean into the mellow, pedalled, slower pieces */
+  rain?: boolean;
+}
+
+type Style = 'hymn' | 'flow' | 'lullaby' | 'ambient' | 'title' | 'cave' | 'nether'
+  | 'pastoral' | 'waltz' | 'elegy' | 'tide' | 'deep';
 
 export const TITLE_SEED = 0x5eed;
 
@@ -51,6 +63,7 @@ const RH3 = [[2, 1, 3], [1, 1, 1, 3], [-1, 1, 1, 2, 1], [3, 2, 1], [1.5, 0.5, 1,
 const STEPS = [-1, 1, -1, 1, -2, 2, 0, 3, -3, 1, -1, 2];
 
 type Rng = () => number;
+interface Motif { rh: number[]; steps: number[]; start: number }
 
 /** Small fast seeded PRNG (mulberry32) so a seed always yields the same piece. */
 export function rng(seed: number): Rng {
@@ -76,69 +89,150 @@ function weighted<T>(r: Rng, opts: [T, number][]): T {
 
 export function mtof(m: number): number { return 440 * Math.pow(2, (m - 69) / 12); }
 
+// ---- motif development (every transform keeps the two-bar length) ------------
+
+/** the first bar's worth of a rhythm, trimmed to exactly one bar */
+function firstBar(m: Motif, meter: number): Motif {
+  const rh: number[] = [];
+  const steps: number[] = [];
+  let sum = 0;
+  for (let k = 0; k < m.rh.length && sum < meter; k++) {
+    const len = Math.min(Math.abs(m.rh[k]), meter - sum);
+    rh.push(m.rh[k] < 0 ? -len : len);
+    steps.push(m.steps[k]);
+    sum += len;
+  }
+  return { rh, steps, start: m.start };
+}
+const invert = (m: Motif): Motif => ({ ...m, steps: m.steps.map((s) => -s) });
+const sequence = (m: Motif, by: number): Motif => ({ ...m, start: m.start + by });
+/** the head of the motif, stated twice — the second time a step higher */
+function fragmentOf(m: Motif, meter: number): Motif {
+  const h = firstBar(m, meter);
+  return { rh: [...h.rh, ...h.rh], steps: [...h.steps, 1, ...h.steps.slice(1)], start: m.start };
+}
+/** the head of the motif at half speed */
+function augment(m: Motif, meter: number): Motif {
+  const h = firstBar(m, meter);
+  return { ...h, rh: h.rh.map((x) => x * 2) };
+}
+
 /** Compose one piece for the given mood. Deterministic for a given seed. */
-export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: number): Composition {
+export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: number, opts: ComposeOpts = {}): Composition {
   const r = rng(seed);
   const title = env === 'menu' && seed === TITLE_SEED;
+  const rain = !!opts.rain && (env === 'day' || env === 'night' || env === 'creative');
 
   // ---- style, mode and tempo from the environment -------------------------
   let style: Style;
   let mode: string;
-  let bpm: number;
   if (env === 'menu') {
-    style = title ? 'title' : weighted<Style>(r, [['title', 3], ['ambient', 2], ['lullaby', 2], ['hymn', 2]]);
+    style = title ? 'title' : weighted<Style>(r, [['title', 3], ['ambient', 2], ['lullaby', 2], ['hymn', 2], ['pastoral', 1]]);
     mode = title ? 'lydian' : weighted(r, [['ionian', 3], ['lydian', 2], ['dorian', 1], ['aeolian', 1]]);
   } else if (env === 'nether') {
     style = 'nether';
     mode = weighted(r, [['phrygian', 2], ['phrygianDom', 2], ['aeolian', 1]]);
   } else if (env === 'cave') {
-    style = weighted<Style>(r, [['cave', 4], ['ambient', 1]]);
+    style = weighted<Style>(r, [['cave', 5], ['ambient', 1], ['elegy', 1]]);
     mode = weighted(r, [['aeolian', 2], ['phrygian', 2], ['dorian', 1]]);
+  } else if (env === 'underwater') {
+    style = 'deep';
+    mode = weighted(r, [['lydian', 2], ['dorian', 1], ['ionian', 1]]);
+  } else if (env === 'creative') {
+    style = weighted<Style>(r, [['flow', 3], ['pastoral', 3], ['waltz', 2], ['tide', 2], ['hymn', 2], ['ambient', 1]]);
+    mode = weighted(r, [['lydian', 3], ['ionian', 3], ['mixolydian', 1]]);
   } else if (env === 'night') {
-    style = weighted<Style>(r, [['ambient', 4], ['hymn', 3], ['flow', 2], ['lullaby', 1]]);
+    style = weighted<Style>(r, [['ambient', 4], ['elegy', 3], ['hymn', 2], ['flow', 2], ['lullaby', 1]]);
     mode = weighted(r, [['aeolian', 3], ['dorian', 3], ['ionian', 1]]);
   } else {
-    style = weighted<Style>(r, [['hymn', 3], ['flow', 3], ['lullaby', 2], ['ambient', 2]]);
+    style = weighted<Style>(r, [['hymn', 3], ['flow', 3], ['pastoral', 3], ['lullaby', 2], ['ambient', 2], ['waltz', 1]]);
     mode = weighted(r, [['ionian', 4], ['lydian', 2], ['mixolydian', 1]]);
   }
-  // biome colour on the surface: key family + a little tempo push/pull
+
+  // ---- palette: who plays what ---------------------------------------------------
   let tempoMul = 1;
-  let bells = 0.25;      // chance of bell doublings / sparkles
-  let padLift = 1;       // pad loudness
+  let bells = 0.25;          // chance of bell doublings / sparkles
+  let bellInst: Inst = 'bell';
+  let padLift = 1;           // pad loudness
   let lead: Inst = 'piano';
-  if (env === 'day' || env === 'night') {
+  let counter: Inst = env === 'night' ? 'cello' : 'strings';
+  let padInst: Inst = 'pad';
+  let arp: Inst = 'piano';
+  let drone = false;         // a low drone under everything (desert heat, peaks)
+  const surface = env === 'day' || env === 'night' || env === 'creative';
+  if (surface) {
+    const night = env === 'night';
     switch (biome) {
+      case 'forest':
+        if (r() < 0.45 && style !== 'elegy') style = 'pastoral';
+        mode = night ? pick(r, ['dorian', 'aeolian']) : pick(r, ['ionian', 'mixolydian', 'dorian']);
+        lead = pick(r, ['flute', 'ocarina', 'piano']); arp = 'harp';
+        break;
+      case 'plains':
+        if (r() < 0.3) lead = pick(r, ['flute', 'harp']);
+        break;
       case 'snow': case 'taiga':
-        mode = env === 'night' ? 'aeolian' : pick(r, ['dorian', 'aeolian', 'ionian']);
-        tempoMul = 0.88; bells = 0.6; padLift = 0.9;
-        if (style === 'flow') style = 'ambient';
+        mode = night ? 'aeolian' : pick(r, ['dorian', 'aeolian', 'ionian']);
+        tempoMul = 0.88; bells = 0.6; bellInst = 'celesta'; padLift = 0.9; padInst = 'strings';
+        lead = pick(r, ['musicbox', 'celesta', 'piano']);
+        if (style === 'flow' || style === 'pastoral') style = r() < 0.4 ? 'waltz' : 'ambient';
         break;
       case 'desert':
-        mode = env === 'night' ? 'phrygianDom' : pick(r, ['mixolydian', 'dorian']);
-        tempoMul = 0.92; padLift = 1.15;
+        mode = night ? 'phrygianDom' : pick(r, ['mixolydian', 'dorian', 'phrygianDom']);
+        tempoMul = 0.92; padLift = 1.15; lead = pick(r, ['ocarina', 'ocarina', 'piano']); arp = 'harp'; drone = true;
+        if (style === 'waltz') style = 'pastoral';
         break;
       case 'jungle':
-        mode = env === 'night' ? 'dorian' : 'lydian';
-        tempoMul = 1.1; lead = r() < 0.5 ? 'epiano' : 'piano'; bells = 0.35;
+        mode = night ? 'dorian' : 'lydian';
+        tempoMul = 1.1; lead = pick(r, ['flute', 'epiano', 'harp']); arp = 'harp'; bells = 0.35;
+        if (style === 'hymn') style = 'pastoral';
         break;
       case 'swamp':
-        mode = 'dorian'; tempoMul = 0.9; padLift = 1.2; lead = 'epiano';
+        mode = 'dorian'; tempoMul = 0.9; padLift = 1.2; lead = pick(r, ['epiano', 'cello']); counter = 'cello';
         break;
       case 'mountains':
-        padLift = 1.3; bells = 0.45;
-        if (env === 'day') mode = pick(r, ['ionian', 'lydian']);
+        padLift = 1.3; bells = 0.45; padInst = 'strings';
+        if (!night) mode = pick(r, ['ionian', 'lydian']);
+        break;
+      case 'peak':
+        padLift = 1.4; bells = 0.5; padInst = 'strings'; drone = true; tempoMul = 0.9;
+        mode = night ? 'dorian' : 'lydian';
+        if (style === 'flow' || style === 'waltz') style = 'hymn';
+        break;
+      case 'ocean': case 'beach':
+        if (r() < 0.6) style = 'tide';
+        mode = night ? pick(r, ['dorian', 'aeolian']) : pick(r, ['ionian', 'lydian', 'mixolydian']);
+        arp = 'harp'; lead = pick(r, ['piano', 'flute', 'harp']); padLift = 1.1;
+        break;
+      case 'village':
+        style = weighted<Style>(r, [['waltz', 3], ['pastoral', 3], ['hymn', 2], ['lullaby', 1]]);
+        mode = night ? 'dorian' : pick(r, ['ionian', 'mixolydian']);
+        lead = pick(r, ['flute', 'harp', 'musicbox', 'piano']); arp = 'harp'; counter = 'cello';
         break;
     }
+    if (env === 'creative' && lead === 'piano') lead = pick(r, ['epiano', 'flute', 'musicbox', 'piano']);
   }
-  if (style === 'lullaby') lead = r() < 0.6 ? 'celesta' : 'epiano';
+  if (rain) {
+    // rain: mellow, pedalled piano and soft pads; no bright sparkle
+    style = weighted<Style>(r, [['ambient', 3], ['lullaby', 2], ['elegy', 1], ['hymn', 1], [style, 1]]);
+    if (style === 'waltz' || style === 'tide') style = 'lullaby';
+    if (mode === 'lydian' || mode === 'mixolydian') mode = r() < 0.5 ? 'dorian' : 'ionian';
+    tempoMul *= 0.9; bells = 0.08; lead = r() < 0.7 ? 'piano' : 'epiano'; padInst = 'pad'; arp = 'piano';
+  }
+  if (style === 'lullaby' && lead === 'piano') lead = r() < 0.6 ? 'celesta' : 'epiano';
+  if (style === 'waltz' && (lead === 'piano' || lead === 'epiano')) lead = pick(r, ['musicbox', 'flute', 'harp']);
+  if (style === 'elegy') { counter = 'cello'; padInst = 'strings'; if (lead !== 'piano' && lead !== 'cello') lead = 'piano'; }
+  if (style === 'deep') { lead = 'celesta'; bells = 0.2; bellInst = 'celesta'; }
 
-  const meter = style === 'lullaby' ? 3 : (style === 'hymn' || style === 'flow') && r() < 0.3 ? 3 : 4;
+  const meter = style === 'lullaby' || style === 'waltz' ? 3
+    : (style === 'hymn' || style === 'flow' || style === 'pastoral' || style === 'tide') && r() < 0.3 ? 3 : 4;
   const baseBpm: Record<Style, [number, number]> = {
     hymn: [56, 68], flow: [64, 78], lullaby: [74, 88], ambient: [48, 58],
-    title: [58, 62], cave: [44, 54], nether: [40, 50],
+    title: [58, 62], cave: [44, 54], nether: [40, 50], pastoral: [62, 76], waltz: [84, 100],
+    elegy: [50, 60], tide: [58, 70], deep: [42, 50],
   };
   const [lo, hi] = baseBpm[style];
-  bpm = (lo + r() * (hi - lo)) * tempoMul;
+  const bpm = (lo + r() * (hi - lo)) * tempoMul;
   const beat = 60 / bpm;
   const bar = beat * meter;
 
@@ -157,7 +251,7 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
 
   const notes: MNote[] = [];
   const add = (t: number, i: Inst, m: number, v: number, d: number, p?: number): void => {
-    const jitter = i === 'pad' || i === 'drone' ? 0 : (r() - 0.5) * 0.02;
+    const jitter = i === 'pad' || i === 'drone' || i === 'strings' ? 0 : (r() - 0.5) * 0.02;
     notes.push({ t: Math.max(0, t + jitter), i, m, v: Math.min(1, v * (0.88 + r() * 0.2)), d, p });
   };
   /** close-position voicing of a chord (n tones from root in thirds), around a centre pitch */
@@ -170,51 +264,57 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
       return m;
     }).sort((a, b) => a - b);
   };
+  const bassM = (d: number): number => { let m = dm(d) - 12; while (m > 50) m -= 12; while (m < 36) m += 12; return m; };
 
   // ---- form: sections of bars, each with a chord root ------------------------
   const progs = PROGS[mode];
   const progA = pick(r, progs);
   let progB = pick(r, progs);
   if (progB === progA) progB = progs[(progs.indexOf(progA) + 1) % progs.length];
+  const progC = [...progB].reverse();
   let form: string[];
-  if (style === 'ambient' || style === 'cave' || style === 'nether') {
+  const slow = style === 'ambient' || style === 'cave' || style === 'nether' || style === 'deep';
+  if (slow) {
     const n = 16 + (((r() * 3) | 0) * 4);
     form = new Array(n).fill('X');
   } else if (style === 'title') {
     form = ['I', 'I', ...Array(4).fill('A'), ...Array(4).fill('A2'), ...Array(4).fill('B'), ...Array(4).fill('A'), 'O', 'O'];
   } else {
-    const withB = r() < 0.8;
+    // long arc: statement, varied restatement, contrast, (development), recapitulation
+    const withB = r() < 0.85;
+    const withC = env !== 'menu' && r() < 0.6;
     form = ['I', 'I', ...Array(4).fill('A'), ...Array(4).fill('A2'),
-      ...(withB ? Array(4).fill('B') : []), ...Array(4).fill('A'), 'O'];
+      ...(withB ? Array(4).fill('B') : []), ...(withC ? Array(4).fill('C') : []), ...Array(4).fill('A3'), 'O', 'O'];
   }
   const nBars = form.length;
-  // chord per bar: slow harmony for the ambient styles (2 bars per chord)
-  const slow = style === 'ambient' || style === 'cave' || style === 'nether';
   const chordOf: number[] = [];
+  const secStartOf: number[] = [];
   let secStart = 0;
   for (let b = 0; b < nBars; b++) {
     const sec = form[b];
     if (b > 0 && sec !== form[b - 1]) secStart = b;
-    const pr = sec === 'B' ? progB : progA;
+    secStartOf.push(secStart);
+    const pr = sec === 'B' ? progB : sec === 'C' ? progC : progA;
     const idx = slow ? Math.floor(b / 2) : sec === 'I' ? 0 : b - secStart;
     chordOf.push(sec === 'O' ? 0 : pr[idx % pr.length]);
   }
-  const energy: Record<string, number> = { I: 0.8, A: 0.92, A2: 1, B: 1.08, O: 0.85, X: 1 };
+  const energy: Record<string, number> = { I: 0.8, A: 0.92, A2: 1, B: 1.08, C: 1.12, A3: 1, O: 0.85, X: 1 };
 
   // ---- melody motifs ----------------------------------------------------------
-  const motif = (): { rh: number[]; steps: number[]; start: number } => {
+  const motif = (): Motif => {
     const rh = pick(r, meter === 3 ? RH3 : RH4);
     return { rh, steps: rh.map(() => pick(r, STEPS)), start: 9 + pick(r, [0, 2, 2, 4, -2]) };
   };
   const motA = motif();
   const motB = motif();
   motB.start = motA.start + pick(r, [2, 3, 4]);
+  const leadOct = lead === 'musicbox' ? 1 : lead === 'cello' ? -1 : 0;
   /** play a two-bar motif from bar b; varied = small changes for the repeat */
-  const phrase = (b: number, mot: { rh: number[]; steps: number[]; start: number }, inst: Inst,
-    v: number, varied: boolean, resolve: boolean, octave = 0): void => {
+  const phrase = (b: number, mot: Motif, inst: Inst, v: number, varied: boolean, resolve: boolean, octave = 0): void => {
     let d = snap(mot.start + (varied ? pick(r, [0, 0, 1, -1]) : 0), chordOf[b]);
     let t = b * bar;
     const t0 = t;
+    const legato = inst === 'flute' || inst === 'ocarina' || inst === 'cello' || inst === 'strings';
     for (let k = 0; k < mot.rh.length; k++) {
       const len = mot.rh[k];
       if (len < 0) { t += -len * beat; continue; }
@@ -225,11 +325,13 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
       const last = k === mot.rh.length - 1 || (k === mot.rh.length - 2 && mot.rh[k + 1] < 0);
       if (last && resolve) d = snap(d, chordOf[barIdx]);
       d = Math.max(7, Math.min(18, d));
-      add(t, inst, dm(d) + 12 * octave, v, len * beat * 1.7 + (last ? 1.5 : 0));
-      if (bells > 0 && r() < bells * 0.35) add(t + 0.01, 'bell', dm(d) + 12 * (octave + 1), v * 0.28, 2);
+      add(t, inst, dm(d) + 12 * octave, v, legato ? len * beat * 0.98 + (last ? 0.6 : 0) : len * beat * 1.7 + (last ? 1.5 : 0));
+      if (bells > 0 && r() < bells * 0.35) add(t + 0.01, bellInst, dm(d) + 12 * (octave + 1), v * 0.28, 2);
       t += len * beat;
     }
   };
+  // the development section walks the motif through its transformations
+  const devel = [invert(motA), sequence(fragmentOf(motA, meter), 2), sequence(augment(motB, meter), -1), sequence(invert(motB), 1)];
 
   // ---- accompaniment per style ------------------------------------------------
   for (let b = 0; b < nBars; b++) {
@@ -237,7 +339,6 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
     const sec = form[b];
     const root = chordOf[b];
     const e = energy[sec] ?? 1;
-    const bassM = (d: number): number => { let m = dm(d) - 12; while (m > 50) m -= 12; while (m < 36) m += 12; return m; };
 
     switch (style) {
       case 'hymn': {
@@ -250,19 +351,32 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
         } else if (r() < 0.35) {
           vo.forEach((m, k) => add(tb + 2 * beat + k * 0.03, 'piano', m, 0.18 * e, bar * 0.6));
         }
-        if (sec === 'A2' || sec === 'B') {
-          for (const m of voice(root, 3, 55)) add(tb, 'pad', m, 0.45 * padLift, bar * 1.05);
+        if (sec === 'A2' || sec === 'B' || sec === 'C' || sec === 'A3') {
+          for (const m of voice(root, 3, 55)) add(tb, padInst, m, 0.45 * padLift, bar * 1.05);
         }
         break;
       }
-      case 'flow': {
-        const pat = meter === 4 ? [-7, -3, 0, 2, 4, 2, 0, -3] : [-7, -3, 0, 2, 4, 2];
+      case 'flow': case 'pastoral': case 'tide': {
+        // broken chords, pedalled: every note of the bar rings until the pedal
+        // lifts at the next bar line
+        const pat = style === 'tide'
+          ? (meter === 4 ? [-7, -3, 0, 2, 4, 7, 4, 2] : [-7, 0, 4, 7, 4, 0])
+          : meter === 4 ? [-7, -3, 0, 2, 4, 2, 0, -3] : [-7, -3, 0, 2, 4, 2];
         const step = bar / pat.length;
+        const inst = style === 'flow' ? arp : 'harp';
         pat.forEach((o, k) => {
           const m = dm(root + o);
-          add(tb + k * step, 'piano', m, (k === 0 ? 0.42 : k % 2 ? 0.24 : 0.3) * e, bar * 1.15, (k / pat.length - 0.5) * 0.5);
+          const pedal = bar - k * step + 0.35;
+          add(tb + k * step, inst, m, (k === 0 ? 0.42 : k % 2 ? 0.24 : 0.3) * e * (inst === 'harp' ? 0.9 : 1), pedal, (k / pat.length - 0.5) * 0.6);
         });
-        if (sec === 'B') for (const m of voice(root, 3, 57)) add(tb, 'pad', m, 0.35 * padLift, bar * 1.05);
+        if (style === 'tide' && b % 2 === 0) {
+          // a slow swell every two bars, like a wave coming in
+          for (const m of voice(root, 3, 57)) add(tb, padInst, m, 0.4 * padLift, bar * 2.05);
+          add(tb, 'bass', bassM(root), 0.35, bar * 2);
+        } else if (sec === 'B' || sec === 'C') {
+          for (const m of voice(root, 3, 57)) add(tb, padInst, m, 0.35 * padLift, bar * 1.05);
+        }
+        if (style === 'pastoral' && b % 2 === 0 && sec !== 'I') add(tb, 'bass', bassM(root), 0.3, bar * 2);
         break;
       }
       case 'lullaby': {
@@ -272,18 +386,44 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
         if (sec !== 'I' && b % 2 === 0) for (const m of voice(root, 3, 55)) add(tb, 'pad', m, 0.3 * padLift, bar * 2.1);
         break;
       }
+      case 'waltz': {
+        // oom-pah-pah: a low note, then two light chords (music box / harp)
+        add(tb, arp === 'harp' ? 'harp' : 'piano', bassM(root), 0.45 * e, bar);
+        const vo = voice(root, 3, 64);
+        const hit: Inst = lead === 'musicbox' ? 'harp' : 'musicbox';
+        for (let bt = 1; bt < meter; bt++) vo.forEach((m, k) => add(tb + bt * beat + k * 0.012, hit, m, 0.16 * e, beat * 0.9));
+        if ((sec === 'B' || sec === 'A3') && b % 2 === 0) for (const m of voice(root, 3, 55)) add(tb, padInst, m, 0.3 * padLift, bar * 2.05);
+        break;
+      }
+      case 'elegy': {
+        // sustained string chords over a slow walking cello
+        for (const m of voice(root, 3, 57)) add(tb, 'strings', m, 0.42 * e, bar * 1.02);
+        add(tb, 'cello', bassM(root), 0.5 * e, bar * 0.52);
+        add(tb + bar * 0.5, 'cello', bassM(root + (r() < 0.5 ? 4 : 2)), 0.4 * e, bar * 0.48);
+        break;
+      }
       case 'title':
       case 'ambient': {
         if (b % 2 === 0) {
-          for (const m of voice(root, 4, 57)) add(tb, 'pad', m, 0.55 * padLift, bar * 2.15);
+          for (const m of voice(root, 4, 57)) add(tb, padInst, m, 0.55 * padLift * (padInst === 'strings' ? 0.8 : 1), bar * 2.15);
           add(tb, 'bass', bassM(root), 0.5, bar * 2.1);
         }
         // sparse chord-tone notes, like stones dropped into still water
         for (let bt = 0; bt < meter; bt++) {
           if (r() > (style === 'title' ? 0.2 : 0.28)) continue;
           const d = root + pick(r, [7, 9, 11, 14]);
-          add(tb + bt * beat, r() < 0.8 ? 'piano' : 'celesta', dm(d), 0.3 + r() * 0.15, 3.5, (r() - 0.5) * 0.6);
-          if (r() < bells) add(tb + bt * beat + beat * 0.5, 'bell', dm(d) + 12, 0.18, 3);
+          const inst: Inst = rain ? 'piano' : r() < 0.7 ? 'piano' : r() < 0.5 ? 'celesta' : 'harp';
+          add(tb + bt * beat, inst, dm(d), 0.3 + r() * 0.15, rain ? 6 : 3.5, (r() - 0.5) * 0.6);
+          if (r() < bells) add(tb + bt * beat + beat * 0.5, bellInst, dm(d) + 12, 0.18, 3);
+        }
+        break;
+      }
+      case 'deep': {
+        // underwater: slow low pads, far celesta drops, no bass at all
+        if (b % 4 === 0) for (const m of voice(root, 3, 52)) add(tb, 'pad', m, 0.75, bar * 4.1);
+        for (let bt = 0; bt < meter; bt++) {
+          if (r() > 0.16) continue;
+          add(tb + bt * beat, r() < 0.6 ? 'celesta' : 'harp', dm(root + pick(r, [7, 9, 11, 14])), 0.5, 4, (r() - 0.5) * 0.8);
         }
         break;
       }
@@ -293,6 +433,7 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
           const cl = [dm(root), dm(root + 2), dm(root + 1) + 12];
           for (const m of cl) add(tb, 'pad', m - 12, 0.35, bar * 4.1);
         }
+        if (b % 8 === 4 && r() < 0.6) add(tb, 'cello', bassM(root), 0.38, bar * 1.6);
         for (let bt = 0; bt < meter; bt++) {
           const x = r();
           if (x < 0.1) add(tb + bt * beat, 'piano', dm(root + pick(r, [0, 2, 4, 7])), 0.3 + r() * 0.15, 5, (r() - 0.5) * 0.8);
@@ -316,6 +457,7 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
         }
         if (b % 4 === 0) {
           for (const m of [dm(root), dm(root + 1), dm(root + 4)]) add(tb, 'pad', m, 0.42, bar * 4.1);
+          if (r() < 0.5) add(tb + bar, 'cello', bassM(root + 1), 0.4, bar * 1.5);
         }
         if (r() < 0.15) {
           const m = dm(root + 14);
@@ -325,56 +467,148 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
         break;
       }
     }
+    if (drone && b === 0) add(0, 'drone', dm(0) - 12, 0.35, nBars * bar + 2);
 
     // ---- melody on top ----
-    const melodic = style === 'hymn' || style === 'flow' || style === 'lullaby' || style === 'title';
+    const melodic = !slow;
     if (melodic && b % 2 === 0 && b + 1 < nBars) {
-      const octave = 0;
-      const mv = (style === 'title' ? 0.5 : 0.55) * e;
-      const skipA = style === 'flow' && sec === 'A' && b < 8; // let the arpeggio breathe first
-      if (sec === 'A' && !skipA) phrase(b, motA, lead, mv, b >= 12, (b % 4) === 2, octave);
-      else if (sec === 'A2') phrase(b, motA, lead, mv, true, (b % 4) === 2, octave);
-      else if (sec === 'B') phrase(b, motB, lead, mv * 1.05, (b % 4) === 2, (b % 4) === 2, octave);
+      const mv = (style === 'title' ? 0.5 : 0.55) * e * (lead === 'flute' || lead === 'ocarina' ? 0.9 : 1);
+      const skipA = (style === 'flow' || style === 'tide') && sec === 'A' && b < 8; // let the arpeggio breathe first
+      const j = (b - secStartOf[b]) >> 1;
+      if (sec === 'A' && !skipA) phrase(b, motA, lead, mv, b >= 12, (b % 4) === 2, leadOct);
+      else if (sec === 'A2') phrase(b, motA, lead, mv, true, (b % 4) === 2, leadOct);
+      else if (sec === 'B') phrase(b, motB, lead, mv * 1.05, (b % 4) === 2, (b % 4) === 2, leadOct);
+      else if (sec === 'C') phrase(b, devel[j % devel.length], lead, mv * 1.05, false, j % 2 === 1, leadOct);
+      else if (sec === 'A3') {
+        // recapitulation: the theme returns, answered by a counter-line below
+        phrase(b, motA, lead, mv, j === 1, true, leadOct);
+      }
+    }
+    // counter-melody: slow chord-tone line under B and the recap
+    if (melodic && (sec === 'A3' || (sec === 'B' && style !== 'waltz')) && style !== 'elegy') {
+      const d = root + (b % 2 ? 4 : 2);
+      let m = dm(d);
+      const center = counter === 'cello' ? 50 : 57;
+      while (m < center - 5) m += 12;
+      while (m > center + 6) m -= 12;
+      add(tb, counter, m, 0.32 * e, bar * 0.96);
     }
     // ambient pieces carry one motif statement through their middle
     if ((style === 'ambient' || style === 'nether') && b % 2 === 0 && b >= 4 && b < nBars - 4 && r() < 0.4) {
-      phrase(b, motA, style === 'nether' ? 'epiano' : lead, 0.42, b > 8, true, style === 'nether' ? -1 : 0);
+      phrase(b, b > 10 && r() < 0.5 ? invert(motA) : motA, style === 'nether' ? 'epiano' : lead, 0.42, b > 8, true,
+        style === 'nether' ? -1 : leadOct);
     }
   }
 
   // ---- ending: a last tonic chord left to ring -----------------------------------
   const tEnd = nBars * bar;
-  if (style !== 'cave' && style !== 'nether') {
-    add(tEnd, 'piano', dm(0) - 12, 0.42, 7);
-    voice(0, 3, 62).forEach((m, k) => add(tEnd + 0.05 + k * 0.06, 'piano', m, 0.26, 7));
-    if (r() < 0.6) add(tEnd + beat * 1.5, lead === 'celesta' ? 'celesta' : 'bell', dm(9) + 12, 0.2, 5);
+  if (style !== 'cave' && style !== 'nether' && style !== 'deep') {
+    const endInst: Inst = arp === 'harp' ? 'harp' : 'piano';
+    add(tEnd, endInst, dm(0) - 12, 0.42, 7);
+    voice(0, 3, 62).forEach((m, k) => add(tEnd + 0.05 + k * (endInst === 'harp' ? 0.09 : 0.06), endInst, m, 0.26, 7));
+    if (r() < 0.6) add(tEnd + beat * 1.5, lead === 'celesta' || lead === 'musicbox' ? lead : bellInst, dm(9) + 12, 0.2, 5);
   }
 
   notes.sort((a, b) => a.t - b.t);
   const names: Record<Style, string> = {
     hymn: 'Hymn', flow: 'Flow', lullaby: 'Lullaby', ambient: 'Drift', title: 'Title', cave: 'Hollow', nether: 'Ember',
+    pastoral: 'Pastoral', waltz: 'Waltz', elegy: 'Elegy', tide: 'Tide', deep: 'Deep',
   };
-  return { name: `${names[style]} in ${mode} (${Math.round(bpm)} bpm)`, notes, len: tEnd + 2, beat };
+  return {
+    name: `${names[style]} in ${mode} (${Math.round(bpm)} bpm, ${lead})`,
+    notes, len: tEnd + 2, beat, tonic, minor: sc[2] === 3,
+  };
 }
 
 /** A few-note gesture for the long silences between pieces. */
 export function fragment(env: MusicEnv, seed: number): Composition {
   const r = rng(seed);
-  const dark = env !== 'day';
+  const dark = env !== 'day' && env !== 'creative';
   const sc = dark ? MODES.aeolian : MODES.ionian;
   const tonic = 55 + ((r() * 7) | 0);
   const dm = (d: number): number => tonic + sc[((d % 7) + 7) % 7] + 12 * Math.floor(d / 7);
   const notes: MNote[] = [];
   const beat = 60 / (52 + r() * 10);
   const root = pick(r, [0, 3, 5]);
-  for (const d of [root, root + 2, root + 4]) notes.push({ t: 0, i: 'pad', m: dm(d) - 12, v: 0.4, d: beat * 9 });
+  const padI: Inst = env === 'night' && r() < 0.4 ? 'strings' : 'pad';
+  for (const d of [root, root + 2, root + 4]) notes.push({ t: 0, i: padI, m: dm(d) - 12, v: 0.4, d: beat * 9 });
   let d = root + 7 + pick(r, [0, 2, 4]);
   const n = 2 + ((r() * 3) | 0);
   let t = beat;
+  const inst: Inst = env === 'cave' ? 'bell' : env === 'underwater' ? 'celesta'
+    : env === 'night' ? pick(r, ['piano', 'piano', 'cello']) : pick(r, ['piano', 'harp', 'flute', 'musicbox']);
   for (let k = 0; k < n; k++) {
-    notes.push({ t, i: env === 'cave' ? 'bell' : 'piano', m: dm(d), v: 0.35 + r() * 0.15, d: 3.5, p: (r() - 0.5) * 0.6 });
+    notes.push({ t, i: inst, m: dm(d) - (inst === 'cello' ? 12 : 0), v: 0.35 + r() * 0.15, d: inst === 'flute' || inst === 'cello' ? beat * 1.4 : 3.5, p: (r() - 0.5) * 0.6 });
     t += beat * pick(r, [1, 1.5, 2]);
     d += pick(r, [-1, 1, -2, 2]);
   }
-  return { name: 'fragment', notes, len: t + beat * 4, beat };
+  return { name: 'fragment', notes, len: t + beat * 4, beat, tonic, minor: dark };
+}
+
+export type StingerKind = 'village' | 'peak' | 'cave' | 'sunrise' | 'nightfall' | 'nether' | 'discover';
+
+/** A short situational cue (a few seconds): arriving somewhere, dawn, dusk.
+ *  Plays in `tonic` when a piece is running so it sits inside the music. */
+export function stinger(kind: StingerKind, seed: number, tonic?: number): Composition {
+  const r = rng(seed);
+  const k = tonic ?? 55 + ((r() * 5) | 0);
+  const maj = MODES.ionian, min = MODES.aeolian, lyd = MODES.lydian;
+  const deg = (sc: number[], d: number): number => k + sc[((d % 7) + 7) % 7] + 12 * Math.floor(d / 7);
+  const notes: MNote[] = [];
+  const n = (t: number, i: Inst, m: number, v: number, d: number, p?: number): void => { notes.push({ t, i, m, v, d, p }); };
+  let beat = 0.42;
+  switch (kind) {
+    case 'village': {
+      // a warm harp roll up the tonic chord, then a little flute "hello"
+      [0, 2, 4, 7, 9, 11].forEach((d, i) => n(i * 0.07, 'harp', deg(maj, d), 0.4, 3, -0.3 + i * 0.1));
+      for (const d of [0, 2, 4]) n(0, 'pad', deg(maj, d), 0.35, 5);
+      [[4, 0.9, 0.5], [5, 1.4, 0.35], [7, 1.75, 1.6]].forEach(([d, t, len]) => n(t, 'flute', deg(maj, d) + 12, 0.42, len));
+      break;
+    }
+    case 'peak': {
+      // a wide lydian string swell with bells ringing out over the valley
+      for (const d of [0, 4, 7, 9, 10]) n(0, 'strings', deg(lyd, d) - 12 + (d > 7 ? 0 : 12), 0.36, 5.5);
+      n(0, 'bass', k - 12, 0.4, 5);
+      [11, 9, 14].forEach((d, i) => n(1.2 + i * 0.55, 'bell', deg(lyd, d) + 12, 0.24, 4, (i - 1) * 0.5));
+      break;
+    }
+    case 'cave': {
+      // a low cello note and a far echoing bell pair
+      n(0, 'cello', k - 12, 0.45, 3.2);
+      n(0, 'pad', k - 12, 0.3, 5);
+      n(1.4, 'bell', deg(min, 9) + 12, 0.18, 4, -0.5);
+      n(2.3, 'bell', deg(min, 9) + 18, 0.12, 4, 0.5);
+      break;
+    }
+    case 'sunrise': {
+      // the music box winds up: a rising major arpeggio into a warm pad
+      beat = 0.3;
+      [0, 2, 4, 7, 9, 11, 14].forEach((d, i) => n(i * beat, 'musicbox', deg(maj, d) + 12, 0.35 - i * 0.02, 1.6, -0.4 + i * 0.12));
+      for (const d of [0, 2, 4, 6]) n(0.4, 'pad', deg(maj, d), 0.35, 5.5);
+      n(2.3, 'celesta', deg(maj, 16) + 12, 0.18, 3);
+      break;
+    }
+    case 'nightfall': {
+      // a slow falling minor figure on the piano over a dark pad
+      [[9, 0], [7, 0.7], [5, 1.4], [2, 2.3]].forEach(([d, t]) => n(t, 'piano', deg(min, d) + 12, 0.36, 3));
+      for (const d of [0, 2, 4]) n(0, 'pad', deg(min, d) - 12, 0.4, 6);
+      n(0, 'cello', k - 12, 0.3, 4);
+      break;
+    }
+    case 'nether': {
+      n(0, 'drone', k - 24, 0.6, 7);
+      n(0.5, 'cello', k - 12 + 1, 0.42, 3.4);
+      n(2.4, 'bell', k + 18, 0.16, 4, 0.4);
+      break;
+    }
+    case 'discover': {
+      [0, 4, 7].forEach((d, i) => n(i * 0.12, 'celesta', deg(maj, d) + 12, 0.3, 2.5));
+      n(0, 'strings', deg(maj, 2), 0.3, 3.5);
+      n(0, 'strings', deg(maj, 4), 0.3, 3.5);
+      break;
+    }
+  }
+  notes.sort((a, b) => a.t - b.t);
+  const len = notes.reduce((m, x) => Math.max(m, x.t + x.d), 0);
+  return { name: `stinger:${kind}`, notes, len, beat, tonic: k, minor: kind === 'nightfall' || kind === 'cave' };
 }

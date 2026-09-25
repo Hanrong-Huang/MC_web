@@ -95,6 +95,68 @@ export enum B {
   COAL_BLOCK = 96,
   QUARTZ_BLOCK = 95,
   SMOOTH_STONE = 94,
+  // --- building + decoration pass (ids 61, 84-93, 200+; chunk data is u8) ---
+  /** carved pumpkin with a candle: a glowing block with a face (meta = facing) */
+  JACK_O_LANTERN = 61,
+  BRICKS = 84,
+  CLAY = 85,
+  MOSSY_COBBLE = 86,
+  MOSSY_STONE_BRICKS = 87,
+  CRACKED_STONE_BRICKS = 88,
+  SNOW_BLOCK = 89,
+  /** slippery; melts back to water when broken */
+  ICE = 90,
+  PACKED_ICE = 91,
+  TERRACOTTA = 92,
+  PUMPKIN = 93,
+  MELON = 200,
+  /** stems sprout a fruit on a free neighbouring cell once mature */
+  PUMPKIN_STEM = 201,
+  MELON_STEM = 202,
+  RED_WOOL = 203,
+  ORANGE_WOOL = 204,
+  YELLOW_WOOL = 205,
+  LIME_WOOL = 206,
+  CYAN_WOOL = 207,
+  BLUE_WOOL = 208,
+  PURPLE_WOOL = 209,
+  BLACK_WOOL = 210,
+  CORNFLOWER = 211,
+  ALLIUM = 212,
+  OXEYE_DAISY = 213,
+  BROWN_MUSHROOM = 214,
+  RED_MUSHROOM = 215,
+  /** hanging (meta 1) or standing iron lantern; a light source */
+  LANTERN = 216,
+  GLASS_PANE = 217,
+  OAK_FENCE = 218,
+  /** open/facing live in world.doorStates, like trapdoors */
+  FENCE_GATE = 219,
+  COBBLE_SLAB = 220,
+  STONE_SLAB = 221,
+  OAK_SLAB = 222,
+  STONE_BRICK_SLAB = 223,
+  BRICK_SLAB = 224,
+  SANDSTONE_SLAB = 225,
+  OAK_STAIRS = 226,
+  COBBLE_STAIRS = 227,
+  STONE_BRICK_STAIRS = 228,
+  BRICK_STAIRS = 229,
+  /** right-click with a worn tool: repair it with its material for a level */
+  ANVIL = 230,
+  /** right-click with a tool/armor/bow: spend levels + amethyst to enchant */
+  ENCHANTING_TABLE = 231,
+  /** a wooden storage cask (chest inventory) */
+  BARREL = 232,
+  /** cooks raw food placed on it; lights the area; hurts to stand in */
+  CAMPFIRE = 233,
+  /** placeable cake eaten a slice at a time (meta = slices eaten) */
+  CAKE = 234,
+  /** holds a flower/sapling/mushroom (meta = plant id) */
+  FLOWER_POT = 235,
+  /** turns plant matter into bone meal (meta = fill level 0..8) */
+  COMPOSTER = 236,
+  CHISELED_STONE_BRICKS = 237,
 }
 
 export enum I {
@@ -198,6 +260,48 @@ export enum I {
   SPYGLASS = 197,
   PAPER = 198,
   BOOK = 199,
+  // --- items from the building + decoration pass (ids 300+) ---------------
+  CLAY_BALL = 300,
+  BRICK = 301,
+  SNOWBALL = 302,
+  SUGAR = 303,
+  COOKIE = 304,
+  PUMPKIN_PIE = 305,
+  MELON_SLICE = 306,
+  PUMPKIN_SEEDS = 307,
+  MELON_SEEDS = 308,
+  MUSHROOM_STEW = 309,
+  GLASS_BOTTLE = 310,
+  WATER_BOTTLE = 311,
+  POTION_HEALING = 312,
+  POTION_SWIFTNESS = 313,
+  POTION_NIGHT_VISION = 314,
+  POTION_WATER_BREATHING = 315,
+  POTION_FIRE_RESISTANCE = 316,
+  POTION_STRENGTH = 317,
+  POTION_LEAPING = 318,
+  POTION_REGENERATION = 319,
+  RED_DYE = 320,
+  ORANGE_DYE = 321,
+  YELLOW_DYE = 322,
+  LIME_DYE = 323,
+  CYAN_DYE = 324,
+  BLUE_DYE = 325,
+  PURPLE_DYE = 326,
+  BLACK_DYE = 327,
+  /** held: shows an explorer map of the surrounding terrain */
+  MAP = 328,
+  /** points back to where you last died */
+  RECOVERY_COMPASS = 329,
+  /** worn in the chest slot: jump mid-fall to glide */
+  GLIDER = 330,
+  /** right-click while gliding for a boost */
+  FIREWORK_ROCKET = 331,
+  /** thrown: teleports you to where it lands */
+  WARP_PEARL = 332,
+  GLISTERING_MELON = 333,
+  /** drink for a burst of experience */
+  EXPERIENCE_BOTTLE = 334,
 }
 
 /** Wearable-armor slot index: 0 head, 1 chest, 2 legs, 3 feet. */
@@ -844,6 +948,312 @@ itemDef({ id: I.AMETHYST, name: 'amethyst', label: 'Amethyst', sprite: 'amethyst
 itemDef({ id: I.MOB_CATCHER, name: 'mob_catcher', label: 'Mob Catcher', sprite: 'mob_catcher', stack: 16 });
 itemDef({ id: I.MOB_CATCHER_FILLED, name: 'mob_catcher_filled', label: 'Captured Mob', sprite: 'mob_catcher_filled', stack: 1 });
 
+// =============================================================================
+// Building + decoration pass: masonry, ice, colored wool, garden plants,
+// shaped blocks (slabs, stairs, fences, panes, lanterns ...), utility blocks,
+// foods, potions, dyes and exploration gear.
+// =============================================================================
+
+function cube(id: number, name: string, label: string, tile: string, extra: Partial<Def> = {}): void {
+  blockDef({
+    id, name, label, hardness: 1.5, tool: 'pickaxe', minTier: 2, sound: 'stone',
+    faces: { top: tile, bottom: tile, sides: tile }, ...extra,
+  });
+}
+cube(B.BRICKS, 'bricks', 'Bricks', 'bricks', { hardness: 2 });
+cube(B.CLAY, 'clay', 'Clay', 'clay', {
+  hardness: 0.6, tool: 'shovel', minTier: undefined, sound: 'sand',
+  drop: { id: I.CLAY_BALL, min: 4, max: 4 },
+});
+cube(B.MOSSY_COBBLE, 'mossy_cobblestone', 'Mossy Cobblestone', 'mossy_cobble', { hardness: 2 });
+cube(B.MOSSY_STONE_BRICKS, 'mossy_stone_bricks', 'Mossy Stone Bricks', 'mossy_stone_bricks');
+cube(B.CRACKED_STONE_BRICKS, 'cracked_stone_bricks', 'Cracked Stone Bricks', 'cracked_stone_bricks');
+cube(B.CHISELED_STONE_BRICKS, 'chiseled_stone_bricks', 'Chiseled Stone Bricks', 'chiseled_stone_bricks');
+cube(B.SNOW_BLOCK, 'snow_block', 'Snow Block', 'snow_top', {
+  hardness: 0.2, tool: 'shovel', minTier: undefined, sound: 'sand',
+  drop: { id: I.SNOWBALL, min: 4, max: 4 },
+});
+cube(B.ICE, 'ice', 'Ice', 'ice', {
+  hardness: 0.5, minTier: undefined, sound: 'glass',
+  drop: null, // melts to water (handled in Player)
+});
+cube(B.PACKED_ICE, 'packed_ice', 'Packed Ice', 'packed_ice', { hardness: 0.5, minTier: undefined, sound: 'glass' });
+cube(B.TERRACOTTA, 'terracotta', 'Terracotta', 'terracotta', { hardness: 1.25 });
+blockDef({
+  id: B.PUMPKIN, name: 'pumpkin', label: 'Pumpkin', hardness: 1, tool: 'axe', sound: 'wood',
+  faces: { top: 'pumpkin_top', bottom: 'pumpkin_top', sides: 'pumpkin_side' },
+});
+blockDef({
+  id: B.JACK_O_LANTERN, name: 'jack_o_lantern', label: "Jack o'Lantern", hardness: 1, tool: 'axe', sound: 'wood',
+  faces: { top: 'pumpkin_top', bottom: 'pumpkin_top', sides: 'pumpkin_side', front: 'jack_o_lantern' },
+});
+blockDef({
+  id: B.MELON, name: 'melon', label: 'Melon', hardness: 1, tool: 'axe', sound: 'wood',
+  faces: { top: 'melon_top', bottom: 'melon_top', sides: 'melon_side' },
+  drop: { id: I.MELON_SLICE, min: 3, max: 7 },
+});
+for (const [id, name, label, tile, seeds] of [
+  [B.PUMPKIN_STEM, 'pumpkin_stem', 'Pumpkin Stem', 'pumpkin_stem', I.PUMPKIN_SEEDS],
+  [B.MELON_STEM, 'melon_stem', 'Melon Stem', 'melon_stem', I.MELON_SEEDS],
+] as [number, string, string, string, number][]) {
+  blockDef({
+    id, name, label, hardness: 0, sound: 'grass', solid: false, opaque: false, occludes: false,
+    faces: { top: tile, bottom: tile, sides: tile }, drop: { id: seeds, min: 1, max: 1 },
+  });
+}
+
+/** Wool colours: [block, dye, name stem, label, tint]. */
+export const WOOL_COLORS: [number, number, string, string, string][] = [
+  [B.RED_WOOL, I.RED_DYE, 'red', 'Red', '#b02e26'],
+  [B.ORANGE_WOOL, I.ORANGE_DYE, 'orange', 'Orange', '#f9801d'],
+  [B.YELLOW_WOOL, I.YELLOW_DYE, 'yellow', 'Yellow', '#fed83d'],
+  [B.LIME_WOOL, I.LIME_DYE, 'lime', 'Lime', '#80c71f'],
+  [B.CYAN_WOOL, I.CYAN_DYE, 'cyan', 'Cyan', '#169c9c'],
+  [B.BLUE_WOOL, I.BLUE_DYE, 'blue', 'Blue', '#3c44aa'],
+  [B.PURPLE_WOOL, I.PURPLE_DYE, 'purple', 'Purple', '#8932b8'],
+  [B.BLACK_WOOL, I.BLACK_DYE, 'black', 'Black', '#1d1d21'],
+];
+for (const [id, dye, stem, label] of WOOL_COLORS) {
+  blockDef({
+    id, name: `${stem}_wool`, label: `${label} Wool`, hardness: 0.8, sound: 'grass',
+    faces: { top: `${stem}_wool`, bottom: `${stem}_wool`, sides: `${stem}_wool` },
+  });
+  itemDef({ id: dye, name: `${stem}_dye`, label: `${label} Dye`, sprite: `${stem}_dye` });
+}
+
+// garden plants (crossed billboards)
+for (const [id, name, label] of [
+  [B.CORNFLOWER, 'cornflower', 'Cornflower'], [B.ALLIUM, 'allium', 'Allium'],
+  [B.OXEYE_DAISY, 'oxeye_daisy', 'Oxeye Daisy'],
+  [B.BROWN_MUSHROOM, 'brown_mushroom', 'Brown Mushroom'], [B.RED_MUSHROOM, 'red_mushroom', 'Red Mushroom'],
+] as [number, string, string][]) {
+  blockDef({
+    id, name, label, hardness: 0, sound: 'grass', solid: false, opaque: false, occludes: false,
+    faces: { top: name, bottom: name, sides: name },
+  });
+}
+
+// --- shaped blocks (see shapeBoxes + Mesher.emitShaped) -----------------------
+blockDef({
+  id: B.LANTERN, name: 'lantern', label: 'Lantern', hardness: 1.5, tool: 'pickaxe', sound: 'stone',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'lantern', bottom: 'lantern', sides: 'lantern' },
+});
+blockDef({
+  id: B.GLASS_PANE, name: 'glass_pane', label: 'Glass Pane', hardness: 0.3, sound: 'glass',
+  opaque: false, occludes: false, drop: null,
+  faces: { top: 'glass_pane_top', bottom: 'glass_pane_top', sides: 'glass' },
+});
+blockDef({
+  id: B.OAK_FENCE, name: 'oak_fence', label: 'Oak Fence', hardness: 2, tool: 'axe', sound: 'wood', fuel: 15,
+  opaque: false, occludes: false,
+  faces: { top: 'planks', bottom: 'planks', sides: 'planks' },
+});
+blockDef({
+  id: B.FENCE_GATE, name: 'oak_fence_gate', label: 'Oak Fence Gate', hardness: 2, tool: 'axe', sound: 'wood', fuel: 15,
+  opaque: false, occludes: false,
+  faces: { top: 'planks', bottom: 'planks', sides: 'planks' },
+});
+
+/** Slab/stair material table: [slab, stairs | 0, full block, tile top, tile side, label, tool]. */
+export const SLAB_KINDS: [number, number, number, string, string, string, 'pickaxe' | 'axe'][] = [
+  [B.COBBLE_SLAB, B.COBBLE_STAIRS, B.COBBLE, 'cobble', 'cobble', 'Cobblestone', 'pickaxe'],
+  [B.STONE_SLAB, 0, B.SMOOTH_STONE, 'smooth_stone', 'smooth_stone_slab_side', 'Smooth Stone', 'pickaxe'],
+  [B.OAK_SLAB, B.OAK_STAIRS, B.PLANKS, 'planks', 'planks', 'Oak', 'axe'],
+  [B.STONE_BRICK_SLAB, B.STONE_BRICK_STAIRS, B.STONE_BRICKS, 'stone_bricks', 'stone_bricks', 'Stone Brick', 'pickaxe'],
+  [B.BRICK_SLAB, B.BRICK_STAIRS, B.BRICKS, 'bricks', 'bricks', 'Brick', 'pickaxe'],
+  [B.SANDSTONE_SLAB, 0, B.SANDSTONE, 'sandstone_top', 'sandstone_side', 'Sandstone', 'pickaxe'],
+];
+for (const [slab, stairs, , top, side, label, tool] of SLAB_KINDS) {
+  const wood = tool === 'axe';
+  const common = {
+    hardness: 2, tool, minTier: wood ? undefined : 2, sound: (wood ? 'wood' : 'stone') as SoundClass,
+    opaque: false, occludes: false, ...(wood ? { fuel: 7 } : {}),
+  };
+  blockDef({
+    id: slab, name: `${label.toLowerCase().replace(/ /g, '_')}_slab`, label: `${label} Slab`, ...common,
+    faces: { top, bottom: top, sides: side },
+  });
+  if (stairs) {
+    blockDef({
+      id: stairs, name: `${label.toLowerCase().replace(/ /g, '_')}_stairs`, label: `${label} Stairs`, ...common,
+      faces: { top, bottom: top, sides: side },
+    });
+  }
+}
+
+blockDef({
+  id: B.ANVIL, name: 'anvil', label: 'Anvil', hardness: 5, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  opaque: false, occludes: false,
+  faces: { top: 'anvil_top', bottom: 'anvil', sides: 'anvil' },
+});
+blockDef({
+  id: B.ENCHANTING_TABLE, name: 'enchanting_table', label: 'Enchanting Table', hardness: 5, tool: 'pickaxe', minTier: 2,
+  sound: 'stone', opaque: false, occludes: false,
+  faces: { top: 'enchanting_table_top', bottom: 'obsidian', sides: 'enchanting_table_side' },
+});
+blockDef({
+  id: B.BARREL, name: 'barrel', label: 'Barrel', hardness: 2.5, tool: 'axe', sound: 'wood', fuel: 15,
+  faces: { top: 'barrel_top', bottom: 'barrel_bottom', sides: 'barrel_side' },
+});
+blockDef({
+  id: B.CAMPFIRE, name: 'campfire', label: 'Campfire', hardness: 2, tool: 'axe', sound: 'wood',
+  opaque: false, occludes: false,
+  faces: { top: 'campfire_log', bottom: 'campfire_log', sides: 'campfire_log' },
+  drop: { id: I.COAL, min: 1, max: 2 },
+});
+blockDef({
+  id: B.CAKE, name: 'cake', label: 'Cake', hardness: 0.5, sound: 'grass', stack: 1,
+  opaque: false, occludes: false, drop: null,
+  faces: { top: 'cake_top', bottom: 'cake_bottom', sides: 'cake_side' },
+});
+blockDef({
+  id: B.FLOWER_POT, name: 'flower_pot', label: 'Flower Pot', hardness: 0, sound: 'stone',
+  opaque: false, occludes: false,
+  faces: { top: 'flower_pot', bottom: 'flower_pot', sides: 'flower_pot' },
+});
+blockDef({
+  id: B.COMPOSTER, name: 'composter', label: 'Composter', hardness: 0.6, tool: 'axe', sound: 'wood', fuel: 15,
+  opaque: false, occludes: false,
+  faces: { top: 'composter_top', bottom: 'composter_bottom', sides: 'composter_side' },
+});
+
+// --- items --------------------------------------------------------------------
+itemDef({ id: I.CLAY_BALL, name: 'clay_ball', label: 'Clay Ball', sprite: 'clay_ball' });
+itemDef({ id: I.BRICK, name: 'brick', label: 'Brick', sprite: 'brick' });
+itemDef({ id: I.SNOWBALL, name: 'snowball', label: 'Snowball', sprite: 'snowball', stack: 16 });
+itemDef({ id: I.SUGAR, name: 'sugar', label: 'Sugar', sprite: 'sugar' });
+itemDef({ id: I.COOKIE, name: 'cookie', label: 'Cookie', sprite: 'cookie', food: 2, sat: 0.4 });
+itemDef({ id: I.PUMPKIN_PIE, name: 'pumpkin_pie', label: 'Pumpkin Pie', sprite: 'pumpkin_pie', food: 8, sat: 4.8 });
+itemDef({ id: I.MELON_SLICE, name: 'melon_slice', label: 'Melon Slice', sprite: 'melon_slice', food: 2, sat: 1.2 });
+itemDef({ id: I.PUMPKIN_SEEDS, name: 'pumpkin_seeds', label: 'Pumpkin Seeds', sprite: 'pumpkin_seeds' });
+itemDef({ id: I.MELON_SEEDS, name: 'melon_seeds', label: 'Melon Seeds', sprite: 'melon_seeds' });
+itemDef({ id: I.MUSHROOM_STEW, name: 'mushroom_stew', label: 'Mushroom Stew', sprite: 'mushroom_stew', food: 6, sat: 7.2, stack: 1 });
+itemDef({ id: I.GLISTERING_MELON, name: 'glistering_melon_slice', label: 'Glistering Melon Slice', sprite: 'glistering_melon' });
+itemDef({ id: I.GLASS_BOTTLE, name: 'glass_bottle', label: 'Glass Bottle', sprite: 'glass_bottle', stack: 16 });
+itemDef({ id: I.WATER_BOTTLE, name: 'water_bottle', label: 'Water Bottle', sprite: 'water_bottle', stack: 1, alwaysEdible: true });
+itemDef({ id: I.EXPERIENCE_BOTTLE, name: 'experience_bottle', label: "Bottle o' Enchanting", sprite: 'experience_bottle', alwaysEdible: true });
+
+/** Potions: drink (hold right-click) for a timed effect. [id, stem, label, colour]. */
+export const POTIONS: [number, string, string, string][] = [
+  [I.POTION_HEALING, 'healing', 'Potion of Healing', '#f82423'],
+  [I.POTION_SWIFTNESS, 'swiftness', 'Potion of Swiftness', '#7cafc6'],
+  [I.POTION_NIGHT_VISION, 'night_vision', 'Potion of Night Vision', '#1f1fa1'],
+  [I.POTION_WATER_BREATHING, 'water_breathing', 'Potion of Water Breathing', '#2e5299'],
+  [I.POTION_FIRE_RESISTANCE, 'fire_resistance', 'Potion of Fire Resistance', '#e49a3a'],
+  [I.POTION_STRENGTH, 'strength', 'Potion of Strength', '#932423'],
+  [I.POTION_LEAPING, 'leaping', 'Potion of Leaping', '#22ff4c'],
+  [I.POTION_REGENERATION, 'regeneration', 'Potion of Regeneration', '#cd5cab'],
+];
+for (const [id, stem, label] of POTIONS) {
+  itemDef({ id, name: `potion_${stem}`, label, sprite: `potion_${stem}`, stack: 1, alwaysEdible: true });
+}
+export function isPotion(id: number): boolean { return id >= I.POTION_HEALING && id <= I.POTION_REGENERATION; }
+/** Drinkables (potions, bottles, milk) are sipped rather than chewed. */
+export function isDrink(id: number): boolean {
+  return isPotion(id) || id === I.WATER_BOTTLE || id === I.EXPERIENCE_BOTTLE || id === I.MILK_BUCKET;
+}
+
+itemDef({ id: I.MAP, name: 'map', label: 'Explorer Map', sprite: 'map', stack: 1 });
+itemDef({ id: I.RECOVERY_COMPASS, name: 'recovery_compass', label: 'Recovery Compass', sprite: 'recovery_compass', stack: 1 });
+itemDef({
+  id: I.GLIDER, name: 'glider', label: 'Glider', sprite: 'glider', stack: 1, durability: 432,
+  armor: { slot: ARMOR_CHEST, points: 0 },
+});
+itemDef({ id: I.FIREWORK_ROCKET, name: 'firework_rocket', label: 'Firework Rocket', sprite: 'firework_rocket' });
+itemDef({ id: I.WARP_PEARL, name: 'warp_pearl', label: 'Warp Pearl', sprite: 'warp_pearl', stack: 16 });
+
+// --- block metadata + shapes ---------------------------------------------------
+// Shaped blocks keep a small per-block value in world.bedFacings (the generic
+// "facing/meta" map that is already persisted per dimension and shipped to the
+// mesh worker): stair facing (+4 = upside down), slab half (1 = top), lantern
+// hanging (1), cake slices eaten, flower-pot plant id, composter level, jack
+// o'lantern / anvil / campfire facing. Fence gates keep open+facing in doorStates.
+
+export const SLAB_IDS = new Set<number>(SLAB_KINDS.map((k) => k[0]));
+export const STAIR_IDS = new Set<number>(SLAB_KINDS.map((k) => k[1]).filter((id) => id !== 0));
+/** Full block a slab doubles into when a second slab is laid on it. */
+export function slabFullBlock(slab: number): number {
+  return SLAB_KINDS.find((k) => k[0] === slab)?.[2] ?? slab;
+}
+
+/** Non-cube blocks drawn by Mesher.emitShaped (with collision from shapeBoxes). */
+export const SHAPED = new Set<number>([
+  ...SLAB_IDS, ...STAIR_IDS,
+  B.LANTERN, B.GLASS_PANE, B.OAK_FENCE, B.FENCE_GATE, B.ANVIL, B.ENCHANTING_TABLE,
+  B.CAMPFIRE, B.CAKE, B.FLOWER_POT, B.COMPOSTER, B.JACK_O_LANTERN,
+]);
+/** Blocks whose meta entry must be dropped when they are removed. */
+export const META_BLOCKS = new Set<number>([...SHAPED]);
+
+/** Fences join fences, gates and full solid blocks; panes join panes, glass and full solid blocks. */
+export function connectsTo(self: number, other: number): boolean {
+  if (other === B.AIR || !hasDef(other)) return false;
+  if (self === B.GLASS_PANE) return other === B.GLASS_PANE || other === B.GLASS || (def(other).opaque && def(other).solid);
+  return other === B.OAK_FENCE || other === B.FENCE_GATE || (def(other).opaque && def(other).solid);
+}
+
+/** Axis-aligned box in block-local units: x0, y0, z0, x1, y1, z1. */
+export type Box = [number, number, number, number, number, number];
+const P16 = 1 / 16;
+
+/** Stair boxes: the lower (or upper, upside-down) slab plus the raised step
+ *  on the `facing` side (0 = -z, 1 = -x, 2 = +z, 3 = +x). */
+function stairBoxes(meta: number): Box[] {
+  const f = meta & 3, flip = (meta & 4) !== 0;
+  const base: Box = flip ? [0, 0.5, 0, 1, 1, 1] : [0, 0, 0, 1, 0.5, 1];
+  const y0 = flip ? 0 : 0.5, y1 = flip ? 0.5 : 1;
+  const step: Box =
+    f === 0 ? [0, y0, 0, 1, y1, 0.5] :
+    f === 1 ? [0, y0, 0, 0.5, y1, 1] :
+    f === 2 ? [0, y0, 0.5, 1, y1, 1] : [0.5, y0, 0, 1, y1, 1];
+  return [base, step];
+}
+
+/** Fence/pane: a centre post plus an arm toward each connected side
+ *  (conn bits: 1 = -z, 2 = +z, 4 = -x, 8 = +x). */
+function postBoxes(r: number, h: number, conn: number): Box[] {
+  const a = 0.5 - r, b = 0.5 + r;
+  const out: Box[] = [[a, 0, a, b, h, b]];
+  if (conn & 1) out.push([a, 0, 0, b, h, a]);
+  if (conn & 2) out.push([a, 0, b, b, h, 1]);
+  if (conn & 4) out.push([0, 0, a, a, h, b]);
+  if (conn & 8) out.push([b, 0, a, 1, h, b]);
+  return out;
+}
+
+/**
+ * Collision boxes of a shaped block, or null for a plain full cube. `meta` is
+ * the block's bedFacings value, `conn` the fence/pane connection mask and
+ * `open` whether a fence gate stands open. `collide` = physics boxes (fences
+ * stand 1.5 tall there); otherwise the visual/outline extent.
+ */
+export function shapeBoxes(id: number, meta: number, conn: number, open: boolean, collide: boolean): Box[] | null {
+  if (SLAB_IDS.has(id)) return [meta === 1 ? [0, 0.5, 0, 1, 1, 1] : [0, 0, 0, 1, 0.5, 1]];
+  if (STAIR_IDS.has(id)) return stairBoxes(meta);
+  switch (id) {
+    case B.OAK_FENCE: return postBoxes(2 * P16, collide ? 1.5 : 1, conn);
+    case B.GLASS_PANE: return postBoxes(P16, 1, conn);
+    case B.FENCE_GATE: {
+      if (open && collide) return [];
+      const alongX = (meta & 1) === 0; // facing north/south: the gate spans x
+      const h = collide ? 1.5 : 1;
+      return [alongX ? [0, 0, 7 * P16, 1, h, 9 * P16] : [7 * P16, 0, 0, 9 * P16, h, 1]];
+    }
+    case B.LANTERN: return meta === 1
+      ? [[5 * P16, 1 * P16, 5 * P16, 11 * P16, 10 * P16, 11 * P16]]
+      : [[5 * P16, 0, 5 * P16, 11 * P16, 9 * P16, 11 * P16]];
+    case B.ANVIL: return (meta & 1) === 0
+      ? [[0, 0, 3 * P16, 1, 1, 13 * P16]]
+      : [[3 * P16, 0, 0, 13 * P16, 1, 1]];
+    case B.ENCHANTING_TABLE: return [[0, 0, 0, 1, 0.75, 1]];
+    case B.CAMPFIRE: return [[0, 0, 0, 1, 7 * P16, 1]];
+    case B.CAKE: return [[(1 + 2 * Math.min(6, meta)) * P16, 0, P16, 15 * P16, 0.5, 15 * P16]];
+    case B.FLOWER_POT: return [[5 * P16, 0, 5 * P16, 11 * P16, 6 * P16, 11 * P16]];
+    default: return null;
+  }
+}
+
 export function def(id: number): Def {
   const d = DEFS.get(id);
   if (!d) throw new Error(`Unknown id ${id}`);
@@ -899,6 +1309,8 @@ export const CROSS_BLOCKS = new Set<number>([
   B.POTATO_0, B.POTATO_1, B.POTATO_2,
   B.BEETROOT_0, B.BEETROOT_1, B.BEETROOT_2,
   B.FIRE,
+  B.CORNFLOWER, B.ALLIUM, B.OXEYE_DAISY, B.BROWN_MUSHROOM, B.RED_MUSHROOM,
+  B.PUMPKIN_STEM, B.MELON_STEM,
 ]);
 
 /** How readily a block burns: `burn` = chance of being consumed by adjacent
@@ -917,6 +1329,12 @@ export const FLAMMABLE = new Map<number, { burn: number; catch: number }>([
   [B.DANDELION, { burn: 100, catch: 60 }], [B.SAPLING, { burn: 100, catch: 60 }],
   [B.BOOKSHELF, { burn: 30, catch: 20 }], [B.HAY_BALE, { burn: 60, catch: 20 }],
   [B.COAL_BLOCK, { burn: 5, catch: 5 }],
+  [B.OAK_FENCE, { burn: 20, catch: 5 }], [B.FENCE_GATE, { burn: 20, catch: 5 }],
+  [B.OAK_SLAB, { burn: 20, catch: 5 }], [B.OAK_STAIRS, { burn: 20, catch: 5 }],
+  [B.BARREL, { burn: 20, catch: 5 }], [B.COMPOSTER, { burn: 20, catch: 5 }],
+  [B.CORNFLOWER, { burn: 100, catch: 60 }], [B.ALLIUM, { burn: 100, catch: 60 }],
+  [B.OXEYE_DAISY, { burn: 100, catch: 60 }],
+  ...WOOL_COLORS.map(([id]) => [id, { burn: 60, catch: 30 }] as [number, { burn: number; catch: number }]),
 ]);
 
 /** Blocks that pop off when the block under them is removed.
@@ -928,6 +1346,8 @@ export const FLOOR_BLOCKS = new Set<number>([
   B.POTATO_0, B.POTATO_1, B.POTATO_2,
   B.BEETROOT_0, B.BEETROOT_1, B.BEETROOT_2,
   B.REDSTONE_WIRE, B.PRESSURE_PLATE, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
+  B.CORNFLOWER, B.ALLIUM, B.OXEYE_DAISY, B.BROWN_MUSHROOM, B.RED_MUSHROOM,
+  B.PUMPKIN_STEM, B.MELON_STEM, B.CAKE, B.FLOWER_POT,
 ]);
 export const SELF_STACKING = new Set<number>([B.SUGAR_CANE, B.CACTUS]);
 
@@ -957,7 +1377,7 @@ export function toolSpeed(blockId: number, heldId: number): number {
   const ti = def(heldId).toolInfo;
   if (!ti) return 1;
   // shears: leaves in a snap, wool quickly (vanilla 15x / 5x)
-  if (ti.kind === 'shears') return LEAF_BLOCKS.has(blockId) ? 15 : blockId === B.WOOL ? 5 : 1;
+  if (ti.kind === 'shears') return LEAF_BLOCKS.has(blockId) ? 15 : def(blockId).name.endsWith('_wool') ? 5 : 1;
   // a sword hacks through foliage a little faster than a fist
   if (ti.kind === 'sword') return LEAF_BLOCKS.has(blockId) ? 1.5 : 1;
   const bd = def(blockId);
@@ -1002,6 +1422,53 @@ export function attackStrength(charge: number): number {
   return 0.2 + c * c * 0.8;
 }
 
+// --- enchantments ------------------------------------------------------------
+
+/** Enchantments an enchanting table can roll: id, label, max level and what
+ *  item it can go on. Stored per stack as SlotData.ench ({ id: level }). */
+export interface EnchantDef { id: string; label: string; max: number; fits: (d: Def) => boolean }
+const TOOLS_DIG = new Set<ToolKind>(['pickaxe', 'axe', 'shovel', 'hoe', 'shears']);
+export const ENCHANTS: EnchantDef[] = [
+  { id: 'sharpness', label: 'Sharpness', max: 5, fits: (d) => d.toolInfo?.kind === 'sword' || d.toolInfo?.kind === 'axe' },
+  { id: 'knockback', label: 'Knockback', max: 2, fits: (d) => d.toolInfo?.kind === 'sword' },
+  { id: 'efficiency', label: 'Efficiency', max: 5, fits: (d) => !!d.toolInfo && TOOLS_DIG.has(d.toolInfo.kind) },
+  { id: 'fortune', label: 'Fortune', max: 3, fits: (d) => d.toolInfo?.kind === 'pickaxe' },
+  { id: 'power', label: 'Power', max: 5, fits: (d) => !!d.bow },
+  { id: 'protection', label: 'Protection', max: 4, fits: (d) => !!d.armor && d.armor.points > 0 },
+  { id: 'feather_falling', label: 'Feather Falling', max: 4, fits: (d) => d.armor?.slot === ARMOR_FEET },
+  { id: 'respiration', label: 'Respiration', max: 3, fits: (d) => d.armor?.slot === ARMOR_HEAD },
+  { id: 'unbreaking', label: 'Unbreaking', max: 3, fits: (d) => !!d.durability },
+];
+const ROMAN = ['', 'I', 'II', 'III', 'IV', 'V'];
+export function enchantLabel(id: string, level: number): string {
+  const e = ENCHANTS.find((x) => x.id === id);
+  return `${e?.label ?? id} ${ROMAN[level] ?? level}`;
+}
+/** Enchantments that can go on this item (empty = not enchantable). */
+export function enchantsFor(itemId: number): EnchantDef[] {
+  if (!hasDef(itemId)) return [];
+  const d = def(itemId);
+  return ENCHANTS.filter((e) => e.fits(d));
+}
+/** Level of `ench` on a stack (0 if absent). */
+export function enchLevel(slot: { ench?: Record<string, number> } | null | undefined, ench: string): number {
+  return slot?.ench?.[ench] ?? 0;
+}
+
+/** What an anvil mends an item with (one unit restores a quarter of it). */
+export function repairMaterial(itemId: number): number {
+  if (!hasDef(itemId)) return 0;
+  const n = def(itemId).name;
+  if (n.startsWith('wooden_') || n === 'bow' || n === 'shield' || n === 'fishing_rod') return B.PLANKS;
+  if (n.startsWith('stone_')) return B.COBBLE;
+  if (n.startsWith('iron_') || n === 'shears' || n === 'flint_and_steel') return I.IRON_INGOT;
+  if (n.startsWith('golden_')) return I.GOLD_INGOT;
+  if (n.startsWith('diamond_')) return I.DIAMOND;
+  if (n.startsWith('leather_')) return I.LEATHER;
+  if (n === 'glider') return I.FEATHER;
+  return 0;
+}
+
 /** Saturation a food restores (vanilla values; defaults to food * 0.6). */
 export function foodSaturation(id: number): number {
   const d = def(id);
@@ -1022,6 +1489,8 @@ export function pickItemFor(blockId: number): number {
     case B.CARROT_0: case B.CARROT_1: case B.CARROT_2: return I.CARROT;
     case B.POTATO_0: case B.POTATO_1: case B.POTATO_2: return I.POTATO;
     case B.BEETROOT_0: case B.BEETROOT_1: case B.BEETROOT_2: return I.BEETROOT_SEEDS;
+    case B.PUMPKIN_STEM: return I.PUMPKIN_SEEDS;
+    case B.MELON_STEM: return I.MELON_SEEDS;
     default: return hasDef(blockId) ? blockId : 0;
   }
 }
@@ -1041,6 +1510,16 @@ export const PLACEABLE: number[] = [
   B.REDSTONE_WIRE, B.REDSTONE_LAMP, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
   B.PISTON, B.STICKY_PISTON, B.PRESSURE_PLATE,
   B.BOOKSHELF, B.HAY_BALE, B.COAL_BLOCK, B.QUARTZ_BLOCK, B.SMOOTH_STONE, B2.EMERALD_BLOCK,
+  // building + decoration pass
+  B.BRICKS, B.CLAY, B.MOSSY_COBBLE, B.MOSSY_STONE_BRICKS, B.CRACKED_STONE_BRICKS, B.CHISELED_STONE_BRICKS,
+  B.TERRACOTTA, B.SNOW_BLOCK, B.ICE, B.PACKED_ICE,
+  B.COBBLE_SLAB, B.STONE_SLAB, B.OAK_SLAB, B.STONE_BRICK_SLAB, B.BRICK_SLAB, B.SANDSTONE_SLAB,
+  B.OAK_STAIRS, B.COBBLE_STAIRS, B.STONE_BRICK_STAIRS, B.BRICK_STAIRS,
+  B.OAK_FENCE, B.FENCE_GATE, B.GLASS_PANE, B.LANTERN,
+  B.RED_WOOL, B.ORANGE_WOOL, B.YELLOW_WOOL, B.LIME_WOOL, B.CYAN_WOOL, B.BLUE_WOOL, B.PURPLE_WOOL, B.BLACK_WOOL,
+  B.PUMPKIN, B.JACK_O_LANTERN, B.MELON,
+  B.CORNFLOWER, B.ALLIUM, B.OXEYE_DAISY, B.BROWN_MUSHROOM, B.RED_MUSHROOM,
+  B.BARREL, B.CAMPFIRE, B.ANVIL, B.ENCHANTING_TABLE, B.COMPOSTER, B.FLOWER_POT, B.CAKE,
 ];
 
 export const CREATIVE_ITEMS: number[] = [
@@ -1068,4 +1547,12 @@ export const CREATIVE_ITEMS: number[] = [
   I.GOLD_HELMET, I.GOLD_CHEST, I.GOLD_LEGS, I.GOLD_BOOTS,
   I.SHEARS, I.SHIELD, I.SPYGLASS, I.MILK_BUCKET,
   I.GOLDEN_APPLE, I.ENCHANTED_GOLDEN_APPLE, I.PAPER, I.BOOK,
+  // building + decoration pass
+  I.CLAY_BALL, I.BRICK, I.SNOWBALL, I.SUGAR, I.COOKIE, I.PUMPKIN_PIE, I.MELON_SLICE, I.GLISTERING_MELON,
+  I.PUMPKIN_SEEDS, I.MELON_SEEDS, I.MUSHROOM_STEW,
+  I.RED_DYE, I.ORANGE_DYE, I.YELLOW_DYE, I.LIME_DYE, I.CYAN_DYE, I.BLUE_DYE, I.PURPLE_DYE, I.BLACK_DYE,
+  I.GLASS_BOTTLE, I.WATER_BOTTLE,
+  I.POTION_HEALING, I.POTION_SWIFTNESS, I.POTION_NIGHT_VISION, I.POTION_WATER_BREATHING,
+  I.POTION_FIRE_RESISTANCE, I.POTION_STRENGTH, I.POTION_LEAPING, I.POTION_REGENERATION,
+  I.EXPERIENCE_BOTTLE, I.MAP, I.RECOVERY_COMPASS, I.GLIDER, I.FIREWORK_ROCKET, I.WARP_PEARL,
 ];
