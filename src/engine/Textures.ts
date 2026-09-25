@@ -1349,8 +1349,9 @@ function diagPx(fn: (a: number, c: number) => string | null, colors: Record<stri
 }
 
 // Tool tiers: L highlight, M body, m shade, d deep shade; H/h handle wood.
-type ToolMat = { L: string; M: string; m: string; d: string; H: string; h: string };
-const HANDLE = { H: '#9c7440', h: '#664722' };
+// (O = legacy dark outline, kept so older hand-outlined pixmaps still paint)
+type ToolMat = { L: string; M: string; m: string; d: string; H: string; h: string; O: string };
+const HANDLE = { H: '#9c7440', h: '#664722', O: '#241b10' };
 const WOOD: ToolMat = { L: '#caa870', M: '#a8864e', m: '#846638', d: '#634a26', ...HANDLE };
 const STONEC: ToolMat = { L: '#b4b4b4', M: '#929292', m: '#727272', d: '#555555', ...HANDLE };
 const IRONC: ToolMat = { L: '#ffffff', M: '#dcdcdc', m: '#aeaeae', d: '#828282', ...HANDLE };
