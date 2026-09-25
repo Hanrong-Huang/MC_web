@@ -28,15 +28,13 @@ export function geometryFromArrays(a: GeoArrays): THREE.BufferGeometry {
   g.setAttribute('atint', new THREE.BufferAttribute(a.tints, 3));
   g.setAttribute('uv', new THREE.BufferAttribute(a.uvs, 2));
   g.setIndex(new THREE.BufferAttribute(a.indices, 1));
-  // chunk-local geometry always fits the 16 x CY x 16 column: skip the
-  // per-vertex bounding-sphere pass (it was a measurable upload cost)
-  g.boundingSphere = CHUNK_SPHERE;
-  g.boundingBox = CHUNK_BOX;
+  // the mesher reports the vertical extent, so the culling volume is tight
+  // without a per-vertex computeBoundingSphere pass on the main thread
+  const y0 = a.minY ?? -1, y1 = a.maxY ?? 161;
+  g.boundingBox = new THREE.Box3(new THREE.Vector3(-0.5, y0 - 0.5, -0.5), new THREE.Vector3(16.5, y1 + 0.5, 16.5));
+  g.boundingSphere = g.boundingBox.getBoundingSphere(new THREE.Sphere());
   return g;
 }
-
-const CHUNK_BOX = new THREE.Box3(new THREE.Vector3(-0.5, -1, -0.5), new THREE.Vector3(16.5, 161, 16.5));
-const CHUNK_SPHERE = CHUNK_BOX.getBoundingSphere(new THREE.Sphere());
 
 export function chunkGeometryFromArrays(d: ChunkMeshData): ChunkGeometry {
   return {
@@ -581,6 +579,22 @@ export class Renderer {
     this.overlayScene.add(this.heldGroup);
     this.setHeldItem(0);
 
+    // compile both chunk programs now (during the loading screen) instead of
+    // stalling a frame mid-flight the first time water scrolls into view. It
+    // must be this scene: three keys programs on its lights + fog too.
+    {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0, 0, 0, 0], 3));
+      g.setAttribute('alight', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 2));
+      g.setAttribute('atint', new THREE.Float32BufferAttribute([1, 1, 1, 1, 1, 1, 1, 1, 1], 3));
+      g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 2));
+      const warm = [new THREE.Mesh(g, this.solidMat), new THREE.Mesh(g, this.waterMat)];
+      this.scene.add(...warm);
+      this.three.compile(this.scene, this.camera);
+      this.scene.remove(...warm);
+      g.dispose();
+    }
+
     window.addEventListener('resize', this.onResize);
   }
 
@@ -1122,7 +1136,7 @@ export class Renderer {
       let zc = 0;
       let mesh: THREE.Mesh;
       if (sprite && !isBow) {
-        const built = this.buildExtrudedItem(sprite, 0.46, 0.3);
+        const built = this.buildExtrudedItem(sprite, 0.4, 0.3);
         mesh = built.mesh;
         zc = built.zc;
       } else if (sprite) {

@@ -6,6 +6,7 @@ import { WorldGenerator } from './WorldGenerator';
 import { B, isSolid, def, hasDef } from './Blocks';
 import { BlockEntity } from './Inventory';
 import { rleDecode, rleEncode } from './Persistence';
+import type { GenResult } from './gen-worker';
 
 /** Cardinal facing for a placed door/trapdoor, in 90-degree steps.
  *  For doors this is the direction the player was looking when placed. */
@@ -68,6 +69,17 @@ export class World {
 
   private genQueue: { cx: number; cz: number; d: number }[] = [];
   private queued = new Set<string>();
+  // Terrain generation runs in Web Workers when available (the sync path
+  // below stays as the fallback for node tests / no-Worker environments).
+  private genWorkers: Worker[] | null = null;
+  private genWorkersTried = false;
+  private genInFlight = new Map<string, number>(); // key -> job id
+  private genJobId = 0;
+  private genRR = 0;
+  private lastPcx = 0;
+  private lastPcz = 0;
+  /** EMA of worker generation time per chunk (ms), for the debug overlay */
+  genMs = 0;
 
   dimension: 'overworld' | 'nether' = 'overworld';
   dimData: {
@@ -145,6 +157,7 @@ export class World {
     const existing = this.chunks.get(key);
     if (existing) return existing;
     this.queued.delete(key);
+    this.genInFlight.delete(key); // a pending worker result for it is now stale
     const chunk = new Chunk(cx, cz);
     const saved = this.savedChunks.get(key);
     if (saved) {
@@ -620,12 +633,19 @@ export class World {
     }
   }
 
-  /** A chunk is meshable when its 4 neighbors are generated. */
+  /** A chunk is meshable when all 8 neighbours are generated: the mesher
+   *  reads the whole 3x3 block (AO at the corners, sky/torch light spilling
+   *  diagonally), so meshing earlier would bake wrong corners and need a
+   *  remesh when the diagonal arrives. */
   neighborsReady(cx: number, cz: number): boolean {
-    return !![
-      this.getChunk(cx - 1, cz), this.getChunk(cx + 1, cz),
-      this.getChunk(cx, cz - 1), this.getChunk(cx, cz + 1),
-    ].every((c) => c && c.ready);
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dz === 0) continue;
+        const c = this.chunks.get(chunkKey(cx + dx, cz + dz));
+        if (!c || !c.ready) return false;
+      }
+    }
+    return true;
   }
 
   /** Stream chunks around the player; generate up to a small time budget. */
@@ -645,17 +665,32 @@ export class World {
         this.genQueue.push({ cx, cz, d });
       }
     }
+    this.lastPcx = pcx; this.lastPcz = pcz;
     if (this.genQueue.length) {
+      // re-prioritise by the current distance (entries go stale as you move)
+      for (const j of this.genQueue) {
+        const dx = j.cx - pcx, dz = j.cz - pcz;
+        j.d = dx * dx + dz * dz;
+      }
       this.genQueue.sort((a, b) => a.d - b.d);
+      const pool = this.ensureGenWorkers();
+      const maxInFlight = pool ? pool.length * 2 : 0;
       const t0 = performance.now();
       while (this.genQueue.length && performance.now() - t0 < budgetMs) {
+        if (pool && this.genInFlight.size >= maxInFlight) break;
         const job = this.genQueue.shift()!;
         const key = chunkKey(job.cx, job.cz);
-        this.queued.delete(key);
-        const dx = job.cx - pcx, dz = job.cz - pcz;
-        if (dx * dx + dz * dz > R * R + 1) continue; // player moved away
-        const chunk = new Chunk(job.cx, job.cz);
+        if (job.d > R * R + 1) { this.queued.delete(key); continue; } // player moved away
         const saved = this.savedChunks.get(key);
+        if (!saved && pool) {
+          // off-thread: stays in `queued` until the result is installed
+          const id = ++this.genJobId;
+          this.genInFlight.set(key, id);
+          pool[this.genRR++ % pool.length].postMessage({ type: 'job', job: { id, cx: job.cx, cz: job.cz, dim: this.dimension } });
+          continue;
+        }
+        this.queued.delete(key);
+        const chunk = new Chunk(job.cx, job.cz);
         if (saved) {
           chunk.data = rleDecode(saved, chunk.data.length);
           chunk.computeHeightmap();
@@ -666,21 +701,7 @@ export class World {
           this.generator.generate(chunk);
           this.generator.drainStates(this);
         }
-        this.chunks.set(key, chunk);
-        this.dirtySet.add(key);
-        this.scanRedstoneInChunk(chunk);
-        // remesh neighbors so their frontier faces update; include diagonals
-        // when this chunk carries torch light that may spill across borders
-        if (chunk.torches.size > 0) {
-          for (let dz = -1; dz <= 1; dz++) {
-            for (let dx = -1; dx <= 1; dx++) this.markDirty(job.cx + dx, job.cz + dz);
-          }
-        } else {
-          this.markDirty(job.cx - 1, job.cz);
-          this.markDirty(job.cx + 1, job.cz);
-          this.markDirty(job.cx, job.cz - 1);
-          this.markDirty(job.cx, job.cz + 1);
-        }
+        this.installChunk(key, chunk);
       }
     }
 
@@ -696,6 +717,82 @@ export class World {
         this.onChunkRemoved(key);
       }
     }
+  }
+
+  /** Register a freshly generated/loaded chunk. Its neighbours need no
+   *  remesh: a chunk only meshes once all 8 neighbours exist (see
+   *  neighborsReady), so none of them was meshed without this one — they are
+   *  either still waiting in dirtySet or were meshed while an identical copy
+   *  of it was loaded. */
+  private installChunk(key: string, chunk: Chunk): void {
+    this.chunks.set(key, chunk);
+    this.dirtySet.add(key);
+    this.scanRedstoneInChunk(chunk);
+  }
+
+  /** Lazily start the generation workers (null when Workers are unavailable). */
+  private ensureGenWorkers(): Worker[] | null {
+    if (this.genWorkersTried) return this.genWorkers;
+    this.genWorkersTried = true;
+    if (typeof Worker === 'undefined' || typeof window === 'undefined') return null;
+    try {
+      const n = (navigator.hardwareConcurrency ?? 2) >= 6 ? 2 : 1;
+      const pool: Worker[] = [];
+      for (let i = 0; i < n; i++) {
+        const w = new Worker(new URL('./gen-worker.ts', import.meta.url), { type: 'module' });
+        w.postMessage({ type: 'init', seed: this.seed });
+        w.onmessage = (e: MessageEvent) => { if (e.data?.type === 'done') this.onGenDone(e.data.res as GenResult); };
+        w.onerror = () => this.dropGenWorkers();
+        pool.push(w);
+      }
+      this.genWorkers = pool;
+    } catch {
+      this.genWorkers = null;
+    }
+    return this.genWorkers;
+  }
+
+  /** Worker failure: fall back to synchronous generation and requeue the
+   *  in-flight chunks. */
+  private dropGenWorkers(): void {
+    if (this.genWorkers) for (const w of this.genWorkers) w.terminate();
+    this.genWorkers = null;
+    for (const key of this.genInFlight.keys()) this.queued.delete(key);
+    this.genInFlight.clear();
+  }
+
+  private onGenDone(res: GenResult): void {
+    const key = chunkKey(res.cx, res.cz);
+    if (this.genInFlight.get(key) !== res.id) return; // stale (dimension switch)
+    this.genInFlight.delete(key);
+    this.queued.delete(key);
+    this.genMs = this.genMs * 0.9 + res.ms * 0.1;
+    if (res.dim !== this.dimension || this.chunks.has(key)) return; // ensureChunk won the race
+    const dx = res.cx - this.lastPcx, dz = res.cz - this.lastPcz;
+    const R = this.viewDist + 1;
+    if (dx * dx + dz * dz > R * R + 1) return;
+    const chunk = new Chunk(res.cx, res.cz);
+    chunk.data = res.data;
+    chunk.heightmap = res.heightmap;
+    for (const t of res.torches) chunk.torches.add(t);
+    for (const t of res.glowers) chunk.glowers.add(t);
+    chunk.ready = true;
+    // the worker generator's door/torch/bed states + new village spots
+    for (const [k, v] of res.doors) if (!this.doorStates.has(k)) this.doorStates.set(k, v);
+    for (const [k, v] of res.torchFacings) if (!this.torchFacings.has(k)) this.torchFacings.set(k, v);
+    for (const [k, v] of res.beds) if (!this.bedFacings.has(k)) this.bedFacings.set(k, v);
+    const vs = this.generator.villageSpawns;
+    for (const s of res.spawns) {
+      if (!vs.some((o) => o.x === s.x && o.y === s.y && o.z === s.z)) vs.push(s);
+    }
+    this.installChunk(key, chunk);
+  }
+
+  /** Stop background workers (world is being discarded). */
+  dispose(): void {
+    if (this.genWorkers) for (const w of this.genWorkers) w.terminate();
+    this.genWorkers = null;
+    this.genInFlight.clear();
   }
 
   /** Snapshot all currently-modified chunks into savedChunks (for saving). */
@@ -745,6 +842,7 @@ export class World {
     this.dirtySet.clear();
     this.genQueue.length = 0;
     this.queued.clear();
+    this.genInFlight.clear(); // late worker results for the old dimension are dropped
 
     this.dimension = dim;
     this.generator.dimension = dim;

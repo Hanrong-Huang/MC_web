@@ -46,6 +46,8 @@ export interface MeshAtlas { rect(name: string): UVRect; }
 export interface GeoArrays {
   positions: Float32Array; lights: Float32Array; tints: Float32Array;
   uvs: Float32Array; indices: Uint32Array | Uint16Array;
+  /** vertical extent of the vertices, for a tight culling volume */
+  minY?: number; maxY?: number;
 }
 export interface ChunkMeshData { solid: GeoArrays | null; water: GeoArrays | null; }
 
@@ -140,7 +142,7 @@ function padIdx(x: number, y: number, z: number): number {
   return ((z + 1) * PW + (x + 1)) * PH + (y + 1);
 }
 
-/** Leaf blocks render every face (fancy leaves) and sway gently. */
+/** Leaf blocks sway gently in the wind. */
 const LEAF_LUT = new Uint8Array(256);
 for (let id = 1; id < 256; id++) if (hasDef(id) && def(id).name.endsWith('leaves')) LEAF_LUT[id] = 1;
 
@@ -212,7 +214,10 @@ export class GeoBuilder {
     const p = this.p, n = this.vertCount;
     // 16-bit indices whenever they fit: half the index upload for most chunks
     const indices = n <= 65535 ? Uint16Array.from(p.idx.subarray(0, this.idxCount)) : p.idx.slice(0, this.idxCount);
+    let minY = Infinity, maxY = -Infinity;
+    for (let i = 1; i < n * 3; i += 3) { const y = p.pos[i]; if (y < minY) minY = y; if (y > maxY) maxY = y; }
     return {
+      minY, maxY,
       positions: p.pos.slice(0, n * 3),
       lights: p.lit.slice(0, n * 2),
       tints: p.tint.slice(0, n * 3),
@@ -530,13 +535,6 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
         }
 
         const opaque = OPAQUE_LUT[id] === 1;
-        // a leaf block buried inside its canopy (every neighbour leaf or solid)
-        // can't be seen even through leaf holes: skip it entirely
-        if (LEAF_LUT[id] &&
-          (LEAF_LUT[PAD[pi + 1]] || OPAQUE_LUT[PAD[pi + 1]]) && (LEAF_LUT[PAD[pi - 1]] || OPAQUE_LUT[PAD[pi - 1]]) &&
-          (LEAF_LUT[PAD[pi + PH]] || OPAQUE_LUT[PAD[pi + PH]]) && (LEAF_LUT[PAD[pi - PH]] || OPAQUE_LUT[PAD[pi - PH]]) &&
-          (LEAF_LUT[PAD[pi + PW * PH]] || OPAQUE_LUT[PAD[pi + PW * PH]]) &&
-          (LEAF_LUT[PAD[pi - PW * PH]] || OPAQUE_LUT[PAD[pi - PW * PH]])) continue;
         const isWater = id === B.WATER;
         const isLava = id === B.LAVA;
         const isLiquid = isWater || isLava;
@@ -559,12 +557,10 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
             if (nb !== B.AIR && !LEAF_LUT[nb] && nb !== B.TORCH && face !== 2) continue;
           } else if (opaque) {
             if (OPAQUE_LUT[nb]) continue;
-          } else if (isLeaf) {
-            // fancy leaves: keep the faces between leaf blocks so a canopy reads
-            // as dense foliage instead of a hollow shell with see-through holes
-            if (OPAQUE_LUT[nb]) continue;
           } else {
-            // cutout blocks (glass): cull against opaque and same type
+            // cutout blocks (leaves, glass): cull against opaque and same type.
+            // (Fancy leaf-to-leaf faces were tried: +37% vertices in forests
+            // and heavy overdraw for little gain with these dense leaf tiles.)
             if (OPAQUE_LUT[nb] || nb === id) continue;
           }
 

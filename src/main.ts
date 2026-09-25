@@ -1958,7 +1958,7 @@ class Game {
       `Facing: ${facing} (yaw ${yawDeg.toFixed(1)})`,
       `Biome: ${biome}  Day: ${(this.dayTime * 100).toFixed(0)}%`,
       `Chunks: ${this.world.countLoaded()} loaded, ${this.world.dirtySet.size} dirty`,
-      `Mesh: ${this.meshMs.toFixed(2)} ms/chunk (${this.meshPerFrame}/frame)`,
+      `Mesh: ${this.meshMs.toFixed(2)} ms/chunk (${this.meshPerFrame}/frame)  Gen: ${this.world.genMs.toFixed(1)} ms/chunk`,
       `Entities: ${c.mobs} mobs, ${c.drops} drops, ${c.other} fx`,
       `Mode: ${this.player.mode}${this.player.flying ? ' (flying)' : ''}${this.player.onGround ? ' on ground' : ''}`,
     ]);
@@ -2216,6 +2216,7 @@ class Game {
     cancelAnimationFrame(this.raf);
     this.meshWorker?.terminate();
     this.meshWorker = null;
+    this.world.dispose(); // stop the terrain-generation workers
     this.input.exitLock();
     this.input.dispose();
     this.touch?.el.remove();
