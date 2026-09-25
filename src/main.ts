@@ -31,6 +31,7 @@ import { Weather } from './engine/Weather';
 import { getControls, setControls } from './engine/ControlsSettings';
 import { AdvancementTracker } from './engine/Advancements';
 import { FireSystem } from './engine/Fire';
+import { waterFX } from './engine/WaterFX';
 import type { Entity } from './engine/EntityManager';
 
 const DAY_LENGTH = 1200; // 20 real minutes
@@ -124,6 +125,7 @@ class Game {
     this.input = new Input(this.renderer.canvas);
     this.entities = new EntityManager(this.renderer.scene, this.world, this.atlas, this.audio);
     this.entities.setPlayer(this.player);
+    waterFX.attach(this.renderer.scene, this.world, this.audio);
     this.entities.onKill = (kind) => {
       if (['zombie', 'skeleton', 'spider', 'creeper'].includes(kind)) this.adv.unlock('kill_mob');
     };
@@ -1299,6 +1301,7 @@ class Game {
       this.world.updateDoorSwings(dt);
       this.processMeshing(8);
       this.entities.update(dt, this.elapsed, this.renderer.camera.quaternion);
+      waterFX.update(dt, this.world, this.renderer.camera.position, this.renderer.daylight, this.entities.entities);
 
       // weather follows the player; the Nether has no sky, so no weather there
       const pp = this.player.pos;

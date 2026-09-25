@@ -142,7 +142,19 @@ npm run dev        # open the printed localhost URL
   TNT chain flashes.
 - **Extra visuals**: per-vertex **biome tinting** for grass, foliage, and
   tall grass (dry plains go yellow-green, humid forests deep green, cold
-  biomes pale), and **animated water** with a gentle world-anchored wave.
+  biomes pale).
+- **Water** (`WATER_FRAG` in `Renderer.ts`, fed per-vertex flow/depth/shore
+  data by the mesher): still water shimmers with two drifting texture layers,
+  flowing water streams downhill along its surface slope and down waterfalls,
+  depth-graded colour (clear turquoise shallows over the seabed, deep blue
+  in the middle), Fresnel reflection of the sky *and the real cloud layer*,
+  sun glints / moon path, lapping shoreline foam and whitewater where falls
+  plunge in, caustic sparkle in the shallows. Under water: caustics on the
+  terrain, a screen wobble, blue fog and a Snell's-window surface overhead.
+  `WaterFX.ts` adds splash droplets, ripples and bubbles (one instanced draw),
+  and water sounds scale with impact speed: splash on entry, swim strokes,
+  a dripping exit, and a babbling/roaring bed near flowing water and falls.
+  Mobs and items that fall in splash too.
 - **Creative**: infinite blocks, instant breaking, flight, full item panel.
 - **Persistence**: RLE-compressed chunk diffs + player/inventory/durability/
   chest/furnace/spawn-point/time state in IndexedDB across three save slots.
