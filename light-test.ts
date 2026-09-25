@@ -25,6 +25,17 @@ const chunk = world.getChunk(0, 0)!;
 const h = chunk.heightmap[8 * 16 + 8]; // first free y at local (8,8)
 check('surface found', h > 1 && h < 120);
 
+// generated terrain can hold its own glowers (lava, glowstone, magma, lush
+// caves), so light far from the torch is measured against this baseline
+const lit = (L: Float32Array | number[], i: number): number => (L[i * 2 + 1] >= 4 ? 0 : L[i * 2 + 1] % 2);
+const geo0 = buildChunkGeometry(world, chunk, mockAtlas);
+const P0 = geo0.solid!.positions, L0 = geo0.solid!.lights;
+let baseFar = 0, baseAny = 0;
+for (let i = 0; i < P0.length / 3; i++) {
+  const d = Math.hypot(P0[i * 3] - 8.5, P0[i * 3 + 1] - h, P0[i * 3 + 2] - 8.5);
+  if (lit(L0, i) > 0.05) { baseAny++; if (d > 20) baseFar++; }
+}
+
 // place a torch on the surface
 const ok = world.setBlock(8, h, 8, B.TORCH);
 check('torch placed', ok && world.getBlock(8, h, 8) === B.TORCH);
@@ -57,15 +68,15 @@ for (let i = 0; i < pos.count; i++) {
 console.log(`  near torch: ${nearLit}/${nearTotal} lit, max block light ${maxNear.toFixed(2)}`);
 check('vertices near torch are lit', nearLit >= 20); // d<3 also catches unconnected cave faces
 check('strong light at the torch', maxNear > 0.6);
-check('light attenuates with distance', farLit === 0);
+check('light attenuates with distance', farLit === baseFar);
 
 // breaking the torch clears the light
 world.setBlock(8, h, 8, B.AIR);
 const geo2 = buildChunkGeometry(world, chunk, mockAtlas);
 const L2 = geo2.solid!.lights;
 let anyLit = 0;
-for (let i = 0; i < L2.length / 2; i++) if (L2[i * 2 + 1] < 4 && L2[i * 2 + 1] % 2 > 0.05) anyLit++;
-check('light removed with torch', anyLit === 0);
+for (let i = 0; i < L2.length / 2; i++) if (lit(L2, i) > 0.05) anyLit++;
+check('light removed with torch', anyLit === baseAny);
 
 console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');
 process.exit(failures ? 1 : 0);
