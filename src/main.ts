@@ -143,7 +143,7 @@ class Game {
     });
     this.adv.onChange = () => {
       let t: { id: string; label: string; icon: string } | null;
-      while ((t = this.adv.popToast())) this.hud.showAdvancementToast(t.icon, t.label);
+      while ((t = this.adv.popToast())) { this.hud.showAdvancementToast(t.icon, t.label); this.audio.play('advancement'); }
     };
 
     this.world.onChunkRemoved = (key) => this.renderer.removeChunk(key);
@@ -679,6 +679,7 @@ class Game {
       this.containerPos = null;
     }
     this.state = 'container';
+    if (kind === 'chest') this.audio.play('chestOpen');
     this.input.exitLock();
     this.hud.openContainer(this.container, this.player.inventory, this.player.mode);
   }
@@ -880,6 +881,7 @@ class Game {
   private closeContainer(): void {
     if (this.state !== 'container') return;
     this.hud.closeContainer();
+    if (this.container?.kind === 'chest') this.audio.play('chestClose');
     this.container = null;
     this.containerPos = null;
     this.state = 'playing';
@@ -2134,6 +2136,7 @@ class App {
 
   async showMenu(): Promise<void> {
     this.game = null;
+    this.audio.setMenuMusic(true);
     let saves: Awaited<ReturnType<SaveDB['list']>> = [];
     try {
       saves = await this.db.list();
@@ -2216,6 +2219,7 @@ class App {
       if (!save) return;
     }
     this.hud.hideMenu();
+    this.audio.setMenuMusic(false);
     this.game = new Game(this, slot, save, fresh);
     void this.game;
   }

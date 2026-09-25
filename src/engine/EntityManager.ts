@@ -1675,7 +1675,7 @@ export class EntityManager {
 
       // idle voices, attenuated by distance
       if (d < 24 && Math.random() < (e.state === 'chase' ? 0.008 : 0.0035)) {
-        this.audio.mobSound(e.kind, (1 - d / 24) * 0.9);
+        this.audio.mobSound(e.kind, (1 - d / 24) * 0.9, 'idle', ((e.pos.x - p.pos.x) * Math.cos(p.yaw) - (e.pos.z - p.pos.z) * Math.sin(p.yaw)) / Math.max(1, d) * 0.7);
       }
 
       if (stats.hostile && e.state !== 'fuse' && !this.isPet(e)) {
@@ -1912,6 +1912,7 @@ export class EntityManager {
     e.vel.z += (kbZ / len) * 7;
     e.vel.y = Math.max(e.vel.y, 5);
     this.audio.play('hit');
+    this.audio.mobSound(e.kind as string, 0.85, e.hp <= 0 ? 'death' : 'hurt');
     if (!MOB_STATS[e.kind as MobKind].hostile) {
       e.state = 'flee';
       e.stateTime = 5;
