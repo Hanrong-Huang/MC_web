@@ -357,6 +357,7 @@ export class WorldGenerator {
       if (b === SWAMP) { this.sTop = B.DIRT; this.sFill = B.DIRT; }
       else if (pat > 0.3 || (h < SEA_LEVEL - 9 && pat > -0.1)) { this.sTop = B.GRAVEL; this.sFill = B.GRAVEL; this.sDepth = 2; }
       else if (pat < -0.45 && h >= SEA_LEVEL - 3) { this.sTop = B.DIRT; this.sFill = B.DIRT; }
+      else if (pat < -0.22 && r < 0.6) { this.sTop = B.CLAY; this.sFill = B.CLAY; this.sDepth = 2; } // clay beds
       else { this.sTop = B.SAND; this.sFill = B.SAND; this.sUnder = B.SANDSTONE; this.sUnderDepth = 2; }
       return;
     }
@@ -697,7 +698,12 @@ export class WorldGenerator {
           if (r < grass) chunk.setRaw(x, h + 1, z, B.TALL_GRASS);
           else if (b === JUNGLE && r < grass + 0.025) chunk.setRaw(x, h + 1, z, B.JUNGLE_LEAVES); // understory
           else if (r < grass + 0.008 && b !== TAIGA && b !== SWAMP && b !== MOUNTAINS) {
-            chunk.setRaw(x, h + 1, z, hash2(this.seed ^ 0xf10c, wx, wz) < 0.5 ? B.POPPY : B.DANDELION);
+            const f = hash2(this.seed ^ 0xf10c, wx, wz);
+            chunk.setRaw(x, h + 1, z, f < 0.34 ? B.POPPY : f < 0.68 ? B.DANDELION : f < 0.8 ? B.CORNFLOWER : f < 0.9 ? B.OXEYE_DAISY : B.ALLIUM);
+          } else if (r < grass + 0.0095 && (b === PLAINS || b === FOREST || b === JUNGLE)) {
+            chunk.setRaw(x, h + 1, z, b === JUNGLE ? B.MELON : B.PUMPKIN); // a wild pumpkin / melon
+          } else if (r > 0.994 && (b === FOREST || b === SWAMP || b === TAIGA)) {
+            chunk.setRaw(x, h + 1, z, hash2(this.seed ^ 0xf10d, wx, wz) < 0.6 ? B.BROWN_MUSHROOM : B.RED_MUSHROOM);
           }
         } else if (surface === B.SAND && b === DESERT) {
           if (r < 0.0065 && this.cactusRoom(chunk, x, h, z)) {

@@ -45,6 +45,24 @@ export const ADVANCEMENTS: AdvancementDef[] = [
   { id: 'golden_apple', label: 'Apple of My Eye', desc: 'Eat a golden apple', icon: '🍎', requires: ['root'] },
   { id: 'spyglass', label: 'Is It a Bird?', desc: 'Look through a spyglass', icon: '🔭', requires: ['root'] },
   { id: 'critical', label: 'Critical Hit', desc: 'Land a critical hit on a mob', icon: '✨', requires: ['root'] },
+  // building + decoration pass
+  { id: 'builder', label: 'Master Builder', desc: 'Craft slabs or stairs', icon: '🧱', requires: ['planks'] },
+  { id: 'lantern', label: 'Light the Way', desc: "Craft a lantern or a jack o'lantern", icon: '🏮', requires: ['planks'] },
+  { id: 'dye', label: 'A Splash of Colour', desc: 'Dye a block of wool', icon: '🎨', requires: ['root'] },
+  { id: 'flower_pot', label: 'Green Thumb', desc: 'Pot a plant in a flower pot', icon: '🪴', requires: ['root'] },
+  { id: 'compost', label: 'Waste Not', desc: 'Fill a composter to make bone meal', icon: '♻️', requires: ['farm'] },
+  { id: 'campfire', label: 'Cookout', desc: 'Cook food on a campfire', icon: '🔥', requires: ['root'] },
+  { id: 'baker', label: 'Sweet Tooth', desc: 'Eat a cookie, pumpkin pie or mushroom stew', icon: '🍪', requires: ['farm'] },
+  { id: 'bake_cake', label: 'The Cake Is Real', desc: 'Bake a cake', icon: '🎂', requires: ['farm'] },
+  { id: 'cake', label: 'Piece of Cake', desc: 'Eat a slice of cake', icon: '🍰', requires: ['root'] },
+  { id: 'potion', label: 'Local Brewery', desc: 'Drink a potion', icon: '🧪', requires: ['root'] },
+  { id: 'xp_10', label: 'Seasoned', desc: 'Reach experience level 10', icon: '🟢', requires: ['root'] },
+  { id: 'ench_table', label: 'Enchanter', desc: 'Craft an enchanting table', icon: '📖', requires: ['diamonds'] },
+  { id: 'enchant', label: 'Arcane Arts', desc: 'Enchant an item', icon: '🔮', requires: ['root'] },
+  { id: 'anvil', label: 'Good as New', desc: 'Mend a tool on an anvil', icon: '⚒️', requires: ['iron_age'] },
+  { id: 'cartographer', label: 'Cartographer', desc: 'Craft an explorer map', icon: '🗺️', requires: ['root'] },
+  { id: 'glide', label: 'Sky Is the Limit', desc: 'Soar on a glider', icon: '🪂', requires: ['root'] },
+  { id: 'warp', label: 'Blink', desc: 'Teleport with a warp pearl', icon: '🌀', requires: ['root'] },
 ];
 
 export class AdvancementTracker {

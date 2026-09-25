@@ -3110,6 +3110,9 @@ Object.assign(PACK_MAP, {
 // of shaped blocks. Self-contained: it only reads the shared pixel toolkit.
 // =============================================================================
 
+/** `col` scaled by k as an RGB triple (Px.set wants hex or RGB, not shadeHex's rgb() string). */
+const shadeRGB = (col: string, k: number): RGB => shade(hex(col), k).map((v) => Math.max(0, Math.min(255, v))) as RGB;
+
 /** Speckle moss over a tile (mossy cobble / stone bricks). */
 function mossOver(p: Px, seed: number, amount: number): Px {
   const f = fbm(seed, [[4, 0.55], [8, 0.3], [16, 0.15]], 1.9);
@@ -3380,11 +3383,11 @@ const DECOR_TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => vo
     const r = mulberry32(8840);
     new Px().fill((xx, yy) => {
       const h = yy & 7; // two stacked half-height plates
-      if (h === 0) return shadeHex('#b8b8b8', 0.98 + r() * 0.04);
-      if (h === 7) return shadeHex('#7c7c7c', 0.96 + r() * 0.06);
-      if (xx === 0) return shadeHex('#b0b0b0', 1);
-      if (xx === 15) return shadeHex('#8a8a8a', 1);
-      return shadeHex('#a4a4a4', 0.96 + r() * 0.07);
+      if (h === 0) return shadeRGB('#b8b8b8', 0.98 + r() * 0.04);
+      if (h === 7) return shadeRGB('#7c7c7c', 0.96 + r() * 0.06);
+      if (xx === 0) return shadeRGB('#b0b0b0', 1);
+      if (xx === 15) return shadeRGB('#8a8a8a', 1);
+      return shadeRGB('#a4a4a4', 0.96 + r() * 0.07);
     }).put(c, x, y);
   },
   anvil: (c, x, y) => {
@@ -3465,7 +3468,7 @@ const DECOR_TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => vo
       const h = yy & 7; // icing band + drips over sponge (both half-heights)
       const drip = h === 2 && (xx % 5 === 1 || xx % 7 === 3);
       if (h <= 1 || drip) return h === 0 ? '#fbf8f5' : '#e6e0da';
-      return shadeHex(r() < 0.25 ? '#b0703a' : '#c27d44', h === 7 ? 0.8 : 1);
+      return shadeRGB(r() < 0.25 ? '#b0703a' : '#c27d44', h === 7 ? 0.8 : 1);
     }).put(c, x, y);
   },
   cake_inner: (c, x, y) => {
@@ -3484,7 +3487,7 @@ const DECOR_TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => vo
       if (yy === 10) return '#8a4028'; // rim lip
       if (yy === 11) return '#6a2e1c';
       const lit = xx <= 6 ? 1.1 : xx >= 9 ? 0.86 : 1;
-      return shadeHex(r() < 0.2 ? '#8e4a30' : '#9c5236', lit);
+      return shadeRGB(r() < 0.2 ? '#8e4a30' : '#9c5236', lit);
     }).put(c, x, y);
   },
   flower_pot_top: (c, x, y) => new Px().fill((xx, yy) => {
@@ -3747,6 +3750,7 @@ export const ICON_SHAPES: Record<string, number[][]> = {
   oak_fence_gate: [[0, 0.12, 0.44, 0.56, 0.31, 1], [0.12, 0.88, 0.44, 0.56, 0.38, 0.56], [0.12, 0.88, 0.44, 0.56, 0.75, 0.94],
     [0.38, 0.62, 0.44, 0.56, 0.38, 0.94], [0.88, 1, 0.44, 0.56, 0.31, 1]],
   composter: [[0, 1, 0, 1, 0, 1]],
+  glass_pane: [[0, 1, 0.44, 0.56, 0, 1]],
 };
 for (const [slab, stairs] of SLAB_KINDS) {
   ICON_SHAPES[def(slab).name] = [[0, 1, 0, 1, 0, 0.5]];

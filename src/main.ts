@@ -27,6 +27,12 @@ import { chunkGeometryFromArrays } from './engine/Renderer';
 import type { MeshJob, MeshChunkSnap } from './engine/mesh-worker';
 import { chunkKey, CX, CZ } from './engine/Chunk';
 import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef, isSolid, mobLabel } from './engine/Blocks';
+import { SHAPED, META_BLOCKS, shapeBoxes, connectsTo, enchantLabel } from './engine/Blocks';
+import { craftRemainders } from './engine/Inventory';
+import { ExperienceOrbs, XpBar } from './engine/Experience';
+import { Throwables } from './engine/Throwables';
+import { Campfires } from './engine/Campfires';
+import { MapOverlay } from './ui/MapOverlay';
 import { Weather } from './engine/Weather';
 import { getControls, setControls } from './engine/ControlsSettings';
 import { AdvancementTracker } from './engine/Advancements';
@@ -107,6 +113,17 @@ class Game {
   private fire!: FireSystem;
   private fireAcc = 0;
   private mobBurnAcc = 0;
+  /** experience orbs + the bar above the hotbar */
+  private xpOrbs!: ExperienceOrbs;
+  private xpBar = new XpBar();
+  private lastKilledKind = '';
+  /** warp pearls + snowballs in flight */
+  private throwables!: Throwables;
+  /** food cooking on campfires */
+  private campfires = new Campfires();
+  private campfireHurtT = 0;
+  /** explorer map + recovery compass overlays */
+  private mapOverlay: MapOverlay;
 
   constructor(app: App, slot: string, save: SaveState | null, fresh: { seed: number; mode: GameMode } | null) {
     this.app = app;
@@ -115,6 +132,7 @@ class Game {
     this.audio = app.audio;
     this.atlas = app.atlas;
     this.status = new StatusHUD(app.root);
+    this.mapOverlay = new MapOverlay(app.root, app.atlas);
 
     const seed = save ? save.seed : fresh!.seed;
     this.world = new World(seed);
@@ -126,7 +144,13 @@ class Game {
     this.entities.setPlayer(this.player);
     this.entities.onKill = (kind) => {
       if (['zombie', 'skeleton', 'spider', 'creeper'].includes(kind)) this.adv.unlock('kill_mob');
+      this.lastKilledKind = kind;
     };
+    this.xpOrbs = new ExperienceOrbs(this.renderer.scene, this.world);
+    this.throwables = new Throwables(this.renderer.scene, this.world, this.atlas, this.entities);
+    this.throwables.onWarp = (x, y, z) => this.warpPlayer(x, y, z);
+    // outline hugs slabs, stairs, fences and other shaped blocks
+    this.renderer.outlineShape = (x, y, z) => this.outlineBoxFor(x, y, z);
     // thrown catchers resolve inside the entity update, away from the input path
     this.entities.onToast = (msg) => this.hud.toast(msg);
     this.entities.onCapture = () => this.adv.unlock('catch');
@@ -134,6 +158,7 @@ class Game {
     this.entities.onPlayerHit = (pos, dmg, crit, killed) => {
       if (this.state !== 'playing') return;
       this.hud.flashHitMarker(crit, killed);
+      if (killed) this.xpOrbs.spawn(pos.x, pos.y + 0.5, pos.z, this.killXp(this.lastKilledKind));
       const v = new THREE.Vector3(pos.x, pos.y + 0.9, pos.z).project(this.renderer.camera);
       if (v.z < 1) { // in front of the camera
         const canvas = this.renderer.canvas;
@@ -171,7 +196,11 @@ class Game {
         this.supportQueue.add(`${x - 1},${y},${z}`);
         this.supportQueue.add(`${x},${y},${z + 1}`);
         this.supportQueue.add(`${x},${y},${z - 1}`);
+        this.supportQueue.add(`${x},${y - 1},${z}`); // hanging lanterns
       }
+      // a shaped block's facing/state entry goes with it (explosions, pistons, fire ...)
+      if (_oldId !== newId && META_BLOCKS.has(_oldId)) this.world.bedFacings.delete(`${x},${y},${z}`);
+      if (_oldId === B.FENCE_GATE && newId !== B.FENCE_GATE) this.world.doorStates.delete(`${x},${y},${z}`);
       if (GRAVITY_BLOCKS.has(newId)) this.supportQueue.add(`${x},${y},${z}`);
       // covering grass smothers it
       if (newId !== B.AIR && def(newId).opaque) this.supportQueue.add(`${x},${y - 1},${z}`);
@@ -239,7 +268,11 @@ class Game {
       },
       onPlantSeed: () => this.adv.unlock('farm'),
       onBoneMeal: (x, y, z) => this.applyBoneMeal(x, y, z),
-      onFish: (id) => { if (id === I.RAW_FISH) this.adv.unlock('fish'); },
+      onFish: (id) => {
+        if (id === I.RAW_FISH) this.adv.unlock('fish');
+        const p = this.player.pos;
+        this.xpOrbs.spawn(p.x, p.y + 1, p.z, 1 + Math.floor(Math.random() * 6));
+      },
       onTameWolf: () => this.adv.unlock('wolf'),
       onTrade: () => this.adv.unlock('trade'),
       onDeath: () => this.onDeath(),
@@ -247,6 +280,13 @@ class Game {
       toast: (msg) => this.hud.toast(msg),
       onAdvance: (id) => this.adv.unlock(id),
       ignite: (x, y, z) => this.fire.ignite(x, y, z),
+      onXp: (x, y, z, n) => this.xpOrbs.spawn(x, y, z, n),
+      cookOnCampfire: (x, y, z, id) => {
+        const ok = this.campfires.add(this.world.dimension, x, y, z, id);
+        if (ok) this.adv.unlock('campfire');
+        return ok;
+      },
+      throwItem: (id, x, y, z, dx, dy, dz) => this.throwables.throw(id, x, y, z, dx, dy, dz),
     });
 
     if (save) {
@@ -257,7 +297,8 @@ class Game {
       this.spawnPoint = save.spawn ?? null;
       if (save.advancements) this.adv.load(save.advancements);
       this.fire.load(save.fires);
-      
+      this.campfires.load(save.campfires);
+
       const ow = this.world.dimData.overworld;
       for (const [k, v] of Object.entries(save.world ?? {})) ow.savedChunks.set(k, v);
       for (const [k, v] of Object.entries(save.blockEntities ?? {})) {
@@ -350,13 +391,24 @@ class Game {
       if (id === I.IRON_PICK) this.adv.unlock('iron_pick');
       if (id === I.BOW) this.adv.unlock('bow');
       if (id === I.BREAD) this.adv.unlock('bread');
+      if (hasDef(id) && (def(id).name.endsWith('_slab') || def(id).name.endsWith('_stairs'))) this.adv.unlock('builder');
+      if (id === B.ENCHANTING_TABLE) this.adv.unlock('ench_table');
+      if (id === I.MAP) this.adv.unlock('cartographer');
+      if (id === B.CAKE) this.adv.unlock('bake_cake');
+      if (id === B.LANTERN || id === B.JACK_O_LANTERN) this.adv.unlock('lantern');
+      if (hasDef(id) && def(id).name.endsWith('_wool') && id !== B.WOOL) this.adv.unlock('dye');
+      // containers handed back by the recipe (the cake's milk buckets)
+      for (const r of craftRemainders(id)) {
+        const left = this.player.inventory.add(r.id, r.count);
+        if (left > 0) { const p = this.player.pos; this.entities.spawnDrop(p.x, p.y + 1, p.z, r.id, left); }
+      }
     };
     this.hud.onTrade = () => { this.adv.unlock('trade'); this.adv.unlock('village'); };
 
     this.wireInput();
-    this.hud.onDropLeftover = (id, count, dur, mob) => {
+    this.hud.onDropLeftover = (id, count, dur, mob, ench) => {
       const p = this.player.pos;
-      this.entities.spawnDrop(p.x, p.y + 1, p.z, id, count, dur, mob);
+      this.entities.spawnDrop(p.x, p.y + 1, p.z, id, count, dur, mob, ench);
     };
 
     void this.pregenerate();
@@ -749,6 +801,18 @@ class Game {
       [I.BOW, 1, 1, 1],
       [B.TORCH, 2, 6, 3],
       [B.PLANKS, 2, 8, 2],
+      [I.PUMPKIN_SEEDS, 1, 3, 2],
+      [I.MELON_SEEDS, 1, 3, 2],
+      [I.EXPERIENCE_BOTTLE, 1, 3, 2],
+      [I.GLASS_BOTTLE, 1, 3, 1],
+      [I.WARP_PEARL, 1, 2, 1],
+      [I.FIREWORK_ROCKET, 2, 5, 1],
+      [I.GLIDER, 1, 1, 1],
+      [I.MAP, 1, 1, 1],
+      [I.AMETHYST, 1, 3, 2],
+      [I.BOOK, 1, 3, 2],
+      [I.POTION_HEALING, 1, 1, 1],
+      [I.POTION_NIGHT_VISION, 1, 1, 1],
     ];
     const totalWeight = pool.reduce((s, e) => s + e[3], 0);
     const stacks = 3 + Math.floor(Math.random() * 3);
@@ -962,6 +1026,12 @@ class Game {
   private onDeath(): void {
     const deathPos = { ...this.player.pos };
     this.dropPlayerInventory(deathPos);
+    // experience spills out as orbs; the recovery compass remembers the spot
+    this.xpOrbs.spawn(deathPos.x, deathPos.y + 0.5, deathPos.z, this.player.deathXp());
+    this.player.xpLevel = 0;
+    this.player.xpProgress = 0;
+    this.player.lastDeath = { x: deathPos.x, y: deathPos.y, z: deathPos.z, dim: this.world.dimension };
+    this.player.gliding = false;
     this.state = 'dead';
     this.input.exitLock();
     this.hud.showDeath(
@@ -1109,6 +1179,7 @@ class Game {
         s.count,
         s.dur,
         s.mob,
+        s.ench,
       );
     };
     for (let i = 0; i < inv.slots.length; i++) {
@@ -1160,6 +1231,18 @@ class Game {
           heldId === I.SHEARS ? 'Shears - right-click a sheep for wool, or snip leaves whole' :
           heldId === I.BUCKET ? 'Bucket - scoop water or lava, or milk a cow' :
           heldId === I.MILK_BUCKET ? 'Milk Bucket - drink to clear all status effects' :
+          heldId === I.MAP ? 'Explorer Map - hold it to see the land around you' :
+          heldId === I.RECOVERY_COMPASS ? 'Recovery Compass - points to where you last died' :
+          heldId === I.GLIDER ? 'Glider - wear it, then press jump while falling to glide' :
+          heldId === I.FIREWORK_ROCKET ? 'Firework Rocket - right-click while gliding for a boost' :
+          heldId === I.WARP_PEARL ? 'Warp Pearl - throw it to teleport where it lands' :
+          heldId === I.GLASS_BOTTLE ? 'Glass Bottle - right-click water to fill it, then brew at a crafting table' :
+          heldId === I.PUMPKIN_SEEDS || heldId === I.MELON_SEEDS ? `${def(heldId).label} - plant on farmland; fruit grows beside the stem` :
+          heldId === B.ENCHANTING_TABLE ? 'Enchanting Table - right-click it holding a tool; bookshelves make it stronger' :
+          heldId === B.ANVIL ? 'Anvil - right-click it holding a worn tool to mend it' :
+          heldId === B.CAMPFIRE ? 'Campfire - right-click it with raw food to cook' :
+          heldId === B.COMPOSTER ? 'Composter - fill it with plants to make bone meal' :
+          (this.player.inventory.getSelected()?.ench) ? `${def(heldId).label} - ${Object.entries(this.player.inventory.getSelected()!.ench!).map(([k, v]) => enchantLabel(k, v)).join(', ')}` :
           heldId === I.SEEDS || heldId === I.CARROT || heldId === I.POTATO || heldId === I.BEETROOT_SEEDS
             ? `${def(heldId).label} - plant on farmland` :
             def(heldId).label;
@@ -1236,6 +1319,7 @@ class Game {
       pets: this.entities.savePets(),
       advancements: this.adv.serialize(),
       ...(this.fire.count > 0 ? { fires: this.fire.serialize() } : {}),
+      campfires: this.campfires.serialize(),
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
       lastPlayed: Date.now(),
     };
@@ -1299,6 +1383,11 @@ class Game {
       this.world.updateDoorSwings(dt);
       this.processMeshing(8);
       this.entities.update(dt, this.elapsed, this.renderer.camera.quaternion);
+      this.throwables.update(dt);
+      this.xpOrbs.update(dt, this.player.dead || this.player.mode !== 'survival' ? null : this.player.pos, (n) => {
+        this.player.addXp(n);
+        this.audio.play('pop', 0.6);
+      });
 
       // weather follows the player; the Nether has no sky, so no weather there
       const pp = this.player.pos;
@@ -1446,6 +1535,29 @@ class Game {
       onFire: this.player.fireT > 0 && this.player.mode === 'survival',
     });
     this.hud.updatePets(this.entities.petStatus());
+    const inGame = this.state === 'playing' || this.state === 'container' || this.state === 'paused';
+    this.xpBar.update(inGame && this.player.mode === 'survival', this.player.xpLevel, this.player.xpProgress);
+    // Night Vision lifts the darkness floor (and brightens caves)
+    const nv = this.player.effects.get('night_vision');
+    this.renderer.minAmbient = nv ? (nv.t < 10 ? 0.45 * (0.5 + 0.5 * Math.sin(nv.t * 6)) : 0.45) : 0;
+    {
+      const held = this.player.heldId();
+      const pd = this.player.lastDeath;
+      const p = this.player.pos;
+      this.mapOverlay.update(dt, this.state === 'playing' && held === I.MAP,
+        this.state === 'playing' && held === I.RECOVERY_COMPASS,
+        {
+          x: p.x, z: p.z, yaw: this.player.yaw,
+          death: pd && pd.dim === this.world.dimension ? { x: pd.x, z: pd.z } : null,
+          home: this.spawnPoint && this.world.dimension === 'overworld' ? { x: this.spawnPoint.x, z: this.spawnPoint.z } : null,
+        },
+        (wx, wz) => {
+          const c = this.world.getChunk(Math.floor(wx / 16), Math.floor(wz / 16));
+          if (!c || !c.ready) return null;
+          const h = c.heightmap[(wz & 15) * 16 + (wx & 15)];
+          return { id: this.world.getBlock(wx, h - 1, wz), h };
+        });
+    }
     if (this.state === 'container' && this.container?.kind === 'furnace') this.hud.updateFurnace();
     const showMinimap = this.player.inventory.count(I.COMPASS) > 0 || this.player.mode === 'creative';
     this.hud.setMinimapVisible(showMinimap);
@@ -1521,8 +1633,30 @@ class Game {
       if (st.output && st.output.id === I.IRON_INGOT && st.output.count > outBefore) {
         this.adv.unlock('iron_age');
       }
+      // every finished smelt leaves a little experience by the furnace
+      if (st.output && st.output.count > outBefore && Math.random() < 0.7) {
+        const hot = st.output.id === I.GOLD_INGOT || st.output.id === I.DIAMOND ? 2 : 1;
+        this.xpOrbs.spawn(x + 0.5, y + 1.1, z + 0.5, hot);
+      }
       const want = st.burning ? B.FURNACE_LIT : B.FURNACE;
       if (cur !== want) this.world.setBlock(x, y, z, want);
+    }
+
+    // campfires: cook what's on them, smoke, and scorch anyone standing in them
+    this.campfires.tick(0.05, this.world.dimension, this.world,
+      (x, y, z, id) => {
+        const e = this.entities.spawnDrop(x + 0.5, y + 0.6, z + 0.5, id, 1);
+        e.vel.y = 3;
+        this.audio.play('pop', 0.5);
+      },
+      (x, y, z) => this.entities.spawnTorchFlame(x + 0.3 + Math.random() * 0.4, y + 0.7, z + 0.3 + Math.random() * 0.4));
+    this.campfireHurtT -= 0.05;
+    if (this.campfireHurtT <= 0 && this.player.mode === 'survival') {
+      const p = this.player.pos;
+      if (this.world.getBlock(Math.floor(p.x), Math.floor(p.y + 0.05), Math.floor(p.z)) === B.CAMPFIRE && !this.player.sneaking) {
+        this.campfireHurtT = 0.5;
+        if (!this.player.effects.has('fire_resistance')) this.player.damage(1, undefined, 'Walked into a campfire');
+      }
     }
 
     // redstone ticks: buttons tick down, pressure plates check collision
@@ -1616,6 +1750,13 @@ class Game {
               this.entities.spawnDrop(x + 0.5, y + 0.3, z + 0.5, drop.id, drop.min);
             }
           }
+        } else if (id === B.LANTERN) {
+          // a hanging lantern needs its ceiling, a standing one its floor
+          const hang = this.world.bedFacings.get(key) === 1;
+          if (!this.world.isSolidAt(x, hang ? y + 1 : y - 1, z)) {
+            this.world.setBlock(x, y, z, B.AIR);
+            this.entities.spawnDrop(x + 0.5, y + 0.3, z + 0.5, B.LANTERN, 1);
+          }
         } else if (id === B.GRASS) {
           const above = this.world.getBlock(x, y + 1, z);
           if (above !== B.AIR && hasDef(above) && def(above).opaque) {
@@ -1650,6 +1791,17 @@ class Game {
           const plant = this.world.getBlock(wx, hm, wz);
           if (plant === B.SAPLING) {
             if (Math.random() < 0.06) this.growTree(wx, hm, wz);
+            continue;
+          }
+          if (plant === B.PUMPKIN_STEM || plant === B.MELON_STEM) {
+            if (Math.random() < 0.12) this.growFruit(wx, hm, wz, plant === B.PUMPKIN_STEM ? B.PUMPKIN : B.MELON);
+            continue;
+          }
+          // still water freezes over in snowy biomes
+          if (hm > 0 && this.world.dimension === 'overworld' && this.world.getBlock(wx, hm - 1, wz) === B.WATER &&
+            Math.random() < 0.05 && this.world.waterLevel(wx, hm - 1, wz) === 0) {
+            const biome = this.world.generator.biomeAt(wx, wz);
+            if (biome === 'snow' || biome === 'taiga') this.world.setBlock(wx, hm - 1, wz, B.ICE);
             continue;
           }
           if (plant === B.WHEAT_0 || plant === B.WHEAT_1 ||
@@ -1753,6 +1905,9 @@ class Game {
       return true;
     }
     if (id === B.SAPLING) { this.growTree(x, y, z); return true; }
+    if (id === B.PUMPKIN_STEM || id === B.MELON_STEM) {
+      return this.growFruit(x, y, z, id === B.PUMPKIN_STEM ? B.PUMPKIN : B.MELON);
+    }
     // on a grass block: sprout tall grass + the occasional flower nearby
     if (id === B.GRASS) {
       let placed = 0;
@@ -1762,13 +1917,76 @@ class Game {
         if (this.world.getBlock(gx, y, gz) !== B.GRASS) continue;
         if (this.world.getBlock(gx, y + 1, gz) !== B.AIR) continue;
         const r = Math.random();
-        const plant = r < 0.72 ? B.TALL_GRASS : r < 0.86 ? B.POPPY : B.DANDELION;
+        const plant = r < 0.66 ? B.TALL_GRASS : r < 0.76 ? B.POPPY : r < 0.84 ? B.DANDELION
+          : r < 0.89 ? B.CORNFLOWER : r < 0.93 ? B.ALLIUM : r < 0.97 ? B.OXEYE_DAISY
+            : r < 0.985 ? B.BROWN_MUSHROOM : B.RED_MUSHROOM;
         this.world.setBlock(gx, y + 1, gz, plant);
         placed++;
       }
       return placed > 0;
     }
     return false;
+  }
+
+  /** A ripe pumpkin/melon stem puts a fruit on a free neighbouring patch of
+   *  earth (one fruit per stem at a time). Returns true if one grew. */
+  private growFruit(x: number, y: number, z: number, fruit: number): boolean {
+    const sides: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    for (const [dx, dz] of sides) if (this.world.getBlock(x + dx, y, z + dz) === fruit) return false;
+    const [dx, dz] = sides[(Math.random() * 4) | 0];
+    const ground = this.world.getBlock(x + dx, y - 1, z + dz);
+    if (this.world.getBlock(x + dx, y, z + dz) !== B.AIR) return false;
+    if (ground !== B.GRASS && ground !== B.DIRT && ground !== B.FARMLAND) return false;
+    this.world.setBlock(x + dx, y, z + dz, fruit);
+    this.audio.dig('wood', 0.6);
+    return true;
+  }
+
+  /** Experience a slain mob leaves behind (vanilla: 5 for monsters, 1-3 animals). */
+  private killXp(kind: string): number {
+    if (kind === 'emberghast') return 10;
+    if (['zombie', 'skeleton', 'spider', 'creeper', 'cinderling', 'ashstalker', 'phantom'].includes(kind)) return 5;
+    return 1 + Math.floor(Math.random() * 3);
+  }
+
+  /** A warp pearl landed: blink the player there (a small toll on survival). */
+  private warpPlayer(x: number, y: number, z: number): void {
+    if (this.player.dead) return;
+    const p = this.player;
+    // stand on top of whatever it hit, nudged out of solid cells
+    let ty = Math.floor(y);
+    for (let i = 0; i < 4 && (isSolid(this.world.getBlock(Math.floor(x), ty, Math.floor(z))) ||
+      isSolid(this.world.getBlock(Math.floor(x), ty + 1, Math.floor(z)))); i++) ty++;
+    if (p.isRiding()) p.dismount(false);
+    this.entities.spawnPoof(p.pos.x, p.pos.y + 1, p.pos.z);
+    p.pos = { x: Math.floor(x) + 0.5, y: ty + 0.01, z: Math.floor(z) + 0.5 };
+    p.vel = { x: 0, y: 0, z: 0 };
+    this.audio.play('whoosh');
+    this.audio.play('emerge');
+    if (p.mode === 'survival') p.damage(2, undefined, 'Fell victim to a warp pearl');
+    this.adv.unlock('warp');
+  }
+
+  /** Outline extent of a shaped block (union of its boxes), or null for a cube. */
+  private outlineBoxFor(x: number, y: number, z: number): number[] | null {
+    const id = this.world.getBlock(x, y, z);
+    if (!SHAPED.has(id)) return null;
+    const key = `${x},${y},${z}`;
+    const gate = id === B.FENCE_GATE ? this.world.doorStates.get(key) : undefined;
+    let conn = 0;
+    if (id === B.OAK_FENCE || id === B.GLASS_PANE) {
+      if (connectsTo(id, this.world.getBlock(x, y, z - 1))) conn |= 1;
+      if (connectsTo(id, this.world.getBlock(x, y, z + 1))) conn |= 2;
+      if (connectsTo(id, this.world.getBlock(x - 1, y, z))) conn |= 4;
+      if (connectsTo(id, this.world.getBlock(x + 1, y, z))) conn |= 8;
+      if (id === B.GLASS_PANE && conn === 0) conn = this.world.bedFacings.get(key) === 1 ? 3 : 12;
+    }
+    const meta = gate ? gate.facing : this.world.bedFacings.get(key) ?? 0;
+    const boxes = shapeBoxes(id, meta, conn, false, false);
+    if (!boxes || boxes.length === 0) return null;
+    const u = [1, 1, 1, 0, 0, 0];
+    for (const b of boxes) for (let i = 0; i < 3; i++) { u[i] = Math.min(u[i], b[i]); u[i + 3] = Math.max(u[i + 3], b[i + 3]); }
+    return u;
   }
 
   /** Grow a sapling into a biome-appropriate tree using live block writes. */
@@ -2220,6 +2438,10 @@ class Game {
     this.touch?.el.remove();
     this.audio.setRain('off');
     this.entities.clear();
+    this.xpOrbs.clear();
+    this.throwables.clear();
+    this.xpBar.dispose();
+    this.mapOverlay.dispose();
     this.weather.dispose();
     this.status.dispose();
     this.hud.hideGameUI();

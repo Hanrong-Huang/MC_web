@@ -372,7 +372,7 @@ export class Player {
     const d = this.lookDir();
     const ey = this.pos.y + this.eyeHeight() - 0.3;
     const e = this.deps.entities.spawnDrop(
-      this.pos.x + d.x * 0.3, ey, this.pos.z + d.z * 0.3, s.id, n, s.dur, s.mob,
+      this.pos.x + d.x * 0.3, ey, this.pos.z + d.z * 0.3, s.id, n, s.dur, s.mob, s.ench,
     );
     // thrown clear of the player, with a pickup delay so it isn't slurped straight back
     e.vel = { x: d.x * 7.5, y: d.y * 7.5 + 2.2, z: d.z * 7.5 };
@@ -2496,6 +2496,8 @@ export class Player {
     this.fireT = 0;
     this.clearEffects();
     this.fallDist = 0;
+    this.gliding = false;
+    this.rocketT = 0;
     this.dead = false;
     this.flying = false;
     this.lastDamageCause = '';
@@ -2511,6 +2513,9 @@ export class Player {
       saturation: this.saturation,
       absorb: this.absorb,
       effects: this.effectList().map(({ id, amp, t, total }) => ({ id, amp, t, total })),
+      xpLevel: this.xpLevel,
+      xpProgress: this.xpProgress,
+      ...(this.lastDeath ? { lastDeath: { ...this.lastDeath } } : {}),
     };
   }
 
@@ -2530,5 +2535,8 @@ export class Player {
       }
     }
     this.absorb = this.effects.has('absorption') ? Math.max(0, p.absorb ?? 0) : 0;
+    this.xpLevel = Math.max(0, p.xpLevel ?? 0) | 0;
+    this.xpProgress = Math.max(0, Math.min(0.999, p.xpProgress ?? 0));
+    this.lastDeath = p.lastDeath ? { ...p.lastDeath } : null;
   }
 }

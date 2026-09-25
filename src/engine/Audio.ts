@@ -734,7 +734,11 @@ export class AudioEngine {
       if (n === 'dirt' || n === 'farmland' || n === 'gravel') return 'gravel';
       if (n === 'snow_grass') return 'snow';
       if (n.endsWith('_leaves')) return 'grass';
-      if (n === 'white_wool' || n === 'cactus' || n.startsWith('bed')) return 'wool';
+      if (n.endsWith('_wool') || n === 'cactus' || n.startsWith('bed') || n === 'cake') return 'wool';
+      if (n === 'snow_block') return 'snow';
+      if (n === 'clay') return 'gravel';
+      if (n === 'ice' || n === 'packed_ice' || n === 'glass_pane') return 'glass';
+      if (n === 'anvil' || n === 'lantern') return 'metal';
       if (n === 'iron_block' || n === 'gold_block' || n === 'diamond_block' || n === 'emerald_block') return 'metal';
       if (n === 'netherrack' || n === 'nether_quartz_ore' || n === 'magma' || n === 'nether_bricks') return 'nether';
       if (n === 'soul_sand') return 'soul';
