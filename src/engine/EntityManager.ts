@@ -1738,6 +1738,7 @@ export class EntityManager {
   /** Phantom: flies in circles above the player and periodically swoops. */
   private updatePhantom(e: Entity, dt: number): void {
     const p = this.player!;
+    this.tintMob(e);
     e.circling += dt;
     const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
     const dy = (p.pos.y + 2) - e.pos.y;
@@ -1814,8 +1815,11 @@ export class EntityManager {
     // gently pulsing ember tips over a near-dark charcoal hide (kept low so the
     // tips read as distinct glints rather than blooming into one orange mass)
     const pulse = 0.32 + 0.16 * Math.sin(e.age * 5);
+    const hurt = e.hurtFlash > 0;
     for (const m of e.materials) {
-      if (m.userData.ember) m.emissive.setRGB(pulse, pulse * 0.38, 0.02);
+      m.color.setRGB(MOB_EXPOSURE, hurt ? MOB_EXPOSURE * 0.5 : MOB_EXPOSURE, hurt ? MOB_EXPOSURE * 0.5 : MOB_EXPOSURE);
+      if (hurt) m.emissive.setRGB(0.3, 0.02, 0.02);
+      else if (m.userData.ember) m.emissive.setRGB(pulse, pulse * 0.38, 0.02);
       else m.emissive.setRGB(0.04, 0.015, 0.005);
     }
     if (e.limbs) {
