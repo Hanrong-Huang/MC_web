@@ -27,7 +27,7 @@ import type { GeoArrays, MeshDoor, MeshRedstone } from './engine/Mesher';
 import { chunkGeometryFromArrays } from './engine/Renderer';
 import type { MeshJob, MeshChunkSnap } from './engine/mesh-worker';
 import { chunkKey, CX, CZ } from './engine/Chunk';
-import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef, isSolid, mobLabel } from './engine/Blocks';
+import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, HANGING_PLANTS, def, hasDef, isSolid, mobLabel } from './engine/Blocks';
 import { SHAPED, META_BLOCKS, shapeBoxes, connectsTo, enchantLabel } from './engine/Blocks';
 import { craftRemainders } from './engine/Inventory';
 import { ExperienceOrbs, XpBar } from './engine/Experience';
@@ -1876,6 +1876,11 @@ class Game {
             const below = this.world.getBlock(x, y - 1, z);
             supported = (hasDef(below) && below !== B.AIR && def(below).solid) ||
               (SELF_STACKING.has(id) && below === id);
+            // weeping vines hang from a ceiling (or from more vine)
+            if (!supported && HANGING_PLANTS.has(id)) {
+              const above = this.world.getBlock(x, y + 1, z);
+              supported = above === id || this.world.isSolidAt(x, y + 1, z);
+            }
           }
           if (!supported) {
             this.world.setBlock(x, y, z, B.AIR);

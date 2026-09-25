@@ -13,6 +13,7 @@ import { Chunk, CX, CZ, CY } from './Chunk';
 import { B } from './Blocks';
 import type { DoorState } from './World';
 import { LM_CELL, planLandmark, drawLandmark, type Landmark } from './Landmarks';
+import { NetherGen, type NetherBiome } from './NetherGen';
 
 // Raised well above bedrock (y=0) so there's a deep stone column to mine through.
 export const SEA_LEVEL = 64;
@@ -128,6 +129,8 @@ const STYLE_DESERT: Style = {
 export class WorldGenerator {
   readonly seed: number;
   dimension: 'overworld' | 'nether' = 'overworld';
+  /** Nether terrain + biomes (NetherGen.ts) */
+  readonly nether: NetherGen;
   private hills: Simplex2;
   private continent: Simplex2;
   private ridge: Simplex2;
@@ -186,6 +189,7 @@ export class WorldGenerator {
 
   constructor(seed: number) {
     this.seed = seed | 0;
+    this.nether = new NetherGen(this.seed);
     this.hills = new Simplex2(this.seed ^ 0x1357);
     this.continent = new Simplex2(this.seed ^ 0x2468);
     this.ridge = new Simplex2(this.seed ^ 0x9bdf);
@@ -561,8 +565,15 @@ export class WorldGenerator {
     return BIOMES[this.cB[this.slot(wx, wz)]];
   }
 
-  /** Finer-grained biome name for the debug screen: variants, landforms, water. */
+  /** Nether biome at a column ('wastes' | 'crimson' | 'warped' | 'soul_valley' | 'basalt'). */
+  netherBiomeAt(wx: number, wz: number): NetherBiome {
+    return this.nether.biomeAt(wx, wz);
+  }
+
+  /** Finer-grained biome name for the debug screen: variants, landforms, water
+   *  (the Nether biome while in the Nether). */
   biomeLabel(wx: number, wz: number): string {
+    if (this.dimension === 'nether') return this.nether.label(wx, wz);
     const i = this.slot(wx, wz);
     const f = this.cF[i];
     if (f === F_VOLCANO) return 'volcano';
@@ -854,63 +865,7 @@ export class WorldGenerator {
     const bz = chunk.cz * CZ;
 
     if (this.dimension === 'nether') {
-      const randSeed = this.seed ^ 0x6e74;
-      for (let z = 0; z < CZ; z++) {
-        for (let x = 0; x < CX; x++) {
-          const wx = bx + x, wz = bz + z;
-          
-          chunk.setRaw(x, 0, z, B.BEDROCK);
-          chunk.setRaw(x, CY - 1, z, B.BEDROCK);
-
-          for (let y = 1; y < CY - 1; y++) {
-            const n = this.cave1.noise(wx * 0.024, y * 0.04, wz * 0.024) +
-                      this.cave2.noise(wx * 0.04, y * 0.024, wz * 0.04) * 0.5;
-
-            // centre the open cavern on the taller world so it fills the new height
-            const distToCenter = Math.abs(y - CY / 2) / (CY / 2);
-            const threshold = -0.1 + distToCenter * 0.6;
-            
-            let id = B.AIR;
-            if (n > threshold) {
-              id = B.NETHERRACK;
-              const r = hash3(this.seed ^ 0x111, wx, y, wz);
-              if (r < 0.012) {
-                id = B.QUARTZ_ORE;
-              } else if (chunk.get(x, y - 1, z) === B.LAVA && r > 0.6) {
-                id = B.MAGMA; // crusts the lava surface
-              }
-            } else {
-              if (y <= 32) {
-                id = B.LAVA;
-              } else if (y >= 33 && y <= 36) {
-                const sandNoise = this.hills.noise(wx * 0.05, wz * 0.05);
-                if (sandNoise > 0.35) {
-                  id = B.SOUL_SAND;
-                }
-              }
-            }
-            chunk.setRaw(x, y, z, id);
-          }
-        }
-      }
-      
-      const rand = mulberry32(chunk.cx * 1000 + chunk.cz + this.seed);
-      for (let z = 1; z < CZ - 1; z++) {
-        for (let x = 1; x < CX - 1; x++) {
-          if (rand() < 0.025) {
-            for (let y = CY - 13; y >= 70; y--) {
-              if (chunk.get(x, y, z) === B.NETHERRACK && chunk.get(x, y - 1, z) === B.AIR) {
-                chunk.setRaw(x, y - 1, z, B.GLOWSTONE);
-                if (rand() < 0.5) chunk.setRaw(x - 1, y - 1, z, B.GLOWSTONE);
-                if (rand() < 0.5) chunk.setRaw(x + 1, y - 1, z, B.GLOWSTONE);
-                if (rand() < 0.5) chunk.setRaw(x, y - 1, z + 1, B.GLOWSTONE);
-                if (rand() < 0.5) chunk.setRaw(x, y - 2, z, B.GLOWSTONE);
-                break;
-              }
-            }
-          }
-        }
-      }
+      this.nether.generate(chunk);
       chunk.computeHeightmap(); // mark ready like the overworld path does at the end
       chunk.scanTorches();
       chunk.ready = true;
