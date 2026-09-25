@@ -1197,7 +1197,8 @@ export class EntityManager {
     // trots over (an untamed dog tempted by a bone, a cat by fish, cows/sheep by
     // wheat, pigs by carrots, chickens by seed). Overrides the idle wander.
     let lured = false;
-    if (e.state !== 'flee' && !p.dead && this.isLureFood(e.kind as MobKind, p.heldId()) && distToPlayer < 10) {
+    if (e.state !== 'flee' && e.state !== 'chase' && !p.dead
+      && this.isLureFood(e.kind as MobKind, p.heldId()) && distToPlayer < 10) {
       lured = true;
       e.grazeT = 0; // food beats grass
       const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
@@ -1253,8 +1254,9 @@ export class EntityManager {
     // a grazing sheep stands still with its head in the grass
     if (e.grazeT > 0) { wishX = 0; wishZ = 0; }
 
+    const angryWolf = e.kind === 'wolf' && e.angryT > 0 && e.state === 'chase';
     const speed = lured ? e.moveSpeed * 1.4
-      : e.state === 'flee' ? e.moveSpeed * 2.2 : e.moveSpeed;
+      : e.state === 'flee' ? e.moveSpeed * 2.2 : angryWolf ? e.moveSpeed * 2.4 : e.moveSpeed;
     const res = this.applyGroundMove(e, dt, wishX, wishZ, speed);
     // hop single-block barriers; spiders just climb straight up walls
     if ((res.hitX || res.hitZ) && (wishX !== 0 || wishZ !== 0)) {
@@ -1265,7 +1267,7 @@ export class EntityManager {
     if (e.kind === 'chicken' && !e.onGround && e.vel.y < -2.2) e.vel.y = -2.2;
 
     // melee contact attacks — on the pet it is fighting, else on the player
-    if (MELEE_MOBS.has(e.kind as MobKind) && e.attackCooldown <= 0 && e.state === 'chase'
+    if ((MELEE_MOBS.has(e.kind as MobKind) || angryWolf) && e.attackCooldown <= 0 && e.state === 'chase'
       && (foe || !p.dead)) {
       const dx = qx - e.pos.x, dz = qz - e.pos.z;
       const dy = qy - e.pos.y;
@@ -1406,8 +1408,9 @@ export class EntityManager {
       e.blinkT -= dt;
       if (e.blinkT < -0.14) e.blinkT = 2 + Math.random() * 4.5;
       const shut = e.blinkT < 0;
+      const angry = e.angryT > 0 && e.state === 'chase';
       for (const f of limbs.faces) {
-        const want = shut ? f.closed : f.open;
+        const want = angry && f.angry ? f.angry : shut ? f.closed : f.open;
         if (f.mat.map !== want) f.mat.map = want;
       }
     }
@@ -1531,7 +1534,9 @@ export class EntityManager {
     if (limbs.ears) {
       const f = Math.sin(e.age * 2.3 + e.variant) * Math.sin(e.age * 0.71 + 1.3);
       const tw = Math.max(0, f - 0.82) * 2.4;
-      for (const ear of limbs.ears) ear.rotation.x = -tw;
+      // an angry wolf pins its ears back
+      const pin = e.kind === 'wolf' && e.angryT > 0 && e.state === 'chase' ? 0.55 : 0;
+      for (const ear of limbs.ears) ear.rotation.x = pin || -tw;
     }
     // tails: a happy tamed wolf wags fast; hanging tails (horse, cat) swish side
     // to side; everything picks up a little of the stride
@@ -1551,7 +1556,7 @@ export class EntityManager {
       // as they get hurt (vanilla's health gauge); wild ones keep it low
       if (e.kind === 'wolf') {
         const hpF = Math.max(0, Math.min(1, e.hp / MOB_STATS.wolf.hp));
-        const raised = sitting ? 1.2 : e.tamed ? 0.9 - hpF * 1.3 : 0.9;
+        const raised = sitting ? 1.2 : e.tamed ? 0.9 - hpF * 1.3 : e.angryT > 0 ? -0.5 : 0.9;
         t.rotation.x += (raised - t.rotation.x) * Math.min(1, 4 * dt);
       }
     }
@@ -1970,6 +1975,12 @@ export class EntityManager {
         }
       }
 
+      // an angered wild wolf hunts the player until it calms down
+      if (e.kind === 'wolf' && !e.tamed) {
+        if (e.angryT > 0 && d < 20 && !p.dead && p.mode === 'survival') e.state = 'chase';
+        else if (e.state === 'chase') { e.state = 'wander'; e.stateTime = 2; e.angryT = 0; }
+      }
+
       // villagers scatter from zombies
       if (e.kind === 'villager') {
         const z = this.nearestOf(e, 'zombie', 8);
@@ -2250,7 +2261,16 @@ export class EntityManager {
     e.grazeT = 0;
     this.audio.play('hit');
     this.audio.mobSound(e.kind as string, 0.75); // each mob yelps in its own voice
-    if (!MOB_STATS[e.kind as MobKind].hostile) {
+    if (e.kind === 'wolf' && !e.tamed && attacker === this.player) {
+      // strike a wild wolf and the whole pack turns on you (vanilla)
+      for (const o of this.entities) {
+        if (o.kind !== 'wolf' || o.tamed || o.dead) continue;
+        if (o !== e && Math.hypot(o.pos.x - e.pos.x, o.pos.z - e.pos.z) > 16) continue;
+        o.angryT = 25;
+        o.state = 'chase';
+        o.sitting = false;
+      }
+    } else if (!MOB_STATS[e.kind as MobKind].hostile) {
       e.state = 'flee';
       e.stateTime = 5;
       e.yaw = Math.atan2(-kbX, -kbZ); // run along the knockback direction

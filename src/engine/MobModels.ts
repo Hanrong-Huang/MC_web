@@ -31,7 +31,7 @@ export interface LimbSet {
   /** chicken wings: flap when falling / startled */
   wings?: THREE.Group[];
   /** eyes that blink: each face material with its open/closed textures */
-  faces?: { mat: THREE.MeshLambertMaterial; open: THREE.Texture; closed: THREE.Texture }[];
+  faces?: { mat: THREE.MeshLambertMaterial; open: THREE.Texture; closed: THREE.Texture; angry?: THREE.Texture }[];
   /** the sheep's fleece layer (hidden once sheared) */
   wool?: THREE.Object3D[];
   /** collar shown while tamed (wolf, cat) */
@@ -681,6 +681,12 @@ export class MobModels {
       if (closed) { px(ctx, '#6f6c68', 1, 3, 2, 1); px(ctx, '#6f6c68', 5, 3, 2, 1); }
       else { px(ctx, '#1c1a18', 2, 3); px(ctx, '#1c1a18', 5, 3); px(ctx, '#e6e2da', 1, 3); px(ctx, '#e6e2da', 6, 3); }
     }, mats, limbs);
+    // angry: scowling brows slanting in over red eyes
+    limbs.faces![0].angry = this.skin('wolf_face_angry', grey, greyS, (ctx) => {
+      px(ctx, '#3a3836', 1, 2); px(ctx, '#3a3836', 2, 3); px(ctx, '#3a3836', 6, 2); px(ctx, '#3a3836', 5, 3);
+      px(ctx, '#d42020', 1, 3); px(ctx, '#d42020', 6, 3);
+      px(ctx, '#e6e2da', 2, 5, 1, 1); px(ctx, '#e6e2da', 5, 5, 1, 1); // bared fangs
+    });
     const whiteM = this.mat(this.skin('wolf_white', '#ece9e2', '#dbd7cd'), mats);
     const snoutF = this.mat(this.skin('wolf_snout_f', '#ece9e2', '#dbd7cd', (ctx) => {
       px(ctx, '#1d1b1a', 2, 0, 4, 3);  // black nose on the tip
@@ -897,6 +903,12 @@ export class MobModels {
     const head = new THREE.Group();
     head.position.set(0, 0.25, -0.55);
     head.add(this.box(0.4, 0.26, 0.34, this.front(bodyM, faceM)));
+    // eyes glow in the dark sky like the vanilla phantom's
+    const eyes = this.overlay('phantom_eyes', (ctx) => { px(ctx, '#9cf07a', 1, 3, 2, 1); px(ctx, '#9cf07a', 5, 3, 2, 1); });
+    const eyePlane = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.26), this.glow(eyes));
+    eyePlane.position.z = -0.172;
+    eyePlane.rotation.y = Math.PI;
+    head.add(eyePlane);
     const wings: THREE.Group[] = [];
     for (const side of [-1, 1]) {
       const w = new THREE.Group();
