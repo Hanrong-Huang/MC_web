@@ -1238,7 +1238,7 @@ export class Player {
       const ey = this.pos.y + this.eyeHeight();
       ent.throwCatcher(this.pos.x + d.x * 0.4, ey + d.y * 0.4 - 0.1, this.pos.z + d.z * 0.4, d.x, d.y, d.z);
       this.placeCooldown = 0.35;
-      this.deps.renderer.triggerSwing();
+      this.deps.renderer.triggerOrbThrow();
       if (this.mode === 'survival') this.inventory.consumeSelected();
       this.inventory.onChange();
       return;
