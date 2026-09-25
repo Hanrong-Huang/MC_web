@@ -353,6 +353,8 @@ export class AudioEngine {
 
       if (typeof window !== 'undefined' && ctx instanceof AudioContext) {
         this.pumpTimer = window.setInterval(this.pump, 120);
+        // build the rain texture ahead of time, off the critical path
+        window.setTimeout(() => { if (!this.rainBuf && this.ctx) this.rainBuf = this.makeRain(); }, 4000);
       }
       this.nextPieceAt = ctx.currentTime + (this.musicMode === 'menu' ? 0.6 : 6);
       return true;
@@ -1148,14 +1150,22 @@ export class AudioEngine {
         b2 = 0.57 * b2 + w * 1.0527;
         d[i] = (b0 + b1 + b2 + w * 0.1848) * 0.035;
       }
+      // each droplet: a damped sinusoid via a two-pole resonator recurrence
+      // (no sin/exp per sample, so the whole texture builds in a few ms)
       for (let k = 0; k < 2400; k++) {
         const at = (Math.random() * len) | 0;
-        const f = 1500 + Math.random() * 5000;
-        const a = 0.04 + Math.pow(Math.random(), 3) * 0.45;
+        const w = (2 * Math.PI * (1500 + Math.random() * 5000)) / sr;
         const tau = (0.0005 + Math.random() * 0.0025) * sr;
-        const n = Math.floor(tau * 5);
-        const w = (2 * Math.PI * f) / sr;
-        for (let j = 0; j < n; j++) d[(at + j) % len] += a * Math.sin(w * j) * Math.exp(-j / tau);
+        const rr = Math.exp(-1 / tau);
+        const c1 = 2 * rr * Math.cos(w), c2 = -rr * rr;
+        let y1 = (0.04 + Math.pow(Math.random(), 3) * 0.45) * Math.sin(w), y2 = 0;
+        const n = Math.floor(tau * 4);
+        for (let j = 0; j < n; j++) {
+          d[(at + j) % len] += y1;
+          const y = c1 * y1 + c2 * y2;
+          y2 = y1;
+          y1 = y;
+        }
       }
     }
     return buf;
