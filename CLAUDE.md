@@ -4,7 +4,10 @@ Working notes for AI agents in this repo. Player-facing feature docs live in `RE
 
 ## What this is
 
-A from-scratch Minecraft clone in **TypeScript + Three.js + Vite**. Three.js is only the WebGL wrapper — chunking, meshing, lighting, physics, mob AI, crafting, and persistence are all hand-written. **No game/voxel/physics libraries and no asset files of any kind**: every texture, mob, sound, and music track is generated procedurally in code. Keep it that way — if you need a new texture/sprite/sound, generate it, don't add a binary.
+A Minecraft clone in **TypeScript + Three.js + Vite**. Three.js is the WebGL wrapper; chunking, meshing, lighting, physics, mob AI, crafting, persistence and audio (raw Web Audio) are hand-written so far.
+
+- **Third-party libraries are allowed** (npm packages) when they clearly beat a hand-rolled version — e.g. Tone.js for audio. Weigh bundle size (the build is already ~1.3 MB) and keep them to what's actually used.
+- **No asset files** (images, audio samples, models, fonts): every texture, mob, sound and music track is still generated procedurally in code. If you need a new texture/sprite/sound, generate it — don't add a binary.
 
 Solo project. Commits go straight to `main`.
 
