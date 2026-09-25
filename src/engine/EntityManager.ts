@@ -11,6 +11,7 @@ import { Atlas, extrudeSpriteGeometry } from './Textures';
 import { AudioEngine } from './Audio';
 import { SEA_LEVEL } from './WorldGenerator';
 import type { Player } from './Player';
+import { MobModels, LimbSet, MOB_EXPOSURE, rollVariant } from './MobModels';
 
 export type MobKind =
   | 'pig' | 'chicken' | 'sheep' | 'cow'
@@ -30,21 +31,6 @@ const NETHER_MOBS: MobKind[] = ['cinderling', 'ashstalker', 'emberghast'];
 const JUMP_V = Math.sqrt(2 * 32 * 1.25); // same 1.25-block hop as the player
 const GRAVITY = 32;
 
-/** "#rrggbb" -> [r,g,b]. */
-function hexRgb(h: string): [number, number, number] {
-  const n = parseInt(h.slice(1), 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-const clamp255 = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
-
-/** Horse coat palettes: [body, speckle, mane/tail]. */
-const HORSE_COATS: [string, string, string][] = [
-  ['#6b4a2b', '#5a3d22', '#2a1a0e'], // brown
-  ['#d8c8a8', '#c8b894', '#8a6a44'], // creamy
-  ['#3a2c22', '#2c2018', '#161009'], // black
-  ['#a06038', '#8a4f2c', '#e8d8b0'], // chestnut, flaxen mane
-  ['#cfcfcf', '#bcbcbc', '#9a9a9a'], // white/grey
-];
 /** Foods that put each animal into "love mode". Wolf/cat/horse must be tamed. */
 const BREED_FOOD: Partial<Record<MobKind, number[]>> = {
   pig: [I.WHEAT, I.CARROT, I.POTATO, I.BEETROOT],
@@ -64,29 +50,15 @@ const LURE_FOOD: Partial<Record<MobKind, number[]>> = {
   wolf: [I.BONE],
   cat: [I.RAW_FISH, I.COOKED_FISH],
   cow: [I.WHEAT],
-  pig: [I.WHEAT],
+  sheep: [I.WHEAT],
+  pig: [I.WHEAT, I.CARROT, I.POTATO, I.BEETROOT],
   chicken: [I.SEEDS, I.BEETROOT_SEEDS],
+  horse: [I.GOLDEN_CARROT, I.APPLE],
 };
-
-/** Cat coat palettes: [body, speckle, belly]. */
-const CAT_COATS: [string, string, string][] = [
-  ['#3a3530', '#2a2520', '#cfcabf'], // tuxedo
-  ['#d88a3a', '#c2762c', '#f0d8a8'], // ginger tabby
-  ['#cfcfcf', '#b8b8b8', '#ffffff'], // siamese-ish
-  ['#2a2a2a', '#1c1c1c', '#3a3a3a'], // black
-];
-
-interface LimbSet {
-  legs: THREE.Group[];
-  arms?: THREE.Group[];
-  head?: THREE.Group;
-  /** swaying tail (wolf, horse, cat) */
-  tail?: THREE.Object3D;
-  /** group bobbed gently while idle (body breathing) */
-  body?: THREE.Object3D;
-  /** ear groups (wolf, cat) for occasional twitches */
-  ears?: THREE.Object3D[];
-}
+/** Animals that drift back toward their own kind when picking a wander heading. */
+const HERD_KINDS = new Set<MobKind>(['cow', 'sheep', 'pig', 'chicken', 'horse']);
+/** How long the death topple plays before the smoke poof. */
+const DEATH_TIME = 0.9;
 
 interface MobStats {
   box: { w: number; h: number };
@@ -150,6 +122,8 @@ export class Entity {
   // never the owner or another pet)
   owner: 'player' | 'skeleton' | 'emberghast' | 'pet' | 'petghast' = 'player';
   dmg = 0;
+  /** arrow embedded in a block: seconds since it struck (-1 = in flight) */
+  stuckT = -1;
   // particle fields
   life = 0;
   maxLife = 0;
@@ -195,6 +169,34 @@ export class Entity {
   /** scratch steering output from petChase (consumed by the caller) */
   _wishX = 0;
   _wishZ = 0;
+  // animation state (render-only)
+  /** eased body yaw the mesh actually shows (AI yaw changes snap; this turns) */
+  visYaw = 0;
+  /** eased 0..1 stride amplitude (so legs settle instead of freezing mid-step) */
+  limbAmt = 0;
+  /** idle glance: seconds until the next look-around, and its target */
+  lookT = 0;
+  lookYaw = 0;
+  lookPitch = 0;
+  /** true while this mob is taking an interest in the player */
+  watching = false;
+  /** seconds until the next blink (negative = eyes shut) */
+  blinkT = 3;
+  /** sheep: seconds left in a grass-munching bout */
+  grazeT = 0;
+  /** sheep: fleece shorn off (regrows by grazing) */
+  sheared = false;
+  /** seconds left on fire (undead in daylight) */
+  burnT = 0;
+  /** direction of the last knockback, for the hurt tilt */
+  kbX = 0;
+  kbZ = 0;
+  /** ticks toward the next point of fire damage */
+  burnTick = 0;
+  /** contact shadow (stays on the ground under a jumping/falling mob) */
+  shadow: THREE.Mesh | null = null;
+  /** mesh handed to the death-topple animation; don't dispose on removal */
+  corpse = false;
 
   constructor(kind: EntityKind, pos: Vec3, box: { w: number; h: number }, mesh: THREE.Group) {
     this.kind = kind;
@@ -219,9 +221,12 @@ export class EntityManager {
   onCapture: ((mobKind: string) => void) | null = null;
   /** fired when the player damages a mob (hit marker + damage number feedback) */
   onPlayerHit: ((pos: Vec3, dmg: number, crit: boolean, killed: boolean) => void) | null = null;
-  private skinCache = new Map<string, THREE.Texture>();
+  private models = new MobModels();
+  /** dying mobs' meshes playing the topple-over before their poof */
+  private corpses: { mesh: THREE.Group; mats: THREE.MeshLambertMaterial[]; t: number; w: number; x: number; y: number; z: number }[] = [];
   private shadowTex: THREE.CanvasTexture | null = null;
   private particleMats = new Map<string, THREE.MeshBasicMaterial>();
+  private arrowSprite: HTMLCanvasElement | null = null;
   private spawnTick = 0;
   mobsEnabled = true;
 
@@ -238,7 +243,7 @@ export class EntityManager {
 
   // --- spawning ---------------------------------------------------------------
 
-  spawnDrop(x: number, y: number, z: number, itemId: number, count: number, dur?: number, mob?: string): void {
+  spawnDrop(x: number, y: number, z: number, itemId: number, count: number, dur?: number, mob?: string): Entity {
     const mesh = this.buildDropMesh(itemId, mob);
     const e = new Entity('drop', { x, y, z }, { w: 0.25, h: 0.25 }, mesh);
     e.itemId = itemId;
@@ -248,12 +253,15 @@ export class EntityManager {
     e.vel = { x: (Math.random() - 0.5) * 2.4, y: 3.2, z: (Math.random() - 0.5) * 2.4 };
     this.entities.push(e);
     this.scene.add(mesh);
+    return e;
   }
 
-  spawnMob(kind: MobKind, x: number, y: number, z: number): Entity {
-    const variant = kind === 'horse' ? (Math.random() * HORSE_COATS.length) | 0
-      : kind === 'cat' ? (Math.random() * CAT_COATS.length) | 0 : 0;
-    const { mesh, limbs, mats } = this.buildMobMesh(kind, variant);
+  /** Spawn a mob. `variant` picks a coat/outfit (random when omitted). */
+  spawnMob(kind: MobKind, x: number, y: number, z: number, variant = rollVariant(kind)): Entity {
+    const { mesh, limbs, mats } = this.models.build(kind, variant);
+    // yaw first, then local pitch/roll: knockback tilt + the death topple ride
+    // on the mob's own axes
+    mesh.rotation.order = 'YXZ';
     const stats = MOB_STATS[kind];
     const e = new Entity(kind, { x, y, z }, { ...stats.box }, mesh);
     e.limbs = limbs;
@@ -262,8 +270,16 @@ export class EntityManager {
     e.materials = mats;
     e.variant = variant;
     e.yaw = Math.random() * Math.PI * 2;
+    e.visYaw = e.yaw;
+    e.blinkT = 1 + Math.random() * 4;
+    e.lookT = Math.random() * 3;
+    mesh.position.set(x, y, z);
+    mesh.rotation.y = e.yaw;
     // soft contact shadow under grounded mobs (flyers get none)
-    if (kind !== 'phantom' && kind !== 'emberghast') mesh.add(this.makeShadow(stats.box.w));
+    if (kind !== 'phantom' && kind !== 'emberghast') {
+      e.shadow = this.makeShadow(stats.box.w);
+      mesh.add(e.shadow);
+    }
     this.entities.push(e);
     this.scene.add(mesh);
     return e;
@@ -501,6 +517,7 @@ export class EntityManager {
     m.rotation.x = -Math.PI / 2;
     m.position.y = 0.02;
     m.renderOrder = 1;
+    m.userData.shadow = true;
     return m;
   }
 
@@ -614,19 +631,54 @@ export class EntityManager {
     if (e.age > 60) e.dead = true;
   }
 
+  /** Minecraft's arrow entity: two identical side-view arrows crossed along
+   *  the shaft (an X seen from behind), each extruded one pixel thick. The
+   *  item sprite's dark outline turned the shaft black at this scale, so the
+   *  entity gets its own unoutlined horizontal profile. Tip points down +z,
+   *  which is what lookAt aims along the flight path. */
+  private buildArrowMesh(): THREE.Group {
+    if (!this.arrowSprite) {
+      const c = document.createElement('canvas');
+      c.width = 16; c.height = 16;
+      const ctx = c.getContext('2d')!;
+      const rows = [
+        '................',
+        '..W.............',
+        '.WWw.........L..',
+        '.WwwHhHhHhHhLLL.',
+        '.WwwhHhHhHhHmmmL',
+        '.WWw.........m..',
+        '..W.............',
+      ];
+      const pal: Record<string, string> = {
+        W: '#f4f4f4', w: '#c8c8cc',   // goose-feather fletching
+        H: '#9c7440', h: '#6e4e28',   // oak shaft
+        L: '#e0e0e0', m: '#9a9a9a',   // flint head
+      };
+      rows.forEach((row, y) => {
+        for (let x = 0; x < 16; x++) {
+          const col = pal[row[x]];
+          if (!col) continue;
+          ctx.fillStyle = col;
+          ctx.fillRect(x, y + 5, 1, 1);
+        }
+      });
+      this.arrowSprite = c;
+    }
+    const g = new THREE.Group();
+    const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+    for (let i = 0; i < 2; i++) {
+      const geo = extrudeSpriteGeometry(this.arrowSprite, 0.5);
+      geo.rotateY(-Math.PI / 2); // tip (+x) onto +z
+      if (i) geo.rotateZ(Math.PI / 2);
+      g.add(new THREE.Mesh(geo, mat));
+    }
+    return g;
+  }
+
   shootArrow(owner: 'player' | 'skeleton', x: number, y: number, z: number,
     dx: number, dy: number, dz: number, speed: number, dmg: number): void {
-    const mesh = new THREE.Group();
-    const shaft = new THREE.Mesh(
-      new THREE.BoxGeometry(0.05, 0.05, 0.5),
-      new THREE.MeshLambertMaterial({ color: 0x8a6232 }),
-    );
-    const tip = new THREE.Mesh(
-      new THREE.BoxGeometry(0.07, 0.07, 0.1),
-      new THREE.MeshLambertMaterial({ color: 0xc8c8d0 }),
-    );
-    tip.position.z = 0.28;
-    mesh.add(shaft, tip);
+    const mesh = this.buildArrowMesh();
     const len = Math.hypot(dx, dy, dz) || 1;
     const e = new Entity('arrow', { x, y, z }, { w: 0.1, h: 0.1 }, mesh);
     e.vel = { x: (dx / len) * speed, y: (dy / len) * speed, z: (dz / len) * speed };
@@ -800,7 +852,7 @@ export class EntityManager {
   // --- explosions -----------------------------------------------------------------
 
   explode(x: number, y: number, z: number, power: number, cause = 'Blown up by TNT'): void {
-    this.audio.play('explode');
+    this.audio.play('explode', this.player ? Math.max(0.2, 1 - Math.hypot(this.player.pos.x - x, this.player.pos.y - y, this.player.pos.z - z) / 60) : 1);
     const r = Math.ceil(power);
     const cx = Math.floor(x), cy = Math.floor(y), cz = Math.floor(z);
     for (let dy = -r; dy <= r; dy++) {
@@ -903,9 +955,38 @@ export class EntityManager {
     for (let i = this.entities.length - 1; i >= 0; i--) {
       const e = this.entities[i];
       if (e.dead) {
-        this.scene.remove(e.mesh);
-        disposeGroup(e.mesh);
+        if (!e.corpse) {
+          this.scene.remove(e.mesh);
+          disposeGroup(e.mesh);
+        }
         this.entities.splice(i, 1);
+      }
+    }
+    this.updateCorpses(dt);
+  }
+
+  /** Vanilla death: the body tips onto its side, flushed red, then vanishes in a
+   *  puff of smoke. The mesh outlives its (already dead) entity for DEATH_TIME. */
+  private updateCorpses(dt: number): void {
+    for (let i = this.corpses.length - 1; i >= 0; i--) {
+      const c = this.corpses[i];
+      c.t += dt;
+      const f = Math.min(1, Math.sqrt(c.t / (DEATH_TIME * 0.6)));
+      const ang = f * Math.PI / 2;
+      c.mesh.rotation.x = 0;
+      c.mesh.rotation.z = ang;
+      // lift by the half-width so the body lies on the ground instead of in it
+      c.mesh.position.y = c.y + Math.sin(ang) * c.w * 0.5;
+      for (const m of c.mats) {
+        m.color.setRGB(MOB_EXPOSURE, MOB_EXPOSURE * 0.45, MOB_EXPOSURE * 0.45);
+        m.emissive.setRGB(0.25, 0, 0);
+      }
+      if (c.t >= DEATH_TIME) {
+        this.spawnPoof(c.x, c.y, c.z);
+        this.audio.play('pop');
+        this.scene.remove(c.mesh);
+        disposeGroup(c.mesh);
+        this.corpses.splice(i, 1);
       }
     }
   }
@@ -972,6 +1053,7 @@ export class EntityManager {
   }
 
   private updateArrow(e: Entity, dt: number): void {
+    if (e.stuckT >= 0) { this.updateStuckArrow(e, dt); return; }
     const speed = Math.hypot(e.vel.x, e.vel.y, e.vel.z);
     const steps = Math.max(1, Math.ceil(speed * dt / 0.45));
     const sdt = dt / steps;
@@ -989,8 +1071,26 @@ export class EntityManager {
         e.dead = true;
         if (fireball) { this.fireballBurst(e.pos.x, e.pos.y, e.pos.z); return; }
         this.audio.play('arrowHit');
-        if (e.owner === 'player' && Math.random() < 0.7) {
-          this.spawnDrop(e.pos.x - e.vel.x * sdt, e.pos.y - e.vel.y * sdt, e.pos.z - e.vel.z * sdt, I.ARROW, 1);
+        if (e.owner === 'player' || e.owner === 'skeleton') {
+          // arrows bury their tip in the block and quiver (vanilla), staying
+          // put until picked up or the block under them is broken
+          const len = Math.hypot(e.vel.x, e.vel.y, e.vel.z) || 1;
+          const ux = e.vel.x / len, uy = e.vel.y / len, uz = e.vel.z / len;
+          // walk back to where the shaft entered the block, then sit the
+          // 0.5-long arrow so only its flint tip (~0.1) is buried
+          for (let k = 0; k < 24; k++) {
+            const bid = this.world.getBlock(Math.floor(e.pos.x), Math.floor(e.pos.y), Math.floor(e.pos.z));
+            if (bid === B.AIR || !def(bid).solid) break;
+            e.pos.x -= ux * 0.03; e.pos.y -= uy * 0.03; e.pos.z -= uz * 0.03;
+          }
+          e.pos.x -= ux * 0.14; e.pos.y -= uy * 0.14; e.pos.z -= uz * 0.14;
+          e.dead = false;
+          e.stuckT = 0;
+          e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+          e.mesh.lookAt(e.pos.x + e.vel.x, e.pos.y + e.vel.y, e.pos.z + e.vel.z);
+          e.mesh.userData.rest = e.mesh.quaternion.clone();
+          e.vel = { x: e.vel.x / len, y: e.vel.y / len, z: e.vel.z / len }; // keep the heading for the wobble
+          e.age = 0;
         }
         return;
       }
@@ -1040,6 +1140,43 @@ export class EntityManager {
     if (e.age > 30 || e.pos.y < -8) e.dead = true;
     e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
     e.mesh.lookAt(e.pos.x + e.vel.x, e.pos.y + e.vel.y, e.pos.z + e.vel.z);
+  }
+
+  /** An arrow embedded in a block: quivers briefly, can be walked over to pick
+   *  up (the player's own), and drops out if its block is mined away. */
+  private updateStuckArrow(e: Entity, dt: number): void {
+    e.stuckT += dt;
+    // the block the tip is buried in: a little ahead along the heading
+    const tx = Math.floor(e.pos.x + e.vel.x * 0.3);
+    const ty = Math.floor(e.pos.y + e.vel.y * 0.3);
+    const tz = Math.floor(e.pos.z + e.vel.z * 0.3);
+    const id = this.world.getBlock(tx, ty, tz);
+    if (id === B.AIR || id === B.WATER || !def(id).solid) {
+      // support gone: fall out of the hole
+      e.stuckT = -1;
+      e.vel = { x: e.vel.x * 0.5, y: 0, z: e.vel.z * 0.5 };
+      return;
+    }
+    const rest = e.mesh.userData.rest as THREE.Quaternion | undefined;
+    if (rest) {
+      e.mesh.quaternion.copy(rest);
+      if (e.stuckT < 0.4) {
+        // damped quiver about the shaft's pivot
+        const k = (1 - e.stuckT / 0.4);
+        e.mesh.rotateX(Math.sin(e.stuckT * 70) * 0.12 * k);
+        e.mesh.rotateY(Math.cos(e.stuckT * 55) * 0.06 * k);
+      }
+    }
+    const p = this.player;
+    if (e.owner === 'player' && p && !p.dead &&
+      Math.abs(p.pos.x - e.pos.x) < 1.1 && Math.abs(p.pos.z - e.pos.z) < 1.1 &&
+      e.pos.y > p.pos.y - 0.6 && e.pos.y < p.pos.y + 2.2) {
+      e.dead = true;
+      this.spawnDrop(p.pos.x, p.pos.y + 0.5, p.pos.z, I.ARROW, 1);
+      return;
+    }
+    // vanilla despawns grounded arrows after a minute
+    if (e.stuckT > (e.owner === 'player' ? 60 : 20)) e.dead = true;
   }
 
   private updateTnt(e: Entity, dt: number): void {
@@ -1104,28 +1241,10 @@ export class EntityManager {
     // a ridden horse is driven by the player (see Player.updateRiding)
     if (e.ridden) return;
 
-    // emissive: hurt = red; creeper fuse = white strobe
-    let er = e.hurtFlash > 0 ? 0.55 : 0, eg = 0, eb = 0;
-    if (e.kind === 'creeper' && e.state === 'fuse' && Math.sin(e.age * 22) > 0) {
-      er = 0.8; eg = 0.8; eb = 0.8;
-    }
-    // tamed wolf collar glow
-    if (e.kind === 'wolf' && e.tamed) { er = 0.15; eg = 0.1; eb = 0.05; }
-    // nether mobs smoulder: bright ember accents over a dark charred hide. The
-    // hide glows only faintly so it stays recognizably charcoal instead of washing
-    // the whole mob to flat lava-orange (ember materials are tagged at build time).
-    const netherGlow = (e.kind === 'cinderling' || e.kind === 'ashstalker') && e.hurtFlash <= 0;
+    this.tintMob(e);
     // nether mobs trail a few embers while hunting the player
     if ((e.kind === 'cinderling' || e.kind === 'ashstalker') && e.state === 'chase' && Math.random() < 0.18) {
       this.spawnFirefly(e.pos.x + (Math.random() - 0.5) * 0.4, e.pos.y + e.box.h * 0.5, e.pos.z + (Math.random() - 0.5) * 0.4);
-    }
-    if (netherGlow) {
-      const pulse = 0.34 + 0.14 * Math.sin(e.age * 4 + (e.kind === 'ashstalker' ? 1 : 0));
-      er = pulse; eg = pulse * 0.4; eb = 0.02;
-    }
-    for (const m of e.materials) {
-      if (netherGlow && !m.userData.ember) m.emissive.setRGB(er * 0.22, eg * 0.22, eb);
-      else m.emissive.setRGB(er, eg, eb);
     }
 
     // steering by state
@@ -1143,8 +1262,7 @@ export class EntityManager {
         const res2 = this.applyGroundMove(e, dt, e._wishX, e._wishZ, e.moveSpeed * 1.6);
         if ((res2.hitX || res2.hitZ) && e.onGround && (e._wishX !== 0 || e._wishZ !== 0)) e.vel.y = JUMP_V;
         this.animateMob(e, dt, p);
-        e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
-        e.mesh.rotation.y = e.yaw;
+        this.placeMob(e, dt);
         return;
       }
       if (e.sitting) {
@@ -1166,17 +1284,18 @@ export class EntityManager {
       const res = this.applyGroundMove(e, dt, wishX, wishZ, fspeed);
       if ((res.hitX || res.hitZ) && e.onGround && (wishX !== 0 || wishZ !== 0)) e.vel.y = JUMP_V;
       this.animateMob(e, dt, p);
-      e.mesh.position.set(e.pos.x, e.pos.y + (e.sitting ? -0.12 : 0), e.pos.z);
-      e.mesh.rotation.y = e.yaw;
+      this.placeMob(e, dt, e.sitting ? -0.12 * e.mesh.scale.y : 0);
       return;
     }
 
     // Lure: while the player holds this animal's food it turns to face them and
-    // trots over (an untamed dog tempted by a bone, a cat by fish, cows/pigs by
-    // wheat, chickens by seed). Overrides the idle wander this tick.
+    // trots over (an untamed dog tempted by a bone, a cat by fish, cows/sheep by
+    // wheat, pigs by carrots, chickens by seed). Overrides the idle wander.
     let lured = false;
-    if (this.isLureFood(e.kind as MobKind, p.heldId()) && distToPlayer < 10) {
+    if (e.state !== 'flee' && e.state !== 'chase' && !p.dead
+      && this.isLureFood(e.kind as MobKind, p.heldId()) && distToPlayer < 10) {
       lured = true;
+      e.grazeT = 0; // food beats grass
       const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
       const d = Math.hypot(dx, dz) || 1;
       e.yaw = Math.atan2(-dx, -dz); // look at the player
@@ -1193,6 +1312,15 @@ export class EntityManager {
     } else if (e.state === 'wander' || e.state === 'flee') {
       wishX = -Math.sin(e.yaw);
       wishZ = -Math.cos(e.yaw);
+      // wandering animals shy away from cliff edges, water and lava instead of
+      // strolling off them; a turn-and-pause reads as the mob noticing the drop
+      if (e.state === 'wander' && e.onGround && !inWater(this.world, e.pos, e.box)
+        && this.hazardAhead(e, wishX, wishZ)) {
+        wishX = 0; wishZ = 0;
+        e.state = 'idle';
+        e.stateTime = 0.6 + Math.random() * 1.2;
+        e.yaw += Math.PI * (0.6 + Math.random() * 0.8);
+      }
     } else if (e.state === 'chase') {
       const dx = qx - e.pos.x, dz = qz - e.pos.z;
       const d = Math.hypot(dx, dz) || 1;
@@ -1218,17 +1346,23 @@ export class EntityManager {
         return;
       }
     }
+    // a grazing sheep stands still with its head in the grass
+    if (e.grazeT > 0) { wishX = 0; wishZ = 0; }
 
+    const angryWolf = e.kind === 'wolf' && e.angryT > 0 && e.state === 'chase';
     const speed = lured ? e.moveSpeed * 1.4
-      : e.state === 'flee' ? e.moveSpeed * 2.2 : e.moveSpeed;
+      : e.state === 'flee' ? e.moveSpeed * 2.2 : angryWolf ? e.moveSpeed * 2.4 : e.moveSpeed;
     const res = this.applyGroundMove(e, dt, wishX, wishZ, speed);
-    // hop single-block barriers
-    if ((res.hitX || res.hitZ) && e.onGround && (wishX !== 0 || wishZ !== 0)) {
-      e.vel.y = JUMP_V;
+    // hop single-block barriers; spiders just climb straight up walls
+    if ((res.hitX || res.hitZ) && (wishX !== 0 || wishZ !== 0)) {
+      if (e.kind === 'spider') e.vel.y = Math.max(e.vel.y, 3.2);
+      else if (e.onGround) e.vel.y = JUMP_V;
     }
+    // chickens flutter down instead of dropping like a stone
+    if (e.kind === 'chicken' && !e.onGround && e.vel.y < -2.2) e.vel.y = -2.2;
 
     // melee contact attacks — on the pet it is fighting, else on the player
-    if (MELEE_MOBS.has(e.kind as MobKind) && e.attackCooldown <= 0 && e.state === 'chase'
+    if ((MELEE_MOBS.has(e.kind as MobKind) || angryWolf) && e.attackCooldown <= 0 && e.state === 'chase'
       && (foe || !p.dead)) {
       const dx = qx - e.pos.x, dz = qz - e.pos.z;
       const dy = qy - e.pos.y;
@@ -1256,8 +1390,82 @@ export class EntityManager {
 
     // animation
     this.animateMob(e, dt, p);
-    e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
-    e.mesh.rotation.y = e.yaw;
+    this.placeMob(e, dt);
+  }
+
+  /** Colour state for a ground mob: red hurt flash, burning flicker, creeper
+   *  fuse strobe, and the nether mobs' ember smoulder. */
+  private tintMob(e: Entity): void {
+    const hurt = e.hurtFlash > 0;
+    let er = hurt ? 0.2 : 0, eg = 0, eb = 0;
+    if (!hurt && e.burnT > 0) {
+      const f = 0.07 + Math.random() * 0.08; // a flicker; the flames carry the look
+      er = f; eg = f * 0.45;
+    }
+    if (e.kind === 'creeper' && e.state === 'fuse' && Math.sin(e.age * 22) > 0) {
+      er = 0.8; eg = 0.8; eb = 0.8;
+    }
+    // nether mobs smoulder: bright ember accents over a dark charred hide. The
+    // hide glows only faintly so it stays recognizably charcoal instead of washing
+    // the whole mob to flat lava-orange (ember materials are tagged at build time).
+    const netherGlow = (e.kind === 'cinderling' || e.kind === 'ashstalker') && !hurt;
+    if (netherGlow) {
+      const pulse = 0.34 + 0.14 * Math.sin(e.age * 4 + (e.kind === 'ashstalker' ? 1 : 0));
+      er = pulse; eg = pulse * 0.4; eb = 0.02;
+    }
+    // hurt = vanilla's red overlay: tint the albedo as well as glowing a little
+    const gb = hurt ? MOB_EXPOSURE * 0.5 : MOB_EXPOSURE;
+    for (const m of e.materials) {
+      m.color.setRGB(MOB_EXPOSURE, gb, gb);
+      if (netherGlow && !m.userData.ember) m.emissive.setRGB(er * 0.22, eg * 0.22, eb);
+      else m.emissive.setRGB(er, eg, eb);
+    }
+  }
+
+  /** Push a ground mob's transform to its mesh: the shown body yaw eases toward
+   *  the AI's (so turns read as turns, not snaps) and a fresh hit tips the mob
+   *  away from the blow while the red flash lasts. */
+  private placeMob(e: Entity, dt: number, yOff = 0): void {
+    let d = e.yaw - e.visYaw;
+    d = Math.atan2(Math.sin(d), Math.cos(d));
+    const rate = e.state === 'chase' || e.state === 'flee' || e.ridden ? 14 : 7;
+    e.visYaw += d * Math.min(1, rate * dt);
+    const m = e.mesh;
+    m.position.set(e.pos.x, e.pos.y + yOff, e.pos.z);
+    m.rotation.y = e.visYaw;
+    const k = e.hurtFlash > 0 ? (e.hurtFlash / 0.35) * 0.32 : 0;
+    // knockback direction in the mob's own frame (forward = -z)
+    const c = Math.cos(e.visYaw), s = Math.sin(e.visYaw);
+    const lx = e.kbX * c - e.kbZ * s, lz = e.kbX * s + e.kbZ * c;
+    m.rotation.x = lz * k;
+    m.rotation.z = -lx * k;
+    // airborne: the shadow stays on the ground below and fades with height
+    const sh = e.shadow;
+    if (sh) {
+      let drop = 0;
+      if (!e.onGround) {
+        const x = Math.floor(e.pos.x), z = Math.floor(e.pos.z);
+        let y = Math.floor(e.pos.y);
+        while (drop < 6 && !this.world.isSolidAt(x, y - 1, z)) { y--; drop++; }
+        drop = Math.min(6, e.pos.y - y);
+      }
+      sh.position.y = 0.02 - drop / m.scale.y;
+      (sh.material as THREE.MeshBasicMaterial).opacity = 0.5 * Math.max(0, 1 - drop / 6);
+    }
+  }
+
+  /** Would a wandering mob stepping along (dx,dz) walk off a >3-block drop, or
+   *  into water, lava or a cactus? Walls are fine (it hops or bumps them). */
+  private hazardAhead(e: Entity, dx: number, dz: number): boolean {
+    const reach = e.box.w * 0.5 + 0.4;
+    const x = Math.floor(e.pos.x + dx * reach), z = Math.floor(e.pos.z + dz * reach);
+    const y = Math.floor(e.pos.y + 0.05);
+    for (let dy = 0; dy >= -4; dy--) {
+      const id = this.world.getBlock(x, y + dy, z);
+      if (id === B.WATER || id === B.LAVA || id === B.CACTUS) return true;
+      if (id !== B.AIR && hasDef(id) && def(id).solid) return dy < -3; // floor found
+    }
+    return true;
   }
 
   /** Shared ground-movement integration (gravity, water buoyancy, collision,
@@ -1278,83 +1486,189 @@ export class EntityManager {
     return res;
   }
 
-  /** Shared walk-cycle + head-tracking animation. */
+  /** Shared mob animation: stride-matched walk cycle, head tracking + idle
+   *  glances, blinking, tails/ears/wings, grazing, creeper swell. */
   private animateMob(e: Entity, dt: number, p: Player): void {
+    const limbs = e.limbs;
+    if (!limbs) return;
     const hSpeed = Math.hypot(e.vel.x, e.vel.z);
-    if (!e.limbs) return;
-    const L = e.limbs.legs;
+    const L = limbs.legs;
+    const sitting = (e.kind === 'wolf' || e.kind === 'cat') && e.sitting;
 
-    // sitting wolf/cat: fold the rear legs, keep front legs planted, tail down
-    if ((e.kind === 'wolf' || e.kind === 'cat') && e.sitting) {
+    if (limbs.collar) limbs.collar.visible = e.tamed;
+    if (limbs.wool) for (const w of limbs.wool) w.visible = !e.sheared;
+
+    // blink: eyes shut for ~0.14 s every few seconds
+    if (limbs.faces) {
+      e.blinkT -= dt;
+      if (e.blinkT < -0.14) e.blinkT = 2 + Math.random() * 4.5;
+      const shut = e.blinkT < 0;
+      const angry = e.angryT > 0 && e.state === 'chase';
+      for (const f of limbs.faces) {
+        const want = angry && f.angry ? f.angry : shut ? f.closed : f.open;
+        if (f.mat.map !== want) f.mat.map = want;
+      }
+    }
+
+    // stride: the leg phase advances with ground covered (short legs step
+    // faster), and the swing amplitude eases with speed so legs settle
+    const ref = Math.max(0.8, e.moveSpeed * 0.9);
+    const target = e.onGround || e.kind === 'spider' ? Math.min(1, hSpeed / ref) : e.limbAmt * 0.9;
+    e.limbAmt += (target - e.limbAmt) * Math.min(1, 8 * dt);
+    e.walkCycle += hSpeed * dt * (1.9 / limbs.legLen);
+    const maxSwing = e.kind === 'chicken' ? 1.0 : L.length === 2 ? 0.75 : 0.65;
+    const swing = Math.sin(e.walkCycle) * e.limbAmt * maxSwing;
+
+    if (sitting) {
+      // fold the rear legs, keep the front legs planted
       if (L[0]) L[0].rotation.x = -0.15;
       if (L[1]) L[1].rotation.x = -0.15;
       if (L[2]) L[2].rotation.x = 1.25;
       if (L[3]) L[3].rotation.x = 1.25;
-      if (e.limbs.tail) e.limbs.tail.rotation.y = Math.sin(e.age * 2) * 0.12;
-      if (e.limbs.body) e.limbs.body.position.y = 0;
-      return;
+    } else if (e.kind === 'spider') {
+      // vanilla spider gait: legs sweep fore/aft in yaw and lift in roll,
+      // alternating pairs down each side
+      for (let i = 0; i < L.length; i++) {
+        const lg = L[i];
+        const side = lg.userData.side as number;
+        const ph = e.walkCycle * 1.4 + ((i >> 1) % 2 ? Math.PI : 0) + (side > 0 ? Math.PI : 0);
+        lg.rotation.y = (lg.userData.baseY as number) + Math.sin(ph) * 0.38 * e.limbAmt;
+        lg.rotation.z = (lg.userData.baseZ as number) + side * Math.max(0, Math.cos(ph)) * 0.35 * e.limbAmt;
+      }
+    } else {
+      for (let i = 0; i < L.length; i++) L[i].rotation.x = i % 2 === 0 ? swing : -swing;
     }
 
-    e.walkCycle += hSpeed * dt * 3.2;
-    const swing = Math.sin(e.walkCycle) * Math.min(1, hSpeed / 1.5) * 0.75;
-    for (let i = 0; i < L.length; i++) {
-      L[i].rotation.x = i % 2 === 0 ? swing : -swing;
-    }
-    if (e.limbs.arms) {
-      // zombie/skeleton reach FORWARD (−z), the same way the face points, so the
-      // eyes and the outstretched arms line up; +π/2 points the limbs at the face
-      // side (−π/2 used to point them out the back, 180° off the head)
-      const reach = e.kind === 'zombie' || e.kind === 'skeleton';
-      for (let i = 0; i < e.limbs.arms.length; i++) {
-        e.limbs.arms[i].rotation.x = reach
-          ? Math.PI / 2 + Math.sin(e.walkCycle * 0.5) * 0.1
-          : (i % 2 === 0 ? swing : -swing) * 0.6; // villager: swing gently at the sides
+    if (limbs.arms) {
+      // zombies stalk with arms out (+π/2 points them where the face looks) and
+      // lunge them down on a hit; skeletons raise the bow only while aiming
+      const aiming = e.kind === 'skeleton' && e.state === 'chase';
+      const lunge = e.kind === 'zombie' ? Math.max(0, e.attackCooldown - 0.7) / 0.3 : 0;
+      for (let i = 0; i < limbs.arms.length; i++) {
+        const arm = limbs.arms[i];
+        let tx: number, ty = 0;
+        if (e.kind === 'zombie') {
+          tx = Math.PI / 2 - 0.08 + Math.sin(e.age * 1.3 + i) * 0.06 - lunge * 0.55;
+        } else if (aiming) {
+          tx = Math.PI / 2 - (i === 0 ? 0.08 : 0);
+          ty = i === 0 ? -0.4 : 0.08; // draw hand crosses in to the string
+        } else {
+          tx = (i % 2 === 0 ? -swing : swing) * 0.9 + Math.sin(e.age * 1.1 + i * 2) * 0.04;
+        }
+        const k = Math.min(1, 10 * dt);
+        arm.rotation.x += (tx - arm.rotation.x) * k;
+        arm.rotation.y += (ty - arm.rotation.y) * k;
+        arm.rotation.z = (i === 0 ? 1 : -1) * 0.05;
       }
+      // keep the bow upright whether the arm hangs or aims
+      if (limbs.bow && limbs.arms[1]) limbs.bow.rotation.x = limbs.arms[1].rotation.x - Math.PI / 2;
     }
-    // Head look-tracking: hostiles in pursuit lock on; every other mob with a
-    // head glances at the player when they're close, then relaxes to neutral.
-    // Both pitch and yaw are eased so the motion looks alive, not snappy.
-    if (e.limbs.head) {
+
+    // chicken wings flap hard while airborne (it flutters down) and give the
+    // odd idle ruffle on the ground
+    if (limbs.wings) {
+      const ruffle = Math.max(0, Math.sin(e.age * 0.9 + e.variant) - 0.97) * 30;
+      const a = !e.onGround ? 0.25 + Math.abs(Math.sin(e.age * 26)) * 1.0
+        : Math.abs(Math.sin(e.age * 20)) * ruffle * 0.5;
+      limbs.wings[0].rotation.z = -a;
+      limbs.wings[1].rotation.z = a;
+    }
+
+    // Head: hostiles in pursuit lock on; a mob with its food in the player's hand
+    // stares at it; otherwise mobs take turns glancing at a nearby player or
+    // looking idly around. Pitch and yaw are both eased.
+    if (limbs.head) {
+      const head = limbs.head;
       const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
       const distH = Math.hypot(dx, dz);
+      e.lookT -= dt;
+      if (e.lookT <= 0) {
+        e.lookT = 1.8 + Math.random() * 3.5;
+        e.watching = Math.random() < 0.6;
+        const idle = Math.random() < 0.3;
+        e.lookYaw = idle ? 0 : (Math.random() - 0.5) * 1.5;
+        e.lookPitch = idle ? 0 : (Math.random() - 0.6) * 0.5;
+      }
       const aggro = e.state === 'chase' || e.state === 'fuse';
-      const watch = aggro || (distH < 8 && e.state !== 'flee');
-      let tx = 0, ty = 0;
+      const tempted = !aggro && this.isLureFood(e.kind as MobKind, p.heldId()) && distH < 10;
+      // villagers and pets always meet the eye of a player standing close by
+      const close = distH < 4 && (e.kind === 'villager' || e.tamed);
+      const watch = !p.dead && !e.ridden && (aggro || tempted || close
+        || (e.watching && distH < 8 && e.state !== 'flee' && e.grazeT <= 0));
+      let tx = e.lookPitch, ty = e.lookYaw, tz = 0;
+      if (hSpeed > 0.5 && !watch) { tx = 0; ty = 0; } // walking: eyes on the path
+      if (e.ridden) { tx = -0.3; ty = 0; }             // under a rider: head low, out of the view
       if (watch) {
         const dy = (p.pos.y + 1.6) - (e.pos.y + e.box.h * 0.9);
         tx = Math.atan2(dy, distH) * 0.7;
-        ty = Math.atan2(-dx, -dz) - e.yaw;
+        ty = Math.atan2(-dx, -dz) - e.visYaw;
         ty = Math.atan2(Math.sin(ty), Math.cos(ty));      // wrap to [-π,π]
-        ty = Math.max(-0.7, Math.min(0.7, ty));            // no head-spinning past the shoulder
+        ty = Math.max(-0.8, Math.min(0.8, ty));            // no head-spinning past the shoulder
+        // a wolf eyeing a bone cocks its head, begging
+        if (e.kind === 'wolf' && tempted) tz = 0.32;
+      }
+      let drop = 0;
+      if (e.grazeT > 0) {
+        // munching: nose down in the turf, jaw working
+        tx = (e.kind === 'horse' ? -1.7 : -1.05) + Math.sin(e.age * 16) * 0.08; ty = 0;
+        drop = e.kind === 'sheep' ? 0.34 : 0;
+      } else if (e.kind === 'chicken' && !watch && hSpeed < 0.3 && e.lookYaw === 0) {
+        // a chicken with nothing to look at pecks at the ground
+        tx = -(Math.max(0, Math.sin(e.age * 7)) ** 3) * 1.1;
       }
       const k = Math.min(1, (watch ? 6 : 3) * dt);
-      e.limbs.head.rotation.x += (tx - e.limbs.head.rotation.x) * k;
-      e.limbs.head.rotation.y += (ty - e.limbs.head.rotation.y) * k;
+      head.rotation.x += (tx - head.rotation.x) * k;
+      head.rotation.y += (ty - head.rotation.y) * k;
+      head.rotation.z += (tz - head.rotation.z) * k;
+      if (head.userData.baseY === undefined) head.userData.baseY = head.position.y;
+      const hy = (head.userData.baseY as number) - drop;
+      head.position.y += (hy - head.position.y) * Math.min(1, 6 * dt);
     }
+
     // sparse ear flicks for wolves/cats — small life-signs while idle
-    if (e.limbs.ears) {
-      const f = Math.sin(e.age * 2.3) * Math.sin(e.age * 0.71 + 1.3);
+    if (limbs.ears) {
+      const f = Math.sin(e.age * 2.3 + e.variant) * Math.sin(e.age * 0.71 + 1.3);
       const tw = Math.max(0, f - 0.82) * 2.4;
-      for (const ear of e.limbs.ears) ear.rotation.x = -tw;
+      // an angry wolf pins its ears back
+      const pin = e.kind === 'wolf' && e.angryT > 0 && e.state === 'chase' ? 0.55 : 0;
+      for (const ear of limbs.ears) ear.rotation.x = pin || -tw;
     }
-    // tail sway: a happy tamed wolf wags fast; others drift gently + with stride
-    if (e.limbs.tail) {
-      let amp = 0.22, rate = 3.5;
-      if (e.kind === 'wolf' && e.tamed) { amp = 0.6; rate = 14; }
-      e.limbs.tail.rotation.y = Math.sin(e.age * rate) * amp + swing * 0.35;
-      // wolves hold the tail high when tamed/happy, low otherwise
+    // tails: a happy tamed wolf wags fast; hanging tails (horse, cat) swish side
+    // to side; everything picks up a little of the stride
+    if (limbs.tail) {
+      const t = limbs.tail;
+      if (limbs.tailAxis === 'z') {
+        const swish = e.kind === 'horse'
+          ? Math.sin(e.age * 1.6) * 0.1 + Math.max(0, Math.sin(e.age * 0.45) - 0.9) * 4 * Math.sin(e.age * 14)
+          : Math.sin(e.age * 2.1) * (sitting ? 0.08 : 0.18);
+        t.rotation.z = swish + swing * 0.2;
+      } else {
+        let amp = 0.22, rate = 3.5;
+        if (e.kind === 'wolf' && e.tamed) { amp = 0.6; rate = 14; }
+        t.rotation.y = Math.sin(e.age * rate) * amp * (sitting ? 0.3 : 1) + swing * 0.35;
+      }
+      // a wolf's tail height shows its mood: tamed ones carry it high, lower
+      // as they get hurt (vanilla's health gauge); wild ones keep it low
       if (e.kind === 'wolf') {
-        const raised = e.tamed ? -0.4 : 0.9;
-        e.limbs.tail.rotation.x += (raised - e.limbs.tail.rotation.x) * Math.min(1, 4 * dt);
+        const hpF = Math.max(0, Math.min(1, e.hp / MOB_STATS.wolf.hp));
+        const raised = sitting ? 1.2 : e.tamed ? 0.9 - hpF * 1.3 : e.angryT > 0 ? -0.5 : 0.9;
+        t.rotation.x += (raised - t.rotation.x) * Math.min(1, 4 * dt);
       }
     }
     // idle breathing: subtle body bob that fades out once moving. Bob *around*
     // the body's rest height — an absolute set slammed bodies whose limb sits at
     // its true height (wolf/cinderling/ashstalker) down onto the feet.
-    if (e.limbs.body) {
-      const b = e.limbs.body;
+    if (limbs.body) {
+      const b = limbs.body;
       if (b.userData.baseY === undefined) b.userData.baseY = b.position.y;
-      b.position.y = (b.userData.baseY as number) + Math.sin(e.age * 2.2) * 0.02 * Math.max(0, 1 - hSpeed);
+      b.position.y = (b.userData.baseY as number) + (sitting ? 0 : Math.sin(e.age * 2.2) * 0.015 * Math.max(0, 1 - hSpeed));
+    }
+    // creeper swell: puffs out (and trembles) as the fuse burns down
+    if (e.kind === 'creeper') {
+      const f = e.state === 'fuse' ? Math.max(0, Math.min(1, 1 - e.fuseT / 1.5)) : 0;
+      const wob = 1 + Math.sin(f * 100) * f * 0.01;
+      const sx = (1 + f * 0.4) * wob, sy = (1 + f * 0.1) / wob;
+      e.mesh.scale.set(sx, sy, sx);
     }
   }
 
@@ -1373,6 +1687,7 @@ export class EntityManager {
       if (e.tamed && m.tamed) { baby.tamed = true; baby.ownerName = 'player'; }
       this.spawnHearts(bx, by + 0.4, bz);
       this.audio.play('pop');
+      this.audio.mobSound(e.kind as string, 0.8);
       return;
     }
   }
@@ -1518,6 +1833,7 @@ export class EntityManager {
   /** Phantom: flies in circles above the player and periodically swoops. */
   private updatePhantom(e: Entity, dt: number): void {
     const p = this.player!;
+    this.tintMob(e);
     e.circling += dt;
     const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
     const dy = (p.pos.y + 2) - e.pos.y;
@@ -1594,8 +1910,11 @@ export class EntityManager {
     // gently pulsing ember tips over a near-dark charcoal hide (kept low so the
     // tips read as distinct glints rather than blooming into one orange mass)
     const pulse = 0.32 + 0.16 * Math.sin(e.age * 5);
+    const hurt = e.hurtFlash > 0;
     for (const m of e.materials) {
-      if (m.userData.ember) m.emissive.setRGB(pulse, pulse * 0.38, 0.02);
+      m.color.setRGB(MOB_EXPOSURE, hurt ? MOB_EXPOSURE * 0.5 : MOB_EXPOSURE, hurt ? MOB_EXPOSURE * 0.5 : MOB_EXPOSURE);
+      if (hurt) m.emissive.setRGB(0.3, 0.02, 0.02);
+      else if (m.userData.ember) m.emissive.setRGB(pulse, pulse * 0.38, 0.02);
       else m.emissive.setRGB(0.04, 0.015, 0.005);
     }
     if (e.limbs) {
@@ -1668,6 +1987,7 @@ export class EntityManager {
       if (e.baby && (e.growT -= 0.05) <= 0) {
         e.baby = false;
         e.mesh.scale.setScalar(1);
+        e.limbs?.head?.scale.setScalar(1);
         e.box = { ...MOB_STATS[e.kind as MobKind].box };
       }
       e.stateTime -= 0.05;
@@ -1675,18 +1995,14 @@ export class EntityManager {
 
       // idle voices, attenuated by distance
       if (d < 24 && Math.random() < (e.state === 'chase' ? 0.008 : 0.0035)) {
-        this.audio.mobSound(e.kind, (1 - d / 24) * 0.9);
+        this.audio.mobSound(e.kind, (1 - d / 24) * 0.9, 'idle', ((e.pos.x - p.pos.x) * Math.cos(p.yaw) - (e.pos.z - p.pos.z) * Math.sin(p.yaw)) / Math.max(1, d) * 0.7);
       }
 
       if (stats.hostile && e.state !== 'fuse' && !this.isPet(e)) {
-        // undead mobs burn off at dawn when the sky can see them
+        // undead catch fire at dawn when the sky can see them (water puts it out)
         if (!isNight && (e.kind === 'zombie' || e.kind === 'skeleton' || e.kind === 'phantom')) {
           const sky = this.world.skyLight(Math.floor(e.pos.x), Math.floor(e.pos.y + 1), Math.floor(e.pos.z));
-          if (sky >= 0.95) {
-            this.spawnBlockParticles(Math.floor(e.pos.x), Math.floor(e.pos.y + 1), Math.floor(e.pos.z), B.LOG, 6);
-            e.dead = true;
-            continue;
-          }
+          if (sky >= 0.95 && !inWater(this.world, e.pos, e.box)) e.burnT = Math.max(e.burnT, 3);
         }
         const dark = this.world.skyLight(Math.floor(e.pos.x), Math.floor(e.pos.y + 1), Math.floor(e.pos.z)) < 0.7;
         const aggressive = e.kind === 'spider' ? (isNight || dark || e.angryT > 0) : true;
@@ -1709,6 +2025,11 @@ export class EntityManager {
         } else if (e.state === 'chase') {
           e.state = 'wander';
           e.stateTime = 3;
+        }
+        // creepers are terrified of cats (vanilla): bolt away from one within 6
+        if (e.kind === 'creeper') {
+          const cat = this.nearestOf(e, 'cat', 6);
+          if (cat) this.fleeFrom(e, cat);
         }
 
         // skeleton archery (at its pet quarry if it has one, else the player)
@@ -1736,7 +2057,60 @@ export class EntityManager {
         }
       }
 
-      if (e.state !== 'chase' && e.state !== 'fuse' && e.stateTime <= 0) {
+      // burning: flames + 2 damage a second until it dies, finds water or shade
+      if (e.burnT > 0) {
+        e.burnT -= 0.05;
+        if (inWater(this.world, e.pos, e.box)) e.burnT = 0;
+        if (Math.random() < 0.5) {
+          this.spawnTorchFlame(e.pos.x + (Math.random() - 0.5) * e.box.w, e.pos.y + Math.random() * e.box.h,
+            e.pos.z + (Math.random() - 0.5) * e.box.w);
+        }
+        if (++e.burnTick >= 20) {
+          e.burnTick = 0;
+          e.hp -= 2;
+          e.hurtFlash = 0.3;
+          this.audio.play('hit');
+          if (e.hp <= 0) { this.killMob(e); continue; }
+        }
+      }
+
+      // an angered wild wolf hunts the player until it calms down
+      if (e.kind === 'wolf' && !e.tamed) {
+        if (e.angryT > 0 && d < 20 && !p.dead && p.mode === 'survival') e.state = 'chase';
+        else if (e.state === 'chase') { e.state = 'wander'; e.stateTime = 2; e.angryT = 0; }
+      }
+
+      // villagers scatter from zombies
+      if (e.kind === 'villager') {
+        const z = this.nearestOf(e, 'zombie', 8);
+        if (z) this.fleeFrom(e, z);
+      }
+
+      // grazing: sheep put their head down in the turf for two seconds, then the
+      // grass is eaten (grass block -> dirt, or a tuft cleared) and a shorn fleece
+      // regrows; idle horses crop the grass too, just for show
+      if ((e.kind === 'sheep' || e.kind === 'horse') && !e.tamed && !e.ridden) {
+        if (e.grazeT > 0) {
+          const before = e.grazeT;
+          e.grazeT = Math.max(0, e.grazeT - 0.05);
+          if (e.kind === 'sheep' && before > 0.7 && e.grazeT <= 0.7) this.eatGrass(e);
+        } else if (e.state === 'idle' && e.onGround && this.grassUnder(e) && Math.random()
+          < (e.kind === 'horse' ? 1 / 300 : e.sheared || e.baby ? 1 / 120 : 1 / 500)) {
+          e.grazeT = e.kind === 'horse' ? 3 : 2;
+          e.stateTime = Math.max(e.stateTime, e.grazeT);
+        }
+      }
+      // a baby trots after the nearest grown-up of its kind
+      if (e.baby && !e.tamed && e.state !== 'flee' && e.stateTime <= 0) {
+        const parent = this.nearestAdult(e);
+        if (parent && Math.hypot(parent.pos.x - e.pos.x, parent.pos.z - e.pos.z) > 3) {
+          e.state = 'wander';
+          e.yaw = Math.atan2(-(parent.pos.x - e.pos.x), -(parent.pos.z - e.pos.z));
+          e.stateTime = 1 + Math.random();
+        }
+      }
+
+      if (e.state !== 'chase' && e.state !== 'fuse' && e.stateTime <= 0 && e.grazeT <= 0) {
         if (e.state === 'flee') e.state = 'idle';
         if (Math.random() < 0.55) {
           e.state = 'idle';
@@ -1745,6 +2119,13 @@ export class EntityManager {
           e.state = 'wander';
           e.yaw = Math.random() * Math.PI * 2;
           e.stateTime = 2 + Math.random() * 4;
+          // herd animals drift back toward their own kind instead of scattering
+          if (HERD_KINDS.has(e.kind as MobKind) && !e.tamed) {
+            const c = this.herdCentre(e);
+            if (c && Math.random() < 0.7) {
+              e.yaw = Math.atan2(-(c.x - e.pos.x), -(c.z - e.pos.z)) + (Math.random() - 0.5) * 1.2;
+            }
+          }
         }
       }
 
@@ -1756,6 +2137,70 @@ export class EntityManager {
       this.spawnTick = 0;
       this.trySpawns(isNight);
     }
+  }
+
+  /** Centre of this animal's herd (same kind within 16 blocks), when the mob has
+   *  strayed more than 5 blocks from it; null when it is already among them. */
+  private herdCentre(e: Entity): { x: number; z: number } | null {
+    let sx = 0, sz = 0, n = 0;
+    for (const o of this.entities) {
+      if (o === e || o.kind !== e.kind || o.dead) continue;
+      const dx = o.pos.x - e.pos.x, dz = o.pos.z - e.pos.z;
+      if (dx * dx + dz * dz > 256) continue;
+      sx += o.pos.x; sz += o.pos.z; n++;
+    }
+    if (!n) return null;
+    const cx = sx / n, cz = sz / n;
+    return Math.hypot(cx - e.pos.x, cz - e.pos.z) > 5 ? { x: cx, z: cz } : null;
+  }
+
+  /** Nearest wild mob of `kind` within `r` blocks of `e` (pets don't count). */
+  private nearestOf(e: Entity, kind: MobKind, r: number): Entity | null {
+    let best: Entity | null = null, bestD = r * r;
+    for (const o of this.entities) {
+      if (o === e || o.kind !== kind || o.dead || (o.tamed && kind !== 'cat')) continue;
+      const d = (o.pos.x - e.pos.x) ** 2 + (o.pos.z - e.pos.z) ** 2;
+      if (d < bestD) { bestD = d; best = o; }
+    }
+    return best;
+  }
+
+  /** Run directly away from `threat` for a couple of seconds. */
+  private fleeFrom(e: Entity, threat: Entity): void {
+    e.state = 'flee';
+    e.stateTime = 1.5;
+    e.grazeT = 0;
+    e.yaw = Math.atan2(-(e.pos.x - threat.pos.x), -(e.pos.z - threat.pos.z));
+  }
+
+  private nearestAdult(e: Entity): Entity | null {
+    let best: Entity | null = null, bestD = 16 * 16;
+    for (const o of this.entities) {
+      if (o === e || o.kind !== e.kind || o.baby || o.dead) continue;
+      const d = (o.pos.x - e.pos.x) ** 2 + (o.pos.z - e.pos.z) ** 2;
+      if (d < bestD) { bestD = d; best = o; }
+    }
+    return best;
+  }
+
+  /** Is there grass (a tuft at the feet, or a grass block below) for a sheep to eat? */
+  private grassUnder(e: Entity): boolean {
+    const x = Math.floor(e.pos.x), y = Math.floor(e.pos.y + 0.05), z = Math.floor(e.pos.z);
+    return this.world.getBlock(x, y, z) === B.TALL_GRASS || this.world.getBlock(x, y - 1, z) === B.GRASS;
+  }
+
+  private eatGrass(e: Entity): void {
+    const x = Math.floor(e.pos.x), y = Math.floor(e.pos.y + 0.05), z = Math.floor(e.pos.z);
+    if (this.world.getBlock(x, y, z) === B.TALL_GRASS) {
+      this.world.setBlock(x, y, z, B.AIR);
+      this.spawnBlockParticles(x, y, z, B.TALL_GRASS, 6);
+    } else if (this.world.getBlock(x, y - 1, z) === B.GRASS) {
+      this.world.setBlock(x, y - 1, z, B.DIRT);
+      this.spawnBlockParticles(x, y - 1, z, B.GRASS, 6);
+    } else return;
+    this.audio.play('eat');
+    e.sheared = false;
+    if (e.baby) e.growT = Math.max(0, e.growT - 10); // lambs grow up faster on grass
   }
 
   private trySpawns(isNight: boolean): void {
@@ -1911,8 +2356,20 @@ export class EntityManager {
     e.vel.x += (kbX / len) * 7;
     e.vel.z += (kbZ / len) * 7;
     e.vel.y = Math.max(e.vel.y, 5);
+    e.kbX = kbX / len; e.kbZ = kbZ / len;
+    e.grazeT = 0;
     this.audio.play('hit');
-    if (!MOB_STATS[e.kind as MobKind].hostile) {
+    this.audio.mobSound(e.kind as string, 0.85, e.hp <= 0 ? 'death' : 'hurt');
+    if (e.kind === 'wolf' && !e.tamed && attacker === this.player) {
+      // strike a wild wolf and the whole pack turns on you (vanilla)
+      for (const o of this.entities) {
+        if (o.kind !== 'wolf' || o.tamed || o.dead) continue;
+        if (o !== e && Math.hypot(o.pos.x - e.pos.x, o.pos.z - e.pos.z) > 16) continue;
+        o.angryT = 25;
+        o.state = 'chase';
+        o.sitting = false;
+      }
+    } else if (!MOB_STATS[e.kind as MobKind].hostile) {
       e.state = 'flee';
       e.stateTime = 5;
       e.yaw = Math.atan2(-kbX, -kbZ); // run along the knockback direction
@@ -1932,17 +2389,22 @@ export class EntityManager {
       if (!e.sitting) e.target = wild;
       wild.foe = e;
     }
-    if (e.hp <= 0) {
-      const wasPet = this.isPet(e);
-      e.dead = true;
-      this.audio.play('pop');
-      this.spawnPoof(e.pos.x, e.pos.y, e.pos.z);
-      this.dropLoot(e);
-      this.clearFoe(e);
-      if (wasPet) this.onToast?.(`Your ${mobLabel(e.kind as string)} was slain`);
-      this.onKill?.(e.kind as string);
-    }
+    if (e.hp <= 0) this.killMob(e);
     if (attacker === this.player) this.onPlayerHit?.(e.pos, dmg, crit, e.dead);
+  }
+
+  /** A mob's health hit zero: loot, forget it as anyone's quarry, and hand its
+   *  mesh to the death topple (the poof comes when that finishes). */
+  private killMob(e: Entity): void {
+    const wasPet = this.isPet(e);
+    e.dead = true;
+    this.dropLoot(e);
+    this.clearFoe(e);
+    e.corpse = true;
+    e.mesh.traverse((o) => { if (o.userData.shadow) o.visible = false; });
+    this.corpses.push({ mesh: e.mesh, mats: e.materials, t: 0, w: e.box.w, x: e.pos.x, y: e.pos.y, z: e.pos.z });
+    if (wasPet) this.onToast?.(`Your ${mobLabel(e.kind as string)} was slain`);
+    this.onKill?.(e.kind as string);
   }
 
   /** The player was hurt by `source` -> all idle pets retaliate against it. */
@@ -2026,6 +2488,15 @@ export class EntityManager {
       if (e.sitting) e.target = null;
       return 'sit';
     }
+    // shears (whenever the item registry has them) clip a sheep's fleece for
+    // 1-3 wool; it grows back after the sheep grazes
+    const shears = (I as unknown as Record<string, number | undefined>).SHEARS;
+    if (e.kind === 'sheep' && shears !== undefined && heldId === shears && !e.sheared && !e.baby) {
+      e.sheared = true;
+      this.spawnDrop(e.pos.x, e.pos.y + 1, e.pos.z, B.WOOL, 1 + Math.floor(Math.random() * 3));
+      this.audio.play('snap');
+      return 'sit'; // same feedback as sit/stay: a click and a short use cooldown
+    }
     // feeding an adult its breeding food puts it into love mode
     if (this.canBreed(e, heldId)) {
       e.loveT = 22;
@@ -2088,12 +2559,21 @@ export class EntityManager {
   /** Put a saddle on a tamed horse (visual + handled flag for a speed boost). */
   private saddleHorse(e: Entity): void {
     e.saddled = true;
-    const leather = new THREE.MeshLambertMaterial({ color: 0x5a3d22 });
-    const seat = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.14, 0.6), leather);
-    seat.position.set(0, 1.52, 0.15);
-    const knob = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.12, 0.12), leather);
-    knob.position.set(0, 1.62, -0.12);
-    e.mesh.add(seat, knob);
+    // rides on the barrel group so it rears with the horse
+    const host = e.limbs?.body ?? e.mesh;
+    const leather = new THREE.MeshLambertMaterial({ color: 0x6a4526 });
+    const dark = new THREE.MeshLambertMaterial({ color: 0x3a2614 });
+    const metal = new THREE.MeshLambertMaterial({ color: 0xb8b8c0 });
+    const box = (w: number, h: number, d: number, m: THREE.Material, x: number, y: number, z: number) => {
+      const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+      b.position.set(x, y, z);
+      host.add(b);
+    };
+    box(0.66, 0.08, 0.62, leather, 0, 1.4, 0.1);    // seat pad
+    box(0.3, 0.12, 0.12, dark, 0, 1.48, -0.18);     // pommel
+    box(0.3, 0.1, 0.08, dark, 0, 1.47, 0.38);       // cantle
+    box(0.68, 0.62, 0.1, dark, 0, 1.1, 0.02);       // girth strap
+    for (const sx of [-1, 1]) box(0.04, 0.1, 0.1, metal, sx * 0.36, 0.86, 0.02); // stirrups
     this.spawnHearts(e.pos.x, e.pos.y + 1.6, e.pos.z);
   }
 
@@ -2101,11 +2581,15 @@ export class EntityManager {
   private armorHorse(e: Entity, tier: number): void {
     e.armorTier = tier;
     const iron = new THREE.MeshLambertMaterial({ color: 0xcfcfd6 });
-    const chest = new THREE.Mesh(new THREE.BoxGeometry(0.78, 0.5, 0.7), iron);
-    chest.position.set(0, 1.15, 0.18);
-    const neck = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.78, 0.42), iron);
-    neck.position.set(0, 1.46, -0.5); neck.rotation.x = 0.5;
-    e.mesh.add(chest, neck);
+    const host = e.limbs?.body ?? e.mesh;
+    const chest = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.68, 0.72), iron);
+    chest.position.set(0, 1.06, -0.26);
+    host.add(chest);
+    // neck plate rides the neck group so it follows head turns
+    const neckGroup = e.limbs?.head?.children[0] ?? host;
+    const plate = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.78, 0.48), iron);
+    plate.position.set(0, 0.31, -0.06);
+    neckGroup.add(plate);
     this.spawnHearts(e.pos.x, e.pos.y + 1.6, e.pos.z);
   }
 
@@ -2115,6 +2599,8 @@ export class EntityManager {
     e.baby = true;
     e.growT = 45;
     e.mesh.scale.setScalar(0.55);
+    // babies are mostly head: a big noggin on a small body reads as "young"
+    if (e.limbs?.head) e.limbs.head.scale.setScalar(kind === 'horse' ? 1.25 : 1.6);
     e.box = { w: e.box.w * 0.6, h: e.box.h * 0.6 };
     return e;
   }
@@ -2146,8 +2632,7 @@ export class EntityManager {
       if (e.onGround && Math.random() < dt * 6) e.vel.y = JUMP_V * 0.7;
       this.applyGroundMove(e, dt, 0, 0, 0);
       if (e.limbs?.body) e.limbs.body.rotation.x = -0.4 + Math.sin(e.age * 20) * 0.18;
-      e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
-      e.mesh.rotation.y = e.yaw;
+      this.placeMob(e, dt);
       if (e.bucking <= 0) {
         if (e.limbs?.body) e.limbs.body.rotation.x = 0;
         if (Math.random() < 0.4) {
@@ -2179,8 +2664,8 @@ export class EntityManager {
       e.restT -= dt;
       if (e.restT <= 0) { e.restT = 0.3; this.audio.play('hoof'); }
     }
-    e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
-    e.mesh.rotation.y = e.yaw;
+    e.visYaw = e.yaw; // the rider's view drives the horse: no easing lag
+    this.placeMob(e, dt);
     return false;
   }
 
@@ -2333,740 +2818,14 @@ export class EntityManager {
       disposeGroup(e.mesh);
     }
     this.entities = [];
+    for (const c of this.corpses) {
+      this.scene.remove(c.mesh);
+      disposeGroup(c.mesh);
+    }
+    this.corpses = [];
   }
 
   // --- mesh building --------------------------------------------------------------
-
-  private skin(key: string, base: string, speckle: string, face?: (ctx: CanvasRenderingContext2D) => void): THREE.Texture {
-    const cached = this.skinCache.get(key);
-    if (cached) return cached;
-    const c = document.createElement('canvas');
-    c.width = 8; c.height = 8;
-    const ctx = c.getContext('2d')!;
-    const [br, bg, bb] = hexRgb(base);
-    const [sr, sg, sb] = hexRgb(speckle);
-    let s = key.length * 1337 + 7;
-    const rng = () => { s = (s * 16807) % 2147483647; return s / 2147483647; };
-    // Clean Minecraft-style skin: a flat base colour with gentle top-lit
-    // vertical shading and only sparse, low-contrast speckle for grain. This
-    // reads as a solid recognisable creature instead of TV-static noise.
-    for (let y = 0; y < 8; y++) {
-      const shade = 1 + (3.5 - y) / 3.5 * 0.13; // lighter up top, darker low
-      for (let x = 0; x < 8; x++) {
-        const speck = rng() < 0.12;
-        const f = shade * (1 + (rng() - 0.5) * 0.07);
-        const r = speck ? sr : br, gg = speck ? sg : bg, b = speck ? sb : bb;
-        ctx.fillStyle = `rgb(${clamp255(r * f)},${clamp255(gg * f)},${clamp255(b * f)})`;
-        ctx.fillRect(x, y, 1, 1);
-      }
-    }
-    if (face) face(ctx);
-    const tex = new THREE.CanvasTexture(c);
-    tex.magFilter = THREE.NearestFilter;
-    tex.minFilter = THREE.NearestFilter;
-    this.skinCache.set(key, tex);
-    return tex;
-  }
-
-  private mat(tex: THREE.Texture, mats: THREE.MeshLambertMaterial[]): THREE.MeshLambertMaterial {
-    const m = new THREE.MeshLambertMaterial({ map: tex });
-    mats.push(m);
-    return m;
-  }
-
-  private boxMesh(w: number, h: number, d: number, mat: THREE.Material | THREE.Material[]): THREE.Mesh {
-    return new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-  }
-
-  /** Leg pivot at the hip so sine swings look right. */
-  private leg(w: number, len: number, mat: THREE.Material, x: number, hipY: number, z: number): THREE.Group {
-    const g = new THREE.Group();
-    g.position.set(x, hipY, z);
-    const m = this.boxMesh(w, len, w, mat);
-    m.position.y = -len / 2;
-    g.add(m);
-    return g;
-  }
-
-  private buildMobMesh(kind: MobKind, variant = 0): {
-    mesh: THREE.Group; limbs: LimbSet; mats: THREE.MeshLambertMaterial[];
-  } {
-    const g = new THREE.Group();
-    const mats: THREE.MeshLambertMaterial[] = [];
-
-    if (kind === 'pig') {
-      const skin = this.skin('pig', '#eda0a7', '#d98a92');
-      const faceTex = this.skin('pig_face', '#eda0a7', '#d98a92', (ctx) => {
-        ctx.fillStyle = '#3b3b4a'; ctx.fillRect(1, 2, 1, 1); ctx.fillRect(6, 2, 1, 1);
-        ctx.fillStyle = '#c76b75'; ctx.fillRect(3, 4, 2, 2);
-        ctx.fillStyle = '#8f4a52'; ctx.fillRect(3, 5, 1, 1); ctx.fillRect(4, 5, 1, 1);
-      });
-      const bodyM = this.mat(skin, mats);
-      const faceM = this.mat(faceTex, mats);
-      const body = this.boxMesh(0.62, 0.5, 0.95, bodyM);
-      body.position.set(0, 0.55, 0.05);
-      const head = new THREE.Group();
-      head.position.set(0, 0.62, -0.5);
-      head.add(this.boxMesh(0.5, 0.5, 0.42, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
-      // protruding snout reads instantly as a pig
-      const pigSnoutM = this.mat(this.skin('pig_snout', '#c76b75', '#b85b65'), mats);
-      const pigSnout = this.boxMesh(0.26, 0.18, 0.1, pigSnoutM);
-      pigSnout.position.set(0, -0.05, -0.26);
-      head.add(pigSnout);
-      // ears
-      const earL = this.boxMesh(0.12, 0.08, 0.04, bodyM);
-      earL.position.set(-0.28, 0.1, 0.08);
-      const earR = earL.clone();
-      earR.position.x = 0.28;
-      head.add(earL, earR);
-      // tail
-      const tail = this.boxMesh(0.06, 0.06, 0.16, bodyM);
-      tail.position.set(0, 0.62, 0.52);
-      tail.rotation.x = -0.3;
-      const legs = [
-        this.leg(0.18, 0.32, bodyM, -0.2, 0.32, -0.32),
-        this.leg(0.18, 0.32, bodyM, 0.2, 0.32, -0.32),
-        this.leg(0.18, 0.32, bodyM, 0.2, 0.32, 0.38),
-        this.leg(0.18, 0.32, bodyM, -0.2, 0.32, 0.38),
-      ];
-      g.add(body, head, tail, ...legs);
-      return { mesh: g, limbs: { legs, head }, mats };
-    }
-
-    if (kind === 'chicken') {
-      const skin = this.skin('chicken', '#f4f0e8', '#ddd6c8');
-      const faceTex = this.skin('chicken_face', '#f4f0e8', '#ddd6c8', (ctx) => {
-        ctx.fillStyle = '#2a2a36'; ctx.fillRect(2, 2, 1, 1); ctx.fillRect(5, 2, 1, 1);
-        ctx.fillStyle = '#e8a33d'; ctx.fillRect(3, 4, 2, 2);
-      });
-      const bodyM = this.mat(skin, mats);
-      const faceM = this.mat(faceTex, mats);
-      const legM = this.mat(this.skin('chicken_leg', '#e8a33d', '#cf8f30'), mats);
-      const body = this.boxMesh(0.36, 0.36, 0.5, bodyM);
-      body.position.set(0, 0.42, 0);
-      const head = new THREE.Group();
-      head.position.set(0, 0.72, -0.22);
-      head.add(this.boxMesh(0.24, 0.32, 0.22, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
-      // beak (orange), comb + wattle (red) — classic chicken silhouette
-      const beakM = this.mat(this.skin('chk_beak', '#e8a33d', '#cf8f30'), mats);
-      const combM = this.mat(this.skin('chk_comb', '#c43030', '#a82424'), mats);
-      const beak = this.boxMesh(0.1, 0.08, 0.14, beakM); beak.position.set(0, -0.03, -0.16);
-      const comb = this.boxMesh(0.05, 0.1, 0.2, combM); comb.position.set(0, 0.2, 0.02);
-      const wattle = this.boxMesh(0.05, 0.09, 0.05, combM); wattle.position.set(0, -0.13, -0.11);
-      head.add(beak, comb, wattle);
-      const legs = [
-        this.leg(0.07, 0.26, legM, -0.09, 0.26, 0.02),
-        this.leg(0.07, 0.26, legM, 0.09, 0.26, 0.02),
-      ];
-      const wingL = this.boxMesh(0.06, 0.22, 0.34, bodyM);
-      wingL.position.set(-0.21, 0.48, 0);
-      const wingR = wingL.clone();
-      wingR.position.x = 0.21;
-      // upright tail feathers
-      const tail = this.boxMesh(0.18, 0.24, 0.12, bodyM);
-      tail.position.set(0, 0.54, 0.28); tail.rotation.x = 0.6;
-      g.add(body, head, wingL, wingR, tail, ...legs);
-      return { mesh: g, limbs: { legs, head }, mats };
-    }
-
-    if (kind === 'sheep') {
-      const wool = this.skin('sheep_wool', '#f2efe8', '#e3ded2');
-      const faceTex = this.skin('sheep_face', '#cfb89c', '#bfa88c', (ctx) => {
-        ctx.fillStyle = '#2a2a36'; ctx.fillRect(1, 3, 1, 1); ctx.fillRect(6, 3, 1, 1);
-        ctx.fillStyle = '#a8907a'; ctx.fillRect(3, 5, 2, 2);
-      });
-      const skinM = this.mat(this.skin('sheep_skin', '#cfb89c', '#bfa88c'), mats);
-      const woolM = this.mat(wool, mats);
-      const faceM = this.mat(faceTex, mats);
-      const bodySkin = this.boxMesh(0.62, 0.52, 0.92, skinM);
-      bodySkin.position.set(0, 0.78, 0.05);
-      const bodyWool = this.boxMesh(0.72, 0.62, 1.02, woolM);
-      bodyWool.position.set(0, 0.78, 0.05);
-      const head = new THREE.Group();
-      head.position.set(0, 0.95, -0.55);
-      head.add(this.boxMesh(0.4, 0.4, 0.36, [skinM, skinM, woolM, skinM, skinM, faceM]));
-      const headWool = this.boxMesh(0.44, 0.15, 0.4, woolM);
-      headWool.position.set(0, 0.16, 0.02);
-      head.add(headWool);
-      const legs = [
-        this.leg(0.16, 0.5, skinM, -0.2, 0.5, -0.32),
-        this.leg(0.16, 0.5, skinM, 0.2, 0.5, -0.32),
-        this.leg(0.16, 0.5, skinM, 0.2, 0.5, 0.38),
-        this.leg(0.16, 0.5, skinM, -0.2, 0.5, 0.38),
-      ];
-      g.add(bodySkin, bodyWool, head, ...legs);
-      return { mesh: g, limbs: { legs, head }, mats };
-    }
-
-    if (kind === 'cow') {
-      const hide = this.skin('cow', '#5d4231', '#ece6dc');
-      const faceTex = this.skin('cow_face', '#5d4231', '#4d3628', (ctx) => {
-        ctx.fillStyle = '#2a2a36'; ctx.fillRect(1, 3, 1, 1); ctx.fillRect(6, 3, 1, 1);
-        ctx.fillStyle = '#d8c8b8'; ctx.fillRect(2, 5, 4, 3);
-      });
-      const bodyM = this.mat(hide, mats);
-      const faceM = this.mat(faceTex, mats);
-      const hornM = this.mat(this.skin('cow_horn', '#e8e0d0', '#d4ccb8'), mats);
-      const body = this.boxMesh(0.7, 0.65, 1.1, bodyM);
-      body.position.set(0, 0.92, 0.05);
-      // white Holstein patches wrap the torso so it reads unmistakably as a cow
-      const patchM = this.mat(this.skin('cow_patch', '#ece6dc', '#dcd4c6'), mats);
-      const patchA = this.boxMesh(0.72, 0.36, 0.46, patchM); patchA.position.set(0, 1.04, -0.15);
-      const patchB = this.boxMesh(0.72, 0.3, 0.34, patchM); patchB.position.set(0, 0.74, 0.4);
-      g.add(patchA, patchB);
-      const head = new THREE.Group();
-      head.position.set(0, 1.1, -0.62);
-      head.add(this.boxMesh(0.44, 0.44, 0.4, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
-      const hornL = this.boxMesh(0.08, 0.08, 0.12, hornM);
-      hornL.position.set(-0.26, 0.18, -0.05);
-      const hornR = hornL.clone();
-      hornR.position.x = 0.26;
-      // pale muzzle on the face
-      const muzzleM = this.mat(this.skin('cow_muzzle', '#d8c8b8', '#c8b6a4'), mats);
-      const muzzle = this.boxMesh(0.3, 0.2, 0.1, muzzleM);
-      muzzle.position.set(0, -0.08, -0.22);
-      head.add(hornL, hornR, muzzle);
-      // small udder under the belly
-      const udderM = this.mat(this.skin('cow_udder', '#e8a0a8', '#d89098'), mats);
-      const udder = this.boxMesh(0.26, 0.14, 0.3, udderM);
-      udder.position.set(0, 0.5, 0.34);
-      g.add(udder);
-      const legs = [
-        this.leg(0.18, 0.6, bodyM, -0.22, 0.6, -0.32),
-        this.leg(0.18, 0.6, bodyM, 0.22, 0.6, -0.32),
-        this.leg(0.18, 0.6, bodyM, 0.22, 0.6, 0.42),
-        this.leg(0.18, 0.6, bodyM, -0.22, 0.6, 0.42),
-      ];
-      g.add(body, head, ...legs);
-      return { mesh: g, limbs: { legs, head }, mats };
-    }
-
-    if (kind === 'spider') {
-      const skin = this.skin('spider', '#2a2125', '#3a2e33');
-      const faceTex = this.skin('spider_face', '#2a2125', '#3a2e33', (ctx) => {
-        ctx.fillStyle = '#c43030';
-        ctx.fillRect(1, 2, 1, 1); ctx.fillRect(3, 2, 1, 1); ctx.fillRect(4, 2, 1, 1); ctx.fillRect(6, 2, 1, 1);
-        ctx.fillRect(2, 4, 1, 1); ctx.fillRect(5, 4, 1, 1);
-      });
-      const bodyM = this.mat(skin, mats);
-      const faceM = this.mat(faceTex, mats);
-      const abdomen = this.boxMesh(0.7, 0.45, 0.8, bodyM);
-      abdomen.position.set(0, 0.42, 0.35);
-      const thorax = this.boxMesh(0.42, 0.4, 0.42, bodyM);
-      thorax.position.set(0, 0.4, -0.15);
-      const head = new THREE.Group();
-      head.position.set(0, 0.42, -0.42);
-      head.add(this.boxMesh(0.36, 0.36, 0.3, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
-      const legs: THREE.Group[] = [];
-      for (let i = 0; i < 4; i++) {
-        for (const side of [-1, 1]) {
-          const lg = new THREE.Group();
-          lg.position.set(side * 0.22, 0.45, -0.3 + i * 0.22);
-          const lm = this.boxMesh(0.55, 0.07, 0.07, bodyM);
-          lm.position.x = side * 0.28;
-          lg.add(lm);
-          lg.rotation.z = side * -0.5;
-          legs.push(lg);
-        }
-      }
-      g.add(abdomen, thorax, head, ...legs);
-      return { mesh: g, limbs: { legs, head }, mats };
-    }
-
-    if (kind === 'creeper') {
-      const skin = this.skin('creeper', '#58a84a', '#3f8a36');
-      const faceTex = this.skin('creeper_face', '#58a84a', '#3f8a36', (ctx) => {
-        ctx.fillStyle = '#0a0a0a';
-        ctx.fillRect(1, 1, 2, 2); ctx.fillRect(5, 1, 2, 2);   // eyes
-        ctx.fillRect(3, 3, 2, 3);                              // mouth
-        ctx.fillRect(2, 4, 1, 3); ctx.fillRect(5, 4, 1, 3);   // mouth flares
-      });
-      const bodyM = this.mat(skin, mats);
-      const faceM = this.mat(faceTex, mats);
-      const body = this.boxMesh(0.42, 0.85, 0.28, bodyM);
-      body.position.set(0, 0.78, 0);
-      const head = new THREE.Group();
-      head.position.set(0, 1.2, 0);
-      const hb = this.boxMesh(0.46, 0.46, 0.46, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]);
-      hb.position.y = 0.23;
-      head.add(hb);
-      const legs = [
-        this.leg(0.18, 0.34, bodyM, -0.12, 0.34, -0.2),
-        this.leg(0.18, 0.34, bodyM, 0.12, 0.34, -0.2),
-        this.leg(0.18, 0.34, bodyM, 0.12, 0.34, 0.2),
-        this.leg(0.18, 0.34, bodyM, -0.12, 0.34, 0.2),
-      ];
-      for (const leg of legs) {
-        const toes = this.boxMesh(0.2, 0.06, 0.08, bodyM);
-        toes.position.set(0, -0.34, -0.09);
-        leg.add(toes);
-      }
-      g.add(body, head, ...legs);
-      return { mesh: g, limbs: { legs, head }, mats };
-    }
-
-    if (kind === 'skeleton') {
-      const bone = this.skin('skeleton', '#d8d8d0', '#bfbfb5');
-      const faceTex = this.skin('skeleton_face', '#d8d8d0', '#bfbfb5', (ctx) => {
-        ctx.fillStyle = '#1a1a1a'; ctx.fillRect(1, 3, 2, 1); ctx.fillRect(5, 3, 2, 1);
-        ctx.fillStyle = '#4a4a44'; ctx.fillRect(3, 5, 2, 2);
-      });
-      const boneM = this.mat(bone, mats);
-      const faceM = this.mat(faceTex, mats);
-      // ribcage with real depth (the old wafer torso vanished side-on), plus a
-      // shoulder bar + pelvis so the frame reads as a skeleton, not a stick
-      const torso = this.boxMesh(0.34, 0.66, 0.18, boneM);
-      torso.position.set(0, 1.15, 0);
-      const shoulders = this.boxMesh(0.46, 0.12, 0.2, boneM);
-      shoulders.position.set(0, 1.46, 0);
-      const pelvis = this.boxMesh(0.32, 0.14, 0.2, boneM);
-      pelvis.position.set(0, 0.84, 0);
-      // vertebra of neck lifting the skull clear of the shoulders
-      const neck = this.boxMesh(0.13, 0.16, 0.13, boneM);
-      neck.position.set(0, 1.5, 0);
-      const head = new THREE.Group();
-      head.position.set(0, 1.56, 0);     // pivot at the neck top
-      const hb = this.boxMesh(0.46, 0.46, 0.46, [boneM, boneM, boneM, boneM, boneM, faceM]);
-      hb.position.y = 0.23;
-      head.add(hb);
-      // thicker, separated leg-bones so they no longer fuse into one pole
-      const legs = [
-        this.leg(0.1, 0.8, boneM, -0.13, 0.82, 0),
-        this.leg(0.1, 0.8, boneM, 0.13, 0.82, 0),
-      ];
-      const arms: THREE.Group[] = [];
-      for (const side of [-1, 1]) {
-        const a = new THREE.Group();
-        a.position.set(side * 0.28, 1.44, 0);
-        const am = this.boxMesh(0.09, 0.7, 0.09, boneM);
-        am.position.y = -0.35;
-        a.add(am);
-        a.rotation.x = -Math.PI / 2;
-        arms.push(a);
-      }
-      // simple held bow
-      const bowM = this.mat(this.skin('skel_bow', '#8a6232', '#5d4222'), mats);
-      const bow = this.boxMesh(0.06, 0.5, 0.06, bowM);
-      bow.position.set(-0.28, 1.44, -0.6);
-      g.add(torso, shoulders, pelvis, neck, head, ...legs, ...arms, bow);
-      return { mesh: g, limbs: { legs, arms, head }, mats };
-    }
-
-    if (kind === 'zombie') {
-      const skin = this.skin('zombie', '#4f7d4a', '#3f6a3c');
-      const shirt = this.skin('zombie_shirt', '#3f6e8f', '#34597a');
-      const pants = this.skin('zombie_pants', '#3a4d8f', '#2e3c70');
-      const faceTex = this.skin('zombie_face', '#4f7d4a', '#3f6a3c', (ctx) => {
-        ctx.fillStyle = '#1a1a1a'; ctx.fillRect(1, 3, 2, 1); ctx.fillRect(5, 3, 2, 1);
-        ctx.fillStyle = '#2a3a28'; ctx.fillRect(3, 5, 2, 2);
-      });
-      const skinM = this.mat(skin, mats);
-      const faceM = this.mat(faceTex, mats);
-      const shirtM = this.mat(shirt, mats);
-      const pantsM = this.mat(pants, mats);
-      const torso = this.boxMesh(0.5, 0.72, 0.26, shirtM);
-      torso.position.set(0, 1.12, 0);
-      // a short skin neck bridges the shirt collar and the head
-      const neck = this.boxMesh(0.24, 0.14, 0.24, skinM);
-      neck.position.set(0, 1.5, 0);
-      const head = new THREE.Group();
-      head.position.set(0, 1.54, 0);     // pivot at the neck top
-      const headBox = this.boxMesh(0.46, 0.46, 0.46, [skinM, skinM, skinM, skinM, skinM, faceM]);
-      headBox.position.y = 0.23;
-      head.add(headBox);
-      // separated legs (the old pair touched and read as a single plinth)
-      const legs = [
-        this.leg(0.21, 0.76, pantsM, -0.15, 0.76, 0),
-        this.leg(0.21, 0.76, pantsM, 0.15, 0.76, 0),
-      ];
-      // sleeved upper arm + bare green forearm so the outstretched arms read
-      const arms: THREE.Group[] = [];
-      for (const side of [-1, 1]) {
-        const a = new THREE.Group();
-        a.position.set(side * 0.36, 1.42, 0);
-        const sleeve = this.boxMesh(0.2, 0.34, 0.2, shirtM);
-        sleeve.position.y = -0.17;
-        const fore = this.boxMesh(0.19, 0.38, 0.19, skinM);
-        fore.position.y = -0.53;
-        a.add(sleeve, fore);
-        a.rotation.x = -Math.PI / 2;
-        arms.push(a);
-      }
-      g.add(torso, neck, head, ...legs, ...arms);
-      return { mesh: g, limbs: { legs, arms, head }, mats };
-    }
-
-  if (kind === 'wolf') {
-    const fur = this.skin('wolf', '#9a9a9a', '#818181');
-    const faceTex = this.skin('wolf_face', '#9a9a9a', '#818181', (ctx) => {
-      // dark brow over angled amber eyes + a black nose-bridge line — alert canine look
-      ctx.fillStyle = '#222'; ctx.fillRect(1, 2, 2, 1); ctx.fillRect(5, 2, 2, 1);
-      ctx.fillStyle = '#d8801f'; ctx.fillRect(2, 3, 1, 1); ctx.fillRect(5, 3, 1, 1);
-      ctx.fillStyle = '#181818'; ctx.fillRect(3, 4, 2, 1);
-    });
-    const bodyM = this.mat(fur, mats);
-    const faceM = this.mat(faceTex, mats);
-    const whiteM = this.mat(this.skin('wolf_white', '#ece9e2', '#dbd7cd'), mats);
-    const noseM = this.mat(this.skin('wolf_nose', '#262626', '#1a1a1a'), mats);
-    // The trunk (body + chest + neck + tail) rides in one group so the shared
-    // breathing bob lifts the whole torso together and the tail can never drift
-    // off the body.
-    const trunk = new THREE.Group();
-    // compact lean body sitting on the legs (bottom ~0.42 = hip top)
-    const body = this.boxMesh(0.48, 0.4, 0.72, bodyM);
-    body.position.set(0, 0.62, 0.04);
-    // white chest bib stood proud of the lower front — the classic two-tone coat
-    const chest = this.boxMesh(0.34, 0.3, 0.18, whiteM);
-    chest.position.set(0, 0.54, -0.32);
-    // a fluffy fur ruff at the shoulders that the head nestles into — replaces the
-    // old rotated neck wedge that read as a strange step between head and body
-    const ruff = this.boxMesh(0.42, 0.38, 0.24, bodyM);
-    ruff.position.set(0, 0.72, -0.28);
-    // bushy tail rooted DEEP in the rear of the body (near segment buried inside
-    // the trunk) so sway/animation can never pull it off
-    const tail = new THREE.Group();
-    tail.position.set(0, 0.72, 0.3);
-    const tailA = this.boxMesh(0.18, 0.18, 0.28, bodyM); tailA.position.z = 0.08;
-    const tailB = this.boxMesh(0.15, 0.15, 0.22, bodyM); tailB.position.z = 0.28;
-    const tailTip = this.boxMesh(0.12, 0.12, 0.12, whiteM); tailTip.position.z = 0.42;
-    tail.add(tailA, tailB, tailTip);
-    tail.rotation.x = 0.7; // down-and-back at rest (tamed dogs raise it, see animateMob)
-    trunk.add(body, chest, ruff, tail);
-
-    // head nestled into the ruff: its rear-bottom overlaps the ruff so there's no
-    // gap and no awkward neck, while the snout/face read clearly out front
-    const head = new THREE.Group();
-    head.position.set(0, 0.8, -0.46);
-    head.add(this.boxMesh(0.36, 0.32, 0.32, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
-    // pale muzzle — the single strongest "this is a canine" cue
-    const snout = this.boxMesh(0.2, 0.15, 0.26, [whiteM, whiteM, whiteM, whiteM, whiteM, faceM]);
-    snout.position.set(0, -0.08, -0.28);
-    head.add(snout);
-    // black nose tip on the end of the muzzle
-    const nose = this.boxMesh(0.1, 0.08, 0.05, noseM);
-    nose.position.set(0, -0.04, -0.42);
-    head.add(nose);
-    // upright, slightly tapered triangular ears (base + smaller tip)
-    const ears: THREE.Object3D[] = [];
-    for (const sx of [-1, 1]) {
-      const ear = new THREE.Group();
-      ear.position.set(sx * 0.12, 0.18, 0.02);
-      ear.rotation.z = sx * -0.08;
-      const base = this.boxMesh(0.11, 0.12, 0.06, bodyM);
-      const tip = this.boxMesh(0.06, 0.08, 0.06, bodyM);
-      tip.position.y = 0.1;
-      ear.add(base, tip);
-      head.add(ear);
-      ears.push(ear);
-    }
-    // taller legs, set just inside the trunk corners, so it stands like a dog
-    const legs = [
-      this.leg(0.15, 0.42, bodyM, -0.16, 0.44, -0.22),
-      this.leg(0.15, 0.42, bodyM, 0.16, 0.44, -0.22),
-      this.leg(0.15, 0.42, bodyM, 0.16, 0.44, 0.3),
-      this.leg(0.15, 0.42, bodyM, -0.16, 0.44, 0.3),
-    ];
-    g.add(trunk, head, ...legs);
-    return { mesh: g, limbs: { legs, head, tail, body: trunk, ears }, mats };
-  }
-
-  if (kind === 'villager') {
-    const robe = this.skin('villager', '#7a5a3a', '#6a4d30');
-    const faceTex = this.skin('villager_face', '#c8a878', '#b89868', (ctx) => {
-      ctx.fillStyle = '#4a3a2a'; ctx.fillRect(1, 1, 6, 2); // brow/unibrow
-      ctx.fillStyle = '#1a1a1a'; ctx.fillRect(2, 3, 1, 1); ctx.fillRect(5, 3, 1, 1); // eyes
-      ctx.fillStyle = '#8a6a4a'; ctx.fillRect(3, 5, 2, 1); // mouth
-    });
-    const robeM = this.mat(robe, mats);
-    const faceM = this.mat(faceTex, mats);
-    // plain skin for the rest of the head — the face only belongs on the front
-    // (the old mesh used faceM on all six sides, so it had a face on every side)
-    const headM = this.mat(this.skin('villager_head', '#c8a878', '#b89868'), mats);
-    const torso = this.boxMesh(0.5, 0.8, 0.28, robeM);
-    torso.position.set(0, 1.1, 0);
-    const head = new THREE.Group();
-    head.position.set(0, 1.5, 0);      // pivot at the neck so the head sits flush on the torso
-    const hb = this.boxMesh(0.46, 0.46, 0.46, [headM, headM, headM, headM, headM, faceM]);
-    hb.position.y = 0.23;
-    head.add(hb);
-    const nose = this.boxMesh(0.12, 0.28, 0.16, headM);
-    nose.position.set(0, 0.08, -0.28);
-    head.add(nose);
-    const legs = [
-      this.leg(0.2, 0.76, robeM, -0.13, 0.76, 0),
-      this.leg(0.2, 0.76, robeM, 0.13, 0.76, 0),
-    ];
-    const arms: THREE.Group[] = [];
-    for (const side of [-1, 1]) {
-      const a = new THREE.Group();
-      a.position.set(side * 0.32, 1.5, 0);
-      const am = this.boxMesh(0.16, 0.72, 0.18, robeM);
-      am.position.y = -0.36;
-      a.add(am);
-      arms.push(a);
-    }
-    g.add(torso, head, ...legs, ...arms);
-    return { mesh: g, limbs: { legs, arms, head }, mats };
-  }
-
-  if (kind === 'horse') {
-    const [coat, speck, mane] = HORSE_COATS[variant] ?? HORSE_COATS[0];
-    const hide = this.skin(`horse_${variant}`, coat, speck);
-    const faceTex = this.skin(`horse_face_${variant}`, coat, speck, (ctx) => {
-      ctx.fillStyle = '#16110c'; ctx.fillRect(1, 2, 1, 2); ctx.fillRect(6, 2, 1, 2); // eyes
-      ctx.fillStyle = '#000000'; ctx.fillRect(2, 6, 1, 1); ctx.fillRect(5, 6, 1, 1); // nostrils
-    });
-    const bodyM = this.mat(hide, mats);
-    const faceM = this.mat(faceTex, mats);
-    const maneM = this.mat(this.skin(`horse_mane_${variant}`, mane, mane), mats);
-
-    // body group (bobs gently while idle); holds torso + neck + mane
-    const body = new THREE.Group();
-    const torso = this.boxMesh(0.8, 0.7, 1.3, bodyM);
-    torso.position.set(0, 1.12, 0.1);
-    const neck = this.boxMesh(0.38, 0.72, 0.4, bodyM);
-    neck.position.set(0, 1.46, -0.52); neck.rotation.x = 0.5;
-    const maneStrip = this.boxMesh(0.1, 0.74, 0.16, maneM);
-    maneStrip.position.set(0, 1.5, -0.42); maneStrip.rotation.x = 0.5;
-    body.add(torso, neck, maneStrip);
-
-    // head pivots for look-tracking; snout + ears + forelock
-    const head = new THREE.Group();
-    head.position.set(0, 1.82, -0.66);
-    const headBox = this.boxMesh(0.3, 0.44, 0.34, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]);
-    headBox.position.y = 0.02;
-    const snout = this.boxMesh(0.26, 0.26, 0.28, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]);
-    snout.position.set(0, -0.08, -0.28);
-    const earL = this.boxMesh(0.08, 0.16, 0.06, bodyM); earL.position.set(-0.1, 0.32, 0.05);
-    const earR = earL.clone(); earR.position.x = 0.1;
-    const forelock = this.boxMesh(0.16, 0.12, 0.1, maneM); forelock.position.set(0, 0.26, -0.02);
-    head.add(headBox, snout, earL, earR, forelock);
-
-    // stocky legs (thick, not stilts) reaching the ground from the wider barrel
-    const legs = [
-      this.leg(0.26, 0.78, bodyM, -0.27, 0.78, -0.42),
-      this.leg(0.26, 0.78, bodyM, 0.27, 0.78, -0.42),
-      this.leg(0.26, 0.78, bodyM, 0.27, 0.78, 0.52),
-      this.leg(0.26, 0.78, bodyM, -0.27, 0.78, 0.52),
-    ];
-
-    const tail = new THREE.Group();
-    tail.position.set(0, 1.3, 0.72);
-    const tailM = this.boxMesh(0.16, 0.6, 0.16, maneM);
-    tailM.position.y = -0.28;
-    tail.add(tailM);
-    tail.rotation.x = -0.25;
-
-    g.add(body, head, tail, ...legs);
-    return { mesh: g, limbs: { legs, head, tail, body }, mats };
-  }
-
-  if (kind === 'cat') {
-    const [coat, speck, belly] = CAT_COATS[variant] ?? CAT_COATS[0];
-    const fur = this.skin(`cat_${variant}`, coat, speck);
-    const faceTex = this.skin(`cat_face_${variant}`, coat, speck, (ctx) => {
-      ctx.fillStyle = '#7cd24a'; ctx.fillRect(2, 3, 1, 1); ctx.fillRect(5, 3, 1, 1); // green eyes
-      ctx.fillStyle = '#d88a8a'; ctx.fillRect(3, 5, 2, 1); // nose
-    });
-    const bodyM = this.mat(fur, mats);
-    const faceM = this.mat(faceTex, mats);
-    const legM = this.mat(this.skin(`cat_paw_${variant}`, belly, belly), mats);
-
-    const body = new THREE.Group();
-    const torso = this.boxMesh(0.3, 0.28, 0.62, bodyM);
-    torso.position.set(0, 0.36, 0.05);
-    body.add(torso);
-
-    const head = new THREE.Group();
-    head.position.set(0, 0.44, -0.32);
-    head.add(this.boxMesh(0.27, 0.25, 0.24, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
-    // tall, tapered, forward-set ears — the unmistakable cat triangle
-    const ears: THREE.Object3D[] = [];
-    for (const sx of [-1, 1]) {
-      const ear = new THREE.Group();
-      ear.position.set(sx * 0.08, 0.13, -0.02);
-      const base = this.boxMesh(0.09, 0.07, 0.05, bodyM);
-      const tip = this.boxMesh(0.05, 0.06, 0.05, bodyM);
-      tip.position.y = 0.06;
-      ear.add(base, tip);
-      head.add(ear);
-      ears.push(ear);
-    }
-
-    const legs = [
-      this.leg(0.1, 0.3, legM, -0.1, 0.3, -0.18),
-      this.leg(0.1, 0.3, legM, 0.1, 0.3, -0.18),
-      this.leg(0.1, 0.3, legM, 0.1, 0.3, 0.24),
-      this.leg(0.1, 0.3, legM, -0.1, 0.3, 0.24),
-    ];
-
-    // upright tail with a slight curl
-    const tail = new THREE.Group();
-    tail.position.set(0, 0.42, 0.34);
-    const tailM = this.boxMesh(0.08, 0.42, 0.08, bodyM);
-    tailM.position.y = 0.18;
-    tail.add(tailM);
-    tail.rotation.x = 0.5;
-
-    g.add(body, head, tail, ...legs);
-    return { mesh: g, limbs: { legs, head, tail, body, ears }, mats };
-  }
-
-  if (kind === 'cinderling') {
-    // a small upright charcoal imp: blazing eyes, ember horns, glowing chest
-    // crack, ember arms at its sides
-    const charM = this.mat(this.skin('cinderling', '#2a2320', '#d65a16'), mats);
-    const faceTex = this.skin('cinderling_face', '#2a2320', '#d65a16', (ctx) => {
-      ctx.fillStyle = '#ffd24a'; ctx.fillRect(1, 2, 2, 2); ctx.fillRect(5, 2, 2, 2); // blazing eyes
-      ctx.fillStyle = '#ff8a1a'; ctx.fillRect(2, 6, 4, 1);                             // grin
-    });
-    const faceM = this.mat(faceTex, mats);
-    const emberM = this.mat(this.skin('cinder_ember', '#ff7a1a', '#ffd24a'), mats);
-    emberM.userData.ember = true; // glows bright; the charcoal hide stays dark
-    const body = this.boxMesh(0.36, 0.36, 0.26, charM);
-    body.position.set(0, 0.5, 0);
-    // a glowing ember crack down the chest so it reads as molten charcoal
-    const crack = this.boxMesh(0.1, 0.24, 0.04, emberM);
-    crack.position.set(0, 0.48, -0.14);
-    g.add(crack);
-    const head = new THREE.Group();
-    head.position.set(0, 0.74, 0);
-    head.add(this.boxMesh(0.32, 0.3, 0.3, [charM, charM, charM, charM, charM, faceM]));
-    // swept-back ember horns
-    for (const sx of [-1, 1]) {
-      const horn = new THREE.Group();
-      horn.position.set(sx * 0.1, 0.15, 0);
-      const h1 = this.boxMesh(0.06, 0.12, 0.06, emberM);
-      const h2 = this.boxMesh(0.05, 0.08, 0.05, emberM); h2.position.set(sx * 0.04, 0.09, 0.02);
-      horn.add(h1, h2); horn.rotation.z = sx * -0.32; horn.rotation.x = 0.2;
-      head.add(horn);
-    }
-    const legs = [
-      this.leg(0.11, 0.3, charM, -0.1, 0.34, 0),
-      this.leg(0.11, 0.3, charM, 0.1, 0.34, 0),
-    ];
-    // ember arms hanging at the sides (added straight to g so the forward-reach
-    // arm animation never grabs them)
-    for (const sx of [-1, 1]) {
-      const arm = this.boxMesh(0.09, 0.28, 0.09, emberM);
-      arm.position.set(sx * 0.23, 0.5, 0);
-      arm.rotation.z = sx * -0.1;
-      g.add(arm);
-    }
-    g.add(body, head, ...legs);
-    return { mesh: g, limbs: { legs, head, body }, mats };
-  }
-
-  if (kind === 'ashstalker') {
-    // a charred four-legged hell-beast: ember-lit spine, glowing maw + underbelly
-    const hideM = this.mat(this.skin('ashstalker', '#241e1c', '#b8501a'), mats);
-    const faceTex = this.skin('ashstalker_face', '#241e1c', '#b8501a', (ctx) => {
-      ctx.fillStyle = '#ffd24a'; ctx.fillRect(1, 2, 2, 2); ctx.fillRect(5, 2, 2, 2); // eyes
-      ctx.fillStyle = '#ff7a1a'; ctx.fillRect(1, 6, 6, 1);                            // glowing maw
-    });
-    const faceM = this.mat(faceTex, mats);
-    const emberM = this.mat(this.skin('ash_ember', '#ff7a1a', '#ffd24a'), mats);
-    emberM.userData.ember = true; // glows bright; the charred hide stays dark
-    const body = this.boxMesh(0.52, 0.42, 0.92, hideM);
-    body.position.set(0, 0.58, 0.05);
-    // ember underbelly seam — molten glow between the legs
-    const belly = this.boxMesh(0.3, 0.12, 0.66, emberM);
-    belly.position.set(0, 0.4, 0.04);
-    g.add(belly);
-    // four ember spines marching down the back
-    for (let i = 0; i < 4; i++) {
-      const sp = this.boxMesh(0.08, 0.2, 0.1, emberM);
-      sp.position.set(0, 0.82, -0.26 + i * 0.26); sp.rotation.x = -0.12;
-      g.add(sp);
-    }
-    const head = new THREE.Group();
-    head.position.set(0, 0.62, -0.5);
-    head.add(this.boxMesh(0.4, 0.36, 0.34, [hideM, hideM, hideM, hideM, hideM, faceM]));
-    const snout = this.boxMesh(0.24, 0.18, 0.2, [hideM, hideM, hideM, hideM, hideM, faceM]);
-    snout.position.set(0, -0.08, -0.24); head.add(snout);
-    // jagged ear/horn nubs
-    for (const sx of [-1, 1]) {
-      const ear = this.boxMesh(0.09, 0.14, 0.07, hideM);
-      ear.position.set(sx * 0.13, 0.24, 0.06); ear.rotation.z = sx * -0.2;
-      head.add(ear);
-    }
-    const legs = [
-      this.leg(0.16, 0.36, hideM, -0.18, 0.38, -0.3),
-      this.leg(0.16, 0.36, hideM, 0.18, 0.38, -0.3),
-      this.leg(0.16, 0.36, hideM, 0.18, 0.38, 0.34),
-      this.leg(0.16, 0.36, hideM, -0.18, 0.38, 0.34),
-    ];
-    g.add(body, head, ...legs);
-    return { mesh: g, limbs: { legs, head, body }, mats };
-  }
-
-  if (kind === 'emberghast') {
-    // a floating charcoal cube with a molten maw and dangling charcoal tendrils
-    // tipped with glowing embers (the ghast silhouette: a face + nine tentacles)
-    const charM = this.mat(this.skin('emberghast', '#2a2320', '#3a2f28'), mats);
-    const faceTex = this.skin('emberghast_face', '#2a2320', '#3a2f28', (ctx) => {
-      ctx.fillStyle = '#ffd24a'; ctx.fillRect(1, 2, 2, 2); ctx.fillRect(5, 2, 2, 2); // eyes
-      ctx.fillStyle = '#ff5a10'; ctx.fillRect(2, 5, 4, 2);                            // molten maw
-    });
-    const faceM = this.mat(faceTex, mats);
-    const emberM = this.mat(this.skin('ghast_ember', '#ff7a1a', '#ffd24a'), mats);
-    emberM.userData.ember = true;
-    // body: face is the -Z front (material index 5)
-    const body = this.boxMesh(0.8, 0.8, 0.8, [charM, charM, charM, charM, charM, faceM]);
-    body.position.set(0, 0.7, 0);
-    g.add(body);
-    // a thin molten underline along the front jaw — just a hint of glow, not a slab
-    const jaw = this.boxMesh(0.5, 0.07, 0.06, emberM);
-    jaw.position.set(0, 0.36, -0.4);
-    g.add(jaw);
-    // nine charcoal tendrils in a 3x3 grid, each ending in a small ember tip so
-    // they read as distinct danglers instead of one bright orange mass
-    const legs: THREE.Group[] = [];
-    for (const lx of [-0.26, 0, 0.26]) {
-      for (const lz of [-0.26, 0, 0.26]) {
-        const tendril = new THREE.Group();
-        tendril.position.set(lx, 0.32, lz);
-        const seg = this.boxMesh(0.09, 0.34, 0.09, charM);
-        seg.position.y = -0.17;
-        const tip = this.boxMesh(0.07, 0.1, 0.07, emberM);
-        tip.position.y = -0.36;
-        tendril.add(seg, tip);
-        g.add(tendril);
-        legs.push(tendril);
-      }
-    }
-    return { mesh: g, limbs: { legs, body }, mats };
-  }
-
-  // phantom: a small flying mob with two angular wings
-  {
-    const skin = this.skin('phantom', '#4a4a5a', '#3a3a48');
-    const faceTex = this.skin('phantom_face', '#4a4a5a', '#3a3a48', (ctx) => {
-      ctx.fillStyle = '#c43030'; ctx.fillRect(2, 2, 1, 1); ctx.fillRect(5, 2, 1, 1);
-      ctx.fillStyle = '#1a1a1a'; ctx.fillRect(3, 4, 2, 2);
-    });
-    const bodyM = this.mat(skin, mats);
-    const faceM = this.mat(faceTex, mats);
-    const body = this.boxMesh(0.5, 0.3, 0.9, bodyM);
-    body.position.set(0, 0.2, 0);
-    const head = new THREE.Group();
-    head.position.set(0, 0.25, -0.55);
-    head.add(this.boxMesh(0.34, 0.3, 0.34, [bodyM, bodyM, bodyM, bodyM, bodyM, faceM]));
-    // wings as flat angled planes attached at the shoulders
-    const wings: THREE.Group[] = [];
-    for (const side of [-1, 1]) {
-      const w = new THREE.Group();
-      w.position.set(side * 0.3, 0.25, 0);
-      const wm = this.boxMesh(0.06, 0.5, 0.7, bodyM);
-      wm.position.set(side * 0.35, 0.1, 0.1);
-      wm.rotation.z = side * -0.3;
-      w.add(wm);
-      wings.push(w);
-    }
-    g.add(body, head, ...wings);
-    return { mesh: g, limbs: { legs: wings, head }, mats };
-  }
-}
 
   /** Textured cube for drops, falling blocks, and primed TNT. */
   private makeBlockMesh(blockId: number, size: number): THREE.Mesh {

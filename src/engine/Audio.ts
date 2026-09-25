@@ -1,68 +1,141 @@
-// Web Audio synthesis: dig/place/step sounds per block class, UI clicks,
-// hurt/eat/pop effects, and a sparse ambient pad. No audio assets used.
+// Web Audio synthesis — every footstep, creak, mob voice and note of music is
+// generated in code (no audio assets).
+//
+//   sfx events ───► sfxBus ─► comp ──┐
+//   ambience ─────► ambBus ──────────┼─► master ─► underwater LP ─► limiter ─► out
+//   music notes ─► piece ─► musicBus ─► duck ─┘        ▲
+//             (sends from all three) ─► reverb ────────┘   (+ tempo delay on music)
+//
+// Every sound is a short-lived "event": one gain node plus its sources and
+// filters. The chain disconnects itself when its last source ends, and each
+// bus has a voice cap so a TNT chain or a mob crowd can't swamp the CPU.
 
-import { SoundClass } from './Blocks';
+import { SoundClass, def, hasDef } from './Blocks';
+import { compose, fragment, mtof, MNote, TITLE_SEED } from './AudioMusic';
 
 export type SfxName =
   | 'pop' | 'hurt' | 'hit' | 'eat' | 'burp' | 'click' | 'select' | 'fail' | 'craft' | 'level'
   | 'doorOpen' | 'doorClose' | 'plateOn' | 'plateOff'
   | 'explode' | 'bow' | 'snap' | 'fuse' | 'arrowHit' | 'whoosh' | 'lowdur'
   | 'thunder' | 'rain' | 'splash' | 'hoof' | 'mount'
-  | 'submerge' | 'emerge';
+  | 'submerge' | 'emerge'
+  | 'chestOpen' | 'chestClose' | 'advancement' | 'equip' | 'lavaPop' | 'bubble';
 
 /** Ambient mood selector for ambientTick. */
 export type AmbientEnv = 'day' | 'night' | 'cave' | 'nether';
 
-/** Overworld biome flavour for the generative music (subtle scale/tempo/colour shifts). */
+/** Overworld biome flavour for the generative music (key/tempo/colour shifts). */
 export type MusicBiome =
   'plains' | 'forest' | 'desert' | 'snow' | 'taiga' | 'swamp' | 'mountains' | 'jungle';
 
-/** Resolved musical character for one generated piece. */
-interface PieceMood {
-  night: boolean;
-  scale: number[];          // scale degrees (semitones) for the melody
-  arpDeg: number[];         // arpeggio degree pattern
-  third: number;            // pad colour 3rd (major 4 / minor 3)
-  seventh: number;          // jazzy 7th colour
-  progressions: number[][]; // chord-root movements (semitones)
-  roots: number[];          // candidate tonics (Hz)
-  barLen: number;           // seconds per bar (tempo)
-  octaveBias: number;       // chance the melody leaps an octave up (sparkle)
-  bellChance: number;       // high bell frequency
-  padVol: number;           // pad richness multiplier
-  density: number;          // melody note probability multiplier
-}
+/** Mob vocalisation kind. */
+export type MobVoice = 'idle' | 'hurt' | 'death';
 
-interface AudioSettings { music: boolean; sound: boolean; volume: number }
+interface AudioSettings { music: boolean; sound: boolean; volume: number; musicVol: number; soundVol: number }
+
+type Pool = 'sfx' | 'amb' | 'music';
+/** One live sound: an output gain, its helper nodes, and a count of running sources. */
+interface Ev { t: number; out: GainNode; nodes: AudioNode[]; live: number; pool: Pool }
+
+/** Finer material than Blocks' SoundClass, resolved per block id. */
+type Mat = 'grass' | 'plant' | 'gravel' | 'sand' | 'snow' | 'wood' | 'stone' | 'metal' | 'glass'
+  | 'wool' | 'nether' | 'soul' | 'amethyst' | 'none';
+type Act = 'step' | 'hit' | 'break' | 'place';
+
+interface Piece { notes: MNote[]; i: number; t0: number; end: number; out: GainNode; env: string; fading: boolean; name: string }
 
 const SETTINGS_KEY = 'voxelcraft-audio';
+const CAP: Record<Pool, number> = { sfx: 36, amb: 14, music: 80 };
+
+// per-sound loudness trims, balanced against each other by offline renders
+const SFX_GAIN: Partial<Record<SfxName, number>> = {
+  pop: 4.5, hit: 1.7, click: 3.5, select: 5, fail: 0.7, plateOn: 1.4, plateOff: 1.4, bow: 1.9,
+  snap: 1.8, arrowHit: 1.8, hoof: 1.2, doorOpen: 0.6, doorClose: 0.4, chestClose: 0.35, mount: 0.35,
+  submerge: 1.6, emerge: 1.6, splash: 0.6, whoosh: 0.6, lavaPop: 3, bubble: 5, hurt: 1.6,
+};
+// material trims: [break/hit, step] — evens out how loud each texture reads
+const MAT_GAIN: Record<Mat, [number, number]> = {
+  stone: [0.9, 1.7], wood: [1.25, 1.6], grass: [0.56, 0.9], plant: [1, 1], gravel: [1, 1],
+  sand: [0.4, 0.63], soul: [0.45, 0.63], snow: [1.4, 1.25], wool: [1, 1.4], metal: [0.8, 1.4],
+  glass: [0.5, 1.7], nether: [0.8, 1], amethyst: [0.56, 1.25], none: [0, 0],
+};
+
+const clamp = (v: number, a: number, b: number): number => Math.max(a, Math.min(b, v));
+const rand = (a: number, b: number): number => a + Math.random() * (b - a);
+const chance = (p: number): boolean => Math.random() < p;
+
+// ------------------------------------------------------------------------------
+// primitive option bags
+// ------------------------------------------------------------------------------
+interface NzOpt {
+  at?: number; dur: number; vol: number;
+  color?: 'white' | 'pink' | 'brown';
+  type?: BiquadFilterType; f?: number; f1?: number; q?: number;
+  type2?: BiquadFilterType; f2?: number; q2?: number;
+  attack?: number; curve?: Float32Array; rate?: number; to?: AudioNode;
+}
+interface TnOpt {
+  at?: number; dur: number; f: number; f1?: number; vol: number;
+  type?: OscillatorType; wave?: PeriodicWave; attack?: number; detune?: number;
+  glide?: number; to?: AudioNode; lp?: number;
+}
+interface VoxOpt {
+  at?: number; dur: number; vol: number;
+  pitch: number[];                    // f0 contour, points spread evenly over dur
+  formants: [number[], number, number][]; // [freq contour, Q, gain]
+  type?: OscillatorType; attack?: number; release?: number;
+  vib?: [number, number];             // [rate Hz, depth cents]
+  rough?: [number, number];           // fast pitch jitter: [rate Hz, depth cents]
+  breath?: number; direct?: number; to?: AudioNode;
+}
 
 export class AudioEngine {
-  private ctx: AudioContext | null = null;
+  private ctx: BaseAudioContext | null = null;
   private master: GainNode | null = null;
   private sfx: GainNode | null = null;
+  private amb: GainNode | null = null;
   private musicBus: GainNode | null = null;
-  private noiseBuf: AudioBuffer | null = null;
-  private ambientT = 22;
-  private musicT = 6;        // seconds until the next generated piece
-  private atmosphereT = 12;  // sparse lonely wind/drone/bell cues between music
-  private heartT = 0;        // low-health heartbeat pacing
-  private settings: AudioSettings = { music: true, sound: true, volume: 0.7 };
-  // master gain at volume=0.7 (the previous fixed 0.35), scaling linearly
-  private masterFor(v: number): number { return 0.5 * Math.max(0, Math.min(1, v)); }
-  // continuous rain bed: a persistent looping noise source we fade in/out
-  private rainSrc: AudioBufferSourceNode | null = null;
-  private rainGain: GainNode | null = null;
-  private rainFilter: BiquadFilterNode | null = null;
-  private rainState: 'off' | 'rain' | 'thunder' = 'off';
-  // held so the reverb/delay send chain isn't garbage-collected mid-session
-  private musicFx: AudioNode[] = [];
-  // underwater: a lowpass on the master that muffles everything while submerged,
-  // plus a soft bubbling bed
+  private musicDuck: GainNode | null = null;
   private uwFilter: BiquadFilterNode | null = null;
-  private uwBubbleSrc: AudioBufferSourceNode | null = null;
-  private uwBubbleGain: GainNode | null = null;
+  private sfxVerb: GainNode | null = null;
+  private reverbIn: GainNode | null = null;
+  private delay: DelayNode | null = null;
+  private white: AudioBuffer | null = null;
+  private pink: AudioBuffer | null = null;
+  private brown: AudioBuffer | null = null;
+  private rainBuf: AudioBuffer | null = null;
+  private pianoWave: PeriodicWave | null = null;
+  private padWave: PeriodicWave | null = null;
+  private live: Record<Pool, number> = { sfx: 0, amb: 0, music: 0 };
+  private livePeak: Record<Pool, number> = { sfx: 0, amb: 0, music: 0 };
+  private lastAt = new Map<string, number>();
+  private settings: AudioSettings = { music: true, sound: true, volume: 0.7, musicVol: 1, soundVol: 1 };
+  // held so the effect graph isn't garbage-collected mid-session
+  private fx: AudioNode[] = [];
+  private pumpTimer = 0;
+
+  // generative music state
+  private musicMode: 'menu' | 'game' = 'game';
+  private piece: Piece | null = null;
+  private nextPieceAt = 6;
+  private menuCount = 0;
+  private env: AmbientEnv = 'day';
+  private biome: MusicBiome | undefined;
+  private envAt = -99;         // ctx time of the last ambientTick (game is live)
+  private fragT = 40;          // seconds until a short musical fragment between pieces
+
+  // ambience
+  private atmosphereT = 8;
+  private heartT = 0;
+  private bubbleT = 2;
+  private rain: { src: AudioBufferSourceNode; g: GainNode; lp: BiquadFilterNode; roar: GainNode; nodes: AudioNode[] } | null = null;
+  private rainState: 'off' | 'rain' | 'thunder' = 'off';
+  private uw: { src: AudioBufferSourceNode; g: GainNode; nodes: AudioNode[] } | null = null;
   private underwater = false;
+  private netherBed: { src: AudioBufferSourceNode; g: GainNode; nodes: AudioNode[] } | null = null;
+  private unlocked = false;
+  private resuming = false;
+  private level = 1;           // loudness of the effect being built (scales ducking)
 
   constructor() {
     try {
@@ -71,40 +144,84 @@ export class AudioEngine {
     } catch { /* default settings */ }
   }
 
+  // ==========================================================================
+  // settings
+  // ==========================================================================
+
   get musicOn(): boolean { return this.settings.music; }
   get soundOn(): boolean { return this.settings.sound; }
   get volume(): number { return this.settings.volume; }
+  get musicVolume(): number { return this.settings.musicVol; }
+  get soundVolume(): number { return this.settings.soundVol; }
+
+  // perceptual (squared) taper; 0.7 lands on the old fixed 0.35 master gain
+  private masterFor(v: number): number { const c = clamp(v, 0, 1); return 0.72 * c * c; }
+
+  /** Smoothly glide an AudioParam to a value (no zipper clicks). */
+  private glide(p: AudioParam, v: number, time = 0.12): void {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    p.cancelScheduledValues(t);
+    p.setValueAtTime(p.value, t);
+    p.linearRampToValueAtTime(v, t + time);
+  }
 
   /** Master loudness 0..1; ramps smoothly and persists. */
   setVolume(v: number): void {
-    this.settings.volume = Math.max(0, Math.min(1, v));
-    if (this.master && this.ctx) {
-      const t = this.ctx.currentTime;
-      this.master.gain.cancelScheduledValues(t);
-      this.master.gain.setValueAtTime(this.master.gain.value, t);
-      this.master.gain.linearRampToValueAtTime(this.masterFor(this.settings.volume), t + 0.1);
-    }
+    this.settings.volume = clamp(v, 0, 1);
+    if (this.master) this.glide(this.master.gain, this.masterFor(this.settings.volume), 0.1);
+    this.persist();
+  }
+
+  /** Music loudness 0..1 (relative to master). */
+  setMusicVolume(v: number): void {
+    this.settings.musicVol = clamp(v, 0, 1);
+    this.applyBusGains();
+    this.persist();
+  }
+
+  /** Sound-effect + ambience loudness 0..1 (relative to master). */
+  setSoundVolume(v: number): void {
+    this.settings.soundVol = clamp(v, 0, 1);
+    this.applyBusGains();
     this.persist();
   }
 
   setMusic(on: boolean): void {
     this.settings.music = on;
-    if (this.musicBus) this.musicBus.gain.value = on ? 1 : 0;
+    this.applyBusGains();
+    if (!on) this.fadePiece(0.6);
+    else if (this.ctx) this.nextPieceAt = this.ctx.currentTime + rand(1.5, 4);
     this.persist();
   }
 
   setSound(on: boolean): void {
     this.settings.sound = on;
-    if (this.sfx) this.sfx.gain.value = on ? 1 : 0;
+    this.applyBusGains();
     this.persist();
+  }
+
+  private applyBusGains(): void {
+    const s = this.settings;
+    if (this.musicBus) this.glide(this.musicBus.gain, s.music ? s.musicVol : 0, 0.5);
+    if (this.sfx) this.glide(this.sfx.gain, s.sound ? s.soundVol : 0, 0.08);
+    if (this.amb) this.glide(this.amb.gain, s.sound ? s.soundVol : 0, 0.4);
   }
 
   private persist(): void {
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings)); } catch { /* ignore */ }
   }
 
+  // ==========================================================================
+  // context lifecycle
+  // ==========================================================================
+
   /** Must be called from a user gesture at least once (safe to call repeatedly). */
   ensure(): void {
+    const ctx = this.ctx;
+    if (ctx && ctx.state === 'running' && this.unlocked) return;
+    // resume synchronously too, so a call inside a user gesture always counts
+    if (ctx instanceof AudioContext && ctx.state !== 'running') ctx.resume().catch(() => { /* needs a gesture */ });
     void this.ensureRunning();
   }
 
@@ -115,74 +232,131 @@ export class AudioEngine {
 
   private async ensureRunning(): Promise<void> {
     if (!this.ctx) {
-      if (!this.initContext()) return;
+      let ctx: AudioContext;
+      try { ctx = new AudioContext({ latencyHint: 'interactive' }); } catch { return; }
+      if (!this.attachContext(ctx)) return;
     }
-    if (!this.ctx) return;
-    if (this.ctx.state !== 'running') this.unlocked = false;
-    await this.resumeUntilRunning();
-    if (this.ctx?.state === 'running') this.unlock();
-  }
-
-  private async resumeUntilRunning(): Promise<void> {
     const ctx = this.ctx;
-    if (!ctx) return;
-    for (let i = 0; i < 24; i++) {
-      if (ctx.state === 'running') return;
-      try { await ctx.resume(); } catch { /* gesture may be required */ }
-      await new Promise<void>(r => setTimeout(r, 25));
+    if (!(ctx instanceof AudioContext)) return; // offline test contexts render on demand
+    if (ctx.state !== 'running') this.unlocked = false;
+    // one resume loop at a time — play() may be called many times per frame
+    if (this.resuming) return;
+    this.resuming = true;
+    try {
+      for (let i = 0; i < 24 && ctx.state !== 'running'; i++) {
+        try { await ctx.resume(); } catch { /* gesture may be required */ }
+        if ((ctx.state as string) === 'running') break;
+        await new Promise<void>((r) => setTimeout(r, 25));
+      }
+    } finally {
+      this.resuming = false;
     }
+    if (ctx.state === 'running') this.unlock();
   }
 
-  private initContext(): boolean {
+  /** iOS/Safari unlock trick: play a one-sample silent buffer while the context
+   *  is running inside a user gesture. Only marked done when state is 'running'. */
+  private unlock(): void {
+    const ctx = this.ctx;
+    if (this.unlocked || !ctx || ctx.state !== 'running') return;
     try {
-      this.ctx = new AudioContext();
-      this.master = this.ctx.createGain();
-      this.master.gain.value = this.masterFor(this.settings.volume);
-      // master → underwater lowpass → speakers. The filter is transparent (20kHz)
-      // until submerged, when it ramps down to a muffled ~600 Hz.
-      this.uwFilter = this.ctx.createBiquadFilter();
+      const b = ctx.createBufferSource();
+      b.buffer = ctx.createBuffer(1, 1, 22050);
+      b.connect(ctx.destination);
+      b.start(0);
+      this.unlocked = true;
+      if (this.nextPieceAt < ctx.currentTime) this.nextPieceAt = ctx.currentTime + (this.musicMode === 'menu' ? 0.6 : 6);
+    } catch { /* ignore — ensure() will retry on the next gesture */ }
+  }
+
+  /** Build the mixing graph on a context. Public so a test harness can render
+   *  the engine into an OfflineAudioContext. */
+  attachContext(ctx: BaseAudioContext): boolean {
+    try {
+      this.ctx = ctx;
+      const s = this.settings;
+      this.master = ctx.createGain();
+      this.master.gain.value = this.masterFor(s.volume);
+      // master → underwater lowpass (transparent until submerged) → limiter → out
+      this.uwFilter = ctx.createBiquadFilter();
       this.uwFilter.type = 'lowpass';
       this.uwFilter.frequency.value = 20000;
       this.uwFilter.Q.value = 0.7;
-      this.master.connect(this.uwFilter);
-      this.uwFilter.connect(this.ctx.destination);
-      this.sfx = this.ctx.createGain();
-      this.sfx.gain.value = this.settings.sound ? 1 : 0;
-      const comp = this.ctx.createDynamicsCompressor();
-      comp.threshold.value = -20;
+      const limiter = ctx.createDynamicsCompressor();
+      limiter.threshold.value = -5;
+      limiter.knee.value = 3;
+      limiter.ratio.value = 16;
+      limiter.attack.value = 0.002;
+      limiter.release.value = 0.18;
+      this.master.connect(this.uwFilter).connect(limiter).connect(ctx.destination);
+
+      // shared reverb: procedural stereo impulse with damped (darker) tail
+      const reverb = ctx.createConvolver();
+      reverb.buffer = this.makeImpulse(3.2, 2.6);
+      this.reverbIn = ctx.createGain();
+      const verbOut = ctx.createGain();
+      verbOut.gain.value = 0.85;
+      this.reverbIn.connect(reverb).connect(verbOut).connect(this.master);
+
+      // sound effects: gentle glue compression, small room send (grows in caves)
+      this.sfx = ctx.createGain();
+      this.sfx.gain.value = s.sound ? s.soundVol : 0;
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -18;
       comp.knee.value = 10;
       comp.ratio.value = 3;
       comp.attack.value = 0.003;
       comp.release.value = 0.12;
       this.sfx.connect(comp).connect(this.master);
-      this.musicBus = this.ctx.createGain();
-      this.musicBus.gain.value = this.settings.music ? 1 : 0;
-      // dry path
-      this.musicBus.connect(this.master);
-      // Spacious reverb send — the single biggest factor in the airy C418 vibe.
-      // Impulse is procedurally generated decaying noise (no asset).
-      const reverb = this.ctx.createConvolver();
-      reverb.buffer = this.makeImpulse(3.0, 2.4);
-      const revGain = this.ctx.createGain();
-      revGain.gain.value = 0.28;
-      this.musicBus.connect(reverb).connect(revGain).connect(this.master);
-      // Soft feedback delay for the sparkle echoes; its output is also reverbed
-      // so trailing notes dissolve into the space rather than repeating dryly.
-      const delay = this.ctx.createDelay(1.0);
-      delay.delayTime.value = 0.4;
-      const fb = this.ctx.createGain();
-      fb.gain.value = 0.3;
-      const delayGain = this.ctx.createGain();
-      delayGain.gain.value = 0.22;
-      this.musicBus.connect(delay);
-      delay.connect(fb).connect(delay);
-      delay.connect(delayGain).connect(this.master);
-      delay.connect(reverb);
-      this.musicFx = [reverb, revGain, delay, fb, delayGain];
-      const len = this.ctx.sampleRate;
-      this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
-      const data = this.noiseBuf.getChannelData(0);
-      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      this.sfxVerb = ctx.createGain();
+      this.sfxVerb.gain.value = 0.035;
+      this.sfx.connect(this.sfxVerb).connect(this.reverbIn);
+
+      // ambience (birds, wind, cave cues, rain): its own bus, generous reverb
+      this.amb = ctx.createGain();
+      this.amb.gain.value = s.sound ? s.soundVol : 0;
+      this.amb.connect(this.master);
+      const ambVerb = ctx.createGain();
+      ambVerb.gain.value = 0.3;
+      this.amb.connect(ambVerb).connect(this.reverbIn);
+
+      // music: bus (on/off × volume) → duck → master, plus reverb + tempo delay
+      this.musicBus = ctx.createGain();
+      this.musicBus.gain.value = s.music ? s.musicVol : 0;
+      this.musicDuck = ctx.createGain();
+      this.musicBus.connect(this.musicDuck).connect(this.master);
+      const musicVerb = ctx.createGain();
+      musicVerb.gain.value = 0.42;
+      this.musicDuck.connect(musicVerb).connect(this.reverbIn);
+      // soft feedback delay, darkened each repeat so echoes melt into the reverb
+      this.delay = ctx.createDelay(2.0);
+      this.delay.delayTime.value = 0.6;
+      const fb = ctx.createGain();
+      fb.gain.value = 0.28;
+      const fbLp = ctx.createBiquadFilter();
+      fbLp.type = 'lowpass';
+      fbLp.frequency.value = 2600;
+      const delayWet = ctx.createGain();
+      delayWet.gain.value = 0.14;
+      this.musicDuck.connect(this.delay);
+      this.delay.connect(fbLp).connect(fb).connect(this.delay);
+      this.delay.connect(delayWet).connect(this.master);
+      delayWet.connect(this.reverbIn);
+      this.fx = [limiter, reverb, verbOut, comp, ambVerb, musicVerb, fb, fbLp, delayWet];
+
+      // shared noise sources: generated once, played from random offsets
+      this.white = this.makeNoise('white');
+      this.pink = this.makeNoise('pink');
+      this.brown = this.makeNoise('brown');
+      this.pianoWave = this.makeWave([1, 0.42, 0.26, 0.19, 0.1, 0.07, 0.055, 0.03, 0.022, 0.012, 0.008]);
+      this.padWave = this.makeWave([1, 0.5, 0.33, 0.22, 0.14, 0.09, 0.06, 0.04]);
+
+      if (typeof window !== 'undefined' && ctx instanceof AudioContext) {
+        this.pumpTimer = window.setInterval(this.pump, 120);
+        // build the rain texture ahead of time, off the critical path
+        window.setTimeout(() => { if (!this.rainBuf && this.ctx) this.rainBuf = this.makeRain(); }, 4000);
+      }
+      this.nextPieceAt = ctx.currentTime + (this.musicMode === 'menu' ? 0.6 : 6);
       return true;
     } catch {
       this.ctx = null;
@@ -190,514 +364,1476 @@ export class AudioEngine {
     }
   }
 
-  /** iOS/Safari unlock trick: play a one-sample silent buffer while the context
-   *  is running inside a user gesture. Only marked done when state is 'running'. */
-  private unlocked = false;
-  private unlock(): void {
-    if (this.unlocked || !this.ctx || this.ctx.state !== 'running') return;
-    try {
-      const b = this.ctx.createBufferSource();
-      b.buffer = this.ctx.createBuffer(1, 1, 22050);
-      b.connect(this.ctx.destination);
-      b.start(0);
-      this.unlocked = true;
-    } catch { /* ignore — ensure() will retry on the next gesture */ }
+  /** Voice / scheduler counters (for harnesses and debugging). */
+  debugStats(): { live: Record<Pool, number>; peak: Record<Pool, number>; piece: string | null; rain: string; nether: boolean } {
+    return { live: { ...this.live }, peak: { ...this.livePeak }, piece: this.piece?.name ?? null, rain: this.rainState, nether: !!this.netherBed };
   }
 
-  private noiseBurst(dur: number, freq: number, vol: number, type: BiquadFilterType = 'lowpass', freqEnd?: number, pitch = 1): void {
-    if (!this.ctx || !this.sfx || !this.noiseBuf) return;
-    const t = this.ctx.currentTime;
-    const src = this.ctx.createBufferSource();
-    src.buffer = this.noiseBuf;
-    src.loop = true;
-    src.playbackRate.value = (0.7 + Math.random() * 0.6) * pitch;
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = type;
-    filter.frequency.setValueAtTime(freq, t);
-    if (freqEnd) filter.frequency.exponentialRampToValueAtTime(Math.max(40, freqEnd), t + dur);
-    const g = this.ctx.createGain();
-    g.gain.setValueAtTime(vol, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    src.connect(filter).connect(g).connect(this.sfx);
-    src.start(t);
-    src.stop(t + dur + 0.02);
-  }
-
-  private tone(dur: number, f0: number, f1: number, vol: number, type: OscillatorType = 'sine', when = 0, pitch = 1): void {
-    if (!this.ctx || !this.sfx) return;
-    const t = this.ctx.currentTime + when;
-    const osc = this.ctx.createOscillator();
-    osc.type = type;
-    const p0 = f0 * pitch;
-    const p1 = Math.max(30, f1 * pitch);
-    osc.frequency.setValueAtTime(p0, t);
-    osc.frequency.exponentialRampToValueAtTime(p1, t + dur);
-    const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(vol, t + 0.012);
-    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    osc.connect(g).connect(this.sfx);
-    osc.start(t);
-    osc.stop(t + dur + 0.02);
-  }
-
-  /** Dig/place sound for a block sound class — MC-style layered hits. */
-  dig(cls: SoundClass, vol: number, pitch = 1): void {
-    this.ensure();
-    switch (cls) {
-      case 'stone':
-        // crisp double-tap: body thud + gritty scrape
-        this.noiseBurst(0.09, 1100, 0.45 * vol, 'lowpass', 400, pitch);
-        this.noiseBurst(0.06, 2600, 0.18 * vol, 'bandpass', 1400, pitch);
-        this.tone(0.05, 140, 90, 0.1 * vol, 'sine', 0, pitch);
-        break;
-      case 'wood':
-        // hollow knock + woody body
-        this.noiseBurst(0.08, 800, 0.36 * vol, 'lowpass', 300, pitch);
-        this.tone(0.07, 200, 130, 0.14 * vol, 'triangle', 0, pitch);
-        this.tone(0.05, 95, 70, 0.08 * vol, 'sine', 0, pitch);
-        break;
-      case 'grass':
-        // soft squelch
-        this.noiseBurst(0.1, 1800, 0.26 * vol, 'bandpass', 700, pitch);
-        this.noiseBurst(0.05, 600, 0.1 * vol, 'lowpass', 250, pitch);
-        break;
-      case 'sand':
-        // gritty crunch
-        this.noiseBurst(0.14, 3000, 0.22 * vol, 'highpass', 1200, pitch);
-        this.noiseBurst(0.06, 1400, 0.1 * vol, 'bandpass', undefined, pitch);
-        break;
-      case 'glass':
-        // bright shatter
-        this.noiseBurst(0.18, 4400, 0.32 * vol, 'highpass', undefined, pitch);
-        this.tone(0.12, 2100, 900, 0.1 * vol, 'triangle', 0, pitch);
-        this.tone(0.08, 3200, 1600, 0.05 * vol, 'sine', 0, pitch);
-        break;
-      case 'none': break;
-    }
-  }
-
-  step(cls: SoundClass): void {
-    const pitch = 0.9 + Math.random() * 0.22;
-    this.dig(cls === 'none' ? 'stone' : cls, 0.16, pitch);
-  }
-
-  play(name: SfxName): void {
-    this.ensure();
-    switch (name) {
-      case 'pop': this.tone(0.1, 420, 940, 0.3, 'sine'); break;
-      case 'hurt':
-        // a short pained grunt — a low vocal body with a noisy rasp on top
-        this.tone(0.2, 198, 104, 0.34, 'sawtooth');
-        this.tone(0.17, 150, 86, 0.2, 'triangle', 0.015);
-        this.noiseBurst(0.12, 1000, 0.15, 'bandpass', 340);
-        break;
-      case 'hit':
-        // a meaty thwack on a mob — a soft impact thump + a faint woody knock
-        this.noiseBurst(0.07, 1400, 0.28, 'lowpass', 420);
-        this.tone(0.1, 205, 95, 0.26, 'sine');
-        this.tone(0.045, 360, 150, 0.1, 'square', 0.006);
-        break;
-      case 'eat': this.noiseBurst(0.07, 1400, 0.25, 'bandpass'); break;
-      case 'burp': this.tone(0.25, 220, 80, 0.3, 'sawtooth'); break;
-      case 'click': this.tone(0.035, 850, 700, 0.18, 'square'); break;
-      case 'select':
-        this.tone(0.04, 540, 720, 0.11, 'triangle');
-        this.tone(0.055, 880, 1020, 0.07, 'sine', 0.028);
-        this.noiseBurst(0.03, 2200, 0.04, 'highpass');
-        break;
-      case 'fail':
-        this.tone(0.09, 180, 125, 0.16, 'square');
-        this.tone(0.08, 130, 95, 0.1, 'triangle', 0.055);
-        break;
-      case 'craft':
-        this.noiseBurst(0.055, 1800, 0.08, 'bandpass');
-        this.tone(0.06, 520, 660, 0.12, 'triangle');
-        this.tone(0.08, 780, 940, 0.08, 'sine', 0.045);
-        break;
-      case 'doorOpen':
-        // wooden latch + creak upward (MC-style)
-        this.tone(0.04, 520, 420, 0.14, 'square');
-        this.noiseBurst(0.14, 320, 0.28, 'bandpass', 900);
-        this.tone(0.16, 140, 240, 0.16, 'triangle');
-        this.tone(0.1, 220, 310, 0.1, 'sine', 0.05);
-        break;
-      case 'doorClose':
-        // soft thud + descending creak
-        this.noiseBurst(0.12, 480, 0.26, 'bandpass', 220);
-        this.tone(0.18, 210, 95, 0.18, 'triangle');
-        this.tone(0.08, 380, 260, 0.1, 'square', 0.04);
-        this.noiseBurst(0.06, 180, 0.14, 'lowpass', 90);
-        break;
-      case 'plateOn':
-        // soft wooden depress: a low muted tick (no sharp UI click)
-        this.tone(0.05, 240, 180, 0.12, 'triangle');
-        this.noiseBurst(0.05, 600, 0.08, 'lowpass', 240);
-        break;
-      case 'plateOff':
-        // gentle release, a touch higher and shorter
-        this.tone(0.04, 300, 360, 0.09, 'triangle');
-        this.noiseBurst(0.04, 700, 0.06, 'lowpass', 300);
-        break;
-      case 'level': this.tone(0.3, 520, 1040, 0.2, 'sine'); this.tone(0.3, 660, 1320, 0.15, 'sine', 0.08); break;
-      case 'explode':
-        this.noiseBurst(0.8, 350, 0.8, 'lowpass', 60);
-        this.tone(0.5, 90, 35, 0.5, 'sine');
-        break;
-      case 'bow':
-        this.noiseBurst(0.1, 1800, 0.2, 'bandpass');
-        this.tone(0.12, 320, 720, 0.18, 'triangle');
-        break;
-      case 'snap':
-        this.tone(0.05, 700, 300, 0.3, 'square');
-        this.tone(0.06, 500, 200, 0.3, 'square', 0.07);
-        this.noiseBurst(0.12, 2400, 0.2, 'highpass');
-        break;
-      case 'fuse': this.noiseBurst(1.3, 3800, 0.22, 'highpass'); break;
-      case 'whoosh':
-        // a soft airy swish for swinging at empty air — short filtered noise sweep
-        this.noiseBurst(0.16, 1700, 0.12, 'bandpass', 520);
-        break;
-      case 'lowdur':
-        // a small worried two-tone chirp: your tool is nearly spent
-        this.tone(0.07, 880, 700, 0.12, 'square');
-        this.tone(0.09, 640, 460, 0.1, 'triangle', 0.07);
-        break;
-      case 'arrowHit': this.tone(0.06, 950, 500, 0.2, 'triangle'); this.noiseBurst(0.05, 2000, 0.12, 'bandpass'); break;
-      case 'splash':
-        this.noiseBurst(0.22, 1400, 0.18, 'bandpass', 520);
-        this.noiseBurst(0.12, 3200, 0.08, 'highpass');
-        break;
-      case 'submerge':
-        // head goes under: a muffled descending gloop + a low watery thud
-        this.noiseBurst(0.4, 900, 0.3, 'lowpass', 160);
-        this.tone(0.32, 360, 110, 0.16, 'sine');
-        this.tone(0.5, 150, 70, 0.12, 'sine', 0.04);
-        break;
-      case 'emerge':
-        // breaking the surface: a bright rising splash + a gasp of air
-        this.noiseBurst(0.26, 1200, 0.26, 'highpass');
-        this.noiseBurst(0.18, 2600, 0.14, 'bandpass', 1400);
-        this.tone(0.18, 220, 520, 0.12, 'triangle');
-        break;
-      case 'hoof':
-        // a dull clop: low square thud + soft body
-        this.tone(0.05, 150, 88, 0.16, 'square');
-        this.noiseBurst(0.05, 280, 0.1, 'lowpass', 110);
-        break;
-      case 'mount':
-        // leather creak when climbing into the saddle
-        this.noiseBurst(0.16, 520, 0.14, 'bandpass', 220);
-        this.tone(0.1, 180, 240, 0.08, 'triangle');
-        break;
-      case 'thunder':
-        // layered: low rumble + crackle, fading slowly
-        this.noiseBurst(2.0, 600, 0.6, 'lowpass', 80);
-        this.tone(1.8, 70, 38, 0.55, 'sine');
-        this.noiseBurst(0.5, 1800, 0.35, 'highpass');
-        break;
-      case 'rain':
-        // legacy single-shot; the continuous bed is driven by setRain()
-        this.setRain('rain', 0.5);
-        break;
-    }
-  }
-
-  /** Drive the continuous rain bed. Call with kind='off' to stop. The bed
-   *  is a single looping filtered-noise source that fades in/out smoothly,
-   *  much softer and less choppy than per-burst noise. */
-  setRain(kind: 'off' | 'rain' | 'thunder', intensity = 0.6): void {
-    this.ensure();
-    if (!this.ctx || !this.sfx || !this.noiseBuf) return;
-    const k = Math.max(0, Math.min(1, intensity));
-    // stop the bed when weather clears
-    if (kind === 'off') {
-      if (this.rainGain && this.ctx) {
-        const t = this.ctx.currentTime;
-        this.rainGain.gain.cancelScheduledValues(t);
-        this.rainGain.gain.setValueAtTime(this.rainGain.gain.value, t);
-        this.rainGain.gain.linearRampToValueAtTime(0, t + 1.5);
+  private makeNoise(color: 'white' | 'pink' | 'brown'): AudioBuffer {
+    const ctx = this.ctx!;
+    const len = ctx.sampleRate * 2;
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    let b0 = 0, b1 = 0, b2 = 0, last = 0;
+    for (let i = 0; i < len; i++) {
+      const w = Math.random() * 2 - 1;
+      if (color === 'white') d[i] = w;
+      else if (color === 'pink') {
+        // Paul Kellet's economy pink filter
+        b0 = 0.99765 * b0 + w * 0.099;
+        b1 = 0.963 * b1 + w * 0.2965;
+        b2 = 0.57 * b2 + w * 1.0527;
+        d[i] = (b0 + b1 + b2 + w * 0.1848) * 0.2;
+      } else {
+        last = (last + 0.02 * w) / 1.02;
+        d[i] = last * 3.5;
       }
-      const src = this.rainSrc;
-      if (src) setTimeout(() => { try { src.stop(); } catch { /* already */ } }, 1600);
-      this.rainSrc = null;
+    }
+    return buf;
+  }
+
+  private makeWave(harm: number[]): PeriodicWave {
+    const ctx = this.ctx!;
+    const real = new Float32Array(harm.length + 1);
+    const imag = new Float32Array(harm.length + 1);
+    harm.forEach((a, i) => { imag[i + 1] = a; });
+    return ctx.createPeriodicWave(real, imag);
+  }
+
+  /** Procedural reverb impulse: pre-delay, a few early reflections, then a
+   *  decorrelated stereo tail whose highs die away faster than its lows. */
+  private makeImpulse(dur: number, decay: number): AudioBuffer {
+    const ctx = this.ctx!;
+    const sr = ctx.sampleRate;
+    const len = Math.floor(sr * dur);
+    const buf = ctx.createBuffer(2, len, sr);
+    const pre = Math.floor(sr * 0.018);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      let lp = 0;
+      for (let i = pre; i < len; i++) {
+        const x = i / len;
+        const k = 0.75 - 0.68 * x; // lowpass coefficient: bright start, dark tail
+        lp += (Math.random() * 2 - 1 - lp) * k;
+        d[i] = lp * Math.pow(1 - x, decay);
+      }
+      for (let r = 0; r < 7; r++) {
+        const at = pre + Math.floor(sr * (0.006 + Math.random() * 0.07));
+        if (at < len) d[at] += (Math.random() < 0.5 ? -1 : 1) * (0.7 - r * 0.07);
+      }
+    }
+    return buf;
+  }
+
+  // ==========================================================================
+  // event plumbing
+  // ==========================================================================
+
+  /** Open a one-shot event on a pool's bus. Returns null when the pool is full —
+   *  the extra sound is simply skipped. `at` is an absolute context time. */
+  private open(pool: Pool, vol: number, o: { pan?: number; at?: number; to?: AudioNode } = {}): Ev | null {
+    const ctx = this.ctx;
+    const bus = o.to ?? (pool === 'sfx' ? this.sfx : pool === 'amb' ? this.amb : this.musicBus);
+    if (!ctx || !bus || vol <= 0.0003) return null;
+    if (this.live[pool] >= CAP[pool]) return null;
+    const out = ctx.createGain();
+    out.gain.value = vol;
+    const e: Ev = { t: o.at ?? ctx.currentTime + 0.005, out, nodes: [], live: 0, pool };
+    if (o.pan) {
+      const p = ctx.createStereoPanner();
+      p.pan.value = clamp(o.pan, -1, 1);
+      out.connect(p).connect(bus);
+      e.nodes.push(p);
+    } else {
+      out.connect(bus);
+    }
+    if (++this.live[pool] > this.livePeak[pool]) this.livePeak[pool] = this.live[pool];
+    return e;
+  }
+
+  /** Start a source inside an event; the event tears itself down after the last one ends. */
+  private run(e: Ev, src: AudioScheduledSourceNode, start: number, stop: number, offset?: number): void {
+    e.live++;
+    src.onended = () => {
+      src.disconnect();
+      if (--e.live <= 0) this.close(e);
+    };
+    if (offset !== undefined && src instanceof AudioBufferSourceNode) src.start(start, offset);
+    else src.start(start);
+    src.stop(stop);
+  }
+
+  private close(e: Ev): void {
+    for (const n of e.nodes) n.disconnect();
+    e.out.disconnect();
+    e.nodes.length = 0;
+    this.live[e.pool] = Math.max(0, this.live[e.pool] - 1);
+  }
+
+  /** Release an event that ended up with no sources. */
+  private seal(e: Ev | null): void { if (e && e.live === 0) this.close(e); }
+
+  /** Rate-limit a named sound so stacked triggers (a pile of pickups) don't phase. */
+  private gate(key: string, gap: number): boolean {
+    const now = this.ctx?.currentTime ?? 0;
+    const last = this.lastAt.get(key) ?? -1;
+    if (now - last < gap) return false;
+    this.lastAt.set(key, now);
+    return true;
+  }
+
+  /** Temporarily lower the music under a loud event, then recover smoothly. */
+  private duck(depth: number, hold: number, release = 1.8): void {
+    const g = this.musicDuck?.gain;
+    if (!g || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    const target = Math.min(g.value, 1 - depth);
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(g.value, t);
+    g.linearRampToValueAtTime(target, t + 0.05);
+    g.setValueAtTime(target, t + 0.05 + hold);
+    g.linearRampToValueAtTime(1, t + 0.05 + hold + release);
+  }
+
+  // ==========================================================================
+  // synthesis primitives
+  // ==========================================================================
+
+  /** Random crackle envelope: `count` grains, sharper with `sharp`→1, weighted
+   *  toward the start by `skew`, over a faint decaying floor. */
+  private grains(count: number, sharp: number, skew = 1.5, floor = 0.08): Float32Array {
+    const n = 192;
+    const c = new Float32Array(n);
+    const w = 1 + (1 - sharp) * 8;
+    for (let k = 0; k < count; k++) {
+      const p = Math.floor(Math.pow(Math.random(), skew) * (n - 6));
+      const a = 0.3 + Math.random() * 0.7;
+      for (let j = 0; j < w * 4 && p + j < n; j++) c[p + j] = Math.max(c[p + j], a * Math.exp(-j / w));
+    }
+    for (let i = 0; i < n; i++) {
+      const fade = 1 - i / n;
+      c[i] = Math.min(1, c[i] + floor * fade) * Math.sqrt(fade);
+    }
+    c[0] = 0;
+    c[n - 1] = 0;
+    return c;
+  }
+
+  /** Filtered noise layer with either a decay envelope or a grain curve. */
+  private nz(e: Ev, o: NzOpt): void {
+    const ctx = this.ctx!;
+    const t = e.t + (o.at ?? 0);
+    const src = ctx.createBufferSource();
+    src.buffer = o.color === 'pink' ? this.pink : o.color === 'brown' ? this.brown : this.white;
+    src.loop = true;
+    src.playbackRate.value = o.rate ?? 1;
+    let head: AudioNode = src;
+    if (o.type) {
+      const f = ctx.createBiquadFilter();
+      f.type = o.type;
+      f.frequency.setValueAtTime(o.f ?? 1000, t);
+      if (o.f1) f.frequency.exponentialRampToValueAtTime(Math.max(30, o.f1), t + o.dur);
+      f.Q.value = o.q ?? (o.type === 'bandpass' ? 1 : 0.7);
+      head.connect(f);
+      head = f;
+      e.nodes.push(f);
+    }
+    if (o.type2) {
+      const f = ctx.createBiquadFilter();
+      f.type = o.type2;
+      f.frequency.value = o.f2 ?? 1000;
+      f.Q.value = o.q2 ?? 0.7;
+      head.connect(f);
+      head = f;
+      e.nodes.push(f);
+    }
+    const g = ctx.createGain();
+    if (o.curve) {
+      const c = new Float32Array(o.curve.length);
+      for (let i = 0; i < c.length; i++) c[i] = o.curve[i] * o.vol;
+      g.gain.value = 0;
+      g.gain.setValueCurveAtTime(c, t, o.dur);
+    } else {
+      const a = o.attack ?? 0.003;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(o.vol, t + a);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + Math.max(a + 0.005, o.dur));
+    }
+    head.connect(g).connect(o.to ?? e.out);
+    e.nodes.push(g);
+    this.run(e, src, t, t + o.dur + 0.03, Math.random() * 1.5);
+  }
+
+  /** Oscillator layer with a pitch sweep and a fast-attack exponential decay. */
+  private tn(e: Ev, o: TnOpt): OscillatorNode {
+    const ctx = this.ctx!;
+    const t = e.t + (o.at ?? 0);
+    const osc = ctx.createOscillator();
+    if (o.wave) osc.setPeriodicWave(o.wave); else osc.type = o.type ?? 'sine';
+    osc.frequency.setValueAtTime(o.f, t);
+    if (o.f1 !== undefined) osc.frequency.exponentialRampToValueAtTime(Math.max(20, o.f1), t + (o.glide ?? o.dur));
+    if (o.detune) osc.detune.value = o.detune;
+    const g = ctx.createGain();
+    const a = o.attack ?? 0.004;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(o.vol, t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + Math.max(a + 0.005, o.dur));
+    let head: AudioNode = osc;
+    if (o.lp) {
+      const f = ctx.createBiquadFilter();
+      f.type = 'lowpass';
+      f.frequency.value = o.lp;
+      head.connect(f);
+      head = f;
+      e.nodes.push(f);
+    }
+    head.connect(g).connect(o.to ?? e.out);
+    e.nodes.push(g);
+    this.run(e, osc, t, t + o.dur + 0.03);
+    return osc;
+  }
+
+  /** Two-operator FM voice: bells, chimes, e-piano tines. */
+  private fm(e: Ev, o: { at?: number; f: number; ratio: number; index: number; dur: number; vol: number; idxDur?: number; attack?: number; to?: AudioNode }): void {
+    const ctx = this.ctx!;
+    const t = e.t + (o.at ?? 0);
+    const car = ctx.createOscillator();
+    car.frequency.value = o.f;
+    const mod = ctx.createOscillator();
+    mod.frequency.value = o.f * o.ratio;
+    const mg = ctx.createGain();
+    mg.gain.setValueAtTime(o.f * o.index, t);
+    mg.gain.exponentialRampToValueAtTime(Math.max(0.01, o.f * o.index * 0.04), t + (o.idxDur ?? o.dur * 0.4));
+    mod.connect(mg).connect(car.frequency);
+    const g = ctx.createGain();
+    const a = o.attack ?? 0.003;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(o.vol, t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + o.dur);
+    car.connect(g).connect(o.to ?? e.out);
+    e.nodes.push(mg, g);
+    this.run(e, car, t, t + o.dur + 0.03);
+    this.run(e, mod, t, t + o.dur + 0.03);
+  }
+
+  /** Formant voice: a buzzy glottal source through vowel-like bandpass
+   *  resonances, with pitch contour, vibrato, roughness and breath. */
+  private vox(e: Ev, o: VoxOpt): void {
+    const ctx = this.ctx!;
+    const t = e.t + (o.at ?? 0);
+    const d = o.dur;
+    const osc = ctx.createOscillator();
+    osc.type = o.type ?? 'sawtooth';
+    const pts = o.pitch;
+    osc.frequency.setValueAtTime(pts[0], t);
+    for (let i = 1; i < pts.length; i++) osc.frequency.linearRampToValueAtTime(pts[i], t + (d * i) / (pts.length - 1));
+    const env = ctx.createGain();
+    const a = o.attack ?? 0.02;
+    const rel = Math.min(o.release ?? d * 0.4, d - a);
+    env.gain.setValueAtTime(0.0001, t);
+    env.gain.linearRampToValueAtTime(o.vol, t + a);
+    env.gain.setValueAtTime(o.vol, t + d - rel);
+    env.gain.exponentialRampToValueAtTime(0.0001, t + d);
+    env.connect(o.to ?? e.out);
+    e.nodes.push(env);
+    let breath: AudioBufferSourceNode | null = null;
+    let bg: GainNode | null = null;
+    if (o.breath) {
+      breath = ctx.createBufferSource();
+      breath.buffer = this.pink;
+      breath.loop = true;
+      bg = ctx.createGain();
+      bg.gain.value = o.breath * 4;
+      breath.connect(bg);
+      e.nodes.push(bg);
+    }
+    for (const [fs, q, gain] of o.formants) {
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.Q.value = q;
+      bp.frequency.setValueAtTime(fs[0], t);
+      for (let i = 1; i < fs.length; i++) bp.frequency.linearRampToValueAtTime(fs[i], t + (d * i) / (fs.length - 1));
+      const fg = ctx.createGain();
+      fg.gain.value = gain * Math.sqrt(q) * 0.4; // narrow bands pass less energy — compensate
+      osc.connect(bp);
+      if (bg) bg.connect(bp);
+      bp.connect(fg).connect(env);
+      e.nodes.push(bp, fg);
+    }
+    if (o.direct) {
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = pts[0] * 3;
+      const dg = ctx.createGain();
+      dg.gain.value = o.direct;
+      osc.connect(lp).connect(dg).connect(env);
+      e.nodes.push(lp, dg);
+    }
+    const mod = (rate: number, cents: number, shape: OscillatorType): void => {
+      const l = ctx.createOscillator();
+      l.type = shape;
+      l.frequency.value = rate;
+      const lg = ctx.createGain();
+      lg.gain.value = cents;
+      l.connect(lg).connect(osc.detune);
+      e.nodes.push(lg);
+      this.run(e, l, t, t + d + 0.03);
+    };
+    if (o.vib) mod(o.vib[0], o.vib[1], 'sine');
+    if (o.rough) mod(o.rough[0], o.rough[1], 'triangle');
+    this.run(e, osc, t, t + d + 0.03);
+    if (breath) this.run(e, breath, t, t + d + 0.03, Math.random() * 1.5);
+  }
+
+  /** Stick-slip friction creak (doors, chests, saddles): a jittery low pulse
+   *  train rung through wood-like resonances. */
+  private creak(e: Ev, at: number, dur: number, r0: number, r1: number, vol: number, body = 1): void {
+    const ctx = this.ctx!;
+    const t = e.t + at;
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    const n = 24;
+    const curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) curve[i] = (r0 + (r1 - r0) * (i / (n - 1))) * (0.8 + Math.random() * 0.4);
+    osc.frequency.setValueCurveAtTime(curve, t, dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(vol, t + dur * 0.2);
+    g.gain.setValueAtTime(vol, t + dur * 0.7);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    for (const [f, q, gg] of [[720 * body, 7, 1], [1500 * body, 9, 0.7], [2900 * body, 10, 0.35]] as [number, number, number][]) {
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = f * rand(0.92, 1.08);
+      bp.Q.value = q;
+      const bg = ctx.createGain();
+      bg.gain.value = gg * 2.4;
+      osc.connect(bp).connect(bg).connect(g);
+      e.nodes.push(bp, bg);
+    }
+    g.connect(e.out);
+    e.nodes.push(g);
+    this.run(e, osc, t, t + dur + 0.03);
+  }
+
+  /** Resonant wooden knock: two body modes + a click. */
+  private knock(e: Ev, at: number, f: number, vol: number, dur = 0.12): void {
+    this.tn(e, { at, dur, f, f1: f * 0.92, vol: vol * 0.7 });
+    this.tn(e, { at, dur: dur * 0.6, f: f * 2.37, f1: f * 2.2, vol: vol * 0.32 });
+    this.nz(e, { at, dur: 0.025, vol: vol * 0.5, type: 'bandpass', f: f * 4, q: 1.2 });
+  }
+
+  // ==========================================================================
+  // block materials: dig / break / place / step
+  // ==========================================================================
+
+  /** Refine a SoundClass into a material using the block's name. */
+  private matFor(cls: SoundClass, id?: number): Mat {
+    if (id !== undefined && hasDef(id)) {
+      const n = def(id).name;
+      if (n === 'dirt' || n === 'farmland' || n === 'gravel') return 'gravel';
+      if (n === 'snow_grass') return 'snow';
+      if (n.endsWith('_leaves')) return 'grass';
+      if (n === 'white_wool' || n === 'cactus' || n.startsWith('bed')) return 'wool';
+      if (n === 'iron_block' || n === 'gold_block' || n === 'diamond_block' || n === 'emerald_block') return 'metal';
+      if (n === 'netherrack' || n === 'nether_quartz_ore' || n === 'magma' || n === 'nether_bricks') return 'nether';
+      if (n === 'soul_sand') return 'soul';
+      if (n === 'amethyst_ore') return 'amethyst';
+      if (cls === 'grass' && n !== 'grass_block' && n !== 'tnt') return 'plant';
+    }
+    return cls === 'none' ? 'none' : cls;
+  }
+
+  /** Dig/place sound for a block sound class. vol ≤ 0.3 reads as a mining hit,
+   *  otherwise a break/place; pass the block id for finer materials. */
+  dig(cls: SoundClass, vol: number, pitch = 1, id?: number): void {
+    this.ensure();
+    const act: Act = vol <= 0.3 ? 'hit' : vol < 0.95 ? 'place' : 'break';
+    if (act === 'hit' && !this.gate('dighit', 0.05)) return;
+    this.material(this.matFor(cls, id), act, vol, pitch);
+  }
+
+  /** Footstep on a block. */
+  step(cls: SoundClass, id?: number): void {
+    if (!this.gate('step', 0.06)) return;
+    this.ensure();
+    const m = this.matFor(cls, id);
+    this.material(m === 'none' ? 'stone' : m, 'step', 0.16, rand(0.9, 1.1));
+  }
+
+  private material(mat: Mat, act: Act, vol: number, pitch: number): void {
+    if (mat === 'none' || !this.ctx) return;
+    const [gBreak, gStep] = MAT_GAIN[mat];
+    const trim = act === 'step' || (mat === 'glass' && act !== 'break') ? gStep : gBreak;
+    const e = this.open('sfx', vol * trim * (act === 'hit' ? 3.4 : 1), { pan: rand(-0.06, 0.06) });
+    if (!e) return;
+    const p = pitch * rand(0.92, 1.08);
+    const big = act === 'break' || act === 'place';
+    const len = act === 'step' ? 0.7 : act === 'hit' ? 0.6 : 1;
+    switch (mat) {
+      case 'stone': {
+        this.nz(e, { dur: 0.03, vol: 0.5, type: 'bandpass', f: 2600 * p, q: 1.3 });
+        this.nz(e, { dur: 0.17 * len, vol: 0.9, color: 'pink', type: 'bandpass', f: 2100 * p, f1: 900, q: 0.6, curve: this.grains(big ? 8 : 3, 0.85) });
+        this.tn(e, { dur: 0.07, f: 170 * p, f1: 70, vol: big ? 0.25 : 0.15 });
+        break;
+      }
+      case 'nether': {
+        this.nz(e, { dur: 0.2 * len, vol: 0.8, color: 'pink', type: 'lowpass', f: 1100 * p, f1: 380, curve: this.grains(big ? 9 : 4, 0.7) });
+        this.nz(e, { dur: 0.08, vol: 0.3, type: 'bandpass', f: 520 * p, q: 3 });
+        this.tn(e, { dur: 0.1, f: 120 * p, f1: 55, vol: 0.3 });
+        break;
+      }
+      case 'wood': {
+        this.knock(e, 0, (act === 'step' ? 240 : 330) * p, big ? 0.6 : 0.45, 0.13 * len + 0.02);
+        this.nz(e, { dur: 0.1 * len, vol: 0.35, color: 'pink', type: 'bandpass', f: 900 * p, q: 0.9, curve: this.grains(big ? 5 : 2, 0.75) });
+        if (big) this.nz(e, { at: 0.02, dur: 0.16, vol: 0.28, type: 'bandpass', f: 1800 * p, q: 1.5, curve: this.grains(6, 0.9, 1.2) });
+        break;
+      }
+      case 'grass': case 'plant': {
+        const hi = mat === 'plant' ? 1.3 : 1;
+        this.nz(e, { dur: 0.2 * len, vol: 0.9, type: 'bandpass', f: 2600 * p * hi, q: 0.8, curve: this.grains(big ? 16 : 8, 0.85, 1.2) });
+        this.nz(e, { dur: 0.12 * len, vol: 0.28, color: 'pink', type: 'lowpass', f: 600 * p, attack: 0.01 });
+        if (big && mat === 'plant') this.tn(e, { dur: 0.03, f: 1400 * p, f1: 700, vol: 0.06 });
+        break;
+      }
+      case 'gravel': {
+        this.nz(e, { dur: 0.19 * len, vol: 0.95, color: 'pink', type: 'bandpass', f: 1300 * p, q: 0.7, curve: this.grains(big ? 16 : 9, 0.95, 1.3) });
+        this.nz(e, { dur: 0.08, vol: 0.4, color: 'brown', type: 'lowpass', f: 380 * p });
+        break;
+      }
+      case 'sand': case 'soul': {
+        this.nz(e, { dur: 0.24 * len, vol: 0.55, type: 'highpass', f: 2200 * p, type2: 'lowpass', f2: 7500, curve: this.grains(big ? 22 : 12, 0.55, 1.1, 0.25) });
+        this.nz(e, { dur: 0.12 * len, vol: 0.3, color: 'pink', type: 'lowpass', f: 900 * p, attack: 0.015 });
+        if (mat === 'soul' && chance(act === 'step' ? 0.25 : 0.6)) {
+          // soul sand: a faint ghostly exhale under the grit
+          this.vox(e, { dur: 0.45, vol: 0.05, pitch: [rand(170, 220), rand(140, 170)], type: 'triangle', formants: [[[400, 700], 4, 1]], vib: [5, 20], attack: 0.1 });
+        }
+        break;
+      }
+      case 'snow': {
+        this.nz(e, { dur: 0.18 * len, vol: 0.85, color: 'pink', type: 'bandpass', f: 1100 * p, q: 1.4, type2: 'lowpass', f2: 3000, curve: this.grains(big ? 12 : 7, 0.6, 1.2, 0.2) });
+        this.nz(e, { dur: 0.1 * len, vol: 0.2, color: 'brown', type: 'lowpass', f: 400 });
+        break;
+      }
+      case 'wool': {
+        this.nz(e, { dur: 0.16 * len, vol: 0.55, color: 'pink', type: 'lowpass', f: 750 * p, curve: this.grains(4, 0.3, 1.2, 0.35) });
+        this.nz(e, { dur: 0.1, vol: 0.12, type: 'bandpass', f: 1800 * p, q: 0.8, curve: this.grains(5, 0.5) });
+        break;
+      }
+      case 'metal': {
+        this.nz(e, { dur: 0.025, vol: 0.45, type: 'highpass', f: 2800 });
+        const base = (act === 'step' ? 420 : 560) * p;
+        const ring = (big ? 0.55 : 0.22) * len;
+        [[1, 0.2], [2.76, 0.12], [5.4, 0.07], [8.93, 0.04]].forEach(([m, v], k) =>
+          this.tn(e, { dur: ring / (1 + k * 0.5), f: base * m, vol: v }));
+        this.tn(e, { dur: 0.07, f: 160 * p, f1: 80, vol: 0.2 });
+        break;
+      }
+      case 'glass': {
+        if (act === 'break') {
+          // shatter: a burst of bright shards over a gritty hiss
+          this.nz(e, { dur: 0.42, vol: 0.55, type: 'highpass', f: 3200, curve: this.grains(18, 0.95, 1.8) });
+          for (let i = 0; i < 7; i++) {
+            this.tn(e, { at: Math.pow(Math.random(), 2) * 0.22, dur: rand(0.06, 0.28), f: rand(2400, 6800) * p, vol: rand(0.03, 0.08) });
+          }
+          this.tn(e, { dur: 0.06, f: 220, f1: 90, vol: 0.18 });
+        } else {
+          // place/step/hit on glass: a stone click with a glassy tick
+          this.nz(e, { dur: 0.03, vol: 0.45, type: 'bandpass', f: 3000 * p, q: 1.5 });
+          this.nz(e, { dur: 0.1 * len, vol: 0.4, color: 'pink', type: 'lowpass', f: 1700 * p, curve: this.grains(3, 0.8) });
+          this.tn(e, { dur: 0.05, f: 3400 * p, vol: 0.05 });
+        }
+        break;
+      }
+      case 'amethyst': {
+        this.nz(e, { dur: 0.03, vol: 0.4, type: 'bandpass', f: 2600 * p, q: 1.3 });
+        const notes = [0, 3, 5, 7, 10, 12];
+        const n = act === 'step' ? 1 : big ? 3 : 2;
+        for (let i = 0; i < n; i++) {
+          const f = 1320 * Math.pow(2, notes[(Math.random() * notes.length) | 0] / 12) * p;
+          this.fm(e, { at: i * 0.045, f, ratio: 2.76, index: 0.9, dur: big ? 1.1 : 0.6, vol: 0.09 });
+        }
+        break;
+      }
+    }
+    this.seal(e);
+  }
+
+  // ==========================================================================
+  // one-shot effects
+  // ==========================================================================
+
+  /** Play a named effect; vol (0..1) scales it, e.g. for distance. */
+  play(name: SfxName, vol = 1): void {
+    this.ensure();
+    if (!this.ctx) return;
+    const gaps: Partial<Record<SfxName, number>> = {
+      pop: 0.035, select: 0.03, click: 0.025, hit: 0.04, eat: 0.07, splash: 0.08, arrowHit: 0.03,
+      hoof: 0.05, fuse: 0.12, bubble: 0.03, lavaPop: 0.05, fail: 0.08, level: 0.1,
+    };
+    const g = gaps[name];
+    if (g !== undefined && !this.gate(name, g)) return;
+    if (name === 'rain') { this.setRain('rain', 0.5); return; }
+    const e = this.open('sfx', (SFX_GAIN[name] ?? 1) * clamp(vol, 0, 1.5));
+    if (!e) return;
+    this.level = clamp(vol, 0, 1);
+    this.buildSfx(e, name);
+    this.seal(e);
+  }
+
+  private buildSfx(e: Ev, name: SfxName): void {
+    switch (name) {
+      case 'pop': {
+        // item pickup: a soft bubbly blip at a wide random pitch, like MC
+        const p = rand(0.75, 1.6);
+        this.tn(e, { dur: 0.07, f: 540 * p, f1: 1150 * p, glide: 0.035, vol: 0.2, attack: 0.002 });
+        this.tn(e, { dur: 0.05, f: 1080 * p, f1: 2100 * p, glide: 0.03, vol: 0.05 });
+        this.nz(e, { dur: 0.012, vol: 0.05, type: 'highpass', f: 3000 });
+        break;
+      }
+      case 'hurt': {
+        // the player's "oof": a short voiced grunt plus a body thump
+        const p = rand(0.94, 1.08);
+        this.vox(e, {
+          dur: 0.22, vol: 0.6, pitch: [205 * p, 228 * p, 150 * p], attack: 0.008, release: 0.12,
+          formants: [[[640, 560], 5, 1], [[1100, 950], 6, 0.55], [[2450], 8, 0.15]],
+          rough: [32, 30], breath: 0.1, direct: 0.25,
+        });
+        this.tn(e, { dur: 0.1, f: 115, f1: 55, vol: 0.3 });
+        this.nz(e, { dur: 0.06, vol: 0.25, color: 'pink', type: 'lowpass', f: 900 });
+        this.duck(0.25, 0.1, 0.8);
+        break;
+      }
+      case 'hit': {
+        // a meaty punch on a mob: sub thump, flesh slap, a little swish
+        const p = rand(0.9, 1.1);
+        this.tn(e, { dur: 0.13, f: 150 * p, f1: 52, vol: 0.42 });
+        this.nz(e, { dur: 0.09, vol: 0.45, color: 'pink', type: 'lowpass', f: 1600 * p, f1: 350 });
+        this.nz(e, { dur: 0.025, vol: 0.2, type: 'bandpass', f: 2300 * p, q: 1.2 });
+        this.nz(e, { dur: 0.1, vol: 0.06, type: 'bandpass', f: 900, f1: 2400, q: 1.5, attack: 0.03 });
+        break;
+      }
+      case 'eat': {
+        // a crunchy munch with a little mouth resonance
+        const p = rand(0.85, 1.15);
+        this.nz(e, { dur: 0.16, vol: 0.55, color: 'pink', type: 'bandpass', f: 1500 * p, q: 1.1, curve: this.grains(7, 0.85, 1.1, 0.15) });
+        this.nz(e, { dur: 0.1, vol: 0.18, type: 'highpass', f: 3500, curve: this.grains(5, 0.9) });
+        this.tn(e, { dur: 0.07, f: 190 * p, f1: 110, vol: 0.12, attack: 0.01 });
+        break;
+      }
+      case 'burp': {
+        this.vox(e, {
+          dur: 0.4, vol: 0.3, pitch: [125, 118, 88], attack: 0.02, release: 0.15,
+          formants: [[[480, 560], 5, 1], [[850, 900], 6, 0.5]], rough: [26, 70], breath: 0.08, direct: 0.3,
+        });
+        break;
+      }
+      case 'click': {
+        // UI click: a crisp woody "tock"
+        this.tn(e, { dur: 0.035, f: 1650, f1: 1250, vol: 0.14, attack: 0.001 });
+        this.tn(e, { dur: 0.05, f: 620, f1: 480, vol: 0.1, attack: 0.001 });
+        this.nz(e, { dur: 0.012, vol: 0.12, type: 'bandpass', f: 4000, q: 1 });
+        break;
+      }
+      case 'select': {
+        this.tn(e, { dur: 0.03, f: 1900, f1: 1700, vol: 0.05, attack: 0.001 });
+        this.nz(e, { dur: 0.01, vol: 0.05, type: 'bandpass', f: 5000, q: 1.5 });
+        break;
+      }
+      case 'fail': {
+        this.tn(e, { dur: 0.1, f: 200, f1: 160, vol: 0.12, type: 'square', lp: 1200 });
+        this.tn(e, { at: 0.08, dur: 0.14, f: 150, f1: 110, vol: 0.12, type: 'square', lp: 900 });
+        break;
+      }
+      case 'craft': {
+        // wooden bench thunk + a light sparkle of the new item
+        this.knock(e, 0, 280, 0.45, 0.1);
+        this.nz(e, { dur: 0.08, vol: 0.2, color: 'pink', type: 'bandpass', f: 1200, curve: this.grains(4, 0.8) });
+        this.fm(e, { at: 0.06, f: 1568, ratio: 3.01, index: 0.6, dur: 0.5, vol: 0.05 });
+        this.fm(e, { at: 0.12, f: 2093, ratio: 3.01, index: 0.5, dur: 0.6, vol: 0.04 });
+        break;
+      }
+      case 'level': {
+        // bright two-note chime (xp / success)
+        this.fm(e, { f: 1046.5, ratio: 2, index: 1.2, dur: 0.9, vol: 0.12, idxDur: 0.2 });
+        this.fm(e, { at: 0.11, f: 1568, ratio: 2, index: 1.1, dur: 1.1, vol: 0.1, idxDur: 0.25 });
+        this.fm(e, { at: 0.11, f: 2093, ratio: 3.5, index: 0.5, dur: 1.0, vol: 0.04 });
+        break;
+      }
+      case 'advancement': {
+        // a toast sliding in + a rising major arpeggio with shimmer
+        this.nz(e, { dur: 0.35, vol: 0.06, type: 'bandpass', f: 700, f1: 3000, q: 1.2, attack: 0.2 });
+        [523.25, 659.25, 783.99, 1046.5].forEach((f, i) =>
+          this.fm(e, { at: 0.12 + i * 0.1, f, ratio: 2, index: 0.9, dur: 1.4 - i * 0.1, vol: 0.09, idxDur: 0.3 }));
+        this.fm(e, { at: 0.5, f: 2093, ratio: 3.5, index: 0.4, dur: 1.4, vol: 0.035 });
+        this.duck(0.3, 0.8, 1.2);
+        break;
+      }
+      case 'equip': {
+        // armor on: a cloth rustle with a few chain-mail jingles
+        this.nz(e, { dur: 0.22, vol: 0.4, color: 'pink', type: 'bandpass', f: 1400, q: 0.8, curve: this.grains(8, 0.5, 1.2, 0.2) });
+        for (let i = 0; i < 4; i++) this.tn(e, { at: rand(0.02, 0.16), dur: rand(0.05, 0.12), f: rand(3200, 6000), vol: 0.03 });
+        this.knock(e, 0.02, 220, 0.2, 0.08);
+        break;
+      }
+      case 'doorOpen': {
+        // latch click, then a rising hinge creak
+        this.knock(e, 0, 520, 0.3, 0.05);
+        this.creak(e, 0.03, rand(0.26, 0.34), rand(55, 70), rand(90, 120), 0.07);
+        this.knock(e, 0.28, 240, 0.18, 0.1);
+        break;
+      }
+      case 'doorClose': {
+        // a short creak into a solid wooden clunk
+        this.creak(e, 0, 0.14, rand(95, 110), rand(60, 75), 0.05);
+        this.knock(e, 0.12, 190, 0.6, 0.16);
+        this.nz(e, { at: 0.12, dur: 0.12, vol: 0.25, color: 'brown', type: 'lowpass', f: 300 });
+        break;
+      }
+      case 'chestOpen': {
+        // heavy lid: a slow low creak and a soft settle
+        this.knock(e, 0, 300, 0.2, 0.06);
+        this.creak(e, 0.02, rand(0.45, 0.55), rand(38, 45), rand(62, 72), 0.08, 0.8);
+        this.nz(e, { at: 0.05, dur: 0.3, vol: 0.05, color: 'pink', type: 'bandpass', f: 600, q: 0.8, attack: 0.1 });
+        break;
+      }
+      case 'chestClose': {
+        this.creak(e, 0, 0.16, 70, 45, 0.05, 0.8);
+        this.knock(e, 0.15, 150, 0.7, 0.18);
+        this.nz(e, { at: 0.15, dur: 0.16, vol: 0.35, color: 'brown', type: 'lowpass', f: 260 });
+        break;
+      }
+      case 'plateOn': {
+        this.knock(e, 0, 340, 0.3, 0.06);
+        this.nz(e, { dur: 0.04, vol: 0.14, color: 'pink', type: 'lowpass', f: 800 });
+        break;
+      }
+      case 'plateOff': {
+        this.knock(e, 0, 420, 0.22, 0.05);
+        break;
+      }
+      case 'explode': {
+        // crack → roaring body → sub thump → rolling debris tail, into the reverb
+        this.nz(e, { dur: 0.06, vol: 0.9, type: 'highpass', f: 1200 });
+        this.nz(e, { dur: 1.3, vol: 1.0, color: 'brown', type: 'lowpass', f: 1400, f1: 140, attack: 0.004 });
+        this.tn(e, { dur: 0.9, f: 70, f1: 26, vol: 0.85 });
+        this.nz(e, { at: 0.05, dur: 2.6, vol: 0.55, color: 'brown', type: 'lowpass', f: 320, f1: 90, curve: this.grains(10, 0.3, 1.3, 0.5) });
+        this.nz(e, { at: 0.1, dur: 1.4, vol: 0.18, color: 'pink', type: 'bandpass', f: 1600, q: 0.8, curve: this.grains(26, 0.95, 1.4, 0.05) });
+        this.duck(0.7 * this.level, 0.6, 2.5);
+        break;
+      }
+      case 'bow': {
+        // string twang + arrow whoosh
+        this.tn(e, { dur: 0.16, f: 190, f1: 165, vol: 0.2, type: 'triangle', lp: 1400 });
+        this.tn(e, { dur: 0.08, f: 380, f1: 330, vol: 0.08, type: 'sawtooth', lp: 1800 });
+        this.nz(e, { dur: 0.22, vol: 0.22, type: 'bandpass', f: 2800, f1: 700, q: 1.4, attack: 0.01 });
+        break;
+      }
+      case 'arrowHit': {
+        // thunk + the shaft quivering
+        this.knock(e, 0, 260, 0.45, 0.08);
+        const q = this.tn(e, { dur: 0.28, f: 180, vol: 0.08, type: 'triangle' });
+        const ctx = this.ctx!;
+        const l = ctx.createOscillator();
+        l.frequency.value = 34;
+        const lg = ctx.createGain();
+        lg.gain.value = 60;
+        l.connect(lg).connect(q.detune);
+        e.nodes.push(lg);
+        this.run(e, l, e.t, e.t + 0.3);
+        break;
+      }
+      case 'snap': {
+        // something breaks: a dry crack with splinters
+        this.nz(e, { dur: 0.12, vol: 0.6, type: 'highpass', f: 1500, curve: this.grains(4, 0.95, 1.6) });
+        this.tn(e, { dur: 0.05, f: 900, f1: 200, vol: 0.18, type: 'triangle' });
+        this.tn(e, { dur: 0.07, f: 140, f1: 70, vol: 0.2 });
+        break;
+      }
+      case 'fuse': {
+        // a lit fuse: sizzling, spitting hiss
+        this.nz(e, { dur: 0.05, vol: 0.3, type: 'bandpass', f: 3000, q: 1.2 });
+        this.nz(e, { dur: 1.3, vol: 0.2, type: 'highpass', f: 3200, type2: 'lowpass', f2: 9000, curve: this.grains(45, 0.8, 1, 0.45) });
+        this.nz(e, { dur: 1.3, vol: 0.06, type: 'bandpass', f: 6000, q: 2, attack: 0.1 });
+        break;
+      }
+      case 'whoosh': {
+        const p = rand(0.85, 1.2);
+        this.nz(e, { dur: 0.2, vol: 0.13, type: 'bandpass', f: 700 * p, f1: 2400 * p, q: 1.6, attack: 0.07 });
+        break;
+      }
+      case 'lowdur': {
+        this.tn(e, { dur: 0.08, f: 880, f1: 760, vol: 0.09, type: 'square', lp: 2400 });
+        this.tn(e, { at: 0.08, dur: 0.1, f: 660, f1: 520, vol: 0.08, type: 'square', lp: 2000 });
+        break;
+      }
+      case 'thunder': {
+        // a sharp crack, then a long rolling rumble that swells and recedes
+        this.nz(e, { dur: 0.25, vol: 0.6, type: 'highpass', f: 900, curve: this.grains(8, 0.95, 2) });
+        this.nz(e, { at: 0.05, dur: rand(4.5, 6.5), vol: 0.9, color: 'brown', type: 'lowpass', f: 420, f1: 120, curve: this.grains(7, 0.05, 1.1, 0.35) });
+        this.tn(e, { at: 0.05, dur: 2.2, f: 55, f1: 30, vol: 0.4, attack: 0.08 });
+        this.duck(0.55 * this.level, 1.5, 3);
+        break;
+      }
+      case 'splash': {
+        this.nz(e, { dur: 0.45, vol: 0.4, type: 'bandpass', f: 1100, f1: 600, q: 0.7, attack: 0.015 });
+        this.nz(e, { dur: 0.25, vol: 0.2, type: 'highpass', f: 3000, curve: this.grains(10, 0.8) });
+        this.bubbles(e, 5, 0.3, 0.06);
+        break;
+      }
+      case 'bubble': {
+        this.bubbles(e, 1, 0, 0.07);
+        break;
+      }
+      case 'submerge': {
+        this.nz(e, { dur: 0.45, vol: 0.4, type: 'lowpass', f: 900, f1: 180 });
+        this.tn(e, { dur: 0.35, f: 360, f1: 110, vol: 0.14 });
+        this.bubbles(e, 6, 0.5, 0.05);
+        break;
+      }
+      case 'emerge': {
+        this.nz(e, { dur: 0.3, vol: 0.3, type: 'bandpass', f: 1400, f1: 2600, q: 0.8 });
+        this.nz(e, { dur: 0.18, vol: 0.12, type: 'highpass', f: 3500, curve: this.grains(8, 0.8) });
+        // a quick gasp of air
+        this.nz(e, { at: 0.12, dur: 0.28, vol: 0.12, color: 'pink', type: 'bandpass', f: 1500, q: 1.5, attack: 0.08 });
+        break;
+      }
+      case 'hoof': {
+        const p = rand(0.9, 1.12);
+        this.knock(e, 0, 480 * p, 0.35, 0.07);
+        this.nz(e, { dur: 0.08, vol: 0.2, color: 'pink', type: 'lowpass', f: 700 * p, curve: this.grains(4, 0.8) });
+        this.tn(e, { dur: 0.06, f: 110, f1: 60, vol: 0.18 });
+        break;
+      }
+      case 'mount': {
+        // saddle leather creak + a settle
+        this.creak(e, 0, 0.3, 30, 45, 0.05, 0.6);
+        this.nz(e, { dur: 0.15, vol: 0.18, color: 'pink', type: 'bandpass', f: 800, curve: this.grains(4, 0.4) });
+        this.tn(e, { at: 0.2, dur: 0.1, f: 120, f1: 70, vol: 0.15 });
+        break;
+      }
+      case 'lavaPop': {
+        this.tn(e, { dur: 0.06, f: rand(180, 320), f1: rand(600, 900), glide: 0.03, vol: 0.12 });
+        this.nz(e, { dur: 0.25, vol: 0.1, color: 'pink', type: 'bandpass', f: 2000, curve: this.grains(10, 0.9, 1.2) });
+        break;
+      }
+      case 'rain': break;
+    }
+  }
+
+  /** Short rising "bloop"s — bubbles breaking. */
+  private bubbles(e: Ev, n: number, spread: number, vol: number): void {
+    for (let i = 0; i < n; i++) {
+      const f = rand(380, 900);
+      this.tn(e, { at: Math.random() * spread, dur: rand(0.04, 0.08), f, f1: f * rand(1.6, 2.3), vol: vol * rand(0.5, 1), attack: 0.003 });
+    }
+  }
+
+  // ==========================================================================
+  // weather + underwater beds
+  // ==========================================================================
+
+  /** Pre-rendered rain texture: soft hiss plus thousands of tiny droplet ticks,
+   *  wrapping seamlessly so it loops without a seam. Built once, on demand. */
+  private makeRain(): AudioBuffer {
+    const ctx = this.ctx!;
+    const sr = ctx.sampleRate;
+    const len = Math.floor(sr * 3);
+    const buf = ctx.createBuffer(2, len, sr);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      let b0 = 0, b1 = 0, b2 = 0;
+      for (let i = 0; i < len; i++) {
+        const w = Math.random() * 2 - 1;
+        b0 = 0.99765 * b0 + w * 0.099;
+        b1 = 0.963 * b1 + w * 0.2965;
+        b2 = 0.57 * b2 + w * 1.0527;
+        d[i] = (b0 + b1 + b2 + w * 0.1848) * 0.035;
+      }
+      // each droplet: a damped sinusoid via a two-pole resonator recurrence
+      // (no sin/exp per sample, so the whole texture builds in a few ms)
+      for (let k = 0; k < 2400; k++) {
+        const at = (Math.random() * len) | 0;
+        const w = (2 * Math.PI * (1500 + Math.random() * 5000)) / sr;
+        const tau = (0.0005 + Math.random() * 0.0025) * sr;
+        const rr = Math.exp(-1 / tau);
+        const c1 = 2 * rr * Math.cos(w), c2 = -rr * rr;
+        let y1 = (0.04 + Math.pow(Math.random(), 3) * 0.45) * Math.sin(w), y2 = 0;
+        const n = Math.floor(tau * 4);
+        for (let j = 0; j < n; j++) {
+          d[(at + j) % len] += y1;
+          const y = c1 * y1 + c2 * y2;
+          y2 = y1;
+          y1 = y;
+        }
+      }
+    }
+    return buf;
+  }
+
+  /** Drive the continuous rain bed. Call with kind='off' to stop. The bed is a
+   *  looping pre-rendered rain texture that fades in/out smoothly; under a
+   *  roof (sheltered) it turns into a muffled drumming. */
+  setRain(kind: 'off' | 'rain' | 'thunder', intensity = 0.6, sheltered = false): void {
+    this.ensure();
+    const ctx = this.ctx;
+    if (!ctx || !this.amb) return;
+    const k = clamp(intensity, 0, 1);
+    if (kind === 'off') {
+      const r = this.rain;
+      if (r) {
+        const t = ctx.currentTime;
+        this.glide(r.g.gain, 0, 1.5);
+        r.src.stop(t + 1.6);
+        this.rain = null;
+      }
       this.rainState = 'off';
       return;
     }
-    // (re)create the bed if it's not running or the character changed
-    if (!this.rainSrc || this.rainState === 'off') {
-      const src = this.ctx.createBufferSource();
-      src.buffer = this.noiseBuf;
+    if (!this.rain) {
+      if (!this.rainBuf) this.rainBuf = this.makeRain();
+      const src = ctx.createBufferSource();
+      src.buffer = this.rainBuf;
       src.loop = true;
-      src.playbackRate.value = 0.6;
-      // two stacked filters for a softer "shhh" character
-      const hp = this.ctx.createBiquadFilter();
-      hp.type = 'highpass'; hp.frequency.value = 1400;
-      const lp = this.ctx.createBiquadFilter();
-      lp.type = 'lowpass'; lp.frequency.value = 6000;
-      const g = this.ctx.createGain();
+      const hp = ctx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.value = 350;
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 6000;
+      const g = ctx.createGain();
       g.gain.value = 0;
-      src.connect(hp).connect(lp).connect(g).connect(this.sfx);
-      src.start();
-      this.rainSrc = src;
-      this.rainFilter = lp;
-      this.rainGain = g;
-      this.rainState = kind;
+      src.connect(hp).connect(lp).connect(g).connect(this.amb);
+      // a low roar layer for heavy downpours
+      const roarSrc = ctx.createBufferSource();
+      roarSrc.buffer = this.brown;
+      roarSrc.loop = true;
+      const rlp = ctx.createBiquadFilter();
+      rlp.type = 'lowpass';
+      rlp.frequency.value = 500;
+      const roar = ctx.createGain();
+      roar.gain.value = 0;
+      roarSrc.connect(rlp).connect(roar).connect(g);
+      const nodes: AudioNode[] = [hp, lp, g, rlp, roar, roarSrc];
+      src.onended = () => {
+        try { roarSrc.stop(); } catch { /* already */ }
+        src.disconnect();
+        for (const n of nodes) n.disconnect();
+      };
+      src.start(0, Math.random() * 3);
+      roarSrc.start(0, Math.random() * 1.5);
+      this.rain = { src, g, lp, roar, nodes };
     }
     this.rainState = kind;
-    // fade to target volume
-    if (this.rainGain && this.ctx) {
-      const t = this.ctx.currentTime;
-      const target = kind === 'thunder' ? 0.07 * k : 0.05 * k;
-      this.rainGain.gain.cancelScheduledValues(t);
-      this.rainGain.gain.setValueAtTime(this.rainGain.gain.value, t);
-      this.rainGain.gain.linearRampToValueAtTime(target, t + 1.2);
-    }
-    // a few sparse "plink" drips layered on top for texture
-    const drips = 1 + Math.floor(k * 3);
-    for (let i = 0; i < drips; i++) {
-      const when = 0.1 + Math.random() * 1.4;
-      this.tone(0.03 + Math.random() * 0.03, 700 + Math.random() * 900, 280 + Math.random() * 300, 0.012 * k, 'sine', when);
-    }
+    const r = this.rain;
+    this.glide(r.g.gain, (kind === 'thunder' ? 0.25 : 0.18) * (0.35 + 0.65 * k) * (sheltered ? 0.7 : 1), 1.2);
+    this.glide(r.roar.gain, (kind === 'thunder' ? 0.25 * k : 0.1 * k) * (sheltered ? 1.6 : 1), 1.2);
+    this.glide(r.lp.frequency, sheltered ? 900 : kind === 'thunder' ? 7500 : 5200 + 1800 * k, 1.2);
   }
 
   /** Muffle the whole mix and run a soft bubble bed while the head is submerged. */
   setUnderwater(on: boolean): void {
     this.ensure();
-    if (!this.ctx || !this.uwFilter || !this.sfx || !this.noiseBuf) return;
+    const ctx = this.ctx;
+    if (!ctx || !this.uwFilter || !this.amb) return;
     if (on === this.underwater) return;
     this.underwater = on;
-    const t = this.ctx.currentTime;
-    // ramp the master lowpass: muffled while under, transparent above
-    this.uwFilter.frequency.cancelScheduledValues(t);
-    this.uwFilter.frequency.setValueAtTime(this.uwFilter.frequency.value, t);
-    this.uwFilter.frequency.exponentialRampToValueAtTime(on ? 620 : 20000, t + 0.45);
-    if (on) {
-      // a low, gently wavering bubble bed
-      const src = this.ctx.createBufferSource();
-      src.buffer = this.noiseBuf; src.loop = true; src.playbackRate.value = 0.42;
-      const lp = this.ctx.createBiquadFilter();
-      lp.type = 'lowpass'; lp.frequency.value = 500; lp.Q.value = 0.8;
-      const g = this.ctx.createGain(); g.gain.value = 0;
-      g.gain.linearRampToValueAtTime(0.05, t + 0.5);
-      src.connect(lp).connect(g).connect(this.sfx);
+    const t = ctx.currentTime;
+    const f = this.uwFilter.frequency;
+    f.cancelScheduledValues(t);
+    f.setValueAtTime(f.value, t);
+    f.exponentialRampToValueAtTime(on ? 600 : 20000, t + 0.45);
+    if (on && !this.uw) {
+      const src = ctx.createBufferSource();
+      src.buffer = this.brown;
+      src.loop = true;
+      src.playbackRate.value = 0.6;
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 420;
+      lp.Q.value = 0.8;
+      const g = ctx.createGain();
+      g.gain.value = 0;
+      src.connect(lp).connect(g).connect(this.amb);
+      src.onended = () => { src.disconnect(); lp.disconnect(); g.disconnect(); };
       src.start();
-      this.uwBubbleSrc = src; this.uwBubbleGain = g;
-    } else if (this.uwBubbleGain && this.uwBubbleSrc) {
-      const g = this.uwBubbleGain; const src = this.uwBubbleSrc;
-      g.gain.cancelScheduledValues(t);
-      g.gain.setValueAtTime(g.gain.value, t);
-      g.gain.linearRampToValueAtTime(0, t + 0.4);
-      setTimeout(() => { try { src.stop(); } catch { /* already stopped */ } }, 600);
-      this.uwBubbleSrc = null; this.uwBubbleGain = null;
+      this.glide(g.gain, 0.12, 0.5);
+      this.uw = { src, g, nodes: [lp] };
+      this.bubbleT = 0.3;
+    } else if (!on && this.uw) {
+      this.glide(this.uw.g.gain, 0, 0.4);
+      this.uw.src.stop(t + 0.5);
+      this.uw = null;
     }
   }
 
-  /** A short looping weather bed; callers retrigger it every ~1-2 seconds. */
+  /** A short weather gesture; callers retrigger it every ~1-2 seconds. */
   weatherLoop(kind: 'rain' | 'thunder' | 'snow', intensity: number, isNight = false, sheltered = false): void {
     this.ensure();
-    if (!this.ctx || !this.sfx) return;
-    const k = Math.max(0, Math.min(1, intensity));
+    if (!this.ctx) return;
+    const k = clamp(intensity, 0, 1);
     if (k <= 0.02) return;
     if (kind === 'snow') {
-      this.noiseBurst(2.0, 1800, 0.025 * k, 'bandpass', 900);
-      if (Math.random() < 0.28) this.windGust(1.4 + Math.random() * 1.2, 0.045 * k, isNight);
+      // snowfall is near-silent: a hushed cold breeze now and then
+      if (chance(0.45)) this.windGust(rand(2.5, 4), 0.07 * k, isNight);
       return;
     }
-
-    const wet = sheltered ? 0.45 : 1;
-    this.noiseBurst(2.0, 4200, 0.06 * k * wet, 'highpass');
-    this.noiseBurst(2.0, 1350, 0.055 * k * wet, 'bandpass', 900);
-    this.noiseBurst(1.7, 520, 0.02 * k, 'lowpass', 360);
-    const drops = 2 + Math.floor(k * 5);
-    for (let i = 0; i < drops; i++) {
-      const when = 0.08 + Math.random() * 1.55;
-      this.tone(0.035 + Math.random() * 0.035, 680 + Math.random() * 840, 260 + Math.random() * 360, 0.018 * k, 'triangle', when);
-      if (Math.random() < 0.35) this.noiseBurst(0.05, 2300 + Math.random() * 1200, 0.025 * k, 'bandpass');
-    }
-    if (kind === 'thunder') {
-      this.windGust(1.8, 0.05 * k, true);
-      if (Math.random() < 0.18) this.noiseBurst(0.55, 220, 0.08 * k, 'lowpass', 90);
-    }
+    this.setRain(kind, k, sheltered);
   }
 
   private windGust(dur: number, vol: number, dark: boolean): void {
-    const start = dark ? 360 : 520;
-    const end = dark ? 120 : 240;
-    this.noiseBurst(dur, start, vol, 'bandpass', end);
+    const e = this.open('amb', vol, { pan: rand(-0.5, 0.5) });
+    if (!e) return;
+    this.nz(e, { dur, vol: 1, color: 'pink', type: 'bandpass', f: dark ? 320 : 480, f1: dark ? 200 : 300, q: 0.9, attack: dur * 0.45 });
+    this.nz(e, { dur: dur * 0.8, vol: 0.4, type: 'bandpass', f: dark ? 900 : 1300, f1: 700, q: 3, attack: dur * 0.4 });
   }
+
+  // ==========================================================================
+  // mob voices
+  // ==========================================================================
 
   /** Synthesized mob voices; vol already includes distance falloff. */
-  mobSound(kind: string, vol: number): void {
+  mobSound(kind: string, vol: number, variant: MobVoice = 'idle', pan = 0): void {
     if (!this.ctx || vol <= 0.02) return;
+    if (!this.gate(`mob:${kind}:${variant}`, variant === 'idle' ? 0.25 : 0.08)) return;
+    const e = this.open('sfx', vol, { pan });
+    if (!e) return;
+    const hurt = variant === 'hurt';
+    const death = variant === 'death';
+    const p = rand(0.92, 1.08) * (hurt ? 1.15 : death ? 0.9 : 1);
+    const dl = death ? 1.6 : hurt ? 0.6 : 1; // length scale
     switch (kind) {
-      case 'pig':
-        this.tone(0.09, 260, 175, 0.3 * vol, 'sawtooth');
-        this.tone(0.08, 240, 170, 0.22 * vol, 'sawtooth', 0.13);
+      case 'pig': {
+        if (hurt || death) {
+          this.vox(e, {
+            dur: 0.3 * dl, vol: 0.3, pitch: [300 * p, 440 * p, death ? 160 * p : 280 * p], attack: 0.01,
+            formants: [[[700], 4, 1], [[1800], 6, 0.5]], rough: [40, 60], breath: 0.1,
+          });
+        } else {
+          // two nasal grunts: "oink-oink"
+          for (const [at, f] of [[0, 1], [0.2, 0.9]] as [number, number][]) {
+            this.vox(e, {
+              at, dur: 0.15, vol: 0.34, pitch: [150 * p * f, 180 * p * f, 125 * p * f], attack: 0.01, release: 0.06,
+              formants: [[[480, 520], 4, 1], [[1350], 6, 0.6], [[2600], 8, 0.2]], rough: [34, 55], breath: 0.12,
+            });
+          }
+        }
         break;
-      case 'sheep':
-        this.tone(0.45, 560, 470, 0.16 * vol, 'sawtooth');
-        this.tone(0.45, 575, 460, 0.12 * vol, 'square');
+      }
+      case 'cow': {
+        // "mmm-ooo": a low buzz whose mouth opens then closes
+        this.vox(e, {
+          dur: (hurt ? 0.4 : rand(0.95, 1.3)) * (death ? 1.4 : 1), vol: 0.32,
+          pitch: death ? [120 * p, 110 * p, 70 * p] : [104 * p, 118 * p, 112 * p, 90 * p], attack: 0.08,
+          formants: [[[300, 650, 600, 380], 4, 1], [[750, 1050, 950], 5, 0.5], [[2400], 8, 0.12]],
+          vib: [5, 14], breath: 0.06, direct: 0.35,
+        });
         break;
-      case 'cow':
-        this.tone(0.6, 165, 105, 0.28 * vol, 'sawtooth');
-        this.tone(0.5, 170, 115, 0.12 * vol, 'triangle', 0.05);
+      }
+      case 'sheep': {
+        // a bleat: "baa-aa" with a goat-like tremble
+        this.vox(e, {
+          dur: (hurt ? 0.3 : rand(0.5, 0.7)) * dl, vol: 0.26, pitch: [290 * p, 310 * p, 270 * p], attack: 0.03,
+          formants: [[[650, 800, 780], 5, 1], [[1300, 1650], 6, 0.6], [[2600], 8, 0.2]],
+          vib: [16, 70], breath: 0.1,
+        });
         break;
-      case 'chicken':
-        this.tone(0.06, 880, 1150, 0.14 * vol, 'square');
-        this.tone(0.06, 840, 1100, 0.12 * vol, 'square', 0.16);
+      }
+      case 'chicken': {
+        if (hurt || death) {
+          this.vox(e, { dur: 0.22 * dl, vol: 0.2, pitch: [1100 * p, 1500 * p, 900 * p], type: 'square', formants: [[[1400], 4, 1], [[3000], 6, 0.5]], rough: [50, 80], breath: 0.2 });
+        } else {
+          // "buk-buk-buk... bagawk"
+          const n = 2 + ((Math.random() * 3) | 0);
+          for (let i = 0; i < n; i++) {
+            this.vox(e, { at: i * rand(0.1, 0.14), dur: 0.07, vol: 0.18, pitch: [680 * p, 820 * p, 640 * p], type: 'square', attack: 0.005, release: 0.03, formants: [[[1000], 4, 1], [[2600], 6, 0.4]] });
+          }
+          if (chance(0.5)) {
+            this.vox(e, { at: n * 0.13 + 0.05, dur: 0.22, vol: 0.18, pitch: [760 * p, 1300 * p, 900 * p], type: 'square', attack: 0.01, formants: [[[1200, 1500], 4, 1], [[2800], 6, 0.4]], rough: [30, 30] });
+          }
+        }
         break;
-      case 'zombie':
-        this.tone(0.7, 115, 65, 0.24 * vol, 'sawtooth');
-        this.noiseBurst(0.5, 320, 0.12 * vol);
+      }
+      case 'zombie': {
+        // a rasping, hollow groan
+        this.vox(e, {
+          dur: (hurt ? 0.45 : rand(0.9, 1.3)) * (death ? 1.5 : 1), vol: 0.34,
+          pitch: death ? [110 * p, 95 * p, 50 * p] : hurt ? [150 * p, 120 * p, 100 * p] : [92 * p, 108 * p, 96 * p, 80 * p],
+          attack: 0.08, formants: [[[500, 420, 380], 5, 1], [[950, 800], 6, 0.55], [[2400], 8, 0.15]],
+          vib: [5, 25], rough: [38, 90], breath: 0.3, direct: 0.3,
+        });
         break;
-      case 'spider':
-        this.noiseBurst(0.3, 2600, 0.12 * vol, 'highpass');
+      }
+      case 'skeleton': {
+        // bone rattle: a run of hollow clacks
+        const n = death ? 14 : hurt ? 7 : 6 + ((Math.random() * 4) | 0);
+        let at = 0;
+        for (let i = 0; i < n; i++) {
+          const f = rand(1100, 2200) * p * (death ? 1 - i / (n * 2) : 1);
+          this.nz(e, { at, dur: 0.03, vol: 0.4, type: 'bandpass', f, q: 9 });
+          this.tn(e, { at, dur: 0.035, f: f * 0.5, f1: f * 0.45, vol: 0.06, type: 'triangle' });
+          at += rand(0.035, 0.07) * (death ? 1.3 : 1);
+        }
+        if (!hurt) this.nz(e, { at: 0.05, dur: 0.5, vol: 0.06, color: 'pink', type: 'bandpass', f: 1000, q: 1.5, attack: 0.15 });
         break;
-      case 'skeleton':
-        this.tone(0.05, 420, 360, 0.1 * vol, 'square');
-        this.tone(0.05, 380, 320, 0.1 * vol, 'square', 0.09);
-        this.tone(0.05, 440, 380, 0.08 * vol, 'square', 0.17);
+      }
+      case 'spider': {
+        // a hissing chitter
+        const d = (hurt ? 0.3 : 0.55) * dl;
+        this.nz(e, { dur: d, vol: 0.3, type: 'bandpass', f: 3200 * p, q: 2.2, curve: this.grains(Math.round(d * 60), 0.95, 1, 0.3) });
+        this.nz(e, { dur: d * 0.8, vol: 0.12, color: 'pink', type: 'bandpass', f: 1400 * p, q: 1.5, attack: 0.05 });
+        if (hurt || death) this.vox(e, { dur: 0.25 * dl, vol: 0.12, pitch: [900 * p, 1400 * p, 700 * p], formants: [[[2400], 5, 1]], rough: [60, 90], breath: 0.3 });
         break;
-      case 'creeper':
-        this.noiseBurst(0.38, 1800, 0.1 * vol, 'highpass');
-        this.noiseBurst(0.24, 520, 0.08 * vol, 'bandpass', 240);
+      }
+      case 'creeper': {
+        // creepers are near-silent: a leafy rustle (and a crumble on hurt)
+        this.nz(e, { dur: 0.3 * dl, vol: 0.3, type: 'bandpass', f: 2600 * p, q: 0.8, curve: this.grains(hurt || death ? 14 : 6, 0.8, 1.2) });
+        if (hurt || death) this.nz(e, { dur: 0.35 * dl, vol: 0.2, type: 'highpass', f: 3000, attack: 0.02 });
         break;
-      case 'wolf':
-        this.tone(0.18, 410, 520, 0.14 * vol, 'triangle');
-        this.tone(0.2, 520, 360, 0.11 * vol, 'triangle', 0.14);
+      }
+      case 'wolf': {
+        if (hurt) {
+          this.vox(e, { dur: 0.18, vol: 0.3, pitch: [900 * p, 1350 * p, 700 * p], type: 'sawtooth', attack: 0.005, formants: [[[1100], 4, 1], [[2400], 6, 0.5]], breath: 0.1 });
+        } else if (death) {
+          this.vox(e, { dur: 0.8, vol: 0.28, pitch: [1000 * p, 900 * p, 420 * p], type: 'triangle', formants: [[[1000, 700], 4, 1], [[2200], 6, 0.4]], vib: [6, 40] });
+        } else {
+          const r = Math.random();
+          if (r < 0.55) {
+            // one or two barks
+            const n = chance(0.5) ? 2 : 1;
+            for (let i = 0; i < n; i++) {
+              this.vox(e, { at: i * 0.22, dur: 0.13, vol: 0.34, pitch: [380 * p, 540 * p, 300 * p], attack: 0.005, release: 0.06, formants: [[[900], 4, 1], [[1800], 5, 0.6]], rough: [40, 60], breath: 0.25 });
+            }
+          } else if (r < 0.82) {
+            // panting
+            for (let i = 0; i < 4; i++) this.nz(e, { at: i * 0.16, dur: 0.12, vol: 0.14, color: 'pink', type: 'bandpass', f: i % 2 ? 1300 : 1600, q: 1.2, attack: 0.03 });
+          } else {
+            // a soft whine
+            this.vox(e, { dur: 0.55, vol: 0.18, pitch: [900 * p, 1300 * p, 1050 * p], type: 'triangle', formants: [[[1200], 3, 1]], vib: [6, 35] });
+          }
+        }
         break;
-      case 'villager':
-        this.tone(0.32, 190, 150, 0.18 * vol, 'sawtooth');
-        this.tone(0.28, 230, 175, 0.12 * vol, 'triangle', 0.16);
+      }
+      case 'villager': {
+        // "hrmm", "hmm?" — nasal mumbles
+        const n = hurt || death ? 1 : 1 + ((Math.random() * 3) | 0);
+        let at = 0;
+        for (let i = 0; i < n; i++) {
+          const d = hurt ? 0.2 : death ? 0.7 : rand(0.18, 0.3);
+          const f = 150 * p * rand(0.95, 1.1);
+          const rise = !hurt && !death && i === n - 1 && chance(0.4);
+          this.vox(e, {
+            at, dur: d, vol: 0.3, pitch: death ? [f * 1.1, f, f * 0.6] : rise ? [f, f * 1.05, f * 1.35] : [f, f * 1.18, f * 0.9],
+            attack: 0.02, formants: [[[280], 5, 1], [[1100, 900], 5, 0.35], [[2400], 7, 0.45]], vib: [7, 18], rough: [30, 25], direct: 0.4,
+          });
+          at += d + rand(0.03, 0.08);
+        }
         break;
-      case 'phantom':
-        this.noiseBurst(0.5, 2400, 0.12 * vol, 'bandpass', 900);
-        this.tone(0.45, 620, 260, 0.08 * vol, 'sawtooth');
+      }
+      case 'phantom': {
+        this.vox(e, {
+          dur: (hurt ? 0.4 : 0.8) * dl, vol: 0.2, pitch: [900 * p, 1450 * p, 520 * p], attack: 0.05,
+          formants: [[[1600, 1100], 3, 1], [[3000], 5, 0.4]], vib: [9, 80], rough: [45, 50], breath: 0.4,
+        });
         break;
-      case 'horse':
-        // a whinny: a quick rise then a long falling vibrato + breath
-        this.tone(0.12, 360, 560, 0.16 * vol, 'sawtooth');
-        this.tone(0.5, 560, 300, 0.16 * vol, 'sawtooth', 0.1);
-        this.tone(0.45, 720, 320, 0.08 * vol, 'square', 0.12);
-        this.noiseBurst(0.3, 1100, 0.05 * vol, 'bandpass', 500);
+      }
+      case 'horse': {
+        if (!hurt && !death && chance(0.45)) {
+          // a snort: breathy blast through the nose
+          this.nz(e, { dur: 0.3, vol: 0.4, color: 'pink', type: 'bandpass', f: 900, f1: 600, q: 1.2, curve: this.grains(10, 0.5, 1, 0.5) });
+          this.vox(e, { dur: 0.25, vol: 0.08, pitch: [90, 80], formants: [[[400], 4, 1]], rough: [45, 80] });
+        } else {
+          // a whinny: rising cry into a long, strongly-trembling fall
+          this.vox(e, {
+            dur: (hurt ? 0.35 : 0.9) * (death ? 1.5 : 1), vol: 0.24,
+            pitch: [420 * p, 780 * p, 700 * p, death ? 260 * p : 380 * p], attack: 0.03,
+            formants: [[[700, 900, 700], 5, 1], [[1600], 6, 0.5], [[2800], 8, 0.2]], vib: [9, 90], breath: 0.15,
+          });
+          if (!hurt) this.nz(e, { at: 0.9 * (death ? 1.5 : 1), dur: 0.25, vol: 0.2, color: 'pink', type: 'bandpass', f: 800, q: 1, attack: 0.02 });
+        }
         break;
-      case 'cat':
-        // a soft two-syllable meow
-        this.tone(0.18, 620, 720, 0.12 * vol, 'sawtooth');
-        this.tone(0.22, 700, 480, 0.1 * vol, 'sawtooth', 0.16);
+      }
+      case 'cat': {
+        if (!hurt && !death && chance(0.25)) {
+          // purr: a low, amplitude-flickering rumble
+          this.nz(e, { dur: 1.2, vol: 0.18, color: 'brown', type: 'lowpass', f: 320, curve: this.grains(30, 0.3, 1, 0.3) });
+        } else if (hurt) {
+          this.vox(e, { dur: 0.28, vol: 0.26, pitch: [700 * p, 900 * p, 600 * p], formants: [[[900, 1200], 4, 1], [[2600], 6, 0.5]], rough: [40, 40], breath: 0.2 });
+        } else {
+          // "mi-aow": the vowel sweeps i → a → u as the pitch rises and falls
+          this.vox(e, {
+            dur: (death ? 0.9 : rand(0.4, 0.6)), vol: 0.24, pitch: death ? [650 * p, 700 * p, 380 * p] : [540 * p, 720 * p, 480 * p], attack: 0.03,
+            formants: [[[350, 850, 500], 4, 1], [[2200, 1300, 1000], 5, 0.6], [[3000], 8, 0.15]], vib: [6, 12],
+          });
+        }
         break;
-      case 'cinderling':
-        // a crackling ember hiss + a small shrill screech
-        this.noiseBurst(0.22, 2600, 0.1 * vol, 'highpass');
-        this.tone(0.12, 880, 1280, 0.1 * vol, 'square');
-        this.tone(0.1, 700, 420, 0.07 * vol, 'sawtooth', 0.12);
+      }
+      case 'cinderling': {
+        // a spitting ember hiss with a small shrill screech
+        this.nz(e, { dur: 0.3 * dl, vol: 0.3, type: 'highpass', f: 2600, curve: this.grains(16, 0.9, 1.1, 0.3) });
+        this.vox(e, { at: 0.04, dur: 0.22 * dl, vol: 0.16, pitch: [950 * p, 1350 * p, 800 * p], type: 'square', formants: [[[1800], 4, 1], [[3200], 6, 0.4]], rough: [50, 60] });
         break;
-      case 'ashstalker':
-        // a low molten growl with a crackle on top
-        this.tone(0.5, 130, 80, 0.22 * vol, 'sawtooth');
-        this.tone(0.4, 165, 105, 0.12 * vol, 'square', 0.05);
-        this.noiseBurst(0.35, 1400, 0.08 * vol, 'bandpass', 500);
+      }
+      case 'ashstalker': {
+        // a low molten growl with crackling on top
+        this.vox(e, {
+          dur: (hurt ? 0.4 : 0.75) * dl, vol: 0.34, pitch: [82 * p, 95 * p, 68 * p], attack: 0.05,
+          formants: [[[450, 380], 5, 1], [[900], 6, 0.5], [[2200], 8, 0.15]], rough: [30, 110], breath: 0.25, direct: 0.35,
+        });
+        this.nz(e, { dur: 0.6 * dl, vol: 0.14, color: 'pink', type: 'bandpass', f: 1800, curve: this.grains(14, 0.9, 1) });
         break;
-      case 'emberghast':
-        // a breathy hollow moan with a fiery hiss — a distant floating menace
-        this.tone(0.7, 280, 200, 0.14 * vol, 'sine');
-        this.tone(0.6, 210, 150, 0.1 * vol, 'triangle', 0.1);
-        this.noiseBurst(0.5, 2000, 0.07 * vol, 'bandpass', 700);
+      }
+      case 'emberghast': {
+        // a far, childlike wail — the Nether's floating menace
+        this.vox(e, {
+          dur: (hurt ? 0.5 : 1.2) * dl, vol: 0.22, pitch: hurt ? [900 * p, 1200 * p, 800 * p] : [560 * p, 700 * p, 640 * p, 460 * p],
+          type: 'triangle', attack: 0.12, formants: [[[500, 700, 450], 4, 1], [[1100, 900], 5, 0.5]], vib: [5.5, 40], breath: 0.15,
+        });
+        this.nz(e, { dur: 0.6, vol: 0.06, type: 'bandpass', f: 2200, q: 1.2, attack: 0.1 });
         break;
+      }
+    }
+    this.seal(e);
+  }
+
+  // ==========================================================================
+  // generative music + ambience
+  // ==========================================================================
+
+  /** Title-screen music on/off. The game switches it off when a world starts;
+   *  in-game pieces then follow ambientTick's environment. */
+  setMenuMusic(on: boolean): void {
+    const want = on ? 'menu' : 'game';
+    if (this.musicMode === want) return;
+    this.musicMode = want;
+    this.fadePiece(on ? 1.5 : 3);
+    this.menuCount = 0;
+    this.envAt = -99;
+    if (this.ctx) this.nextPieceAt = this.ctx.currentTime + (on ? 1.2 : rand(10, 22));
+    if (!on) this.fragT = rand(50, 90);
+    if (on) { this.setRain('off'); this.setUnderwater(false); this.stopNetherBed(); }
+  }
+
+  /** Scheduler heartbeat (timer-driven so the title screen has music too):
+   *  instantiates notes just ahead of the audio clock and starts new pieces. */
+  private pump = (): void => {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state !== 'running') return;
+    this.pumpMusic(ctx.currentTime, typeof document !== 'undefined' && document.hidden ? 2.5 : 0.9);
+  };
+
+  /** Schedule music up to `now + ahead`. Public for offline-render harnesses. */
+  pumpMusic(now: number, ahead: number): void {
+    const p = this.piece;
+    if (p) {
+      if (!p.fading) {
+        const horizon = now + ahead;
+        while (p.i < p.notes.length && p.t0 + p.notes[p.i].t < horizon) {
+          const n = p.notes[p.i++];
+          const at = p.t0 + n.t;
+          if (at < now - 0.08) continue; // tab was throttled — drop, don't pile up
+          this.note(n, Math.max(at, now + 0.01), p.out);
+        }
+      }
+      if (now > p.end) {
+        p.out.disconnect();
+        this.piece = null;
+        // a natural ending earns a silence; a deliberate fade keeps its own timing
+        if (!p.fading) this.nextPieceAt = now + (this.musicMode === 'menu' ? rand(5, 10) : rand(35, 90));
+      }
+      return;
+    }
+    if (!this.settings.music || this.settings.musicVol <= 0) return;
+    const live = this.musicMode === 'menu' || now - this.envAt < 4;
+    if (live && now >= this.nextPieceAt) this.startPiece(now);
+  }
+
+  /** Begin a newly composed piece (optionally forcing a seed, for harnesses). */
+  startPiece(now: number, seed?: number): string {
+    const ctx = this.ctx;
+    if (!ctx || !this.musicBus) return '';
+    const menu = this.musicMode === 'menu';
+    const s = seed ?? (menu && this.menuCount === 0 ? TITLE_SEED : (Math.random() * 2 ** 31) | 0);
+    this.menuCount++;
+    const env = menu ? 'menu' : this.env;
+    const c = compose(env, menu ? undefined : this.biome, s);
+    const out = ctx.createGain();
+    out.gain.value = 1;
+    out.connect(this.musicBus);
+    if (this.delay) this.delay.delayTime.setTargetAtTime(clamp(c.beat * 0.75, 0.25, 1.2), now, 0.3);
+    this.piece = {
+      notes: c.notes, i: 0, t0: now + 0.2, end: now + 0.2 + c.len + 9, out,
+      env: env === 'nether' ? 'nether' : 'other', fading: false, name: c.name,
+    };
+    return c.name;
+  }
+
+  private fadePiece(sec: number): void {
+    const p = this.piece;
+    if (!p || !this.ctx || p.fading) return;
+    p.fading = true;
+    this.glide(p.out.gain, 0, sec);
+    p.end = this.ctx.currentTime + sec + 0.1;
+  }
+
+  /** Instantiate one scored note on its instrument. */
+  private note(n: MNote, at: number, to: AudioNode): void {
+    const f = mtof(n.m);
+    const pan = n.p ?? clamp((n.m - 62) / 60, -0.3, 0.3);
+    switch (n.i) {
+      case 'piano': this.piano(at, f, n.v, n.d, to, pan); break;
+      case 'epiano': this.epiano(at, f, n.v, n.d, to, pan); break;
+      case 'bell': this.bell(at, f, n.v, n.d, to, pan, 3.5); break;
+      case 'celesta': this.bell(at, f, n.v, n.d, to, pan, 4); break;
+      case 'pad': this.pad(at, f, n.v, n.d, to); break;
+      case 'bass': this.bass(at, f, n.v, n.d, to); break;
+      case 'drone': this.drone(at, f, n.v, n.d, to); break;
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Generative music: calm piano-and-pad pieces every few minutes, scheduled
-  // entirely on the Web Audio clock. Day pieces are major, night pieces minor.
-  // ---------------------------------------------------------------------------
-
-  /** Call every frame; env + biome pick the mood. Starts a new piece on timeout. */
-  ambientTick(dt: number, env: AmbientEnv = 'day', biome?: MusicBiome): void {
-    if (!this.ctx || !this.settings.music) return;
-    const dark = env !== 'day';
-    this.ambientT -= dt;
-    if (this.ambientT <= 0) {
-      this.playAmbientStinger(dark);
-      this.ambientT = (dark ? 22 : 30) + Math.random() * 28;
+  /** Felt piano: two slightly detuned strings (beating), a brightness filter
+   *  that closes as the note rings, a prompt decay into a long aftersound, a
+   *  damper release when the hold ends, and a faint hammer knock. */
+  private piano(at: number, f: number, v: number, hold: number, to: AudioNode, pan: number): void {
+    const e = this.open('music', 1, { at, to, pan });
+    if (!e) return;
+    const ctx = this.ctx!;
+    const nat = clamp(7 * Math.pow(220 / f, 0.5), 1.2, 9); // lower strings ring longer
+    const end = at + Math.min(nat, hold + 0.4);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.Q.value = 0.2;
+    lp.frequency.setValueAtTime(Math.min(11000, f * (3 + 7 * v)), at);
+    lp.frequency.exponentialRampToValueAtTime(Math.max(f * 1.4, 250), at + nat * 0.5);
+    const g = ctx.createGain();
+    const pk = 0.13 * v;
+    const decayAt = (x: number): number => pk * 0.4 * Math.pow(0.03, clamp((x - at - 0.3) / (nat - 0.3), 0, 1));
+    const tRel = Math.max(at + 0.32, end - 0.2);
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.linearRampToValueAtTime(pk, at + 0.006);
+    g.gain.exponentialRampToValueAtTime(pk * 0.4, at + 0.3);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.00005, decayAt(tRel)), tRel);
+    g.gain.exponentialRampToValueAtTime(0.00003, Math.max(tRel + 0.05, end));
+    lp.connect(g).connect(e.out);
+    e.nodes.push(lp, g);
+    for (const dt of [-1.6, 1.9]) {
+      const o = ctx.createOscillator();
+      o.setPeriodicWave(this.pianoWave!);
+      o.frequency.value = f;
+      o.detune.value = dt + rand(-0.5, 0.5);
+      o.connect(lp);
+      this.run(e, o, at, end + 0.05);
     }
-    // environment-flavoured ambience: lively birdsong by day (biome-tinted),
-    // lonely wind/owl at night, eerie dread underground, ominous Nether drones
+    if (v > 0.25) this.nz(e, { at: at - e.t, dur: 0.018, vol: 0.02 * v, color: 'pink', type: 'bandpass', f: Math.min(4000, f * 3), q: 1 });
+  }
+
+  /** Rhodes-like electric piano: FM tine with a bell-ish attack. */
+  private epiano(at: number, f: number, v: number, hold: number, to: AudioNode, pan: number): void {
+    const e = this.open('music', 1, { at, to, pan });
+    if (!e) return;
+    const dur = Math.min(clamp(5 * Math.pow(220 / f, 0.4), 1, 6), hold + 0.6);
+    this.fm(e, { f, ratio: 1, index: 0.9 + v, dur, vol: 0.2 * v, idxDur: 0.9 });
+    this.fm(e, { f: f * 2, ratio: 7, index: 0.3, dur: Math.min(0.5, dur), vol: 0.036 * v, idxDur: 0.2 });
+  }
+
+  /** Bell / celesta: inharmonic FM with a long shimmering decay. */
+  private bell(at: number, f: number, v: number, hold: number, to: AudioNode, pan: number, ratio: number): void {
+    const e = this.open('music', 1, { at, to, pan });
+    if (!e) return;
+    const dur = ratio === 4 ? clamp(hold, 1.2, 2.2) : clamp(hold + 1.5, 2, 5);
+    this.fm(e, { f, ratio, index: ratio === 4 ? 0.8 : 1.4, dur, vol: 0.19 * v, idxDur: 0.6 });
+    this.tn(e, { at: 0, dur: dur * 0.7, f: f * 2.01, vol: 0.03 * v });
+  }
+
+  /** Warm pad: two detuned soft-saw voices spread left/right through a
+   *  lowpass that breathes open and closed. Slow swell in, slow release. */
+  private pad(at: number, f: number, v: number, dur: number, to: AudioNode): void {
+    const e = this.open('music', 1, { at, to });
+    if (!e) return;
+    const ctx = this.ctx!;
+    const a = Math.min(dur * 0.35, 2.4);
+    const rel = Math.min(dur * 0.4, 3);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.Q.value = 0.5;
+    lp.frequency.setValueAtTime(Math.min(1800, f * 2.5), at);
+    lp.frequency.linearRampToValueAtTime(Math.min(3200, f * 4.5), at + dur * 0.5);
+    lp.frequency.linearRampToValueAtTime(Math.min(1500, f * 2), at + dur + rel);
+    const g = ctx.createGain();
+    const pk = 0.045 * v;
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.linearRampToValueAtTime(pk, at + a);
+    g.gain.setValueAtTime(pk, at + dur);
+    g.gain.linearRampToValueAtTime(0.0001, at + dur + rel);
+    lp.connect(g).connect(e.out);
+    e.nodes.push(lp, g);
+    for (const [det, side] of [[-7, -0.45], [7, 0.45]]) {
+      const o = ctx.createOscillator();
+      o.setPeriodicWave(this.padWave!);
+      o.frequency.value = f;
+      o.detune.setValueAtTime(det, at);
+      o.detune.linearRampToValueAtTime(det * -0.4, at + dur + rel); // slow chorus drift
+      const pn = ctx.createStereoPanner();
+      pn.pan.value = side;
+      o.connect(pn).connect(lp);
+      e.nodes.push(pn);
+      this.run(e, o, at, at + dur + rel + 0.05);
+    }
+  }
+
+  /** Round sub bass under the ambient pieces. */
+  private bass(at: number, f: number, v: number, dur: number, to: AudioNode): void {
+    const e = this.open('music', 1, { at, to });
+    if (!e) return;
+    const ctx = this.ctx!;
+    const g = ctx.createGain();
+    const pk = 0.12 * v;
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.linearRampToValueAtTime(pk, at + 0.25);
+    g.gain.exponentialRampToValueAtTime(pk * 0.4, at + dur * 0.6);
+    g.gain.linearRampToValueAtTime(0.0001, at + dur + 1);
+    g.connect(e.out);
+    e.nodes.push(g);
+    const o = ctx.createOscillator();
+    o.frequency.value = f;
+    o.connect(g);
+    const o2 = ctx.createOscillator();
+    o2.type = 'triangle';
+    o2.frequency.value = f * 2;
+    const g2 = ctx.createGain();
+    g2.gain.value = 0.18;
+    o2.connect(g2).connect(g);
+    e.nodes.push(g2);
+    this.run(e, o, at, at + dur + 1.05);
+    this.run(e, o2, at, at + dur + 1.05);
+  }
+
+  /** Long, slowly-breathing drone (root + fifth) for caves and the Nether. */
+  private drone(at: number, f: number, v: number, dur: number, to: AudioNode): void {
+    const e = this.open('music', 1, { at, to });
+    if (!e) return;
+    const ctx = this.ctx!;
+    const g = ctx.createGain();
+    const pk = 0.07 * v;
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.linearRampToValueAtTime(pk, at + 4);
+    g.gain.setValueAtTime(pk, at + Math.max(4, dur - 4));
+    g.gain.linearRampToValueAtTime(0.0001, at + dur);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = Math.min(900, f * 5);
+    lp.connect(g).connect(e.out);
+    e.nodes.push(g, lp);
+    // a very slow tremolo keeps it alive
+    const lfo = ctx.createOscillator();
+    lfo.frequency.value = rand(0.07, 0.13);
+    const lg = ctx.createGain();
+    lg.gain.value = pk * 0.35;
+    lfo.connect(lg).connect(g.gain);
+    e.nodes.push(lg);
+    this.run(e, lfo, at, at + dur + 0.05);
+    for (const [m, type, det] of [[1, 'triangle', -4], [1.5, 'sine', 3], [2, 'sawtooth', 6]] as [number, OscillatorType, number][]) {
+      const o = ctx.createOscillator();
+      o.type = type;
+      o.frequency.value = f * m;
+      o.detune.value = det;
+      const og = ctx.createGain();
+      og.gain.value = type === 'sawtooth' ? 0.12 : 0.6;
+      o.connect(og).connect(lp);
+      e.nodes.push(og);
+      this.run(e, o, at, at + dur + 0.05);
+    }
+  }
+
+  /** Call every frame; env + biome pick the mood of music and ambience. */
+  ambientTick(dt: number, env: AmbientEnv = 'day', biome?: MusicBiome): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    if (this.musicMode === 'menu') this.setMenuMusic(false); // a world is running
+    // crossing into/out of the Nether fades the current piece
+    const cls = env === 'nether' ? 'nether' : 'other';
+    if (this.piece && !this.piece.fading && this.piece.env !== cls) {
+      this.fadePiece(4);
+      this.nextPieceAt = now + rand(8, 16);
+    }
+    if (env !== this.env && this.sfxVerb) {
+      // footsteps and digging echo underground
+      this.glide(this.sfxVerb.gain, env === 'cave' ? 0.34 : env === 'nether' ? 0.2 : 0.035, 2);
+    }
+    this.env = env;
+    this.biome = biome;
+    this.envAt = now;
+    this.pump();
+
+    // Nether: a constant low rumble bed
+    if (env === 'nether') this.startNetherBed(); else this.stopNetherBed();
+
+    if (!this.settings.sound) return;
+    // environment ambience: birdsong by day, crickets and owls at night, dread
+    // underground, lava and far wails in the Nether
     this.atmosphereT -= dt;
     if (this.atmosphereT <= 0) {
       this.atmosphereCue(env, biome);
-      this.atmosphereT = (env === 'cave' ? 10 : env === 'day' ? 11 : 15) + Math.random() * 24;
+      this.atmosphereT = (env === 'cave' ? 9 : env === 'day' ? 7 : env === 'nether' ? 5 : 9) + Math.random() * 16;
     }
-    this.musicT -= dt;
-    if (this.musicT > 0) return;
-    const pieceLen = this.playPiece(this.moodFor(env, biome));
-    // a little less silence between pieces than before, so the world sings more
-    this.musicT = pieceLen + 22 + Math.random() * 42;
+    // a short musical fragment now and then in the long gaps between pieces
+    this.fragT -= dt;
+    if (this.fragT <= 0) {
+      this.fragT = rand(45, 100);
+      if (!this.piece && this.settings.music && this.nextPieceAt - now > 20) this.playFragment(env);
+    }
+    if (this.underwater) {
+      this.bubbleT -= dt;
+      if (this.bubbleT <= 0) {
+        this.bubbleT = rand(0.4, 2.2);
+        const e = this.open('amb', 0.8, { pan: rand(-0.6, 0.6) });
+        if (e) { this.bubbles(e, 1 + ((Math.random() * 3) | 0), 0.3, 0.05); this.seal(e); }
+      }
+    }
   }
 
-  /** Resolve the musical character for the current environment + biome. The
-   *  shifts stay subtle so everything still reads as the same calm, exploratory
-   *  Minecraft-style score — just touched with each terrain's mood. */
-  private moodFor(env: AmbientEnv, biome?: MusicBiome): PieceMood {
-    const night = env !== 'day';
-    // base: bright C418-style major by day, wistful minor by night (plains/forest)
-    const m: PieceMood = {
-      night,
-      scale: night ? [0, 3, 5, 7, 10] : [0, 2, 4, 7, 9],
-      arpDeg: night ? [0, 3, 7, 12, 10, 12, 7, 3] : [0, 4, 7, 12, 11, 12, 7, 4],
-      third: night ? 3 : 4,
-      seventh: night ? 10 : 11,
-      progressions: night
-        ? [[0, -5, -2, -7], [0, 3, -2, -5], [0, -4, -7, -2]]
-        : [[0, 7, 9, 5], [0, 5, 7, 12], [0, 9, 5, 7]],
-      roots: night ? [196, 220, 246.94] : [196, 220, 246.94, 261.63, 293.66],
-      barLen: night ? 3.8 : 3.25,
-      octaveBias: night ? 0.2 : 0.34,
-      bellChance: 0.3,
-      padVol: 1.0,
-      density: 1.0,
-    };
-    // underground / Nether: dark and modal, no biome colour
-    if (env === 'cave' || env === 'nether') {
-      m.scale = [0, 2, 3, 7, 8];        // phrygian-tinged unease
-      m.barLen = 4.2; m.density = 0.68; m.octaveBias = 0.12; m.padVol = 1.2; m.bellChance = 0.2;
-      if (env === 'nether') m.roots = [146.83, 164.81, 174.61];
-      return m;
-    }
-    switch (biome) {
-      case 'snow':
-      case 'taiga':
-        // cold crystalline loneliness — sparse, slow, high bells (kumoi colour)
-        m.scale = night ? [0, 2, 3, 7, 10] : [0, 2, 3, 7, 9];
-        m.barLen = night ? 4.4 : 4.0;
-        m.density = 0.6; m.bellChance = 0.62; m.octaveBias += 0.26; m.padVol = 0.85;
-        break;
-      case 'jungle':
-        // lush and alive — lydian sparkle, busier arpeggios, quicker
-        m.scale = night ? [0, 3, 5, 7, 9] : [0, 2, 4, 6, 9];
-        m.arpDeg = night ? [0, 3, 7, 10, 12, 7] : [0, 2, 4, 7, 9, 11, 12, 9];
-        m.barLen = night ? 3.4 : 2.9; m.density = 1.25; m.bellChance = 0.34;
-        break;
-      case 'desert':
-        // wide modal mythos — mixolydian, slow and spacious
-        m.scale = night ? [0, 3, 5, 7, 10] : [0, 2, 4, 7, 10];
-        m.seventh = 10;
-        m.progressions = night ? [[0, -2, -5, -7], [0, 5, -2, -7]] : [[0, 5, 3, 7], [0, 7, 5, 10], [0, 3, 7, 5]];
-        m.barLen = night ? 4.2 : 3.8; m.density = 0.78; m.octaveBias += 0.08; m.padVol = 1.12;
-        break;
-      case 'swamp':
-        // murky mystery — low dorian minor, sustained
-        m.scale = [0, 2, 3, 5, 7, 9, 10]; m.third = 3; m.seventh = 10;
-        m.barLen = 4.2; m.density = 0.8; m.octaveBias = 0.1; m.padVol = 1.2; m.bellChance = 0.2;
-        break;
-      case 'mountains':
-        // grand and mythic — rich pads, wide bells
-        m.barLen = night ? 4.0 : 3.6; m.padVol = 1.28; m.bellChance = 0.5; m.octaveBias += 0.12; m.density = 0.88;
-        break;
-      // plains / forest / undefined keep the classic base
-    }
-    return m;
+  private playFragment(env: AmbientEnv): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.musicBus) return;
+    const c = fragment(env, (Math.random() * 2 ** 31) | 0);
+    const t0 = ctx.currentTime + 0.1;
+    for (const n of c.notes) this.note(n, t0 + n.t, this.musicBus);
+  }
+
+  private startNetherBed(): void {
+    const ctx = this.ctx;
+    if (this.netherBed || !ctx || !this.amb) return;
+    const src = ctx.createBufferSource();
+    src.buffer = this.brown;
+    src.loop = true;
+    src.playbackRate.value = 0.5;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 160;
+    lp.Q.value = 2;
+    const g = ctx.createGain();
+    g.gain.value = 0;
+    // slow swells, like a furnace breathing
+    const lfo = ctx.createOscillator();
+    lfo.frequency.value = 0.09;
+    const lg = ctx.createGain();
+    lg.gain.value = 0.04;
+    lfo.connect(lg).connect(g.gain);
+    src.connect(lp).connect(g).connect(this.amb);
+    src.onended = () => { try { lfo.stop(); } catch { /* already */ } for (const n of [src, lp, g, lfo, lg]) n.disconnect(); };
+    src.start(0, Math.random());
+    lfo.start();
+    this.glide(g.gain, 0.12, 3);
+    this.netherBed = { src, g, nodes: [lp, lfo, lg] };
+  }
+
+  private stopNetherBed(): void {
+    const b = this.netherBed;
+    if (!b || !this.ctx) return;
+    this.glide(b.g.gain, 0, 2);
+    b.src.stop(this.ctx.currentTime + 2.1);
+    this.netherBed = null;
   }
 
   /** A soft heartbeat that emerges and quickens as health drops — survival
@@ -705,421 +1841,193 @@ export class AudioEngine {
   heartbeatTick(dt: number, hpFrac: number): void {
     if (!this.ctx || !this.settings.sound) { this.heartT = 0; return; }
     if (hpFrac <= 0 || hpFrac > 0.3) { this.heartT = 0; return; }
-    const k = 1 - hpFrac / 0.3;                 // 0 at 30% hp, 1 near death
+    const k = 1 - hpFrac / 0.3; // 0 at 30% hp, 1 near death
     this.heartT -= dt;
     if (this.heartT > 0) return;
-    this.heartT = 1.0 - k * 0.45;               // ~1.0s -> ~0.55s as it worsens
-    const vol = 0.06 + k * 0.1;
-    this.tone(0.09, 72, 44, vol, 'sine');        // lub
-    this.tone(0.08, 62, 40, vol * 0.7, 'sine', 0.15); // dub
+    this.heartT = 1.0 - k * 0.45; // ~1.0s → ~0.55s as it worsens
+    const e = this.open('sfx', 0.5 + k * 0.8);
+    if (!e) return;
+    for (const [at, v] of [[0, 1], [0.16, 0.7]]) {
+      this.tn(e, { at, dur: 0.12, f: 70, f1: 42, vol: 0.2 * v, attack: 0.01 });
+      this.nz(e, { at, dur: 0.08, vol: 0.12 * v, color: 'brown', type: 'lowpass', f: 180 });
+    }
+    this.seal(e);
   }
 
-  /** One ambient gesture (through the music reverb), flavoured by environment. */
+  /** One ambient gesture flavoured by environment and biome. */
   private atmosphereCue(env: AmbientEnv, biome?: MusicBiome): void {
-    if (!this.ctx || !this.musicBus) return;
-    const t = this.ctx.currentTime + 0.05;
     const r = Math.random();
     if (env === 'cave') { this.caveCue(); return; }
-    if (env === 'nether') {
-      // ominous emptiness: a low drone or a far molten roar
-      if (r < 0.6) this.padAt(t, 49 * (Math.random() < 0.5 ? 1 : 1.5), 0.03, 7);
-      else { this.padAt(t, 41, 0.035, 3); this.noiseBurst(1.6, 240, 0.05, 'lowpass', 70); }
-      return;
-    }
+    if (env === 'nether') { this.netherCue(); return; }
     if (env === 'night') {
-      // lonely night: wind, a low drone, a distant owl, or a lone bell
-      if (r < 0.38) this.windSigh(t, 0.05, true);
-      else if (r < 0.62) this.padAt(t, 55 * (Math.random() < 0.5 ? 1 : 1.5), 0.03, 7);
-      else if (r < 0.84) this.owlHoot(t);
-      else this.bellNote(t, 196 * Math.pow(2, [0, 3, 7, 10][(Math.random() * 4) | 0] / 12), 0.013, 5);
+      if (biome === 'snow' || biome === 'taiga') { this.windGust(rand(3, 5), 0.07, true); return; }
+      if (biome === 'swamp' && r < 0.5) { this.frogCroak(); return; }
+      if (r < 0.45) this.crickets();
+      else if (r < 0.65) this.owlHoot();
+      else this.windGust(rand(3, 5), 0.05, true);
       return;
     }
-    // day: a living world — birdsong, insect trills, a gentle breeze, tinted by
-    // the terrain so each biome sounds distinct as you walk into it
+    // day: a living world, tinted by the terrain you're standing in
     switch (biome) {
-      case 'snow':
-      case 'taiga':
-        // thin cold wind + sparse icy shimmer
-        if (r < 0.6) this.windSigh(t, 0.042, true);
-        else this.bellNote(t, 1900 + Math.random() * 900, 0.009, 2.4);
+      case 'snow': case 'taiga':
+        if (r < 0.65) this.windGust(rand(3, 5), 0.06, false);
+        else this.birdChirp('tit');
         return;
       case 'desert':
-        // dry, wide breeze with the rare insect
-        if (r < 0.72) this.windSigh(t, 0.045, false);
-        else this.insectTrill(t);
+        if (r < 0.75) this.windGust(rand(3, 6), 0.06, false);
+        else this.insectBuzz();
         return;
       case 'jungle':
-        // dense, chattering birds + insects
-        if (r < 0.5) this.birdChirp(t);
-        else if (r < 0.82) { this.birdChirp(t); this.birdChirp(t + 0.18); }
-        else this.insectTrill(t);
+        if (r < 0.35) this.birdChirp('warble');
+        else if (r < 0.6) { this.birdChirp('trill'); this.birdChirp('tit', 0.4); }
+        else if (r < 0.8) this.birdChirp('tit');
+        else this.insectBuzz();
         return;
       case 'swamp':
-        // low frog croaks and bugs over a heavy hush
-        if (r < 0.5) this.frogCroak(t);
-        else if (r < 0.8) this.insectTrill(t);
-        else this.windSigh(t, 0.03, true);
+        if (r < 0.5) this.frogCroak();
+        else if (r < 0.8) this.insectBuzz();
+        else this.windGust(3, 0.04, true);
         return;
       case 'mountains':
-        // airy heights — breeze with a far bell
-        if (r < 0.6) this.windSigh(t, 0.04, false);
-        else if (r < 0.85) this.birdChirp(t);
-        else this.bellNote(t, 1400 + Math.random() * 500, 0.012, 3.5);
+        if (r < 0.55) this.windGust(rand(3, 6), 0.065, false);
+        else this.birdChirp(r < 0.8 ? 'tit' : 'warble');
         return;
     }
-    // plains / forest / unknown: the classic lively day
-    if (r < 0.52) this.birdChirp(t);
-    else if (r < 0.78) this.insectTrill(t);
-    else this.windSigh(t, 0.03, false);
+    if (r < 0.4) this.birdChirp('warble');
+    else if (r < 0.62) this.birdChirp('tit');
+    else if (r < 0.78) this.birdChirp('trill');
+    else if (r < 0.9) this.insectBuzz();
+    else this.windGust(rand(3, 5), 0.045, false);
   }
 
-  /** A short low frog croak — two quick rasps, for swamp daytime. */
-  private frogCroak(when: number): void {
-    if (!this.ctx || !this.musicBus) return;
-    const croak = (t: number, f: number) => {
-      const osc = this.ctx!.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(f, t);
-      osc.frequency.linearRampToValueAtTime(f * 0.82, t + 0.12);
-      const lp = this.ctx!.createBiquadFilter();
-      lp.type = 'lowpass'; lp.frequency.value = 900; lp.Q.value = 3;
-      const g = this.ctx!.createGain();
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.linearRampToValueAtTime(0.05, t + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.0003, t + 0.14);
-      osc.connect(lp).connect(g).connect(this.musicBus!);
-      osc.start(t); osc.stop(t + 0.16);
-    };
-    const base = 150 + Math.random() * 50;
-    croak(when, base);
-    croak(when + 0.16, base * 1.05);
-  }
-
-  /** A short cheerful birdsong — a few quick gliding high notes. */
-  private birdChirp(when: number): void {
-    if (!this.ctx || !this.musicBus) return;
-    const n = 2 + ((Math.random() * 3) | 0);
-    let base = 2200 + Math.random() * 1200;
-    for (let i = 0; i < n; i++) {
-      const f = base * (0.9 + Math.random() * 0.4);
-      this.chirpNote(when + i * (0.07 + Math.random() * 0.05), f, f * (1 + (Math.random() - 0.3) * 0.4), 0.05);
-      base *= 0.96;
+  /** Birdsong: a warbling phrase, a two-note "fee-bee" whistle, or a trill. */
+  private birdChirp(kind: 'warble' | 'tit' | 'trill', at = 0): void {
+    const e = this.open('amb', rand(0.5, 1), { pan: rand(-0.8, 0.8) });
+    if (!e) return;
+    e.t += at;
+    if (kind === 'tit') {
+      const f = rand(3000, 3800);
+      const reps = 1 + ((Math.random() * 2) | 0);
+      for (let r = 0; r < reps; r++) {
+        this.tn(e, { at: r * 0.55, dur: 0.22, f, f1: f * 0.97, vol: 0.05, attack: 0.02 });
+        this.tn(e, { at: r * 0.55 + 0.26, dur: 0.2, f: f * 0.84, f1: f * 0.82, vol: 0.045, attack: 0.02 });
+      }
+    } else if (kind === 'trill') {
+      const f = rand(3800, 5000);
+      const n = 8 + ((Math.random() * 8) | 0);
+      for (let i = 0; i < n; i++) this.tn(e, { at: i * 0.045, dur: 0.035, f: f * (1 - i * 0.008), f1: f * 0.85, vol: 0.035, attack: 0.004 });
+    } else {
+      const n = 3 + ((Math.random() * 5) | 0);
+      let at2 = 0;
+      let base = rand(2200, 3300);
+      for (let i = 0; i < n; i++) {
+        const f = base * rand(0.85, 1.25);
+        this.tn(e, { at: at2, dur: rand(0.05, 0.12), f, f1: f * rand(0.75, 1.35), vol: 0.045, attack: 0.006 });
+        at2 += rand(0.07, 0.16);
+        base *= rand(0.95, 1.03);
+      }
     }
+    this.seal(e);
   }
 
-  private chirpNote(when: number, f0: number, f1: number, vol: number): void {
-    if (!this.ctx || !this.musicBus) return;
-    const osc = this.ctx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(f0, when);
-    osc.frequency.exponentialRampToValueAtTime(Math.max(200, f1), when + 0.05);
-    const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0.0001, when);
-    g.gain.linearRampToValueAtTime(vol, when + 0.006);
-    g.gain.exponentialRampToValueAtTime(0.0003, when + 0.07);
-    osc.connect(g).connect(this.musicBus);
-    osc.start(when); osc.stop(when + 0.1);
+  /** Night crickets: pulse groups ("chirp-chirp-chirp") from a couple of spots. */
+  private crickets(): void {
+    const e = this.open('amb', 1, { pan: rand(-0.7, 0.7) });
+    if (!e) return;
+    const f = rand(4200, 4900);
+    const groups = 3 + ((Math.random() * 4) | 0);
+    const gap = rand(0.35, 0.55);
+    for (let g = 0; g < groups; g++) {
+      for (let k = 0; k < 3; k++) this.tn(e, { at: g * gap + k * 0.035, dur: 0.028, f, vol: 0.05, attack: 0.004 });
+    }
+    this.seal(e);
   }
 
-  /** A soft amplitude-modulated cricket/insect trill. */
-  private insectTrill(when: number): void {
-    if (!this.ctx || !this.musicBus) return;
-    const dur = 0.6 + Math.random() * 0.9;
-    const osc = this.ctx.createOscillator();
-    osc.type = 'triangle';
-    osc.frequency.value = 4200 + Math.random() * 1500;
-    const lfo = this.ctx.createOscillator();
-    lfo.type = 'square'; lfo.frequency.value = 28 + Math.random() * 14;
-    const lfoGain = this.ctx.createGain(); lfoGain.gain.value = 0.018;
-    const g = this.ctx.createGain(); g.gain.value = 0;
-    g.gain.setValueAtTime(0.0001, when);
-    g.gain.linearRampToValueAtTime(0.018, when + 0.15);
-    g.gain.linearRampToValueAtTime(0.0001, when + dur);
-    lfo.connect(lfoGain).connect(g.gain);
-    osc.connect(g).connect(this.musicBus);
-    osc.start(when); lfo.start(when);
-    osc.stop(when + dur + 0.05); lfo.stop(when + dur + 0.05);
+  /** A warm daytime insect buzz with a wing-beat flutter. */
+  private insectBuzz(): void {
+    const e = this.open('amb', 1, { pan: rand(-0.8, 0.8) });
+    if (!e) return;
+    const dur = rand(0.8, 1.6);
+    this.vox(e, { dur, vol: 0.035, pitch: [rand(180, 240), rand(200, 260), rand(170, 230)], type: 'sawtooth', attack: dur * 0.3, release: dur * 0.4, formants: [[[2400], 3, 1], [[4200], 4, 0.5]], vib: [rand(3, 6), 60] });
+    this.seal(e);
   }
 
   /** A soft two-note owl hoot, low with gentle vibrato. */
-  private owlHoot(when: number): void {
-    if (!this.ctx || !this.musicBus) return;
-    const hoot = (t: number) => {
-      const osc = this.ctx!.createOscillator();
-      osc.type = 'sine'; osc.frequency.value = 360 + Math.random() * 60;
-      const vib = this.ctx!.createOscillator(); vib.type = 'sine'; vib.frequency.value = 7;
-      const vibG = this.ctx!.createGain(); vibG.gain.value = 6;
-      vib.connect(vibG).connect(osc.frequency);
-      const g = this.ctx!.createGain();
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.linearRampToValueAtTime(0.05, t + 0.05);
-      g.gain.exponentialRampToValueAtTime(0.0003, t + 0.4);
-      osc.connect(g).connect(this.musicBus!);
-      osc.start(t); vib.start(t); osc.stop(t + 0.45); vib.stop(t + 0.45);
-    };
-    hoot(when); hoot(when + 0.55);
+  private owlHoot(): void {
+    const e = this.open('amb', 1, { pan: rand(-0.7, 0.7) });
+    if (!e) return;
+    const f = rand(340, 400);
+    this.vox(e, { dur: 0.35, vol: 0.05, pitch: [f, f * 1.03, f * 0.96], type: 'triangle', attack: 0.06, formants: [[[f * 1.2], 2, 1]], vib: [6, 10], direct: 1 });
+    this.vox(e, { at: 0.5, dur: 0.5, vol: 0.045, pitch: [f * 0.98, f, f * 0.9], type: 'triangle', attack: 0.08, formants: [[[f * 1.2], 2, 1]], vib: [6, 10], direct: 1 });
+    this.seal(e);
   }
 
-  /** Underground dread: an eerie moan, a lone echoing drip, or a distant rumble. */
+  /** A low throaty frog croak — two quick rasps. */
+  private frogCroak(): void {
+    const e = this.open('amb', 1, { pan: rand(-0.7, 0.7) });
+    if (!e) return;
+    const f = rand(95, 140);
+    for (const at of [0, 0.2]) {
+      this.vox(e, { at, dur: 0.14, vol: 0.16, pitch: [f, f * 0.85], attack: 0.01, formants: [[[600], 4, 1], [[1400], 5, 0.4]], rough: [25, 120], direct: 0.4 });
+    }
+    this.seal(e);
+  }
+
+  /** Underground dread: moans, reversed swells, echoing drips, far rockfalls
+   *  and the occasional unseen footsteps. */
   private caveCue(): void {
-    if (!this.ctx || !this.musicBus) return;
-    const t = this.ctx.currentTime + 0.05;
     const r = Math.random();
-    if (r < 0.5) {
-      this.caveMoan(t);
-    } else if (r < 0.82) {
-      // a single water drip, echoing into the reverb
-      this.bellNote(t, 1500 + Math.random() * 700, 0.02, 0.5);
-      this.bellNote(t + 0.09, 900 + Math.random() * 300, 0.012, 0.7);
+    const e = this.open('amb', 1, { pan: rand(-0.8, 0.8) });
+    if (!e) return;
+    if (r < 0.25) {
+      // a low, slowly-wavering moan — the classic cave unease
+      const dur = rand(2.6, 4.6);
+      const b = rand(58, 100);
+      this.vox(e, { dur, vol: 0.3, pitch: [b, b * 1.07, b * 0.94], type: 'sawtooth', attack: dur * 0.4, release: dur * 0.5, formants: [[[380, 300], 3, 1], [[700], 4, 0.3]], vib: [0.7, 30], breath: 0.1 });
+    } else if (r < 0.45) {
+      // a reversed swell that stops dead
+      const dur = rand(1.5, 2.6);
+      this.nz(e, { dur, vol: 0.14, color: 'pink', type: 'bandpass', f: 300, f1: 1800, q: 1.5, attack: dur - 0.02 });
+      this.tn(e, { dur, f: rand(180, 260), f1: rand(300, 420), vol: 0.03, type: 'triangle', attack: dur - 0.02 });
+    } else if (r < 0.7) {
+      // a lone drip, echoing into the reverb
+      const f = rand(1400, 2200);
+      this.tn(e, { dur: 0.08, f: f * 0.7, f1: f, glide: 0.02, vol: 0.16 });
+      this.tn(e, { at: rand(0.3, 0.9), dur: 0.07, f: f * 0.8, f1: f * 1.1, glide: 0.02, vol: 0.08 });
+    } else if (r < 0.87) {
+      // distant rockfall rumble with a trickle of pebbles
+      this.nz(e, { dur: rand(1.4, 2.4), vol: 0.22, color: 'brown', type: 'lowpass', f: 200, f1: 60, curve: this.grains(8, 0.3, 1.2, 0.4) });
+      this.nz(e, { at: 0.3, dur: 1, vol: 0.06, color: 'pink', type: 'bandpass', f: 1500, curve: this.grains(10, 0.95) });
     } else {
-      // a distant rockfall rumble
-      this.padAt(t, 44, 0.03, 2.5);
-      this.noiseBurst(1.4, 180, 0.05, 'lowpass', 55);
+      // footsteps somewhere in the dark
+      for (let i = 0; i < 3; i++) {
+        this.nz(e, { at: i * rand(0.45, 0.55), dur: 0.14, vol: 0.4, color: 'pink', type: 'bandpass', f: 1100, q: 0.8, curve: this.grains(6, 0.9, 1.3) });
+      }
     }
+    this.seal(e);
   }
 
-  /** A low, slowly-wavering moan through the reverb — the classic cave unease. */
-  private caveMoan(when: number): void {
-    if (!this.ctx || !this.musicBus) return;
-    const dur = 2.6 + Math.random() * 2.2;
-    const base = 58 + Math.random() * 46;
-    const lp = this.ctx.createBiquadFilter();
-    lp.type = 'lowpass'; lp.frequency.value = 380; lp.Q.value = 1.5;
-    const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0.0001, when);
-    g.gain.linearRampToValueAtTime(0.06, when + dur * 0.4);
-    g.gain.linearRampToValueAtTime(0.0001, when + dur);
-    lp.connect(g).connect(this.musicBus);
-    for (const [mult, detune] of [[1, 0], [1, 8], [2, -5]] as [number, number][]) {
-      const osc = this.ctx.createOscillator();
-      osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(base * mult, when);
-      osc.detune.value = detune;
-      osc.frequency.linearRampToValueAtTime(base * mult * 1.07, when + dur * 0.5);
-      osc.frequency.linearRampToValueAtTime(base * mult * 0.96, when + dur);
-      osc.connect(lp);
-      osc.start(when); osc.stop(when + dur + 0.05);
-    }
-  }
-
-  /** A slow wind swell routed through the music reverb for spacious emptiness. */
-  private windSigh(when: number, vol: number, dark: boolean): void {
-    if (!this.ctx || !this.musicBus || !this.noiseBuf) return;
-    const dur = 3 + Math.random() * 3;
-    const src = this.ctx.createBufferSource();
-    src.buffer = this.noiseBuf; src.loop = true; src.playbackRate.value = 0.5;
-    const bp = this.ctx.createBiquadFilter();
-    bp.type = 'bandpass'; bp.frequency.value = dark ? 300 : 460; bp.Q.value = 0.7;
-    const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0.0001, when);
-    g.gain.linearRampToValueAtTime(vol, when + dur * 0.4);
-    g.gain.linearRampToValueAtTime(0.0001, when + dur);
-    src.connect(bp).connect(g).connect(this.musicBus);
-    src.start(when); src.stop(when + dur + 0.05);
-  }
-
-  private playAmbientStinger(isNight: boolean): void {
-    if (!this.ctx || !this.musicBus) return;
-    const t = this.ctx.currentTime + 0.08;
-    if (isNight) {
-      const root = [98, 110, 130.81][(Math.random() * 3) | 0];
-      this.padAt(t, root, 0.022, 4.8);
-      this.padAt(t + 0.5, root * Math.pow(2, 7 / 12), 0.012, 4.1);
-      if (Math.random() < 0.45) this.pianoNote(t + 1.6, root * 4, 0.025, 3.2);
+  /** Nether ambience: lava pops, a far roar, or a ghostly wail. */
+  private netherCue(): void {
+    const r = Math.random();
+    if (r < 0.45) {
+      const e = this.open('amb', rand(0.4, 0.9), { pan: rand(-0.8, 0.8) });
+      if (!e) return;
+      const n = 1 + ((Math.random() * 3) | 0);
+      for (let i = 0; i < n; i++) {
+        this.tn(e, { at: i * rand(0.1, 0.3), dur: 0.06, f: rand(160, 300), f1: rand(500, 900), glide: 0.03, vol: 0.1 });
+        this.nz(e, { at: i * 0.2, dur: 0.3, vol: 0.08, color: 'pink', type: 'bandpass', f: 1800, curve: this.grains(8, 0.9, 1.2) });
+      }
+      this.seal(e);
+    } else if (r < 0.75) {
+      const e = this.open('amb', 1, { pan: rand(-0.6, 0.6) });
+      if (!e) return;
+      const dur = rand(2.5, 4);
+      this.nz(e, { dur, vol: 0.2, color: 'brown', type: 'lowpass', f: 260, f1: 90, attack: dur * 0.35 });
+      this.tn(e, { dur, f: rand(40, 55), f1: rand(32, 40), vol: 0.07, attack: dur * 0.3 });
+      this.seal(e);
     } else {
-      const root = [196, 220, 261.63][(Math.random() * 3) | 0];
-      this.pianoNote(t, root * 2, 0.025, 2.2);
-      if (Math.random() < 0.7) this.pianoNote(t + 0.42, root * Math.pow(2, 7 / 12) * 2, 0.02, 2.1);
-      if (Math.random() < 0.45) this.padAt(t, root * 0.5, 0.012, 3.5);
-    }
-  }
-
-  /** Schedule one full generated piece in the resolved mood; returns its length. */
-  private playPiece(mood: PieceMood): number {
-    if (!this.ctx || !this.musicBus) return 0;
-    const t0 = this.ctx.currentTime + 0.15;
-    const { night, scale: pent, third, seventh, barLen, padVol, density, octaveBias, bellChance } = mood;
-    const root = mood.roots[(Math.random() * mood.roots.length) | 0];
-    const progression = mood.progressions[(Math.random() * mood.progressions.length) | 0];
-    const bars = 8 + (((Math.random() * 2) | 0) * 4);
-    const motif = [
-      pent[(Math.random() * pent.length) | 0],
-      pent[(Math.random() * pent.length) | 0],
-      pent[(Math.random() * pent.length) | 0],
-    ];
-
-    // arpeggio runs in alternating stretches so the piece breathes: a couple of
-    // flowing bars, then space. The 7th gives the wistful C418 jazz colour.
-    let arpRun = false;
-    for (let bar = 0; bar < bars; bar++) {
-      const tBar = t0 + bar * barLen;
-      const chordRoot = root * Math.pow(2, progression[bar % progression.length] / 12);
-      // pad: root + third + fifth (+ occasional 7th colour), swelling under everything
-      this.padAt(tBar, chordRoot * 0.5, 0.045 * padVol, barLen * 1.15);
-      this.padAt(tBar, chordRoot * Math.pow(2, third / 12) * 0.5, 0.032 * padVol, barLen * 1.15);
-      this.padAt(tBar, chordRoot * Math.pow(2, 7 / 12) * 0.5, 0.028 * padVol, barLen * 1.15);
-      if (Math.random() < 0.5) this.padAt(tBar, chordRoot * Math.pow(2, seventh / 12) * 0.5, 0.018 * padVol, barLen * 1.05);
-      // add-9 shimmer + a warm 5th above for a fuller, richer chord bed
-      if (Math.random() < 0.45) this.padAt(tBar, chordRoot * Math.pow(2, 14 / 12), 0.012 * padVol, barLen * 0.92);
-      if (Math.random() < 0.4) this.padAt(tBar, chordRoot * Math.pow(2, (third + 12) / 12), 0.011 * padVol, barLen * 0.9);
-      // soft bass pulse — warm and low, MC-style drone
-      this.pianoNote(tBar, chordRoot * 0.25, 0.05, 2.6);
-      if (Math.random() < 0.36) this.pianoNote(tBar + barLen * 0.5, chordRoot * 0.5, 0.034, 2.0);
-      // flowing broken-chord arpeggio in roughly half the bars, panning gently L↔R
-      arpRun = bar === 0 ? Math.random() < 0.5 : (Math.random() < 0.72 ? arpRun : !arpRun);
-      if (arpRun) {
-        const steps = night ? 6 : 8;
-        for (let i = 0; i < steps; i++) {
-          const deg = mood.arpDeg[i % mood.arpDeg.length];
-          const freq = chordRoot * Math.pow(2, deg / 12);
-          const when = tBar + (i / steps) * barLen + (Math.random() - 0.5) * 0.015;
-          const pan = Math.sin((i / steps) * Math.PI * 2) * 0.5;
-          this.arpNote(when, freq, 0.02, barLen / steps + 0.5, pan);
-        }
-      }
-      // occasional high sparkle bell for the airy MC ambience
-      if (bar % 2 === 1 && Math.random() < bellChance) {
-        const deg = pent[(Math.random() * pent.length) | 0];
-        this.bellNote(tBar + barLen * 0.25, root * 8 * Math.pow(2, deg / 12), 0.012, 3.5);
-      }
-      // sparse, repeated pentatonic motifs with enough silence to feel exploratory.
-      const beats = night ? [0, 0.375, 0.75] : [0, 0.25, 0.5, 0.75];
-      for (let i = 0; i < beats.length; i++) {
-        if (Math.random() > Math.min(0.95, (i === 0 ? 0.62 : 0.38) * density)) continue;
-        const deg = Math.random() < 0.55 ? motif[i % motif.length] : pent[(Math.random() * pent.length) | 0];
-        const octave = Math.random() < octaveBias ? 4 : 2;
-        const freq = root * octave * Math.pow(2, deg / 12);
-        const when = tBar + beats[i] * barLen + Math.random() * 0.04;
-        this.pianoNote(when, freq, 0.044 + Math.random() * 0.025, 2.3);
-        // a faint octave-up echo a beat later — adds the airy MC sparkle
-        if (Math.random() < 0.5) this.pianoNote(when + 0.28, freq * 2, 0.015, 1.6);
-      }
-      // a gentle counter-melody answering the motif a third up — adds warmth/body
-      if (bar % 2 === 1 && Math.random() < 0.5 * density) {
-        const cd = motif[(bar >> 1) % motif.length];
-        this.arpNote(tBar + barLen * 0.5, root * 2 * Math.pow(2, (cd + third) / 12), 0.016, barLen * 0.7, -0.25);
-      }
-      if (bar % 4 === 3 && Math.random() < 0.58) {
-        const deg = pent[(Math.random() * pent.length) | 0];
-        this.bellNote(tBar + barLen * 0.82, root * 4 * Math.pow(2, deg / 12), 0.026 + bellChance * 0.02, 4.5);
-      }
-    }
-    return bars * barLen;
-  }
-
-  /** Rhodes-piano-ish voice: fundamental + slightly detuned octave + warm 2nd
-   *  harmonic, through a soft lowpass with a gentle "hammer" attack. This is
-   *  closer to C418's electric-piano timbre than a raw sine. */
-  private pianoNote(when: number, freq: number, vol: number, decay: number): void {
-    if (!this.ctx || !this.musicBus) return;
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    // filter opens slightly on the attack for a "ting" then settles
-    filter.frequency.setValueAtTime(1800, when);
-    filter.frequency.linearRampToValueAtTime(2400, when + 0.02);
-    filter.frequency.exponentialRampToValueAtTime(900, when + decay * 0.6);
-    filter.Q.value = 0.4;
-    filter.connect(this.musicBus);
-    // warmer partial blend: fundamental, detuned sub, octave, 2nd harmonic
-    const partials: [number, number, OscillatorType, number][] = [
-      [1, 1.0, 'sine', 0],
-      [1, 0.18, 'sine', -3.5],     // subtle detune for chorus warmth
-      [2, 0.3, 'sine', 0],
-      [3, 0.06, 'triangle', 0],
-    ];
-    for (const [mult, pv, type, detune] of partials) {
-      const osc = this.ctx.createOscillator();
-      osc.type = type;
-      osc.frequency.value = freq * mult * (1 + (Math.random() - 0.5) * 0.001);
-      osc.detune.value = detune;
-      const g = this.ctx.createGain();
-      // soft hammer attack: quick but not instantaneous
-      g.gain.setValueAtTime(0.0001, when);
-      g.gain.linearRampToValueAtTime(vol * pv, when + 0.008);
-      g.gain.exponentialRampToValueAtTime(0.0004, when + decay);
-      osc.connect(g).connect(filter);
-      osc.start(when);
-      osc.stop(when + decay + 0.05);
-    }
-  }
-
-  /** Warm sustained pad: two slightly detuned triangle/sawtooth oscillators
-   *  through a slowly-opening lowpass, for a soft string-pad swell. */
-  private padAt(when: number, freq: number, vol: number, dur: number): void {
-    if (!this.ctx || !this.musicBus) return;
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(500, when);
-    filter.frequency.linearRampToValueAtTime(1100, when + dur * 0.4);
-    filter.frequency.linearRampToValueAtTime(600, when + dur);
-    filter.Q.value = 0.6;
-    const g = this.ctx.createGain();
-    g.gain.setValueAtTime(0.0001, when);
-    g.gain.linearRampToValueAtTime(vol, when + dur * 0.32);
-    g.gain.linearRampToValueAtTime(0.0001, when + dur);
-    filter.connect(g).connect(this.musicBus);
-    for (const [type, detune, pv] of [['triangle', 0, 1], ['triangle', 5, 0.6], ['sawtooth', -4, 0.18]] as [OscillatorType, number, number][]) {
-      const osc = this.ctx.createOscillator();
-      osc.type = type;
-      osc.frequency.value = freq;
-      osc.detune.value = detune;
-      osc.connect(filter);
-      osc.start(when);
-      osc.stop(when + dur + 0.05);
-    }
-  }
-
-  /** Procedural reverb impulse: stereo decaying noise. */
-  private makeImpulse(dur: number, decay: number): AudioBuffer {
-    const ctx = this.ctx!;
-    const len = Math.floor(ctx.sampleRate * dur);
-    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
-    for (let ch = 0; ch < 2; ch++) {
-      const d = buf.getChannelData(ch);
-      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
-    }
-    return buf;
-  }
-
-  /** Gentle plucked arpeggio voice with stereo placement — adds the flowing
-   *  broken-chord motion under C418-style pieces without crowding the melody. */
-  private arpNote(when: number, freq: number, vol: number, decay: number, pan: number): void {
-    if (!this.ctx || !this.musicBus) return;
-    const filter = this.ctx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(2600, when);
-    filter.frequency.exponentialRampToValueAtTime(800, when + decay);
-    filter.Q.value = 0.3;
-    const panner = this.ctx.createStereoPanner();
-    panner.pan.value = Math.max(-1, Math.min(1, pan));
-    filter.connect(panner).connect(this.musicBus);
-    for (const [mult, pv, type] of [[1, 1, 'triangle'], [2, 0.16, 'sine']] as [number, number, OscillatorType][]) {
-      const osc = this.ctx.createOscillator();
-      osc.type = type;
-      osc.frequency.value = freq * mult;
-      const g = this.ctx.createGain();
-      g.gain.setValueAtTime(0.0001, when);
-      g.gain.linearRampToValueAtTime(vol * pv, when + 0.006);
-      g.gain.exponentialRampToValueAtTime(0.0004, when + decay);
-      osc.connect(g).connect(filter);
-      osc.start(when);
-      osc.stop(when + decay + 0.05);
-    }
-  }
-
-  private bellNote(when: number, freq: number, vol: number, decay: number): void {
-    if (!this.ctx || !this.musicBus) return;
-    for (const [mult, gain] of [[1, 1], [2.01, 0.28], [3.02, 0.08]] as [number, number][]) {
-      const osc = this.ctx.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.value = freq * mult;
-      const g = this.ctx.createGain();
-      g.gain.setValueAtTime(0.0001, when);
-      g.gain.linearRampToValueAtTime(vol * gain, when + 0.018);
-      g.gain.exponentialRampToValueAtTime(0.0003, when + decay);
-      osc.connect(g).connect(this.musicBus);
-      osc.start(when);
-      osc.stop(when + decay + 0.05);
+      this.mobSound('emberghast', rand(0.12, 0.25), 'idle', rand(-0.8, 0.8));
     }
   }
 }

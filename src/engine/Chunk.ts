@@ -10,7 +10,7 @@ function lightTransparent(id: number): boolean {
 
 /** Full-block light emitters that feed the block-light flood-fill (alongside torches). */
 export function isGlower(id: number): boolean {
-  return id === B.GLOWSTONE || id === B.REDSTONE_LAMP_LIT || id === B.MAGMA;
+  return id === B.GLOWSTONE || id === B.REDSTONE_LAMP_LIT || id === B.MAGMA || id === B.FIRE;
 }
 
 export const CX = 16;
@@ -42,6 +42,8 @@ export class Chunk {
   modified = false;
   /** generation finished */
   ready = false;
+  /** cached biome grass/foliage tint per column (256 x rgb), filled lazily */
+  tint: Float32Array | null = null;
 
   constructor(cx: number, cz: number) {
     this.cx = cx;

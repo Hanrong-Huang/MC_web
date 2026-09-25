@@ -203,12 +203,16 @@ export class TouchControls {
     // LEFT: a floating movement joystick — touch anywhere on the left and the
     // stick appears under your thumb, drag to walk (full forward push = sprint).
     const moveZone = el('div', 'touch-move-zone', c);
+    // first-run hint in the empty stick area; fades once the player has moved
+    const hint = el('div', 'touch-hint', c);
+    hint.textContent = 'Drag here to move';
     const base = el('div', 'touch-stick stick-move hidden', c);
     const knob = el('div', 'touch-knob', base);
     let mid = -1, mcx = 0, mcy = 0;
     moveZone.addEventListener('pointerdown', (e) => {
       if (mid >= 0) return;
       e.preventDefault();
+      hint.style.opacity = '0';
       mid = e.pointerId; moveZone.setPointerCapture(e.pointerId);
       mcx = e.clientX; mcy = e.clientY;
       base.style.left = `${mcx}px`; base.style.top = `${mcy}px`;
@@ -257,9 +261,9 @@ export class TouchControls {
     this.hold('tb tb-place', ICONS.place, () => { input.rightDown = true; input.queueRightClick(); }, () => { input.rightDown = false; }, 'Place / use');
     this.hold('tb tb-jump', ICONS.jump, () => { input.keys.add('Space'); }, () => { input.keys.delete('Space'); }, 'Jump');
     this.hold('tb tb-down', ICONS.down, () => { input.keys.add('ControlLeft'); }, () => { input.keys.delete('ControlLeft'); }, 'Sneak / descend');
-    this.tap('tb tb-inv', ICONS.inv, hooks.onInventory, 'Inventory');
-    this.tap('tb tb-fly', ICONS.fly, hooks.onFly, 'Toggle flight');
-    this.tap('tb tb-pause', ICONS.pause, hooks.onPause, 'Pause');
+    this.tap('tb tb-inv', ICONS.inv, hooks.onInventory, 'Inventory', 'Items');
+    this.tap('tb tb-fly', ICONS.fly, hooks.onFly, 'Toggle flight', 'Fly');
+    this.tap('tb tb-pause', ICONS.pause, hooks.onPause, 'Pause', 'Menu');
   }
 
   /** Map the movement-stick vector to WASD (+ sprint on a full forward push). */
@@ -278,7 +282,7 @@ export class TouchControls {
   private hold(cls: string, icon: HTMLCanvasElement, onDown: () => void, onUp: () => void, tip = ''): void {
     const b = el('div', cls, this.el);
     b.appendChild(icon);
-    if (tip) b.title = tip;
+    if (tip) { b.title = tip; b.setAttribute('aria-label', tip); b.setAttribute('role', 'button'); }
     b.addEventListener('pointerdown', (e) => {
       e.preventDefault(); b.setPointerCapture(e.pointerId); b.classList.add('held'); this.buzz(); onDown();
     });
@@ -288,10 +292,11 @@ export class TouchControls {
     this.resets.push(up);
   }
 
-  private tap(cls: string, icon: HTMLCanvasElement, onTap: () => void, tip = ''): void {
+  private tap(cls: string, icon: HTMLCanvasElement, onTap: () => void, tip = '', label = ''): void {
     const b = el('div', cls, this.el);
     b.appendChild(icon);
-    if (tip) b.title = tip;
+    if (tip) { b.title = tip; b.setAttribute('aria-label', tip); b.setAttribute('role', 'button'); }
+    if (label) el('span', 'tb-label', b).textContent = label;
     b.addEventListener('pointerdown', (e) => {
       e.preventDefault(); b.classList.add('held'); this.buzz(); onTap();
     });

@@ -1,10 +1,14 @@
 // Face-culled chunk meshing with Minecraft-style per-face shading, per-vertex
-// ambient occlusion, heightmap skylight, and BFS flood-fill torch light.
+// ambient occlusion, flood-filled skylight (15 levels, spilling under overhangs
+// and into cave mouths) and BFS flood-fill torch light.
 // Each vertex carries a 2-channel "alight" attribute: x = sky-lit component
 // (scaled by the day/night uniform in the shader), y = torch-lit component.
+// The torch channel also smuggles a small per-vertex flag (+2 = sway in the
+// wind, +4 = self-lit animated lava) that the vertex shader strips off, so the
+// light model stays 2-channel without another attribute.
 
 import { CX, CZ, CY } from './Chunk';
-import { B, def, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES } from './Blocks';
+import { B, def, hasDef, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES } from './Blocks';
 import type { UVRect } from './Textures';
 
 // Minimal structural views of world/chunk/atlas so the mesher is pure logic and
@@ -41,17 +45,25 @@ export interface MeshAtlas { rect(name: string): UVRect; }
 /** Raw geometry arrays for one material (solid or water) — transferable to/from a worker. */
 export interface GeoArrays {
   positions: Float32Array; lights: Float32Array; tints: Float32Array;
-  uvs: Float32Array; indices: Uint32Array;
+  uvs: Float32Array; indices: Uint32Array | Uint16Array;
+  /** vertical extent of the vertices, for a tight culling volume */
+  minY?: number; maxY?: number;
 }
 export interface ChunkMeshData { solid: GeoArrays | null; water: GeoArrays | null; }
+
+/** Vertex flags packed into the torch channel (see header). */
+export const FLAG_SWAY = 2;
+export const FLAG_LAVA = 4;
 
 // face order: +x, -x, +y, -y, +z, -z
 const FACE_NORMALS = [
   [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
 ] as const;
 
-// per-face shading: top 100%, bottom 50%, z (north/south) 80%, x (east/west) 60%
-const FACE_SHADE = [0.6, 0.6, 1.0, 0.5, 0.8, 0.8];
+// per-face shading: top 100%, bottom 50%, z (north/south) 80%, x (east/west) 60%.
+// Squared-ish because the shader lights in linear space: a 0.6 multiplier in
+// linear reads as ~0.8 on screen, which flattened every hillside.
+const FACE_SHADE = [0.6, 0.6, 1.0, 0.5, 0.8, 0.8].map((s) => Math.pow(s, 1.7));
 const LIQUID_SOURCE_HEIGHT = 14 / 16;
 const LIQUID_EDGE_HEIGHT = 8 / 16;
 
@@ -65,13 +77,20 @@ const FACE_GEO: { o: number[]; u: number[]; v: number[] }[] = [
   { o: [1, 0, 0], u: [-1, 0, 0], v: [0, 1, 0] }, // -z
 ];
 
-const AO_SHADE = [0.45, 0.65, 0.84, 1.0];
+const AO_SHADE = [0.36, 0.56, 0.78, 1.0];
+
+/** Light level (0..15) -> brightness, a softened version of Minecraft's
+ *  l / (3(1-l) + 1) table so light fades quickly away from torches and into
+ *  shade instead of staying flat. */
+const LIGHT_CURVE = new Float32Array(16);
+for (let i = 0; i < 16; i++) { const l = i / 15; LIGHT_CURVE[i] = l / ((1 - l) * 2.2 + 1); }
 
 // reusable 3x3 per-face light/occlusion sample grids (index (i+1)*3+(j+1)),
 // so each face samples the front layer once instead of re-sampling per corner
 const SKY9 = new Float32Array(9);
 const TORCH9 = new Float32Array(9);
 const OCC9 = new Uint8Array(9);
+const SOLID9 = new Uint8Array(9);
 
 /** AO level (0..3) for a face corner, read from the shared 3x3 OCC9 grid. */
 function aoCorner(a: number, b: number, isLiquid: boolean): number {
@@ -83,19 +102,49 @@ function aoCorner(a: number, b: number, isLiquid: boolean): number {
   return s1 && s2 ? 0 : 3 - (s1 + s2 + sc);
 }
 
+/** Smooth light for one face corner: average the brightness of the non-opaque
+ *  cells among the 4 touching it (MC smooth lighting — walls don't count as
+ *  dark samples, AO handles the corner darkening). */
+function cornerLight(grid: Float32Array, a: number, b: number): number {
+  const si = a ? 1 : -1, sj = b ? 1 : -1;
+  const iu = (si + 1) * 3 + 1, iv = 3 + (sj + 1), ic = (si + 1) * 3 + (sj + 1);
+  let sum = grid[4], n = 1;
+  if (!SOLID9[iu]) { sum += grid[iu]; n++; }
+  if (!SOLID9[iv]) { sum += grid[iv]; n++; }
+  if (!SOLID9[ic] && !(SOLID9[iu] && SOLID9[iv])) { sum += grid[ic]; n++; }
+  return sum / n;
+}
+
 const TORCH_LEVEL = 14;
 const GLOW_LEVEL = 15; // glowstone / lit redstone lamp: full-strength block light
-const MAX_LIGHT = 15;
+const SKY_LEVEL = 15;
 
-// shared flood-fill region: chunk plus a 15-block margin on each side
+// Shared flood-fill region: the chunk plus a 15-block margin on each side, laid
+// out column-major (y innermost) so a column's open sky is one fill() call.
 const RX0 = -15, RX1 = 30;
 const RW = RX1 - RX0 + 1; // 46
-const REGION = new Uint8Array(RW * RW * CY);
-const QUEUE = new Int32Array(RW * RW * 8);
+const TORCHR = new Uint8Array(RW * RW * CY);
+const SKYR = new Uint8Array(RW * RW * CY);
+const QLEN = 1 << 17;
+const QUEUE = new Int32Array(QLEN);
+const QMASK = QLEN - 1;
 
 function regionIdx(rx: number, rz: number, y: number): number {
-  return (rx - RX0) + (rz - RX0) * RW + y * RW * RW;
+  return ((rz - RX0) * RW + (rx - RX0)) * CY + y;
 }
+
+// Padded block copy of the chunk + a 1-block rim (18x18 columns, y from -1 to
+// CY), so the hot face/AO loop is plain array reads instead of closure calls.
+const PW = 18;
+const PH = CY + 2;
+const PAD = new Uint8Array(PW * PW * PH);
+function padIdx(x: number, y: number, z: number): number {
+  return ((z + 1) * PW + (x + 1)) * PH + (y + 1);
+}
+
+/** Leaf blocks sway gently in the wind. */
+const LEAF_LUT = new Uint8Array(256);
+for (let id = 1; id < 256; id++) if (hasDef(id) && def(id).name.endsWith('leaves')) LEAF_LUT[id] = 1;
 
 function faceTile(f: NonNullable<ReturnType<typeof def>['faces']>, face: number): string {
   if (face === 2) return f.top;
@@ -104,57 +153,172 @@ function faceTile(f: NonNullable<ReturnType<typeof def>['faces']>, face: number)
   return f.sides;
 }
 
-// Two reusable array pools (solid + water). Meshing is synchronous and
-// single-threaded, so reusing these across chunks avoids ~10 array allocations
-// per chunk and keeps the grown backing capacity (no realloc churn -> far less GC).
-const GEO_POOLS = [0, 1].map(() => ({
-  positions: [] as number[], lights: [] as number[], tints: [] as number[],
-  uvs: [] as number[], indices: [] as number[],
+// Two reusable growable typed-array pools (solid + water). Meshing is
+// synchronous and single-threaded, so the builders keep their grown capacity
+// between chunks (no per-chunk number[] churn, no GC spikes) and only the
+// final exact-size slices are allocated (and transferred by the worker).
+interface Pool { pos: Float32Array; lit: Float32Array; tint: Float32Array; uv: Float32Array; idx: Uint32Array; }
+const GEO_POOLS: Pool[] = [0, 1].map(() => ({
+  pos: new Float32Array(3 * 8192), lit: new Float32Array(2 * 8192), tint: new Float32Array(3 * 8192),
+  uv: new Float32Array(2 * 8192), idx: new Uint32Array(12288),
 }));
 
-class GeoBuilder {
-  positions: number[];
-  lights: number[];
-  tints: number[];
-  uvs: number[];
-  indices: number[];
+export class GeoBuilder {
+  private p: Pool;
   vertCount = 0;
+  idxCount = 0;
 
   constructor(poolIdx: number) {
-    const p = GEO_POOLS[poolIdx];
-    this.positions = p.positions; this.positions.length = 0;
-    this.lights = p.lights; this.lights.length = 0;
-    this.tints = p.tints; this.tints.length = 0;
-    this.uvs = p.uvs; this.uvs.length = 0;
-    this.indices = p.indices; this.indices.length = 0;
+    this.p = GEO_POOLS[poolIdx];
+  }
+
+  private growVerts(): void {
+    const p = this.p;
+    const grow = <T extends Float32Array>(a: T, k: number): T => {
+      const n = new Float32Array(a.length * 2) as T;
+      n.set(a.subarray(0, this.vertCount * k));
+      return n;
+    };
+    p.pos = grow(p.pos, 3); p.lit = grow(p.lit, 2); p.tint = grow(p.tint, 3); p.uv = grow(p.uv, 2);
+  }
+
+  /** Append one vertex: position, sky/torch light, rgb tint, uv. */
+  v(px: number, py: number, pz: number, sky: number, torch: number,
+    r: number, g: number, b: number, u: number, vv: number): void {
+    const p = this.p;
+    const n = this.vertCount;
+    if ((n + 1) * 3 > p.pos.length) this.growVerts();
+    const P = this.p;
+    P.pos[n * 3] = px; P.pos[n * 3 + 1] = py; P.pos[n * 3 + 2] = pz;
+    P.lit[n * 2] = sky; P.lit[n * 2 + 1] = torch;
+    P.tint[n * 3] = r; P.tint[n * 3 + 1] = g; P.tint[n * 3 + 2] = b;
+    P.uv[n * 2] = u; P.uv[n * 2 + 1] = vv;
+    this.vertCount = n + 1;
+  }
+
+  /** Append two triangles (6 indices). */
+  tri2(a: number, b: number, c: number, d: number, e: number, f: number): void {
+    const p = this.p;
+    if (this.idxCount + 6 > p.idx.length) {
+      const n = new Uint32Array(p.idx.length * 2);
+      n.set(p.idx.subarray(0, this.idxCount));
+      p.idx = n;
+    }
+    const i = this.idxCount, I = p.idx;
+    I[i] = a; I[i + 1] = b; I[i + 2] = c; I[i + 3] = d; I[i + 4] = e; I[i + 5] = f;
+    this.idxCount = i + 6;
   }
 
   build(): GeoArrays | null {
     if (this.vertCount === 0) return null;
+    const p = this.p, n = this.vertCount;
+    // 16-bit indices whenever they fit: half the index upload for most chunks
+    const indices = n <= 65535 ? Uint16Array.from(p.idx.subarray(0, this.idxCount)) : p.idx.slice(0, this.idxCount);
+    let minY = Infinity, maxY = -Infinity;
+    for (let i = 1; i < n * 3; i += 3) { const y = p.pos[i]; if (y < minY) minY = y; if (y > maxY) maxY = y; }
     return {
-      positions: new Float32Array(this.positions),
-      lights: new Float32Array(this.lights),
-      tints: new Float32Array(this.tints),
-      uvs: new Float32Array(this.uvs),
-      indices: new Uint32Array(this.indices),
+      minY, maxY,
+      positions: p.pos.slice(0, n * 3),
+      lights: p.lit.slice(0, n * 2),
+      tints: p.tint.slice(0, n * 3),
+      uvs: p.uv.slice(0, n * 2),
+      indices,
     };
   }
 }
+
+// Per-id block kind: 0 = air, 1 = plain cube (opaque / cutout / liquid), 2 =
+// special model (torch, door, bed, plants, ...) handled by its own emitter.
+const KIND = new Int8Array(256).fill(-1);
+function kindOf(id: number): number {
+  let k = KIND[id];
+  if (k < 0) {
+    k = id === B.AIR ? 0
+      : (id === B.TORCH || id === B.DOOR_LOWER || id === B.DOOR_UPPER || id === B.LADDER ||
+        id === B.BED || id === B.BED_HEAD || id === B.TRAPDOOR || id === B.PRESSURE_PLATE ||
+        id === B.LEVER || id === B.WOODEN_BUTTON || id === B.STONE_BUTTON ||
+        id === B.REDSTONE_WIRE || CROSS_BLOCKS.has(id)) ? 2 : 1;
+    KIND[id] = k;
+  }
+  return k;
+}
+
+// per (block, face) atlas rect + biome-tint flag, rebuilt if the atlas changes
+let rectAtlas: MeshAtlas | null = null;
+const FACE_RECT: (UVRect | undefined)[] = new Array(256 * 6);
+const FACE_TINTED = new Uint8Array(256 * 6);
+function faceRect(atlas: MeshAtlas, id: number, face: number): UVRect {
+  if (atlas !== rectAtlas) { rectAtlas = atlas; FACE_RECT.fill(undefined); }
+  const k = id * 6 + face;
+  let r = FACE_RECT[k];
+  if (!r) {
+    const tile = faceTile(def(id).faces!, face);
+    r = atlas.rect(tile);
+    FACE_RECT[k] = r;
+    FACE_TINTED[k] = TINTED_TILES.has(tile) ? 1 : 0;
+  }
+  return r;
+}
+
+// pad-array offsets for the six face neighbours (+x, -x, +y, -y, +z, -z)
+const PAD_STEP = [PH, -PH, 1, -1, PW * PH, -PW * PH];
 
 // per-chunk column tint cache (biome grass/foliage color)
 const TINT_CACHE = new Float32Array(256 * 3);
 const TINT_SET = new Uint8Array(256);
 const tintScratch = { r: 1, g: 1, b: 1 };
+const WHITE = new Float32Array([1, 1, 1]);
+
+/** BFS-propagate levels already seeded in `arr` (queue holds the seeds). */
+function floodFill(arr: Uint8Array, refs: (MeshChunk | undefined)[], qTail: number, waterCost: number): void {
+  let qHead = 0;
+  const chunkAt = (rx: number, rz: number): MeshChunk | undefined =>
+    refs[(rx >> 4) + 1 + ((rz >> 4) + 1) * 3];
+  while (qHead !== qTail) {
+    const ri = QUEUE[qHead]; qHead = (qHead + 1) & QMASK;
+    const level = arr[ri];
+    if (level <= 1) continue;
+    const y = ri % CY;
+    const col = (ri - y) / CY;
+    const rx = (col % RW) + RX0;
+    const rz = ((col / RW) | 0) + RX0;
+    for (let d = 0; d < 6; d++) {
+      let nx = rx, ny = y, nz = rz;
+      if (d === 0) nx++; else if (d === 1) nx--; else if (d === 2) ny++;
+      else if (d === 3) ny--; else if (d === 4) nz++; else nz--;
+      if (nx < RX0 || nx > RX1 || nz < RX0 || nz > RX1 || ny < 0 || ny >= CY) continue;
+      const c = chunkAt(nx, nz);
+      if (!c) continue;
+      const id = c.data[(nx & 15) | ((nz & 15) << 4) | (ny << 8)];
+      if (OPAQUE_LUT[id]) continue;
+      const nl = level - 1 - (id === B.WATER ? waterCost : 0);
+      // prune: light that can no longer reach the meshed box (chunk + 1-block
+      // rim) by manhattan distance can't affect any sampled cell
+      const ox = nx < -1 ? -1 - nx : nx > 16 ? nx - 16 : 0;
+      const oz = nz < -1 ? -1 - nz : nz > 16 ? nz - 16 : 0;
+      if (nl <= ox + oz) continue;
+      const ni = ri + (nx - rx) * CY + (nz - rz) * RW * CY + (ny - y);
+      if (arr[ni] >= nl) continue;
+      arr[ni] = nl;
+      if (((qTail + 1) & QMASK) !== qHead) { QUEUE[qTail] = ni; qTail = (qTail + 1) & QMASK; }
+    }
+  }
+}
 
 export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: MeshAtlas): ChunkMeshData {
   const solid = new GeoBuilder(0);
   const water = new GeoBuilder(1);
   const bx = chunk.cx * CX, bz = chunk.cz * CZ;
+  // top of the tallest non-air block: the heightmap ignores light-transparent
+  // blocks (glass, torches, plants), so it can't bound the mesh on its own
   let maxY = 1;
-  for (let i = 0; i < chunk.heightmap.length; i++) {
-    if (chunk.heightmap[i] > maxY) maxY = chunk.heightmap[i];
+  for (let y = CY - 1; y > 0; y--) {
+    const row = y << 8;
+    let any = false;
+    for (let i = 0; i < 256; i++) if (chunk.data[row | i] !== B.AIR) { any = true; break; }
+    if (any) { maxY = y + 1; break; }
   }
-  maxY = Math.min(CY, maxY + 3);
+  maxY = Math.min(CY, maxY + 1);
 
   // cache the 3x3 chunk neighborhood for fast lookups
   const refs: (MeshChunk | undefined)[] = [];
@@ -167,15 +331,30 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
   const chunkAt = (rx: number, rz: number): MeshChunk | undefined =>
     refs[(rx >> 4) + 1 + ((rz >> 4) + 1) * 3];
 
-  // local getter with cross-chunk fallback (region coords; outside region -> world)
+  // --- padded block copy (chunk + 1-block rim) --------------------------------
+  const padTop = Math.min(CY, maxY + 1);
+  for (let z = -1; z <= 16; z++) {
+    for (let x = -1; x <= 16; x++) {
+      const c = chunkAt(x, z);
+      const base = padIdx(x, 0, z);
+      PAD[base - 1] = B.BEDROCK; // y = -1
+      if (!c) { PAD.fill(B.STONE, base, base + padTop); } // unloaded frontier reads as opaque
+      else {
+        const col = (x & 15) | ((z & 15) << 4);
+        const d = c.data;
+        for (let y = 0; y < padTop; y++) PAD[base + y] = d[col | (y << 8)];
+      }
+      PAD.fill(B.AIR, base + padTop, base + CY + 1);
+    }
+  }
   const get = (x: number, y: number, z: number): number => {
+    if (x >= -1 && x <= 16 && z >= -1 && z <= 16) {
+      if (y < -1) return B.BEDROCK;
+      if (y > CY) return B.AIR;
+      return PAD[padIdx(x, y, z)];
+    }
     if (y < 0) return B.BEDROCK;
     if (y >= CY) return B.AIR;
-    if (x >= RX0 && x <= RX1 && z >= RX0 && z <= RX1) {
-      const c = chunkAt(x, z);
-      if (!c) return B.STONE; // unloaded frontier reads as opaque
-      return c.data[(x & 15) | ((z & 15) << 4) | (y << 8)];
-    }
     return world.getBlockForMesh(bx + x, y, bz + z);
   };
   const liquidCellHeight = (id: number, x: number, y: number, z: number): number => {
@@ -192,7 +371,8 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
     const sz = pz < 0.5 ? -1 : 1;
     let sum = 0;
     let n = 0;
-    for (const [dx, dz] of [[0, 0], [sx, 0], [0, sz], [sx, sz]]) {
+    for (let k = 0; k < 4; k++) {
+      const dx = k === 1 || k === 3 ? sx : 0, dz = k >= 2 ? sz : 0;
       const h = liquidCellHeight(id, x + dx, y, z + dz);
       if (h <= 0) continue;
       sum += h;
@@ -200,13 +380,6 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
     }
     return n > 0 ? sum / n : LIQUID_EDGE_HEIGHT;
   };
-  const skyAt = (x: number, y: number, z: number): number => {
-    if (y >= CY) return 1;
-    const c = chunkAt(x, z);
-    if (!c) return 1;
-    return c.skyLight(x & 15, Math.max(0, y), z & 15);
-  };
-  const occ = (x: number, y: number, z: number): number => OCCLUDE_LUT[get(x, y, z)];
 
   // biome tint per column, computed lazily
   TINT_SET.fill(0);
@@ -222,62 +395,84 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
     return TINT_CACHE.subarray(ci * 3, ci * 3 + 3);
   };
 
+  // --- skylight flood fill ------------------------------------------------------
+  // Every cell at/above a column's heightmap sees the sky (15). Light then spills
+  // sideways and down through non-opaque cells, losing a level per block (two in
+  // water), so overhangs get soft shade, tree canopies cast a light shadow and
+  // caves go dark a few blocks past their mouth.
+  SKYR.fill(0);
+  let qTail = 0;
+  const push = (ri: number): void => { if (qTail < QLEN - 1) QUEUE[qTail++] = ri; };
+  const colH = (rx: number, rz: number): number => {
+    const c = chunkAt(rx, rz);
+    return c ? c.heightmap[(rz & 15) * CX + (rx & 15)] : CY;
+  };
+  for (let rz = RX0; rz <= RX1; rz++) {
+    for (let rx = RX0; rx <= RX1; rx++) {
+      if (!chunkAt(rx, rz)) continue;
+      const h = colH(rx, rz);
+      if (h >= CY) continue;
+      const base = regionIdx(rx, rz, 0);
+      SKYR.fill(SKY_LEVEL, base + h, base + CY);
+      // seed the sky cells that can spill: the lowest one (down into leaves /
+      // water) and those beside a taller neighbour column (under its overhang)
+      let top = h;
+      if (rx > RX0) top = Math.max(top, colH(rx - 1, rz));
+      if (rx < RX1) top = Math.max(top, colH(rx + 1, rz));
+      if (rz > RX0) top = Math.max(top, colH(rx, rz - 1));
+      if (rz < RX1) top = Math.max(top, colH(rx, rz + 1));
+      top = Math.min(top, CY);
+      for (let y = h; y < top || y === h; y++) push(base + y);
+    }
+  }
+  floodFill(SKYR, refs, qTail, 0);
+
   // --- block-light flood fill (torches + glowstone/lit lamps) ----------------
   let hasLights = false;
   for (const c of refs) if (c && (c.torches.size > 0 || c.glowers.size > 0)) { hasLights = true; break; }
   if (hasLights) {
-    REGION.fill(0);
-    let qHead = 0, qTail = 0;
-    const push = (idx: number) => { QUEUE[qTail++ % QUEUE.length] = idx; };
+    TORCHR.fill(0);
+    qTail = 0;
     const seed = (c: MeshChunk, packed: number, level: number): void => {
       const ox = c.cx * CX - bx, oz = c.cz * CZ - bz;
       const rx = ox + (packed & 15), rz = oz + ((packed >> 4) & 15), ry = packed >> 8;
       if (rx < RX0 || rx > RX1 || rz < RX0 || rz > RX1) return;
       const ri = regionIdx(rx, rz, ry);
-      if (REGION[ri] < level) { REGION[ri] = level; push(ri); }
+      if (TORCHR[ri] < level) { TORCHR[ri] = level; push(ri); }
     };
     for (const c of refs) {
       if (!c || (c.torches.size === 0 && c.glowers.size === 0)) continue;
       for (const t of c.torches) seed(c, t, TORCH_LEVEL);
       for (const t of c.glowers) seed(c, t, GLOW_LEVEL); // glowstone/lamp burn a touch brighter
     }
-    while (qHead < qTail) {
-      const ri = QUEUE[qHead++ % QUEUE.length];
-      const level = REGION[ri];
-      if (level <= 1) continue;
-      const y = (ri / (RW * RW)) | 0;
-      const rem = ri - y * RW * RW;
-      const rz = ((rem / RW) | 0) + RX0;
-      const rx = (rem % RW) + RX0;
-      const nl = level - 1;
-      // 6-neighbor spread through non-opaque cells
-      const tryCell = (nx: number, ny: number, nz: number): void => {
-        if (nx < RX0 || nx > RX1 || nz < RX0 || nz > RX1 || ny < 0 || ny >= CY) return;
-        const ni = regionIdx(nx, nz, ny);
-        if (REGION[ni] >= nl) return;
-        const c = chunkAt(nx, nz);
-        if (!c) return;
-        const id = c.data[(nx & 15) | ((nz & 15) << 4) | (ny << 8)];
-        if (OPAQUE_LUT[id]) return;
-        REGION[ni] = nl;
-        if (qTail - qHead < QUEUE.length - 1) push(ni);
-      };
-      tryCell(rx + 1, y, rz); tryCell(rx - 1, y, rz);
-      tryCell(rx, y + 1, rz); tryCell(rx, y - 1, rz);
-      tryCell(rx, y, rz + 1); tryCell(rx, y, rz - 1);
-    }
+    floodFill(TORCHR, refs, qTail, 0);
   }
+
+  const skyAt = (x: number, y: number, z: number): number => {
+    if (y >= CY) return 1;
+    if (y < 0 || x < RX0 || x > RX1 || z < RX0 || z > RX1) return 0;
+    return LIGHT_CURVE[SKYR[regionIdx(x, z, y)]];
+  };
   const torchAt = (x: number, y: number, z: number): number => {
     if (!hasLights || y < 0 || y >= CY || x < RX0 || x > RX1 || z < RX0 || z > RX1) return 0;
-    return REGION[regionIdx(x, z, y)] / MAX_LIGHT;
+    return LIGHT_CURVE[TORCHR[regionIdx(x, z, y)]];
   };
 
   // --- geometry --------------------------------------------------------------
   for (let y = 0; y < maxY; y++) {
     for (let z = 0; z < CZ; z++) {
       for (let x = 0; x < CX; x++) {
-        const id = chunk.data[x | (z << 4) | (y << 8)];
+        const pi = padIdx(x, y, z);
+        const id = PAD[pi];
         if (id === B.AIR) continue;
+        const kind = kindOf(id);
+        // buried opaque cube: nothing to draw (the common case, so bail early)
+        if (kind === 1 && OPAQUE_LUT[id] &&
+          OPAQUE_LUT[PAD[pi + 1]] && OPAQUE_LUT[PAD[pi - 1]] &&
+          OPAQUE_LUT[PAD[pi + PH]] && OPAQUE_LUT[PAD[pi - PH]] &&
+          OPAQUE_LUT[PAD[pi + PW * PH]] && OPAQUE_LUT[PAD[pi - PW * PH]]) continue;
+
+        if (kind === 2) {
 
         if (id === B.TORCH) {
           const facing = world.torchFacings.get(`${bx + x},${y},${bz + z}`);
@@ -337,36 +532,43 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           emitCross(solid, atlas, id, x, y, z, skyAt(x, y, z), torchAt(x, y, z), tint);
           continue;
         }
+        }
 
-        const d = def(id);
+        const opaque = OPAQUE_LUT[id] === 1;
         const isWater = id === B.WATER;
         const isLava = id === B.LAVA;
         const isLiquid = isWater || isLava;
-        const target = isLiquid ? water : solid;
+        const isLeaf = LEAF_LUT[id] === 1;
+        // lava is opaque-looking and self-lit, so it rides the solid pass; only
+        // water goes to the translucent pass
+        const target = isWater ? water : solid;
         const waterTopOpen = isLiquid && get(x, y + 1, z) !== id;
+        // flag bits packed onto the torch channel (stripped in the shader)
+        const flag = isLava ? FLAG_LAVA : isLeaf ? FLAG_SWAY : 0;
 
         for (let face = 0; face < 6; face++) {
           const n = FACE_NORMALS[face];
-          const nb = get(x + n[0], y + n[1], z + n[2]);
+          const nb = PAD[pi + PAD_STEP[face]];
 
           // culling rules
           if (isLiquid) {
             if (nb === id) continue;
             if (OPAQUE_LUT[nb]) continue;
-            if (nb !== B.AIR && nb !== B.LEAVES && nb !== B.TORCH && face !== 2) continue;
-          } else if (d.opaque) {
+            if (nb !== B.AIR && !LEAF_LUT[nb] && nb !== B.TORCH && face !== 2) continue;
+          } else if (opaque) {
             if (OPAQUE_LUT[nb]) continue;
           } else {
-            // cutout blocks (leaves, glass): cull against opaque and same type
+            // cutout blocks (leaves, glass): cull against opaque and same type.
+            // (Fancy leaf-to-leaf faces were tried: +37% vertices in forests
+            // and heavy overdraw for little gain with these dense leaf tiles.)
             if (OPAQUE_LUT[nb] || nb === id) continue;
           }
 
-          const tileName = faceTile(d.faces!, face);
           const geo = FACE_GEO[face];
-          const rect = atlas.rect(tileName);
+          const rect = faceRect(atlas, id, face);
           const shade = FACE_SHADE[face];
           const base = target.vertCount;
-          const tint = TINTED_TILES.has(tileName) ? tintAt(x, z) : null;
+          const tint = FACE_TINTED[id * 6 + face] ? tintAt(x, z) : WHITE;
 
           // Sample the 3x3 grid of cells in the layer in front of this face ONCE,
           // then each corner reads from it (the 4 corners share these samples).
@@ -379,9 +581,17 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
               const gy = cy0 + i * uy + j * vy;
               const gz = cz0 + i * uz + j * vz;
               const gi = (i + 1) * 3 + (j + 1);
-              SKY9[gi] = skyAt(gx, gy, gz);
-              TORCH9[gi] = torchAt(gx, gy, gz);
-              OCC9[gi] = occ(gx, gy, gz);
+              const gid = PAD[padIdx(gx, gy, gz)];
+              OCC9[gi] = OCCLUDE_LUT[gid];
+              SOLID9[gi] = OPAQUE_LUT[gid];
+              // inline skyAt/torchAt: gx/gz are always inside the light region
+              if (gy >= CY) { SKY9[gi] = 1; TORCH9[gi] = 0; }
+              else if (gy < 0) { SKY9[gi] = 0; TORCH9[gi] = 0; }
+              else {
+                const ri = ((gz - RX0) * RW + (gx - RX0)) * CY + gy;
+                SKY9[gi] = LIGHT_CURVE[SKYR[ri]];
+                TORCH9[gi] = hasLights ? LIGHT_CURVE[TORCHR[ri]] : 0;
+              }
             }
           }
 
@@ -391,35 +601,25 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           for (let corner = 0; corner < 4; corner++) {
             const a = corner === 1 || corner === 2 ? 1 : 0; // u coefficient
             const b = corner >= 2 ? 1 : 0;                  // v coefficient
-            let px = geo.o[0] + a * geo.u[0] + b * geo.v[0];
-            let py = geo.o[1] + a * geo.u[1] + b * geo.v[1];
-            let pz = geo.o[2] + a * geo.u[2] + b * geo.v[2];
+            const px = geo.o[0] + a * ux + b * vx;
+            let py = geo.o[1] + a * uy + b * vy;
+            const pz = geo.o[2] + a * uz + b * vz;
             if (waterTopOpen && py === 1) py = liquidCornerHeight(id, x, y, z, px, pz);
 
-            const si = a ? 1 : -1, sj = b ? 1 : -1;
-            const cIdx = 4, suIdx = (si + 1) * 3 + 1, svIdx = 3 + (sj + 1), scIdx = (si + 1) * 3 + (sj + 1);
-            const sky = (SKY9[cIdx] + SKY9[suIdx] + SKY9[svIdx] + SKY9[scIdx]) / 4;
-            const torch = (TORCH9[cIdx] + TORCH9[suIdx] + TORCH9[svIdx] + TORCH9[scIdx]) / 4;
-
+            const sky = cornerLight(SKY9, a, b);
+            let torch = cornerLight(TORCH9, a, b);
             const aoc = corner === 0 ? ao0 : corner === 1 ? ao1 : corner === 2 ? ao2 : ao3;
             const k = shade * AO_SHADE[aoc];
-            target.positions.push(x + px, y + py, z + pz);
-            target.lights.push(k * sky, k * torch);
-            if (tint) target.tints.push(tint[0], tint[1], tint[2]);
-            else target.tints.push(1, 1, 1);
-            target.uvs.push(
+            if (isLava) torch = 1 / k; // self-lit: full brightness after shading
+            target.v(x + px, y + py, z + pz, k * sky, k * torch + flag,
+              tint[0], tint[1], tint[2],
               a ? rect.u1 : rect.u0,
-              b ? rect.v0 : rect.v1, // b=1 is the face top -> image top (flipY=false)
-            );
+              b ? rect.v0 : rect.v1); // b=1 is the face top -> image top (flipY=false)
           }
 
           // flip the quad diagonal when AO is anisotropic
-          if (ao0 + ao2 >= ao1 + ao3) {
-            target.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-          } else {
-            target.indices.push(base + 1, base + 2, base + 3, base + 1, base + 3, base);
-          }
-          target.vertCount += 4;
+          if (ao0 + ao2 >= ao1 + ao3) target.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
+          else target.tri2(base + 1, base + 2, base + 3, base + 1, base + 3, base);
         }
       }
     }
@@ -433,6 +633,7 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
 function emitCross(g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: number, z: number, sky: number, torch: number, tint: Float32Array | null): void {
   const rect = atlas.rect(def(id).faces!.sides);
   const a = 0.146, b = 0.854; // ~ MC's sqrt(2)/2-inset diagonal
+  const tr = tint ? tint[0] : 1, tg = tint ? tint[1] : 1, tb = tint ? tint[2] : 1;
   const planes: [number, number, number, number][] = [
     [a, a, b, b],
     [a, b, b, a],
@@ -446,14 +647,12 @@ function emitCross(g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: nu
       const us = [rect.u0, rect.u1, rect.u1, rect.u0];
       const vs = [rect.v1, rect.v1, rect.v0, rect.v0];
       for (let i = 0; i < 4; i++) {
-        g.positions.push(x + corners[i][0], y + corners[i][1], z + corners[i][2]);
-        g.lights.push(sky, torch);
-        if (tint) g.tints.push(tint[0], tint[1], tint[2]);
-        else g.tints.push(1, 1, 1);
-        g.uvs.push(us[i], vs[i]);
+        // the top edge sways in the wind (flag stripped by the vertex shader)
+        const sway = corners[i][1] > 0 ? FLAG_SWAY : 0;
+        g.v(x + corners[i][0], y + corners[i][1], z + corners[i][2], sky, torch + sway,
+          tr, tg, tb, us[i], vs[i]);
       }
-      g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-      g.vertCount += 4;
+      g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
     }
   }
 }
@@ -488,10 +687,8 @@ function emitTorch(
   const tz = (pz: number, py: number): number => az + (pz - 0.5) + wallZ * py * sinL;
 
   const push = (px: number, py: number, pz: number, u: number, v: number): void => {
-    g.positions.push(x + tx(px, py), y + ty(py), z + tz(pz, py));
-    g.lights.push(sky, Math.max(torch, 0.9)); // a torch always glows itself
-    g.tints.push(1, 1, 1);
-    g.uvs.push(u, v);
+    // a torch always glows itself
+    g.v(x + tx(px, py), y + ty(py), z + tz(pz, py), sky, Math.max(torch, 0.9), 1, 1, 1, u, v);
   };
   const quads: number[][][] = [
     [[hi, 0, hi], [hi, 0, lo], [hi, top, lo], [hi, top, hi]],   // +x
@@ -505,8 +702,7 @@ function emitTorch(
     push(q[1][0], q[1][1], q[1][2], u1, vBottom);
     push(q[2][0], q[2][1], q[2][2], u1, vTop);
     push(q[3][0], q[3][1], q[3][2], u0, vTop);
-    g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-    g.vertCount += 4;
+    g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
   }
   // tip (flame top)
   const base = g.vertCount;
@@ -516,8 +712,7 @@ function emitTorch(
   push(hi, top, hi, tu1, tv1);
   push(hi, top, lo, tu1, tv0);
   push(lo, top, lo, tu0, tv0);
-  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-  g.vertCount += 4;
+  g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
 }
 
 /** Door panels are thin slabs; geometry is computed in doorFootprints below. */
@@ -603,13 +798,9 @@ function emitDoorPanel(
   const pushQuad = (corners: number[][], us: number[], vs: number[]): void => {
     const base = g.vertCount;
     for (let i = 0; i < 4; i++) {
-      g.positions.push(bx + corners[i][0], by + corners[i][1], bz + corners[i][2]);
-      g.lights.push(sky, torch);
-      g.tints.push(1, 1, 1);
-      g.uvs.push(us[i], vs[i]);
+      g.v(bx + corners[i][0], by + corners[i][1], bz + corners[i][2], sky, torch, 1, 1, 1, us[i], vs[i]);
     }
-    g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-    g.vertCount += 4;
+    g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
   };
   const faceU = [u0, u1, u1, u0];
   const faceV = [v1, v1, v0, v0];
@@ -644,13 +835,10 @@ function emitLadder(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: nu
   for (const q of faces) {
     const base = g.vertCount;
     for (let i = 0; i < 4; i++) {
-      g.positions.push(q[i][0], q[i][1], q[i][2]);
-      g.lights.push(sky, torch);
-      g.tints.push(1, 1, 1);
-      g.uvs.push(i === 0 || i === 3 ? rect.u0 : rect.u1, i < 2 ? rect.v1 : rect.v0);
+      g.v(q[i][0], q[i][1], q[i][2], sky, torch, 1, 1, 1,
+        i === 0 || i === 3 ? rect.u0 : rect.u1, i < 2 ? rect.v1 : rect.v0);
     }
-    g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-    g.vertCount += 4;
+    g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
   }
 }
 
@@ -674,13 +862,10 @@ function emitTrapdoor(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: 
     ];
   }
   for (let i = 0; i < 4; i++) {
-    g.positions.push(corners[i][0], corners[i][1], corners[i][2]);
-    g.lights.push(sky, torch);
-    g.tints.push(1, 1, 1);
-    g.uvs.push(i === 0 || i === 3 ? rect.u0 : rect.u1, i < 2 ? rect.v1 : rect.v0);
+    g.v(corners[i][0], corners[i][1], corners[i][2], sky, torch, 1, 1, 1,
+      i === 0 || i === 3 ? rect.u0 : rect.u1, i < 2 ? rect.v1 : rect.v0);
   }
-  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-  g.vertCount += 4;
+  g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
 }
 
 function emitBox(
@@ -689,10 +874,7 @@ function emitBox(
   sky: number, torch: number, tint = [1, 1, 1], topRect: UVRect = rect, topRot = 0
 ): void {
   const push = (px: number, py: number, pz: number, u: number, v: number): void => {
-    g.positions.push(x + px, y + py, z + pz);
-    g.lights.push(sky, torch);
-    g.tints.push(tint[0], tint[1], tint[2]);
-    g.uvs.push(u, v);
+    g.v(x + px, y + py, z + pz, sky, torch, tint[0], tint[1], tint[2], u, v);
   };
   // Each face pushes its 4 corners in clockwise order as seen from outside the
   // box, so the triangles are wound 0,2,1 / 0,3,2 to face outward. (Winding them
@@ -700,8 +882,7 @@ function emitBox(
   // culled and you see the bottom plate through it, which reads as a hollow
   // trough — that was the long-standing look of the bed and pressure plate.)
   const quad = (b: number): void => {
-    g.indices.push(b, b + 2, b + 1, b, b + 3, b + 2);
-    g.vertCount += 4;
+    g.tri2(b, b + 2, b + 1, b, b + 3, b + 2);
   };
 
   // +y top (may use a distinct texture, e.g. a bed's blanket, rotated 90*topRot
@@ -861,15 +1042,11 @@ function emitRedstoneWire(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number,
   const base = g.vertCount;
   const r = 0.3 + 0.7 * (power / 15);
   const push = (px: number, py: number, pz: number, u: number, v: number): void => {
-    g.positions.push(x + px, y + py, z + pz);
-    g.lights.push(sky, Math.max(torch, power / 15));
-    g.tints.push(r, 0, 0);
-    g.uvs.push(u, v);
+    g.v(x + px, y + py, z + pz, sky, Math.max(torch, power / 15), r, 0, 0, u, v);
   };
   push(0, 0.01, 0, rect.u0, rect.v0);
   push(1, 0.01, 0, rect.u1, rect.v0);
   push(1, 0.01, 1, rect.u1, rect.v1);
   push(0, 0.01, 1, rect.u0, rect.v1);
-  g.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
-  g.vertCount += 4;
+  g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
 }
