@@ -69,6 +69,8 @@ Always run `npm run build` (or at least `npx tsc --noEmit`) before committing �
 - **Fire** (`Fire.ts`, `main.fire`): only fires lit through `fire.ignite()` are tracked (spread, burn-out, rain) and saved as `SaveState.fires`; a raw `setBlock(B.FIRE)` is a flame that never burns out. `B.FIRE` is a glower (`Chunk.isGlower`) and a `CROSS_BLOCKS` billboard.
 - **Status effects / saturation** live on `Player` (`effects`, `absorb`, `saturation`, `fireT`) and persist through the optional `PlayerSave` fields; `StatusHUD.ts` draws golden hearts, effect badges, the attack-recharge meter, the spyglass vignette and the burning overlay by attaching to `#stats`/the root, so `HUD.ts` doesn't need to know about them.
 - **Combat** is 1.9-style: damage scales with `Player.attackCharge()` (per-item `attackCooldown()` in `Blocks.ts`), and repeat player hits on one mob within 0.5 s only land the excess (`Player.lastHits`).
+- **Shaped blocks** (`Blocks.SHAPED`: slabs, stairs, fences, gates, panes, lanterns, anvil, enchanting table, campfire, cake, flower pot, composter, jack o'lantern) keep a small per-block value in `world.bedFacings` (stair facing +4 = upside down, slab half, lantern hanging, cake bites, potted plant id, composter level) — it is already persisted and shipped to the mesh worker. Set it *after* `setBlock`: `main.onBlockChanged` deletes the old block's entry when a `META_BLOCKS` id is replaced. Fence gates use `doorStates`. `shapeBoxes()` feeds collision (`Physics.cellBoxes`, with 0.6 step-up) and the outline; `Mesher.emitShaped` draws them with UVs cropped by box extent. Block ids must stay < 256 (chunks are `Uint8Array`); new items live at 300+.
+- **Enchantments** ride on `SlotData.ench` — every place that copies a stack must carry it (HUD transfer/split/armor slots, `spawnDrop`/pickup, `stow`). XP orbs + the XP bar live in `Experience.ts`.
 
 ## Testing
 
@@ -78,6 +80,7 @@ Headless harnesses (`node <name>.mjs`) boot the game in Edge/SwiftShader and fai
 - `ride-test.mjs`, `held-test.mjs`, `sleep-test.mjs`, `mob-test.mjs`, `visual-test.mjs` — feature-specific screenshot checks.
 - `catch-test.mjs` (direct capture/release/recall API) and `catch-throw-test.mjs` (the thrown orb end-to-end, plus the pet self-damage guard) — both assert, not just screenshot.
 - `verify-bed-catcher.mjs` — bed model from four angles/facings, sprite sheet at 8x, held bed + orb, bed screen. Builds its arena on a **stone platform at y=108** so framing is identical whatever world the fresh Playwright profile rolled — terrain-relative arenas produce camera-buried screenshots.
+- `verify-decor.mjs` (`PORT`, `SHOT_DIR` env) — every building/decoration block on the y=108 platform (day + night), icon sheet, held models, explorer map, and asserts for slab/stair step-up, XP levels, enchanting, anvil repair and potions. It waits for the arena chunks to leave the mesh queue before each shot (under load the queue can be 100+ chunks deep).
 
 Two harness gotchas worth remembering: editing `src/` while a harness runs triggers a Vite HMR reload that wipes `window.__game` mid-test, and a zombie/skeleton spawned under open sky in daylight burns away before a thrown orb reaches it (set `g.dayTime = 0.72` first).
 
