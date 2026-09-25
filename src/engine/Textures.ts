@@ -307,16 +307,15 @@ function dirtPx(seed = 102): Px {
   const p = rampFill(new Px(), DIRT_R, f, seed + 1, 0.3);
   const r = mulberry32(seed + 2);
   // little buried pebbles + clods, each lit on top
-  for (let i = 0; i < 9; i++) {
+  for (let i = 0; i < 7; i++) {
     const x = (r() * 16) | 0, y = (r() * 16) | 0;
     p.set(x, y, DIRT_R[0]);
-    if (r() < 0.5) p.set(x + 1, y, DIRT_R[0]);
+    if (r() < 0.5) p.set(x + 1, y, DIRT_R[1]);
     p.set(x, y - 1, DIRT_R[5]);
   }
-  for (let i = 0; i < 2; i++) {
-    const x = (r() * 16) | 0, y = (r() * 16) | 0;
-    p.set(x, y, '#80786c'); p.set(x + 1, y, '#6a6258'); p.set(x, y - 1, '#968d80');
-  }
+  // one small buried stone
+  const x = (r() * 16) | 0, y = (r() * 16) | 0;
+  p.set(x, y, '#7a6e60'); p.set(x + 1, y, '#665a4c'); p.set(x, y - 1, '#8c806f');
   return p;
 }
 
@@ -329,16 +328,10 @@ function grassTopPx(): Px {
 function lipSidePx(seed: number, lip: RGB[], edge: RGB, minDepth: number): Px {
   const p = dirtPx(109);
   const r = mulberry32(seed);
+  // lip edge wanders smoothly along the block, with the odd single drip
+  const wave = tileNoise(seed + 3, 4, 1);
   const depth: number[] = [];
-  for (let x = 0; x < 16; x++) {
-    const q = r();
-    depth.push(minDepth + (q < 0.5 ? 0 : q < 0.82 ? 1 : 2));
-  }
-  // no lone 2-deep spikes: soften against neighbours
-  for (let x = 0; x < 16; x++) {
-    const l = depth[(x + 15) & 15], rr = depth[(x + 1) & 15];
-    if (depth[x] - Math.max(l, rr) > 1) depth[x]--;
-  }
+  for (let x = 0; x < 16; x++) depth.push(minDepth + Math.round(wave(x, 0) * 1.6 - 0.3) + (r() < 0.14 ? 1 : 0));
   const f = fbm(seed + 5, [[8, 0.5], [16, 0.5]], 1.6);
   for (let x = 0; x < 16; x++) {
     for (let y = 0; y < depth[x]; y++) {
@@ -358,10 +351,11 @@ function sandPx(seed = 104, ramp = SAND_R): Px {
   return p;
 }
 
-function cobblePx(seed = 111, ramp = STONE_R, gap: RGB = hex('#4c4c4c')): Px {
+const COBBLE_R = pal(['#666666', '#727272', '#7e7e7e', '#8a8a8a', '#969696', '#a3a3a3', '#b0b0b0']);
+function cobblePx(seed = 111, ramp = COBBLE_R, gap: RGB = hex('#505050')): Px {
   const v = voronoi(seed, 11, 1);
   const r = mulberry32(seed + 1);
-  const base = Array.from({ length: 11 }, () => 3 + ((r() * 3.5) | 0));
+  const base = Array.from({ length: 11 }, () => 2 + ((r() * 3.5) | 0));
   const f = fbm(seed + 2, [[8, 0.5], [16, 0.5]], 1.2);
   const p = new Px().fill((x, y) => ramp[clampI(base[cellAt(v, x, y)] + (f(x, y) - 0.5) * 2.2, ramp.length)]);
   bevelRegions(p, v, 1.14, 0.84, gap, false);
@@ -2358,9 +2352,11 @@ export class Atlas {
   /**
    * Mip levels down to 1px per tile. Each level halves the previous one with
    * an alpha-weighted box filter in linear light; tiles are power-of-two
-   * aligned so a texel never mixes two tiles. Cutout tiles (leaves, plants,
-   * glass) then get their alpha re-thresholded to keep their level-0 coverage,
-   * so foliage neither dissolves nor turns into solid blobs at distance.
+   * aligned so a texel never mixes two tiles. Cutout tiles (leaves, glass)
+   * then get their alpha re-thresholded to keep their level-0 coverage, so
+   * foliage neither dissolves nor turns into solid blobs at distance; very
+   * sparse ones (torch, flowers, crop stems) are dilated instead so their
+   * 1px strokes stay unbroken.
    */
   private buildMipmaps(): void {
     const W = this.canvas.width, H = this.canvas.height;
@@ -2413,6 +2409,11 @@ export class Atlas {
           if (cov < 0) continue;
           const idx: number[] = [];
           for (let y = 0; y < tile; y++) for (let x = 0; x < tile; x++) idx.push(((ty * tile + y) * dw + tx * tile + x) * 4 + 3);
+          if (cov < 0.2) {
+            // thin sprites (torch, flowers, crop stems): dilate so they never break up
+            for (const o of idx) d[o] = d[o] > 0 ? 255 : 0;
+            continue;
+          }
           idx.sort((p, q) => d[q] - d[p]);
           const keep = Math.round(cov * idx.length);
           idx.forEach((o, i) => { d[o] = i < keep && d[o] > 0 ? 255 : 0; });
