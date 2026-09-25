@@ -1,17 +1,23 @@
 // Web Audio synthesis — every footstep, creak, mob voice and note of music is
 // generated in code (no audio assets).
 //
-//   sfx events ───► sfxBus ─► comp ──┐
+//   sfx events ───► sfxBus ─► comp ──┐          (+ cave echo sized to the room)
 //   ambience ─────► ambBus ──────────┼─► master ─► underwater LP ─► limiter ─► out
-//   music notes ─► piece ─► musicBus ─► duck ─┘        ▲
+//   beds (wind, rain…) ─► ambBus     │     ▲
+//   music notes ─► piece ─► musicBus ─► duck ─┘   (combat layer + stingers too)
 //             (sends from all three) ─► reverb ────────┘   (+ tempo delay on music)
+//
+// Continuous ambience "beds" (wind, leaves, surf, streams, rain, snow, fire…)
+// are driven by listen(), which probes the world around the player a few
+// times a second (AudioScape.ts) and glides each bed toward its level/pan.
 //
 // Every sound is a short-lived "event": one gain node plus its sources and
 // filters. The chain disconnects itself when its last source ends, and each
 // bus has a voice cap so a TNT chain or a mob crowd can't swamp the CPU.
 
 import { SoundClass, def, hasDef } from './Blocks';
-import { compose, fragment, mtof, MNote, TITLE_SEED } from './AudioMusic';
+import { compose, fragment, stinger, mtof, MNote, TITLE_SEED, MusicEnv, MusicBiomeKey, StingerKind } from './AudioMusic';
+import { probeScape, Scape, ScapeWorld, ScapePlayer, ScapeMob, ScapeWeather } from './AudioScape';
 
 export type SfxName =
   | 'pop' | 'hurt' | 'hit' | 'eat' | 'burp' | 'click' | 'select' | 'fail' | 'craft' | 'level'
@@ -19,14 +25,17 @@ export type SfxName =
   | 'explode' | 'bow' | 'snap' | 'fuse' | 'arrowHit' | 'whoosh' | 'lowdur'
   | 'thunder' | 'rain' | 'splash' | 'hoof' | 'mount'
   | 'submerge' | 'emerge'
-  | 'chestOpen' | 'chestClose' | 'advancement' | 'equip' | 'lavaPop' | 'bubble';
+  | 'chestOpen' | 'chestClose' | 'advancement' | 'equip' | 'lavaPop' | 'bubble'
+  | 'jump' | 'death' | 'drink' | 'ignite' | 'bell' | 'crackle';
+
+/** Footstep gait: sprinting lands harder and brighter, sneaking barely scuffs. */
+export type Gait = 'walk' | 'sprint' | 'sneak';
 
 /** Ambient mood selector for ambientTick. */
 export type AmbientEnv = 'day' | 'night' | 'cave' | 'nether';
 
 /** Overworld biome flavour for the generative music (key/tempo/colour shifts). */
-export type MusicBiome =
-  'plains' | 'forest' | 'desert' | 'snow' | 'taiga' | 'swamp' | 'mountains' | 'jungle';
+export type MusicBiome = MusicBiomeKey;
 
 /** Mob vocalisation kind. */
 export type MobVoice = 'idle' | 'hurt' | 'death';
@@ -42,16 +51,21 @@ type Mat = 'grass' | 'plant' | 'gravel' | 'sand' | 'snow' | 'wood' | 'stone' | '
   | 'wool' | 'nether' | 'soul' | 'amethyst' | 'none';
 type Act = 'step' | 'hit' | 'break' | 'place';
 
-interface Piece { notes: MNote[]; i: number; t0: number; end: number; out: GainNode; env: string; fading: boolean; name: string }
+interface Piece { notes: MNote[]; i: number; t0: number; end: number; out: GainNode; env: string; fading: boolean; name: string; tonic: number; minor: boolean }
+/** A continuous ambience loop: sources → (own filters) → lp → gain → pan → amb bus. */
+interface Bed { srcs: AudioScheduledSourceNode[]; g: GainNode; pan: StereoPannerNode; lp: BiquadFilterNode; nodes: AudioNode[]; x: Record<string, AudioNode>; quiet: number } // quiet = ctx time it fell silent (0 = playing)
+/** How rain is heard: out in it, under a canopy, under a roof, or deep inside. */
+type Shelter = 'open' | 'leaves' | 'roof' | 'deep';
 
 const SETTINGS_KEY = 'voxelcraft-audio';
-const CAP: Record<Pool, number> = { sfx: 36, amb: 14, music: 80 };
+const CAP: Record<Pool, number> = { sfx: 36, amb: 20, music: 80 };
 
 // per-sound loudness trims, balanced against each other by offline renders
 const SFX_GAIN: Partial<Record<SfxName, number>> = {
   pop: 4.5, hit: 1.7, click: 3.5, select: 5, fail: 0.7, plateOn: 1.4, plateOff: 1.4, bow: 1.9,
   snap: 1.8, arrowHit: 1.8, hoof: 1.2, doorOpen: 0.6, doorClose: 0.4, chestClose: 0.35, mount: 0.35,
   submerge: 1.6, emerge: 1.6, splash: 0.6, whoosh: 0.6, lavaPop: 3, bubble: 5, hurt: 1.6,
+  thunder: 0.8, jump: 0.8, drink: 1.4, ignite: 1.2, bell: 0.9, crackle: 1.6,
 };
 // material trims: [break/hit, step] — evens out how loud each texture reads
 const MAT_GAIN: Record<Mat, [number, number]> = {
@@ -106,6 +120,11 @@ export class AudioEngine {
   private rainBuf: AudioBuffer | null = null;
   private pianoWave: PeriodicWave | null = null;
   private padWave: PeriodicWave | null = null;
+  private harpWave: PeriodicWave | null = null;
+  private fluteWave: PeriodicWave | null = null;
+  private ocarinaWave: PeriodicWave | null = null;
+  private combatBus: GainNode | null = null;
+  private echo: { d: DelayNode; fb: GainNode; wet: GainNode } | null = null;
   private live: Record<Pool, number> = { sfx: 0, amb: 0, music: 0 };
   private livePeak: Record<Pool, number> = { sfx: 0, amb: 0, music: 0 };
   private lastAt = new Map<string, number>();
@@ -128,8 +147,31 @@ export class AudioEngine {
   private atmosphereT = 8;
   private heartT = 0;
   private bubbleT = 2;
-  private rain: { src: AudioBufferSourceNode; g: GainNode; lp: BiquadFilterNode; roar: GainNode; nodes: AudioNode[] } | null = null;
   private rainState: 'off' | 'rain' | 'thunder' = 'off';
+  private patterT = 0;
+  private snowK = 0;           // current snowfall level (0 = none)
+  private blizzardK = 0;       // how hard the blizzard wind howls (0..1)
+  private shimmerT = 1;
+  private beds = new Map<string, Bed>();
+  // soundscape probe + the state that reacts to it
+  private scape: Scape | null = null;
+  private scapeT = 0;
+  private gust = 0.5;          // shared wind-gust signal (random walk), drives wind + leaves
+  private gustTo = 0.5;
+  private windPan = 0;
+  private waveT = 2;
+  private fireT = 0.5;
+  private villageT = 8;
+  private threat = 0;          // smoothed chase intensity → combat music layer
+  private combatNext = 0;
+  private combatBar = 0;
+  private combatOn = false;
+  private musicCtx = 'surface'; // surface | cave | nether | underwater: crossing one crossfades
+  private dayPart: 'day' | 'night' | '' = '';
+  private seenVillageAt = -999;
+  private peakLatch = false;
+  private surfaceSince = 0;
+  private old: Piece[] = [];   // pieces fading out under a crossfade
   private uw: { src: AudioBufferSourceNode; g: GainNode; nodes: AudioNode[] } | null = null;
   private underwater = false;
   private netherBed: { src: AudioBufferSourceNode; g: GainNode; nodes: AudioNode[] } | null = null;
@@ -311,6 +353,21 @@ export class AudioEngine {
       this.sfxVerb = ctx.createGain();
       this.sfxVerb.gain.value = 0.035;
       this.sfx.connect(this.sfxVerb).connect(this.reverbIn);
+      // cave echo: a darkened slapback whose delay follows the size of the
+      // space (silent above ground)
+      const ed = ctx.createDelay(1.0);
+      ed.delayTime.value = 0.18;
+      const efb = ctx.createGain();
+      efb.gain.value = 0.3;
+      const elp = ctx.createBiquadFilter();
+      elp.type = 'lowpass';
+      elp.frequency.value = 2200;
+      const ewet = ctx.createGain();
+      ewet.gain.value = 0;
+      this.sfx.connect(ed);
+      ed.connect(elp).connect(efb).connect(ed);
+      elp.connect(ewet).connect(this.master);
+      this.echo = { d: ed, fb: efb, wet: ewet };
 
       // ambience (birds, wind, cave cues, rain): its own bus, generous reverb
       this.amb = ctx.createGain();
@@ -325,6 +382,10 @@ export class AudioEngine {
       this.musicBus.gain.value = s.music ? s.musicVol : 0;
       this.musicDuck = ctx.createGain();
       this.musicBus.connect(this.musicDuck).connect(this.master);
+      // combat layer: its own gain under the music bus, raised by threat
+      this.combatBus = ctx.createGain();
+      this.combatBus.gain.value = 0;
+      this.combatBus.connect(this.musicBus);
       const musicVerb = ctx.createGain();
       musicVerb.gain.value = 0.42;
       this.musicDuck.connect(musicVerb).connect(this.reverbIn);
@@ -342,7 +403,7 @@ export class AudioEngine {
       this.delay.connect(fbLp).connect(fb).connect(this.delay);
       this.delay.connect(delayWet).connect(this.master);
       delayWet.connect(this.reverbIn);
-      this.fx = [limiter, reverb, verbOut, comp, ambVerb, musicVerb, fb, fbLp, delayWet];
+      this.fx = [limiter, reverb, verbOut, comp, ambVerb, musicVerb, fb, fbLp, delayWet, elp];
 
       // shared noise sources: generated once, played from random offsets
       this.white = this.makeNoise('white');
@@ -350,6 +411,9 @@ export class AudioEngine {
       this.brown = this.makeNoise('brown');
       this.pianoWave = this.makeWave([1, 0.42, 0.26, 0.19, 0.1, 0.07, 0.055, 0.03, 0.022, 0.012, 0.008]);
       this.padWave = this.makeWave([1, 0.5, 0.33, 0.22, 0.14, 0.09, 0.06, 0.04]);
+      this.harpWave = this.makeWave([1, 0.55, 0.24, 0.16, 0.07, 0.05, 0.02]);
+      this.fluteWave = this.makeWave([1, 0.32, 0.12, 0.05, 0.02]);
+      this.ocarinaWave = this.makeWave([1, 0.04, 0.07, 0.01]);
 
       if (typeof window !== 'undefined' && ctx instanceof AudioContext) {
         this.pumpTimer = window.setInterval(this.pump, 120);
@@ -365,8 +429,13 @@ export class AudioEngine {
   }
 
   /** Voice / scheduler counters (for harnesses and debugging). */
-  debugStats(): { live: Record<Pool, number>; peak: Record<Pool, number>; piece: string | null; rain: string; nether: boolean } {
-    return { live: { ...this.live }, peak: { ...this.livePeak }, piece: this.piece?.name ?? null, rain: this.rainState, nether: !!this.netherBed };
+  debugStats(): { live: Record<Pool, number>; peak: Record<Pool, number>; piece: string | null; rain: string; nether: boolean; beds: Record<string, number>; threat: number; fading: number } {
+    const beds: Record<string, number> = {};
+    for (const [k, b] of this.beds) beds[k] = +b.g.gain.value.toFixed(4);
+    return {
+      live: { ...this.live }, peak: { ...this.livePeak }, piece: this.piece?.name ?? null, rain: this.rainState,
+      nether: !!this.netherBed, beds, threat: +this.threat.toFixed(2), fading: this.old.length,
+    };
   }
 
   private makeNoise(color: 'white' | 'pink' | 'brown'): AudioBuffer {
@@ -753,12 +822,39 @@ export class AudioEngine {
     this.material(this.matFor(cls, id), act, vol, pitch);
   }
 
-  /** Footstep on a block. */
-  step(cls: SoundClass, id?: number): void {
+  /** Footstep on a block; sprinting steps land harder, sneaking ones barely scuff. */
+  step(cls: SoundClass, id?: number, gait: Gait = 'walk'): void {
     if (!this.gate('step', 0.06)) return;
     this.ensure();
     const m = this.matFor(cls, id);
-    this.material(m === 'none' ? 'stone' : m, 'step', 0.16, rand(0.9, 1.1));
+    const vol = gait === 'sprint' ? 0.22 : gait === 'sneak' ? 0.075 : 0.16;
+    const p = gait === 'sprint' ? rand(0.98, 1.16) : gait === 'sneak' ? rand(0.84, 0.96) : rand(0.9, 1.1);
+    this.material(m === 'none' ? 'stone' : m, 'step', vol, p);
+    // a sprinting foot also scuffs: a short swish of the material's grit
+    if (gait === 'sprint' && m !== 'none' && chance(0.6)) {
+      const e = this.open('sfx', 0.05 * MAT_GAIN[m][1], { pan: rand(-0.1, 0.1) });
+      if (e) {
+        this.nz(e, { at: 0.03, dur: 0.1, vol: 1, color: 'pink', type: 'bandpass', f: rand(1400, 2400), q: 0.8, attack: 0.02 });
+        this.seal(e);
+      }
+    }
+  }
+
+  /** Landing from a fall: a heavy footstep on the material plus a body thump
+   *  that deepens with the height fallen. */
+  land(cls: SoundClass, id: number | undefined, fall: number): void {
+    this.ensure();
+    if (!this.ctx) return;
+    const m = this.matFor(cls, id);
+    const k = clamp((fall - 1.5) / 10, 0, 1);
+    this.material(m === 'none' ? 'stone' : m, 'step', 0.22 + 0.2 * k, rand(0.82, 0.92));
+    const e = this.open('sfx', 0.35 + 0.65 * k);
+    if (!e) return;
+    this.tn(e, { dur: 0.16 + 0.1 * k, f: 95, f1: 42, vol: 0.4 });
+    this.nz(e, { dur: 0.12, vol: 0.25, color: 'brown', type: 'lowpass', f: 380 });
+    // a sharp exhale on a hard landing
+    if (k > 0.25) this.nz(e, { at: 0.04, dur: 0.18, vol: 0.06 * k, color: 'pink', type: 'bandpass', f: 1300, q: 1.4, attack: 0.03 });
+    this.seal(e);
   }
 
   private material(mat: Mat, act: Act, vol: number, pitch: number): void {
@@ -1068,17 +1164,38 @@ export class AudioEngine {
         break;
       }
       case 'thunder': {
-        // a sharp crack, then a long rolling rumble that swells and recedes
-        this.nz(e, { dur: 0.25, vol: 0.6, type: 'highpass', f: 900, curve: this.grains(8, 0.95, 2) });
-        this.nz(e, { at: 0.05, dur: rand(4.5, 6.5), vol: 0.9, color: 'brown', type: 'lowpass', f: 420, f1: 120, curve: this.grains(7, 0.05, 1.1, 0.35) });
-        this.tn(e, { at: 0.05, dur: 2.2, f: 55, f1: 30, vol: 0.4, attack: 0.08 });
-        this.duck(0.55 * this.level, 1.5, 3);
+        // distant, rolling thunder: a soft muffled onset (only when the strike
+        // is close), then overlapping low swells that roll away — never a
+        // sharp crack
+        const near = this.level;
+        if (near > 0.72) {
+          this.nz(e, { dur: 0.7, vol: 0.5 * (near - 0.6), color: 'brown', type: 'lowpass', f: 1300, f1: 260, curve: this.grains(9, 0.55, 2, 0.3) });
+        }
+        const rolls = 2 + ((Math.random() * 3) | 0);
+        let at = 0.02;
+        for (let i = 0; i < rolls; i++) {
+          const dur = rand(2.4, 4.2);
+          this.nz(e, {
+            at, dur, vol: 0.62 * (1 - i * 0.14), color: 'brown', type: 'lowpass',
+            f: 300 * (0.7 + near * 0.6), f1: 85, q: 0.5, curve: this.grains(6, 0.04, 0.8, 0.5),
+          });
+          at += rand(0.6, 1.5);
+        }
+        this.tn(e, { at: 0.1, dur: 3.2, f: 46, f1: 29, vol: 0.28, attack: 0.5 });
+        this.duck(0.35 * this.level, 1.6, 3.5);
         break;
       }
       case 'splash': {
-        this.nz(e, { dur: 0.45, vol: 0.4, type: 'bandpass', f: 1100, f1: 600, q: 0.7, attack: 0.015 });
-        this.nz(e, { dur: 0.25, vol: 0.2, type: 'highpass', f: 3000, curve: this.grains(10, 0.8) });
-        this.bubbles(e, 5, 0.3, 0.06);
+        // entering water: a hollow plunge, a spray of droplets, then bubbles
+        const p = rand(0.85, 1.15);
+        this.tn(e, { dur: 0.16, f: 260 * p, f1: 90, vol: 0.2 });
+        this.nz(e, { dur: 0.45, vol: 0.4, type: 'bandpass', f: 1100 * p, f1: 600, q: 0.7, attack: 0.015 });
+        this.nz(e, { dur: 0.3, vol: 0.22, type: 'highpass', f: 2800, curve: this.grains(14, 0.85, 1.4) });
+        for (let i = 0; i < 6; i++) {
+          const f = rand(900, 2400);
+          this.tn(e, { at: rand(0.08, 0.45), dur: rand(0.03, 0.06), f, f1: f * rand(1.3, 1.8), vol: rand(0.015, 0.035), attack: 0.002 });
+        }
+        this.bubbles(e, 5, 0.4, 0.05);
         break;
       }
       case 'bubble': {
@@ -1117,6 +1234,59 @@ export class AudioEngine {
         this.nz(e, { dur: 0.25, vol: 0.1, color: 'pink', type: 'bandpass', f: 2000, curve: this.grains(10, 0.9, 1.2) });
         break;
       }
+      case 'jump': {
+        // push-off: a cloth swish and a short breath
+        const p = rand(0.9, 1.12);
+        this.nz(e, { dur: 0.14, vol: 0.09, color: 'pink', type: 'bandpass', f: 900 * p, f1: 1700 * p, q: 1.1, attack: 0.03 });
+        this.nz(e, { dur: 0.1, vol: 0.035, color: 'pink', type: 'bandpass', f: 1500 * p, q: 1.6, attack: 0.02 });
+        break;
+      }
+      case 'death': {
+        // a long falling groan, a body thump, and the world going quiet
+        const p = rand(0.95, 1.05);
+        this.vox(e, {
+          dur: 0.75, vol: 0.55, pitch: [220 * p, 205 * p, 150 * p, 110 * p], attack: 0.01, release: 0.4,
+          formants: [[[650, 520, 480], 5, 1], [[1100, 900], 6, 0.5], [[2450], 8, 0.12]],
+          rough: [30, 40], breath: 0.12, direct: 0.25,
+        });
+        this.tn(e, { at: 0.35, dur: 0.3, f: 90, f1: 38, vol: 0.45 });
+        this.nz(e, { at: 0.35, dur: 0.25, vol: 0.3, color: 'brown', type: 'lowpass', f: 420 });
+        this.duck(0.6, 1.5, 3);
+        break;
+      }
+      case 'drink': {
+        // three gulps: throaty bloops with a wet swallow
+        for (let i = 0; i < 3; i++) {
+          const at = i * rand(0.2, 0.26);
+          const f = rand(260, 340);
+          this.tn(e, { at, dur: 0.09, f, f1: f * 1.9, glide: 0.06, vol: 0.14, attack: 0.01 });
+          this.nz(e, { at, dur: 0.1, vol: 0.12, color: 'pink', type: 'lowpass', f: 900, attack: 0.02 });
+        }
+        break;
+      }
+      case 'ignite': {
+        // flint on steel, then the flame catching with a soft whoomph
+        this.nz(e, { dur: 0.12, vol: 0.4, type: 'highpass', f: 3200, curve: this.grains(6, 0.95, 1.4) });
+        this.tn(e, { dur: 0.08, f: rand(3800, 4600), vol: 0.04 });
+        this.nz(e, { at: 0.06, dur: 0.5, vol: 0.3, color: 'brown', type: 'lowpass', f: 300, f1: 900, attack: 0.08 });
+        this.nz(e, { at: 0.12, dur: 0.6, vol: 0.12, type: 'bandpass', f: 2600, q: 1, curve: this.grains(14, 0.9, 1, 0.1) });
+        break;
+      }
+      case 'bell': {
+        // a village bell tolling in the distance: inharmonic partials + hum
+        const f = rand(430, 520);
+        for (const [m, v, d] of [[1, 0.16, 4.5], [2.0, 0.08, 3], [2.4, 0.07, 2.4], [3.0, 0.04, 1.8], [0.5, 0.1, 5.5]] as [number, number, number][]) {
+          this.tn(e, { dur: d, f: f * m * rand(0.998, 1.002), vol: v, attack: 0.004 });
+        }
+        this.nz(e, { dur: 0.04, vol: 0.08, type: 'bandpass', f: f * 4, q: 2 });
+        break;
+      }
+      case 'crackle': {
+        // a few snaps and pops from a fire or furnace
+        this.nz(e, { dur: rand(0.12, 0.3), vol: 0.35, type: 'bandpass', f: rand(1800, 3200), q: 0.9, curve: this.grains(3 + ((Math.random() * 5) | 0), 0.97, 1.2, 0) });
+        if (chance(0.3)) this.tn(e, { dur: 0.03, f: rand(500, 900), f1: 300, vol: 0.05 });
+        break;
+      }
       case 'rain': break;
     }
   }
@@ -1133,102 +1303,303 @@ export class AudioEngine {
   // weather + underwater beds
   // ==========================================================================
 
-  /** Pre-rendered rain texture: soft hiss plus thousands of tiny droplet ticks,
-   *  wrapping seamlessly so it loops without a seam. Built once, on demand. */
+  /** Pre-rendered rain wash: warm brown/pink noise with thousands of soft,
+   *  low droplet ticks, rolled off above ~2.5 kHz so it reads as a cosy
+   *  steady downpour rather than hiss. The tail is cross-faded into the head
+   *  so the loop has no seam. Built once, on demand. */
   private makeRain(): AudioBuffer {
     const ctx = this.ctx!;
     const sr = ctx.sampleRate;
-    const len = Math.floor(sr * 3);
+    const len = Math.floor(sr * 6);
+    const fade = Math.floor(sr * 0.5);
     const buf = ctx.createBuffer(2, len, sr);
+    const tmp = new Float32Array(len + fade);
+    const a1 = 1 - Math.exp(-2 * Math.PI * 2400 / sr); // one-pole lowpass coefficients
+    const a2 = 1 - Math.exp(-2 * Math.PI * 3600 / sr);
     for (let ch = 0; ch < 2; ch++) {
-      const d = buf.getChannelData(ch);
-      let b0 = 0, b1 = 0, b2 = 0;
-      for (let i = 0; i < len; i++) {
+      let b0 = 0, b1 = 0, b2 = 0, br = 0;
+      for (let i = 0; i < tmp.length; i++) {
         const w = Math.random() * 2 - 1;
         b0 = 0.99765 * b0 + w * 0.099;
         b1 = 0.963 * b1 + w * 0.2965;
         b2 = 0.57 * b2 + w * 1.0527;
-        d[i] = (b0 + b1 + b2 + w * 0.1848) * 0.035;
+        br = (br + 0.02 * w) / 1.02;
+        tmp[i] = (b0 + b1 + b2 + w * 0.1848) * 0.03 + br * 0.5;
       }
-      // each droplet: a damped sinusoid via a two-pole resonator recurrence
-      // (no sin/exp per sample, so the whole texture builds in a few ms)
-      for (let k = 0; k < 2400; k++) {
+      // droplets: damped sinusoids (two-pole resonator recurrence, no sin/exp
+      // per sample) — lower, rounder and softer than a hiss of white ticks
+      for (let k = 0; k < 1500; k++) {
         const at = (Math.random() * len) | 0;
-        const w = (2 * Math.PI * (1500 + Math.random() * 5000)) / sr;
-        const tau = (0.0005 + Math.random() * 0.0025) * sr;
+        const w = (2 * Math.PI * (700 + Math.pow(Math.random(), 1.6) * 2600)) / sr;
+        const tau = (0.0012 + Math.random() * 0.004) * sr;
         const rr = Math.exp(-1 / tau);
         const c1 = 2 * rr * Math.cos(w), c2 = -rr * rr;
-        let y1 = (0.04 + Math.pow(Math.random(), 3) * 0.45) * Math.sin(w), y2 = 0;
+        let y1 = (0.02 + Math.pow(Math.random(), 4) * 0.16) * Math.sin(w), y2 = 0;
         const n = Math.floor(tau * 4);
         for (let j = 0; j < n; j++) {
-          d[(at + j) % len] += y1;
+          tmp[at + j] += y1;
           const y = c1 * y1 + c2 * y2;
           y2 = y1;
           y1 = y;
         }
       }
+      // two gentle lowpass passes: rolls the highs off (no crackle, no fizz)
+      let l1 = 0, l2 = 0;
+      for (let i = 0; i < tmp.length; i++) {
+        l1 += (tmp[i] - l1) * a1;
+        l2 += (l1 - l2) * a2;
+        tmp[i] = l2;
+      }
+      const d = buf.getChannelData(ch);
+      for (let i = 0; i < len; i++) d[i] = tmp[i];
+      for (let i = 0; i < fade; i++) {
+        const x = i / fade;
+        d[i] = tmp[i] * Math.sqrt(x) + tmp[len + i] * Math.sqrt(1 - x);
+      }
     }
     return buf;
   }
 
-  /** Drive the continuous rain bed. Call with kind='off' to stop. The bed is a
-   *  looping pre-rendered rain texture that fades in/out smoothly; under a
-   *  roof (sheltered) it turns into a muffled drumming. */
-  setRain(kind: 'off' | 'rain' | 'thunder', intensity = 0.6, sheltered = false): void {
+  // ---- beds: long-lived loops glided toward a level --------------------------
+
+  /** A looping noise source started at a random offset. */
+  private loopSrc(buf: AudioBuffer, rate = 1): AudioBufferSourceNode {
+    const src = this.ctx!.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    src.playbackRate.value = rate;
+    src.start(this.ctx!.currentTime, Math.random() * buf.duration);
+    return src;
+  }
+
+  private filt(type: BiquadFilterType, f: number, q = 0.7): BiquadFilterNode {
+    const b = this.ctx!.createBiquadFilter();
+    b.type = type;
+    b.frequency.value = f;
+    b.Q.value = q;
+    return b;
+  }
+
+  /** Create (if needed) and steer a named bed. `build` wires its sources into
+   *  `into` the first time; returns null when there's nothing to play. */
+  private bedSet(name: string, level: number, o: { pan?: number; lp?: number; tc?: number },
+    build: (into: AudioNode, b: Bed) => void): Bed | null {
+    const ctx = this.ctx;
+    if (!ctx || !this.amb) return null;
+    let b = this.beds.get(name);
+    if (!b) {
+      if (level <= 0.0005) return null;
+      const lp = this.filt('lowpass', o.lp ?? 18000);
+      const g = ctx.createGain();
+      g.gain.value = 0;
+      const pan = ctx.createStereoPanner();
+      pan.pan.value = clamp(o.pan ?? 0, -1, 1);
+      lp.connect(g).connect(pan).connect(this.amb);
+      b = { srcs: [], g, pan, lp, nodes: [lp, g, pan], x: {}, quiet: 0 };
+      build(lp, b);
+      this.beds.set(name, b);
+    }
+    const t = ctx.currentTime;
+    b.g.gain.setTargetAtTime(Math.max(0, level), t, o.tc ?? 0.6);
+    if (o.pan !== undefined) b.pan.pan.setTargetAtTime(clamp(o.pan, -1, 1), t, 0.5);
+    if (o.lp !== undefined) b.lp.frequency.setTargetAtTime(o.lp, t, 0.5);
+    b.quiet = level <= 0.0005 ? b.quiet || t : 0;
+    return b;
+  }
+
+  /** Fade a bed out and release all of its nodes. */
+  private bedStop(name: string, fade = 1.5): void {
+    const b = this.beds.get(name);
+    const ctx = this.ctx;
+    if (!b || !ctx) return;
+    this.beds.delete(name);
+    const t = ctx.currentTime;
+    b.g.gain.cancelScheduledValues(t);
+    b.g.gain.setValueAtTime(b.g.gain.value, t);
+    b.g.gain.linearRampToValueAtTime(0, t + fade);
+    const first = b.srcs[0];
+    const release = (): void => {
+      for (const s of b.srcs) s.disconnect();
+      for (const n of b.nodes) n.disconnect();
+      for (const n of Object.values(b.x)) n.disconnect();
+    };
+    if (first) first.onended = release;
+    for (const s of b.srcs) { try { s.stop(t + fade + 0.05); } catch { /* already stopped */ } }
+    if (!first) release();
+  }
+
+  /** Beds that have sat silent for a while are torn down to save CPU. */
+  private reapBeds(now: number): void {
+    for (const [k, b] of this.beds) if (b.quiet && now - b.quiet > 6) this.bedStop(k, 0.3);
+  }
+
+  /** Drive the continuous rain bed. Call with kind='off' to stop. A warm,
+   *  low-passed wash with slow natural swells over a soft rumble; under a
+   *  canopy the highs soften, under a roof it becomes a muffled drumming. */
+  setRain(kind: 'off' | 'rain' | 'thunder', intensity = 0.6, sheltered: boolean | Shelter = false): void {
     this.ensure();
     const ctx = this.ctx;
     if (!ctx || !this.amb) return;
-    const k = clamp(intensity, 0, 1);
     if (kind === 'off') {
-      const r = this.rain;
-      if (r) {
-        const t = ctx.currentTime;
-        this.glide(r.g.gain, 0, 1.5);
-        r.src.stop(t + 1.6);
-        this.rain = null;
-      }
+      if (this.rainState !== 'off') { this.bedStop('rain', 2.5); this.bedStop('rainLow', 2.5); }
       this.rainState = 'off';
       return;
     }
-    if (!this.rain) {
-      if (!this.rainBuf) this.rainBuf = this.makeRain();
-      const src = ctx.createBufferSource();
-      src.buffer = this.rainBuf;
-      src.loop = true;
-      const hp = ctx.createBiquadFilter();
-      hp.type = 'highpass';
-      hp.frequency.value = 350;
-      const lp = ctx.createBiquadFilter();
-      lp.type = 'lowpass';
-      lp.frequency.value = 6000;
-      const g = ctx.createGain();
-      g.gain.value = 0;
-      src.connect(hp).connect(lp).connect(g).connect(this.amb);
-      // a low roar layer for heavy downpours
-      const roarSrc = ctx.createBufferSource();
-      roarSrc.buffer = this.brown;
-      roarSrc.loop = true;
-      const rlp = ctx.createBiquadFilter();
-      rlp.type = 'lowpass';
-      rlp.frequency.value = 500;
-      const roar = ctx.createGain();
-      roar.gain.value = 0;
-      roarSrc.connect(rlp).connect(roar).connect(g);
-      const nodes: AudioNode[] = [hp, lp, g, rlp, roar, roarSrc];
-      src.onended = () => {
-        try { roarSrc.stop(); } catch { /* already */ }
-        src.disconnect();
-        for (const n of nodes) n.disconnect();
-      };
-      src.start(0, Math.random() * 3);
-      roarSrc.start(0, Math.random() * 1.5);
-      this.rain = { src, g, lp, roar, nodes };
-    }
+    const k = clamp(intensity, 0, 1);
+    const sh: Shelter = sheltered === true ? 'roof' : sheltered === false ? 'open' : sheltered;
     this.rainState = kind;
-    const r = this.rain;
-    this.glide(r.g.gain, (kind === 'thunder' ? 0.25 : 0.18) * (0.35 + 0.65 * k) * (sheltered ? 0.7 : 1), 1.2);
-    this.glide(r.roar.gain, (kind === 'thunder' ? 0.25 * k : 0.1 * k) * (sheltered ? 1.6 : 1), 1.2);
-    this.glide(r.lp.frequency, sheltered ? 900 : kind === 'thunder' ? 7500 : 5200 + 1800 * k, 1.2);
+    if (!this.rainBuf) this.rainBuf = this.makeRain();
+    const storm = kind === 'thunder' ? 1.15 : 1;
+    const shelterGain = sh === 'roof' ? 0.8 : sh === 'deep' ? 0.3 : sh === 'leaves' ? 0.9 : 1;
+    const level = (0.05 + 0.075 * k) * storm * shelterGain;
+    const lp = sh === 'roof' ? 520 : sh === 'deep' ? 260 : sh === 'leaves' ? 1500 : 1900 + 700 * k;
+    const b = this.bedSet('rain', level, { lp, tc: 1.2 }, (into, bed) => {
+      const src = this.loopSrc(this.rainBuf!);
+      const hp = this.filt('highpass', 90);
+      src.connect(hp).connect(into);
+      // slow, natural intensity swells: two incommensurate LFOs on the gain
+      const depth = this.ctx!.createGain();
+      depth.gain.value = 0;
+      depth.connect(bed.g.gain);
+      bed.srcs.push(src);
+      for (const hz of [0.031, 0.0137]) {
+        const l = this.ctx!.createOscillator();
+        l.frequency.value = hz;
+        l.connect(depth);
+        l.start();
+        bed.srcs.push(l);
+      }
+      bed.nodes.push(hp);
+      bed.x.depth = depth;
+    });
+    if (b) (b.x.depth as GainNode).gain.setTargetAtTime(level * 0.22, ctx.currentTime, 1);
+    // a warm low rumble underneath (heavier in a storm, fuller under a roof)
+    const low = (0.035 + 0.04 * k) * (kind === 'thunder' ? 1.5 : 1) * (sh === 'roof' ? 1.25 : sh === 'deep' ? 0.5 : 1);
+    this.bedSet('rainLow', low, { lp: sh === 'deep' ? 90 : 170, tc: 1.5 }, (into, bed) => {
+      const src = this.loopSrc(this.brown!, 0.7);
+      src.connect(into);
+      bed.srcs.push(src);
+    });
+    this.rainShelter = sh;
+    this.rainK = k;
+  }
+  private rainShelter: Shelter = 'open';
+  private rainK = 0;
+
+  /** Sparse individual drops over the wash: soft pats on leaves, muffled taps
+   *  and the odd gutter plink on a roof, gentle splats on open ground. */
+  private patterTick(dt: number): void {
+    if (this.rainState === 'off' || !this.ctx) return;
+    const sh = this.rainShelter;
+    if (sh === 'deep') return;
+    this.patterT -= dt;
+    if (this.patterT > 0) return;
+    const rate = (sh === 'roof' ? 3.2 : sh === 'leaves' ? 4 : 1.6) * (0.4 + this.rainK);
+    this.patterT = rand(0.4, 1.6) / rate;
+    const e = this.open('amb', 1, { pan: rand(-0.85, 0.85) });
+    if (!e) return;
+    if (sh === 'roof') {
+      // a soft tap on the roof above; now and then a drip from the eaves
+      this.nz(e, { dur: 0.05, vol: rand(0.03, 0.07), color: 'pink', type: 'lowpass', f: rand(500, 900) });
+      this.tn(e, { dur: 0.05, f: rand(160, 300), f1: 120, vol: rand(0.01, 0.025) });
+      if (chance(0.12)) {
+        const f = rand(900, 1500);
+        this.tn(e, { at: rand(0.1, 0.4), dur: 0.07, f, f1: f * 1.4, glide: 0.03, vol: 0.02 });
+      }
+    } else if (sh === 'leaves') {
+      // drops pattering through the canopy, and a fat drip falling off a leaf
+      const n = 1 + ((Math.random() * 3) | 0);
+      for (let i = 0; i < n; i++) {
+        this.nz(e, { at: i * rand(0.03, 0.09), dur: 0.035, vol: rand(0.02, 0.045), color: 'pink', type: 'bandpass', f: rand(1400, 2600), q: 1.6 });
+      }
+      if (chance(0.2)) {
+        const f = rand(700, 1300);
+        this.tn(e, { at: 0.15, dur: 0.06, f, f1: f * 1.6, glide: 0.025, vol: 0.02 });
+      }
+    } else {
+      this.nz(e, { dur: 0.04, vol: rand(0.015, 0.035), color: 'pink', type: 'bandpass', f: rand(1000, 1900), q: 1.2 });
+    }
+    this.seal(e);
+  }
+
+  /** Thunder heard `dist` blocks away: the rumble arrives after a delay that
+   *  grows with distance (sound is slower than the flash) and rolls softer. */
+  thunder(dist: number): void {
+    this.ensure();
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const vol = clamp(1 - dist / 200, 0.3, 1);
+    const delay = clamp(dist / 85, 0.15, 3.5);
+    const e = this.open('sfx', (SFX_GAIN.thunder ?? 1) * vol, { at: ctx.currentTime + delay, pan: rand(-0.4, 0.4) });
+    if (!e) return;
+    this.level = vol;
+    this.buildSfx(e, 'thunder');
+    this.seal(e);
+  }
+
+  /** Snowfall (k 0..1): a hushed, muffled stillness with faint ice-crystal
+   *  glints. The blizzard howl itself rides on the wind bed (windBed). */
+  setSnow(k: number, shelter: Shelter = 'open'): void {
+    this.ensure();
+    if (!this.ctx || !this.amb) return;
+    this.snowK = clamp(k, 0, 1);
+    this.snowShelter = shelter;
+    if (this.snowK <= 0.01) { this.bedStop('snow', 2); return; }
+    const sh = shelter === 'roof' ? 0.35 : shelter === 'deep' ? 0.1 : 1;
+    this.bedSet('snow', 0.03 * this.snowK * sh, { lp: shelter === 'open' ? 900 : 450, tc: 1.5 }, (into, bed) => {
+      const src = this.loopSrc(this.pink!, 0.5);
+      const hp = this.filt('highpass', 140);
+      src.connect(hp).connect(into);
+      bed.srcs.push(src);
+      bed.nodes.push(hp);
+    });
+  }
+  private snowShelter: Shelter = 'open';
+
+  /** Ice-crystal glints drifting past in snowfall (very quiet). */
+  private shimmerTick(dt: number): void {
+    if (this.snowK <= 0.05 || !this.ctx || this.snowShelter === 'deep') return;
+    this.shimmerT -= dt;
+    if (this.shimmerT > 0) return;
+    this.shimmerT = rand(1.2, 4) / (0.5 + this.snowK);
+    const e = this.open('amb', this.snowShelter === 'roof' ? 0.3 : 1, { pan: rand(-0.9, 0.9) });
+    if (!e) return;
+    const n = 1 + ((Math.random() * 3) | 0);
+    for (let i = 0; i < n; i++) {
+      this.fm(e, { at: i * rand(0.05, 0.16), f: rand(3200, 6400), ratio: 3.13, index: 0.35, dur: rand(0.4, 0.9), vol: rand(0.004, 0.009) });
+    }
+    this.seal(e);
+  }
+
+  /** The wind bed: a gusting band of noise with a resonant whistle on top.
+   *  `howl` (0..1) brings in the blizzard whistle; `muffle` darkens it indoors. */
+  private windBed(level: number, howl: number, muffle: boolean): void {
+    const g = this.gust;
+    const b = this.bedSet('wind', level * (0.4 + 0.8 * g), { pan: this.windPan, lp: muffle ? 420 : 5000, tc: 0.7 }, (into, bed) => {
+      const src = this.loopSrc(this.pink!, 0.8);
+      const bp = this.filt('bandpass', 420, 0.6);
+      src.connect(bp).connect(into);
+      const ws = this.loopSrc(this.white!, 1);
+      const wbp = this.filt('bandpass', 950, 14);
+      const wbp2 = this.filt('bandpass', 1500, 18);
+      const wg = this.ctx!.createGain();
+      wg.gain.value = 0;
+      ws.connect(wbp).connect(wg);
+      ws.connect(wbp2).connect(wg);
+      wg.connect(into);
+      bed.srcs.push(src, ws);
+      bed.nodes.push(bp, wbp, wbp2, wg);
+      bed.x.bp = bp;
+      bed.x.wbp = wbp;
+      bed.x.wbp2 = wbp2;
+      bed.x.wg = wg;
+    });
+    if (!b || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    (b.x.bp as BiquadFilterNode).frequency.setTargetAtTime(260 + 560 * g, t, 0.8);
+    (b.x.wbp as BiquadFilterNode).frequency.setTargetAtTime(620 + 900 * g + rand(-90, 90), t, 1.2);
+    (b.x.wbp2 as BiquadFilterNode).frequency.setTargetAtTime(1100 + 1100 * g + rand(-150, 150), t, 1.5);
+    (b.x.wg as GainNode).gain.setTargetAtTime(howl * (0.35 + 2.2 * g * g), t, 0.6);
   }
 
   /** Muffle the whole mix and run a soft bubble bed while the head is submerged. */
@@ -1267,15 +1638,16 @@ export class AudioEngine {
     }
   }
 
-  /** A short weather gesture; callers retrigger it every ~1-2 seconds. */
+  /** A short weather gesture; callers retrigger it every ~1-2 seconds.
+   *  (listen() drives weather by itself; this remains for older callers.) */
   weatherLoop(kind: 'rain' | 'thunder' | 'snow', intensity: number, isNight = false, sheltered = false): void {
     this.ensure();
     if (!this.ctx) return;
     const k = clamp(intensity, 0, 1);
     if (k <= 0.02) return;
     if (kind === 'snow') {
-      // snowfall is near-silent: a hushed cold breeze now and then
-      if (chance(0.45)) this.windGust(rand(2.5, 4), 0.07 * k, isNight);
+      this.setSnow(k, sheltered ? 'roof' : 'open');
+      if (chance(0.45)) this.windGust(rand(2.5, 4), 0.05 * k, isNight);
       return;
     }
     this.setRain(kind, k, sheltered);
@@ -1511,7 +1883,13 @@ export class AudioEngine {
     this.envAt = -99;
     if (this.ctx) this.nextPieceAt = this.ctx.currentTime + (on ? 1.2 : rand(10, 22));
     if (!on) this.fragT = rand(50, 90);
-    if (on) { this.setRain('off'); this.setUnderwater(false); this.stopNetherBed(); }
+    if (on) {
+      this.setRain('off'); this.setSnow(0); this.setUnderwater(false); this.stopNetherBed();
+      for (const k of [...this.beds.keys()]) this.bedStop(k, 1.2);
+      this.threat = 0;
+      this.scape = null;
+      this.dayPart = '';
+    }
   }
 
   /** Scheduler heartbeat (timer-driven so the title screen has music too):
@@ -1522,30 +1900,64 @@ export class AudioEngine {
     this.pumpMusic(ctx.currentTime, typeof document !== 'undefined' && document.hidden ? 2.5 : 0.9);
   };
 
+  /** Instantiate a piece's notes up to `horizon`. */
+  private schedule(p: Piece, now: number, horizon: number): void {
+    while (p.i < p.notes.length && p.t0 + p.notes[p.i].t < horizon) {
+      const n = p.notes[p.i++];
+      const at = p.t0 + n.t;
+      if (at < now - 0.08) continue; // tab was throttled — drop, don't pile up
+      this.note(n, Math.max(at, now + 0.01), p.out);
+    }
+  }
+
   /** Schedule music up to `now + ahead`. Public for offline-render harnesses. */
   pumpMusic(now: number, ahead: number): void {
+    // pieces fading under a crossfade keep playing (quieter and quieter) until done
+    if (this.old.length) {
+      this.old = this.old.filter((q) => {
+        if (now > q.end) { q.out.disconnect(); return false; }
+        this.schedule(q, now, Math.min(now + ahead, q.end - 0.3));
+        return true;
+      });
+    }
+    this.pumpCombat(now, ahead);
     const p = this.piece;
     if (p) {
-      if (!p.fading) {
-        const horizon = now + ahead;
-        while (p.i < p.notes.length && p.t0 + p.notes[p.i].t < horizon) {
-          const n = p.notes[p.i++];
-          const at = p.t0 + n.t;
-          if (at < now - 0.08) continue; // tab was throttled — drop, don't pile up
-          this.note(n, Math.max(at, now + 0.01), p.out);
-        }
-      }
+      this.schedule(p, now, now + ahead);
       if (now > p.end) {
         p.out.disconnect();
         this.piece = null;
-        // a natural ending earns a silence; a deliberate fade keeps its own timing
-        if (!p.fading) this.nextPieceAt = now + (this.musicMode === 'menu' ? rand(5, 10) : rand(35, 90));
+        // a natural ending earns a silence
+        this.nextPieceAt = now + (this.musicMode === 'menu' ? rand(5, 10) : this.scape?.creative ? rand(25, 60) : rand(35, 90));
       }
       return;
     }
     if (!this.settings.music || this.settings.musicVol <= 0) return;
     const live = this.musicMode === 'menu' || now - this.envAt < 4;
     if (live && now >= this.nextPieceAt) this.startPiece(now);
+  }
+
+  /** What the music should be about right now. */
+  private musicEnv(): MusicEnv {
+    if (this.musicMode === 'menu') return 'menu';
+    switch (this.musicCtx) {
+      case 'underwater': return 'underwater';
+      case 'cave': return 'cave';
+      case 'nether': return 'nether';
+    }
+    if (this.scape?.creative && this.env === 'day') return 'creative';
+    return this.env === 'night' ? 'night' : 'day';
+  }
+
+  /** The place flavour: a village, a peak or the coast beat the raw biome. */
+  private musicBiome(): MusicBiome | undefined {
+    const s = this.scape;
+    if (s && this.musicCtx === 'surface') {
+      if (s.villagers >= 3) return 'village';
+      if (s.y > 112 && s.sky > 0.9) return 'peak';
+      if (s.ocean) return s.leaves < 0.1 && s.y > 64 ? 'beach' : 'ocean';
+    }
+    return this.biome;
   }
 
   /** Begin a newly composed piece (optionally forcing a seed, for harnesses). */
@@ -1555,25 +1967,97 @@ export class AudioEngine {
     const menu = this.musicMode === 'menu';
     const s = seed ?? (menu && this.menuCount === 0 ? TITLE_SEED : (Math.random() * 2 ** 31) | 0);
     this.menuCount++;
-    const env = menu ? 'menu' : this.env;
-    const c = compose(env, menu ? undefined : this.biome, s);
+    const env = this.musicEnv();
+    const c = compose(env, menu ? undefined : this.musicBiome(), s, { rain: this.rainState !== 'off' });
     const out = ctx.createGain();
     out.gain.value = 1;
     out.connect(this.musicBus);
     if (this.delay) this.delay.delayTime.setTargetAtTime(clamp(c.beat * 0.75, 0.25, 1.2), now, 0.3);
     this.piece = {
       notes: c.notes, i: 0, t0: now + 0.2, end: now + 0.2 + c.len + 9, out,
-      env: env === 'nether' ? 'nether' : 'other', fading: false, name: c.name,
+      env: menu ? 'menu' : this.musicCtx, fading: false, name: c.name, tonic: c.tonic, minor: c.minor,
     };
     return c.name;
   }
 
+  /** Fade the current piece out over `sec`; it keeps playing underneath
+   *  whatever starts next (a crossfade), then releases itself. */
   private fadePiece(sec: number): void {
     const p = this.piece;
-    if (!p || !this.ctx || p.fading) return;
+    if (!p || !this.ctx) return;
     p.fading = true;
-    this.glide(p.out.gain, 0, sec);
-    p.end = this.ctx.currentTime + sec + 0.1;
+    const t = this.ctx.currentTime;
+    p.out.gain.cancelScheduledValues(t);
+    p.out.gain.setValueAtTime(p.out.gain.value, t);
+    p.out.gain.linearRampToValueAtTime(0, t + sec);
+    p.end = t + sec + 0.1;
+    this.old.push(p);
+    this.piece = null;
+  }
+
+  /** A short situational cue: arriving in a village, topping a peak, dawn…
+   *  Sits in the key of whatever is playing and ducks it while it sounds. */
+  playStinger(kind: StingerKind, gap = 240): boolean {
+    const ctx = this.ctx;
+    if (!ctx || !this.musicBus || !this.settings.music || this.settings.musicVol <= 0) return false;
+    const now = ctx.currentTime;
+    if (now - (this.lastAt.get('sting:' + kind) ?? -1e9) < gap || now - (this.lastAt.get('sting') ?? -1e9) < 40) return false;
+    this.lastAt.set('sting:' + kind, now);
+    this.lastAt.set('sting', now);
+    const c = stinger(kind, (Math.random() * 2 ** 31) | 0, this.piece?.tonic);
+    const t0 = now + 0.15;
+    for (const n of c.notes) this.note(n, t0 + n.t, this.musicBus);
+    const p = this.piece;
+    if (p) {
+      const g = p.out.gain;
+      g.cancelScheduledValues(now);
+      g.setValueAtTime(g.value, now);
+      g.linearRampToValueAtTime(0.45, now + 0.8);
+      g.setValueAtTime(0.45, t0 + c.len * 0.7);
+      g.linearRampToValueAtTime(1, t0 + c.len + 2.5);
+    } else if (this.nextPieceAt < t0 + c.len + 4) {
+      this.nextPieceAt = t0 + c.len + rand(4, 10);
+    }
+    return true;
+  }
+
+  /** Combat layer: a low pulse of toms and a tense cello ostinato in the key of
+   *  the current piece, faded in by how hard you're being chased. */
+  private pumpCombat(now: number, ahead: number): void {
+    const bus = this.combatBus;
+    if (!bus) return;
+    const want = this.threat > 0.08 && this.settings.music && this.musicMode === 'game';
+    if (want && !this.combatOn) {
+      this.combatOn = true;
+      this.combatNext = now + 0.15;
+      this.combatBar = 0;
+    }
+    if (!this.combatOn) return;
+    bus.gain.setTargetAtTime(want ? 0.35 + 0.65 * this.threat : 0, now, want ? 0.8 : 2.2);
+    if (!want && bus.gain.value < 0.01) { this.combatOn = false; return; }
+    const beat = 0.6;
+    while (this.combatNext < now + ahead) {
+      if (this.combatNext >= now - 0.05) this.combatBarNotes(this.combatNext, beat);
+      this.combatNext += beat * 4;
+      this.combatBar++;
+    }
+  }
+
+  private combatBarNotes(t: number, beat: number): void {
+    const to = this.combatBus!;
+    const k = (this.piece?.tonic ?? 50) - 12;
+    const hit = (b: number, m: number, v: number): void => this.note({ t: 0, i: 'tom', m, v, d: 0.4 }, t + b * beat, to);
+    hit(0, 36, 1);
+    hit(1.5, 40, 0.5);
+    hit(2, 38, 0.8);
+    hit(3, 43, 0.45);
+    if (this.combatBar % 2 === 1) hit(3.5, 40, 0.4);
+    if (this.combatBar % 4 === 3) hit(3.75, 33, 0.9);
+    const ost = [0, 0, 12, 0, 1, 0, 7, 0];
+    ost.forEach((o, i) => this.note({ t: 0, i: 'cello', m: k + o, v: i === 0 ? 0.55 : 0.36, d: beat * 0.32, p: -0.2 }, t + i * beat * 0.5, to));
+    if (this.threat > 0.5) {
+      for (const o of [24, 31, this.threat > 0.8 ? 25 : 36]) this.note({ t: 0, i: 'strings', m: k + o, v: 0.28, d: beat * 3.9, p: 0.25 }, t, to);
+    }
   }
 
   /** Instantiate one scored note on its instrument. */
@@ -1588,6 +2072,13 @@ export class AudioEngine {
       case 'pad': this.pad(at, f, n.v, n.d, to); break;
       case 'bass': this.bass(at, f, n.v, n.d, to); break;
       case 'drone': this.drone(at, f, n.v, n.d, to); break;
+      case 'harp': this.harp(at, f, n.v, n.d, to, pan); break;
+      case 'musicbox': this.musicbox(at, f, n.v, to, pan); break;
+      case 'flute': this.flute(at, f, n.v, n.d, to, pan, false); break;
+      case 'ocarina': this.flute(at, f, n.v, n.d, to, pan, true); break;
+      case 'strings': this.strings(at, f, n.v, n.d, to, pan); break;
+      case 'cello': this.cello(at, f, n.v, n.d, to, pan); break;
+      case 'tom': this.tom(at, f, n.v, to); break;
     }
   }
 
@@ -1745,20 +2236,212 @@ export class AudioEngine {
     }
   }
 
+  /** Harp: a plucked string — bright attack that mellows as the filter
+   *  closes, long natural ring (lower strings longer), a soft finger pluck. */
+  private harp(at: number, f: number, v: number, hold: number, to: AudioNode, pan: number): void {
+    const e = this.open('music', 1, { at, to, pan });
+    if (!e) return;
+    const ctx = this.ctx!;
+    const dur = Math.min(clamp(3.4 * Math.pow(220 / f, 0.35), 0.9, 5), hold + 1.4);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.Q.value = 0.4;
+    lp.frequency.setValueAtTime(Math.min(12000, f * 10), at);
+    lp.frequency.exponentialRampToValueAtTime(Math.max(300, f * 2.2), at + 0.5);
+    const g = ctx.createGain();
+    const pk = 0.14 * v;
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.linearRampToValueAtTime(pk, at + 0.004);
+    g.gain.exponentialRampToValueAtTime(pk * 0.35, at + 0.25);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+    lp.connect(g).connect(e.out);
+    e.nodes.push(lp, g);
+    const o = ctx.createOscillator();
+    o.setPeriodicWave(this.harpWave!);
+    o.frequency.value = f;
+    o.detune.value = rand(-2, 2);
+    o.connect(lp);
+    this.run(e, o, at, at + dur + 0.05);
+    this.nz(e, { at: at - e.t, dur: 0.014, vol: 0.025 * v, color: 'pink', type: 'bandpass', f: Math.min(5000, f * 4), q: 1.5 });
+  }
+
+  /** Music box: a small steel tine — pure FM tone with a glassy partial,
+   *  quick to speak and gently fading. */
+  private musicbox(at: number, f: number, v: number, to: AudioNode, pan: number): void {
+    const e = this.open('music', 1, { at, to, pan });
+    if (!e) return;
+    const dur = clamp(2.2 * Math.pow(523 / f, 0.4), 0.8, 2.6);
+    this.fm(e, { f, ratio: 1, index: 0.35, dur, vol: 0.16 * v, idxDur: 0.15, attack: 0.002 });
+    this.tn(e, { dur: dur * 0.25, f: f * 5.43, vol: 0.022 * v, attack: 0.001 });
+    this.tn(e, { dur: dur * 0.6, f: f * 2.01, vol: 0.025 * v, attack: 0.002 });
+  }
+
+  /** Flute / ocarina: a breathy, rounded tone. Soft chiff on the attack,
+   *  vibrato that blooms after the note settles, breath noise throughout. */
+  private flute(at: number, f: number, v: number, hold: number, to: AudioNode, pan: number, ocarina: boolean): void {
+    const e = this.open('music', 1, { at, to, pan });
+    if (!e) return;
+    const ctx = this.ctx!;
+    const d = Math.max(0.18, hold);
+    const end = at + d + 0.22;
+    const g = ctx.createGain();
+    const pk = (ocarina ? 0.11 : 0.1) * v;
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.linearRampToValueAtTime(pk * 1.12, at + (ocarina ? 0.045 : 0.07));
+    g.gain.linearRampToValueAtTime(pk, at + 0.18);
+    g.gain.setValueAtTime(pk * 0.92, at + d);
+    g.gain.exponentialRampToValueAtTime(0.0001, end);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = Math.min(9000, f * (ocarina ? 4 : 6));
+    lp.connect(g).connect(e.out);
+    e.nodes.push(g, lp);
+    const o = ctx.createOscillator();
+    o.setPeriodicWave(ocarina ? this.ocarinaWave! : this.fluteWave!);
+    o.frequency.value = f;
+    o.connect(lp);
+    // delayed vibrato
+    const l = ctx.createOscillator();
+    l.frequency.value = rand(4.6, 5.4);
+    const lg = ctx.createGain();
+    lg.gain.setValueAtTime(0, at);
+    lg.gain.linearRampToValueAtTime(0, at + Math.min(0.35, d * 0.5));
+    lg.gain.linearRampToValueAtTime(ocarina ? 7 : 11, at + Math.min(0.9, d));
+    l.connect(lg).connect(o.detune);
+    e.nodes.push(lg);
+    this.run(e, o, at, end + 0.03);
+    this.run(e, l, at, end + 0.03);
+    // breath + chiff
+    this.nz(e, { at: at - e.t, dur: d + 0.2, vol: 0.012 * v, color: 'pink', type: 'bandpass', f: Math.min(6000, f * 2), q: 1.2, attack: 0.08, to: g });
+    this.nz(e, { at: at - e.t, dur: 0.06, vol: (ocarina ? 0.1 : 0.16) * v, type: 'bandpass', f: Math.min(7000, f * 3), q: 2 });
+  }
+
+  /** String section: three detuned bowed saws per note, swelling in slowly,
+   *  with a shared ensemble vibrato; spread across the stereo field. */
+  private strings(at: number, f: number, v: number, dur: number, to: AudioNode, pan: number): void {
+    const e = this.open('music', 1, { at, to, pan: pan * 0.5 });
+    if (!e) return;
+    const ctx = this.ctx!;
+    const a = clamp(dur * 0.3, 0.12, 1.1);
+    const rel = clamp(dur * 0.3, 0.15, 1.2);
+    const end = at + dur + rel;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.Q.value = 0.6;
+    lp.frequency.setValueAtTime(Math.min(1800, f * 2.5), at);
+    lp.frequency.linearRampToValueAtTime(Math.min(3800, f * 4.5), at + a + 0.4);
+    const g = ctx.createGain();
+    const pk = 0.022 * v;
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.linearRampToValueAtTime(pk, at + a);
+    g.gain.setValueAtTime(pk, at + dur);
+    g.gain.linearRampToValueAtTime(0.0001, end);
+    lp.connect(g).connect(e.out);
+    e.nodes.push(lp, g);
+    const l = ctx.createOscillator();
+    l.frequency.value = rand(5, 5.8);
+    const lg = ctx.createGain();
+    lg.gain.value = 7;
+    l.connect(lg);
+    e.nodes.push(lg);
+    this.run(e, l, at, end + 0.03);
+    for (const [det, side] of [[-9, -0.5], [2, 0], [10, 0.5]]) {
+      const o = ctx.createOscillator();
+      o.type = 'sawtooth';
+      o.frequency.value = f;
+      o.detune.value = det;
+      lg.connect(o.detune);
+      const pn = ctx.createStereoPanner();
+      pn.pan.value = side;
+      o.connect(pn).connect(lp);
+      e.nodes.push(pn);
+      this.run(e, o, at, end + 0.03);
+    }
+  }
+
+  /** Cello: a bowed saw through a woody body resonance, a little bow noise,
+   *  and vibrato that arrives after the attack. */
+  private cello(at: number, f: number, v: number, dur: number, to: AudioNode, pan: number): void {
+    const e = this.open('music', 1, { at, to, pan });
+    if (!e) return;
+    const ctx = this.ctx!;
+    const short = dur < 0.5;
+    const a = short ? 0.02 : 0.12;
+    const rel = short ? 0.12 : 0.35;
+    const end = at + dur + rel;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = Math.min(2200, f * 5);
+    const body = ctx.createBiquadFilter();
+    body.type = 'peaking';
+    body.frequency.value = 280;
+    body.Q.value = 1.4;
+    body.gain.value = 6;
+    const g = ctx.createGain();
+    const pk = 0.06 * v;
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.linearRampToValueAtTime(pk, at + a);
+    g.gain.setValueAtTime(pk * (short ? 0.7 : 0.9), at + dur);
+    g.gain.exponentialRampToValueAtTime(0.0001, end);
+    lp.connect(body).connect(g).connect(e.out);
+    e.nodes.push(lp, body, g);
+    const o = ctx.createOscillator();
+    o.type = 'sawtooth';
+    o.frequency.value = f;
+    o.connect(lp);
+    if (!short) {
+      const l = ctx.createOscillator();
+      l.frequency.value = rand(4.8, 5.4);
+      const lg = ctx.createGain();
+      lg.gain.setValueAtTime(0, at);
+      lg.gain.linearRampToValueAtTime(0, at + 0.25);
+      lg.gain.linearRampToValueAtTime(13, at + 0.8);
+      l.connect(lg).connect(o.detune);
+      e.nodes.push(lg);
+      this.run(e, l, at, end + 0.03);
+    }
+    this.run(e, o, at, end + 0.03);
+    this.nz(e, { at: at - e.t, dur: Math.min(dur, 0.4), vol: 0.008 * v, color: 'pink', type: 'bandpass', f: Math.min(4000, f * 6), q: 1, attack: 0.03 });
+  }
+
+  /** Low tom / taiko: a pitched skin thump with a noisy strike. */
+  private tom(at: number, f: number, v: number, to: AudioNode): void {
+    const e = this.open('music', 1, { at, to });
+    if (!e) return;
+    const t = at - e.t;
+    this.tn(e, { at: t, dur: 0.45, f: f * 1.9, f1: f, glide: 0.12, vol: 0.34 * v, attack: 0.003 });
+    this.nz(e, { at: t, dur: 0.12, vol: 0.18 * v, color: 'brown', type: 'lowpass', f: 700 });
+    this.nz(e, { at: t, dur: 0.02, vol: 0.05 * v, type: 'bandpass', f: 1800, q: 1 });
+  }
+
   /** Call every frame; env + biome pick the mood of music and ambience. */
   ambientTick(dt: number, env: AmbientEnv = 'day', biome?: MusicBiome): void {
     const ctx = this.ctx;
     if (!ctx) return;
     const now = ctx.currentTime;
     if (this.musicMode === 'menu') this.setMenuMusic(false); // a world is running
-    // crossing into/out of the Nether fades the current piece
-    const cls = env === 'nether' ? 'nether' : 'other';
-    if (this.piece && !this.piece.fading && this.piece.env !== cls) {
-      this.fadePiece(4);
-      this.nextPieceAt = now + rand(8, 16);
+    // the music "context" (surface / cave / nether / underwater) only changes
+    // once the new one has held for a few seconds, then the piece crossfades
+    const want = env === 'nether' ? 'nether' : this.underwater ? 'underwater' : env === 'cave' ? 'cave' : 'surface';
+    if (want !== this.ctxWant) { this.ctxWant = want; this.ctxSince = now; }
+    if (want !== this.musicCtx && now - this.ctxSince > (want === 'nether' ? 0.5 : 4)) {
+      const from = this.musicCtx;
+      this.musicCtx = want;
+      if (this.piece && this.piece.env !== want) {
+        this.fadePiece(want === 'underwater' || from === 'underwater' ? 3 : 6);
+        this.nextPieceAt = now + (want === 'nether' ? rand(4, 8) : rand(3, 7));
+      }
+      if (want === 'cave' && from === 'surface' && now - this.surfaceSince > 30) this.playStinger('cave', 180);
+      if (want === 'nether') this.playStinger('nether', 120);
+      if (want === 'surface') this.surfaceSince = now;
     }
-    if (env !== this.env && this.sfxVerb) {
-      // footsteps and digging echo underground
+    // dawn and dusk on the surface
+    if ((env === 'day' || env === 'night') && want === 'surface') {
+      if (this.dayPart && env !== this.dayPart) this.playStinger(env === 'day' ? 'sunrise' : 'nightfall', 400);
+      this.dayPart = env;
+    }
+    if (env !== this.env && this.sfxVerb && !this.scape) {
+      // footsteps and digging echo underground (listen() refines this by room size)
       this.glide(this.sfxVerb.gain, env === 'cave' ? 0.34 : env === 'nether' ? 0.2 : 0.035, 2);
     }
     this.env = env;
@@ -1770,18 +2453,20 @@ export class AudioEngine {
     if (env === 'nether') this.startNetherBed(); else this.stopNetherBed();
 
     if (!this.settings.sound) return;
+    this.patterTick(dt);
+    this.shimmerTick(dt);
     // environment ambience: birdsong by day, crickets and owls at night, dread
     // underground, lava and far wails in the Nether
     this.atmosphereT -= dt;
     if (this.atmosphereT <= 0) {
-      this.atmosphereCue(env, biome);
+      if (this.rainState === 'off' || env === 'cave' || env === 'nether' || chance(0.25)) this.atmosphereCue(env, biome);
       this.atmosphereT = (env === 'cave' ? 9 : env === 'day' ? 7 : env === 'nether' ? 5 : 9) + Math.random() * 16;
     }
     // a short musical fragment now and then in the long gaps between pieces
     this.fragT -= dt;
     if (this.fragT <= 0) {
       this.fragT = rand(45, 100);
-      if (!this.piece && this.settings.music && this.nextPieceAt - now > 20) this.playFragment(env);
+      if (!this.piece && this.settings.music && this.nextPieceAt - now > 20) this.playFragment(this.musicEnv());
     }
     if (this.underwater) {
       this.bubbleT -= dt;
@@ -1792,13 +2477,227 @@ export class AudioEngine {
       }
     }
   }
+  private ctxWant = 'surface';
+  private ducked = false;
+  private ctxSince = 0;
 
-  private playFragment(env: AmbientEnv): void {
+  private playFragment(env: MusicEnv): void {
     const ctx = this.ctx;
     if (!ctx || !this.musicBus) return;
     const c = fragment(env, (Math.random() * 2 ** 31) | 0);
     const t0 = ctx.currentTime + 0.1;
     for (const n of c.notes) this.note(n, t0 + n.t, this.musicBus);
+  }
+
+  /** Probe the world around the player a few times a second and steer every
+   *  ambience bed, the weather beds, the cave echo, the combat layer and the
+   *  place stingers from it. Call every frame while a world is running. */
+  listen(dt: number, world: ScapeWorld, player: ScapePlayer, mobs: readonly ScapeMob[], weather: ScapeWeather | null): void {
+    if (!this.ctx || this.musicMode === 'menu') return;
+    this.scapeT -= dt;
+    if (this.scapeT > 0) return;
+    this.scapeT = 0.33;
+    this.scape = probeScape(world, player, mobs, weather);
+    this.applyScape(this.scape, 0.33);
+  }
+
+  /** Mix the ambience for one probe result. Public for harnesses. */
+  applyScape(s: Scape, dt: number): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    this.scape = s;
+    const nether = s.dim === 'nether';
+    const under = s.underground;
+    const shelter: Shelter = under || (s.enclosed > 0.9 && s.sky < 0.3) ? 'deep'
+      : s.roof === 'solid' ? 'roof' : s.roof === 'leaves' ? 'leaves' : 'open';
+    const exposure = shelter === 'open' ? 1 : shelter === 'leaves' ? 0.75 : shelter === 'roof' ? 0.3 : 0;
+    const quiet = !this.settings.sound;
+
+    // --- weather --------------------------------------------------------------
+    const wet = !nether && s.weather !== 'clear' && s.intensity > 0.2 && !quiet;
+    if (wet && !s.cold) this.setRain(s.weather === 'thunder' ? 'thunder' : 'rain', s.intensity, shelter);
+    else if (this.rainState !== 'off') this.setRain('off');
+    if (wet && s.cold) this.setSnow(s.intensity, shelter);
+    else if (this.snowK > 0) this.setSnow(0);
+    // a blizzard: snow in a storm, or heavy snow high up
+    this.blizzardK = wet && s.cold
+      ? clamp((s.weather === 'thunder' ? 0.85 : 0.3) * s.intensity + clamp((s.y - 90) / 50, 0, 0.5) * s.intensity, 0, 1) : 0;
+
+    // --- wind: altitude, exposure, storms, blizzards ----------------------------
+    if (chance(0.14)) this.gustTo = Math.pow(Math.random(), 0.7);
+    const gustRate = 0.18 + this.blizzardK * 0.3;
+    this.gust += (this.gustTo - this.gust) * gustRate;
+    const swing = 0.1 + this.blizzardK * 0.25;
+    this.windPan = clamp(this.windPan + rand(-swing, swing), -0.4 - this.blizzardK * 0.45, 0.4 + this.blizzardK * 0.45);
+    const alt = clamp((s.y - 78) / 60, 0, 1);
+    const windy = s.biome === 'desert' || s.biome === 'snow' || s.biome === 'taiga' || s.biome === 'mountains' ? 1.3 : 1;
+    const indoorWind = shelter === 'roof' ? 0.3 : shelter === 'deep' ? 0.08 : 0;
+    const wind = nether || quiet ? 0
+      : (0.01 + 0.075 * alt + (wet ? 0.025 * s.intensity : 0)) * windy * (exposure + indoorWind * 0.5) + 0.2 * this.blizzardK * Math.max(exposure, indoorWind);
+    this.windBed(wind, clamp(this.blizzardK * 1.1 + alt * 0.4 - 0.15, 0, 1), exposure < 0.5);
+
+    // --- foliage rustle, tugged by the same gusts ------------------------------
+    const leafLvl = nether || under || quiet ? 0 : s.leaves * (0.006 + 0.03 * this.gust) * (wet ? 0.5 : 1) * (0.4 + 0.6 * exposure);
+    this.bedSet('leaves', leafLvl, { pan: s.leafPan * 0.7, tc: 0.5 }, (into, bed) => {
+      const src = this.loopSrc(this.pink!, 1.3);
+      const hp = this.filt('highpass', 1100);
+      const bp = this.filt('bandpass', 2600, 0.6);
+      src.connect(hp).connect(bp).connect(into);
+      bed.srcs.push(src);
+      bed.nodes.push(hp, bp);
+    });
+
+    // --- sea / lake: a low surf bed plus waves rolling in -----------------------
+    const surf = nether || quiet ? 0 : (s.ocean ? 1 : s.water > 0.4 ? (s.water - 0.4) * 0.8 : 0) * (under ? 0.2 : 0.5 + 0.5 * exposure);
+    this.bedSet('surf', 0.03 * surf, { pan: s.waterPan * 0.5, lp: 420, tc: 1 }, (into, bed) => {
+      const src = this.loopSrc(this.brown!, 0.9);
+      src.connect(into);
+      bed.srcs.push(src);
+    });
+    this.waveT -= dt;
+    if (surf > 0.05 && this.waveT <= 0) {
+      this.waveT = rand(4.5, 8.5);
+      this.wave(surf, s.waterPan);
+    }
+
+    // --- streams and waterfalls ----------------------------------------------
+    const flow = quiet ? 0 : s.flow * (under ? 0.8 : 1);
+    const st = this.bedSet('stream', 0.045 * flow, { pan: s.flowPan * 0.7, tc: 0.6 }, (into, bed) => {
+      const src = this.loopSrc(this.white!, 1);
+      for (const k of ['a', 'b', 'c']) {
+        const bp = this.filt('bandpass', 800, 5);
+        const g = this.ctx!.createGain();
+        g.gain.value = 0.6;
+        src.connect(bp).connect(g).connect(into);
+        bed.nodes.push(bp, g);
+        bed.x[k] = bp;
+      }
+      // a waterfall's broadband roar rides on top when there's a lot of flow
+      const fall = this.loopSrc(this.pink!, 1);
+      const flp = this.filt('lowpass', 2200);
+      const fg = this.ctx!.createGain();
+      fg.gain.value = 0;
+      fall.connect(flp).connect(fg).connect(into);
+      bed.srcs.push(src, fall);
+      bed.nodes.push(flp);
+      bed.x.fg = fg;
+    });
+    if (st) {
+      // burbling: the resonances wander every probe
+      for (const k of ['a', 'b', 'c']) (st.x[k] as BiquadFilterNode).frequency.setTargetAtTime(rand(380, 1600), now, 0.12);
+      (st.x.fg as GainNode).gain.setTargetAtTime(flow > 0.5 ? (flow - 0.5) * 1.6 : 0, now, 0.8);
+      if (chance(0.3 * flow)) {
+        const e = this.open('amb', 0.5 * flow, { pan: s.flowPan * 0.7 });
+        if (e) { this.bubbles(e, 1 + ((Math.random() * 2) | 0), 0.25, 0.05); this.seal(e); }
+      }
+    }
+
+    // --- fire, furnaces, lava ------------------------------------------------------
+    this.bedSet('fire', quiet ? 0 : 0.04 * s.fire, { pan: s.firePan * 0.8, lp: 600, tc: 0.4 }, (into, bed) => {
+      const src = this.loopSrc(this.brown!, 1.2);
+      src.connect(into);
+      bed.srcs.push(src);
+    });
+    this.fireT -= dt;
+    if (s.fire > 0.05 && this.fireT <= 0 && !quiet) {
+      this.fireT = rand(0.15, 0.7) / (0.3 + s.fire);
+      const e = this.open('amb', (SFX_GAIN.crackle ?? 1) * 0.35 * s.fire, { pan: s.firePan * 0.8 });
+      if (e) { this.buildSfx(e, 'crackle'); this.seal(e); }
+    }
+    this.bedSet('lava', quiet ? 0 : 0.05 * s.lava, { pan: s.lavaPan * 0.8, lp: 240, tc: 0.6 }, (into, bed) => {
+      const src = this.loopSrc(this.brown!, 0.6);
+      src.connect(into);
+      bed.srcs.push(src);
+    });
+    if (s.lava > 0.05 && chance(0.18 * s.lava) && !quiet) {
+      const e = this.open('amb', (SFX_GAIN.lavaPop ?? 1) * 0.5 * s.lava, { pan: s.lavaPan * 0.8 });
+      if (e) { this.buildSfx(e, 'lavaPop'); this.seal(e); }
+    }
+
+    // --- caves: still air, and footsteps that echo by the size of the space ----
+    const cave = under && s.enclosed > 0.5;
+    this.bedSet('caveAir', cave && !quiet ? 0.028 : 0, { lp: 130, tc: 2 }, (into, bed) => {
+      const src = this.loopSrc(this.brown!, 0.5);
+      src.connect(into);
+      bed.srcs.push(src);
+    });
+    const room = clamp(s.room / 22, 0, 1);
+    if (this.echo) {
+      this.echo.wet.gain.setTargetAtTime(cave ? 0.05 + 0.16 * room : 0, now, 1);
+      this.echo.d.delayTime.setTargetAtTime(clamp(0.05 + s.room * 0.017, 0.06, 0.42), now, 1);
+      this.echo.fb.gain.setTargetAtTime(cave ? 0.18 + 0.22 * room : 0, now, 1);
+    }
+    if (this.sfxVerb) this.sfxVerb.gain.setTargetAtTime(cave ? 0.1 + 0.3 * room : nether ? 0.2 : 0.035 + 0.04 * s.enclosed, now, 1.5);
+
+    // --- villages: murmurs, a far bell --------------------------------------------
+    if (s.villagers >= 2 && !nether) {
+      if (now - this.seenVillageAt > 150) this.playStinger('village', 300);
+      this.seenVillageAt = now;
+    }
+    this.villageT -= dt;
+    if (s.villagers >= 2 && this.villageT <= 0 && !quiet && !under) {
+      this.villageT = rand(6, 14);
+      this.villageCue(s);
+    }
+
+    // --- peaks ---------------------------------------------------------------------
+    if (!nether && !this.peakLatch && s.y > 118 && s.sky > 0.95) {
+      this.peakLatch = true;
+      this.playStinger('peak', 300);
+    }
+    if (s.y < 100) this.peakLatch = false;
+
+    // --- chases: the combat layer rises fast and settles slowly -----------------
+    this.threat += (s.threat - this.threat) * (s.threat > this.threat ? 0.4 : 0.07);
+    if (this.threat < 0.01) this.threat = 0;
+    const p = this.piece;
+    if (p && this.threat > 0.05) { p.out.gain.setTargetAtTime(1 - 0.45 * this.threat, now, 1.2); this.ducked = true; }
+    else if (p && this.ducked && this.threat === 0) { p.out.gain.setTargetAtTime(1, now, 2); this.ducked = false; }
+
+    this.reapBeds(now);
+  }
+
+  /** A wave rolling in: a slow swell of low surf and a foamy wash as it breaks. */
+  private wave(k: number, pan: number): void {
+    const e = this.open('amb', k, { pan: clamp(pan * 0.6 + rand(-0.25, 0.25), -1, 1) });
+    if (!e) return;
+    const dur = rand(3.8, 5.5);
+    this.nz(e, { dur, vol: 0.09, color: 'brown', type: 'lowpass', f: 420, f1: 900, attack: dur * 0.45 });
+    this.nz(e, { at: dur * 0.38, dur: dur * 0.6, vol: 0.035, color: 'pink', type: 'bandpass', f: 1400, f1: 700, q: 0.6, attack: 0.25 });
+    this.nz(e, { at: dur * 0.42, dur: dur * 0.5, vol: 0.02, type: 'highpass', f: 2600, curve: this.grains(26, 0.6, 1.3, 0.35) });
+    this.seal(e);
+  }
+
+  /** Village life: a quiet overlapping murmur of voices, or a bell far off. */
+  private villageCue(s: Scape): void {
+    const day = this.env === 'day';
+    if (day && chance(0.22)) {
+      const e = this.open('amb', (SFX_GAIN.bell ?? 1) * 0.22, { pan: s.villagePan * 0.7 });
+      if (!e) return;
+      const f = rand(430, 520);
+      for (let i = 0; i < 3; i++) {
+        for (const [m, v, d] of [[1, 0.16, 3.5], [2.4, 0.06, 2], [0.5, 0.08, 4]] as [number, number, number][]) {
+          this.tn(e, { at: i * 1.3, dur: d, f: f * m, vol: v, attack: 0.004 });
+        }
+      }
+      this.seal(e);
+      return;
+    }
+    const e = this.open('amb', day ? 0.5 : 0.25, { pan: s.villagePan * 0.7 });
+    if (!e) return;
+    let at = 0;
+    const n = 2 + ((Math.random() * 3) | 0);
+    for (let i = 0; i < n; i++) {
+      const f = rand(120, 190);
+      const d = rand(0.18, 0.35);
+      this.vox(e, {
+        at, dur: d, vol: 0.08, pitch: [f, f * rand(1.05, 1.25), f * rand(0.85, 1)], attack: 0.03,
+        formants: [[[300], 5, 1], [[1000, 850], 5, 0.3], [[2300], 7, 0.3]], vib: [7, 16], direct: 0.3,
+      });
+      at += rand(0.1, 0.5);
+    }
+    this.seal(e);
   }
 
   private startNetherBed(): void {
@@ -1837,11 +2736,31 @@ export class AudioEngine {
   }
 
   /** A soft heartbeat that emerges and quickens as health drops — survival
-   *  tension. hpFrac is health/maxHealth; silent above 30%. Call every frame. */
+   *  tension — over a low, slowly-beating dissonant drone. hpFrac is
+   *  health/maxHealth; silent above 30%. Call every frame. */
   heartbeatTick(dt: number, hpFrac: number): void {
-    if (!this.ctx || !this.settings.sound) { this.heartT = 0; return; }
-    if (hpFrac <= 0 || hpFrac > 0.3) { this.heartT = 0; return; }
-    const k = 1 - hpFrac / 0.3; // 0 at 30% hp, 1 near death
+    const on = !!this.ctx && this.settings.sound && hpFrac > 0 && hpFrac <= 0.3;
+    const k = on ? 1 - hpFrac / 0.3 : 0; // 0 at 30% hp, 1 near death
+    this.tensionT -= dt;
+    if (this.tensionT <= 0) {
+      this.tensionT = 0.5;
+      this.bedSet('tension', on ? 0.02 + 0.035 * k : 0, { lp: 240 + 400 * k, tc: 1.2 }, (into, bed) => {
+        // two low saws a semitone apart beat against each other
+        for (const f of [55, 58.27, 110.3]) {
+          const o = this.ctx!.createOscillator();
+          o.type = f > 100 ? 'sine' : 'sawtooth';
+          o.frequency.value = f;
+          const g = this.ctx!.createGain();
+          g.gain.value = f > 100 ? 0.5 : 0.35;
+          o.connect(g).connect(into);
+          o.start();
+          bed.srcs.push(o);
+          bed.nodes.push(g);
+        }
+      });
+      if (!on) this.reapBeds(this.ctx?.currentTime ?? 0);
+    }
+    if (!on) { this.heartT = 0; return; }
     this.heartT -= dt;
     if (this.heartT > 0) return;
     this.heartT = 1.0 - k * 0.45; // ~1.0s → ~0.55s as it worsens
@@ -1853,6 +2772,7 @@ export class AudioEngine {
     }
     this.seal(e);
   }
+  private tensionT = 0;
 
   /** One ambient gesture flavoured by environment and biome. */
   private atmosphereCue(env: AmbientEnv, biome?: MusicBiome): void {

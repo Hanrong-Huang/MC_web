@@ -133,10 +133,20 @@ npm run dev        # open the printed localhost URL
   stages), bake **bread**. Leaves drop **saplings** that grow into
   biome-appropriate trees; grass spreads onto exposed dirt and dies under
   opaque blocks — all driven by MC-style surface **random ticks**.
-- **Music**: a generative Web Audio composer plays calm piano-and-pad pieces
-  every few minutes — major-pentatonic by day, minor at night — entirely
-  synthesized, no audio files. Music and sounds toggle from the pause menu
-  (persisted).
+- **Music**: a generative Web Audio composer (`AudioMusic.ts`) writes long
+  C418-style pieces — felt piano with pedalled arpeggios, harp, music box,
+  flute/ocarina, string swells, cello — whose motifs return inverted,
+  sequenced and fragmented through a development section and recap. Palette,
+  mode and tempo follow the place: forest pastorals, desert ocarina over a
+  drone, snowy music-box waltzes, rolling harp "tides" by the sea, village
+  waltzes, lydian string hymns on peaks, dark cello in caves, the Nether,
+  a muffled celesta "deep" underwater, brighter pieces in creative, mellow
+  pedalled piano while it rains. Pieces crossfade when you move between
+  surface / cave / Nether / underwater. Short stingers mark finding a village,
+  topping a peak, entering a cave, sunrise and nightfall; a tom-and-cello
+  combat layer fades in while hostiles chase you, and a low dissonant drone
+  joins the heartbeat at low health. Music and sounds toggle from the pause
+  menu (persisted).
 - **Effects**: continuous chip particles at the mined face, bigger break
   bursts, landing dust + thud on hard falls, white poofs on mob deaths,
   TNT chain flashes.
@@ -152,8 +162,17 @@ npm run dev        # open the printed localhost URL
 - **Resource packs**: load an *unzipped* pack folder using the standard
   `assets/minecraft/textures/{block,item}/*.png` layout to swap in real
   textures (tinting handled).
-- **Audio**: Web Audio synthesis for digging/steps per block class, combat,
-  bow shots, explosions, fuses, tool breaks, eating, pickups, ambient pads.
+- **Audio**: Web Audio synthesis for digging/steps per material (sprint vs
+  sneak gaits, landings that deepen with fall height), jumps, combat, death,
+  bow shots, explosions, fuses, flint & steel, eating/drinking, pickups.
+  **Ambience beds** react to a probe of your surroundings (`AudioScape.ts`):
+  wind that strengthens with altitude, leaves rustling in the gusts, surf and
+  rolling waves by the sea, burbling streams and waterfall roar, fire and
+  furnace crackle, lava, cave air with an echo sized to the cave, village
+  murmurs and a far bell — each panned toward its source. Rain is a warm,
+  low-passed wash with slow swells, pattering on leaves or drumming muffled on
+  a roof; thunder rolls in after a distance delay; snowfall is a hushed
+  stillness with faint ice glints, and blizzards howl and whistle.
 
 ## Architecture
 
@@ -173,7 +192,9 @@ src/engine/Input.ts          pointer lock, keys, double-tap, edge-queued clicks
 src/engine/Inventory.ts      slots, shaped recipes, furnace + chest state
 src/engine/EntityManager.ts  drops, 8 mobs, arrows, TNT, falling blocks, particles, explosions
 src/engine/Persistence.ts    RLE codec + IndexedDB save slots
-src/engine/Audio.ts          Web Audio synthesis
+src/engine/Audio.ts          Web Audio synthesis: sfx, mob voices, instruments, ambience beds
+src/engine/AudioMusic.ts     generative composer: palettes per place, motif development, stingers
+src/engine/AudioScape.ts     soundscape probe: foliage/water/fire/lava/room size/roof/chasers
 src/ui/HUD.ts                menus, hotbar, hearts, durability bars, container screens
 ```
 
