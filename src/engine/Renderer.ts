@@ -405,7 +405,9 @@ export class Renderer {
   // held item
   private heldGroup = new THREE.Group();
   private heldMesh: THREE.Object3D | null = null;
-  private bowArrow: THREE.Object3D | null = null;
+  /** held bow geometries: idle + the three pulling frames, swapped by draw */
+  private bowGeos: THREE.BufferGeometry[] = [];
+  private bowStage = -1;
   /** resting rotation for the current held sprite (tools differ from the bow) */
   private heldIdleRot = new THREE.Euler(0, 0, 0);
   /** resting offset of the held mesh inside the hand group */
@@ -1062,7 +1064,7 @@ export class Renderer {
       this.heldGroup.remove(this.heldMesh);
       this.heldMesh.traverse((o) => {
         const m = o as THREE.Mesh;
-        if (m.geometry) m.geometry.dispose();
+        if (m.geometry && !this.bowGeos.includes(m.geometry)) m.geometry.dispose();
         const mat = m.material as THREE.Material | undefined;
         if (mat) {
           const map = (mat as THREE.MeshBasicMaterial).map;
@@ -1072,15 +1074,9 @@ export class Renderer {
       });
       this.heldMesh = null;
     }
-    if (this.bowArrow) {
-      this.heldGroup.remove(this.bowArrow);
-      this.overlayScene.remove(this.bowArrow);
-      this.bowArrow.traverse((o) => {
-        const m = o as THREE.Mesh;
-        if (m.geometry) m.geometry.dispose();
-      });
-      this.bowArrow = null;
-    }
+    for (const g of this.bowGeos) g.dispose();
+    this.bowGeos = [];
+    this.bowStage = -1;
     this.heldIdleRot.set(0, 0, 0);
     this.heldRestPos.set(0, 0, 0);
     if (id !== 0 && hasDef(id) && def(id).name === 'bed') {
@@ -1088,9 +1084,11 @@ export class Renderer {
       // which reads far better in hand than a textured 9/16 slab
       const sprite = this.atlas.sprite('bed');
       const mesh = sprite
-        ? new THREE.Mesh(extrudeSpriteGeometry(sprite, 0.3), new THREE.MeshLambertMaterial({ vertexColors: true }))
+        ? new THREE.Mesh(extrudeSpriteGeometry(sprite, 0.28), new THREE.MeshLambertMaterial({ vertexColors: true }))
         : new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.3), new THREE.MeshLambertMaterial({ color: 0xb02e2e }));
-      this.heldIdleRot.set(0.1, -0.5, -0.1);
+      // 3/4 turn so the extruded bed shows its depth; raised clear of the frame
+      this.heldIdleRot.set(0.12, -0.55, -0.06);
+      this.heldRestPos.set(-0.03, 0.1, 0);
       mesh.rotation.copy(this.heldIdleRot);
       this.heldMesh = mesh;
     } else if (id !== 0 && hasDef(id) && def(id).block && !def(id).opaque && !def(id).solid) {
@@ -1117,12 +1115,19 @@ export class Renderer {
         for (let v = 0; v < 4; v++) uv.setXY(f * 4 + v, us[v], vs[v]);
       }
       uv.needsUpdate = true;
-      const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: this.atlas.texture, alphaTest: 0.35 }));
+      // bake Minecraft's face shading (top bright, the two visible sides at
+      // different strengths) so the cube reads as 3D under the flat fill light
+      const faceShade = [0.64, 0.82, 1, 0.5, 0.82, 0.64];
+      const cols: number[] = [];
+      for (let f = 0; f < 6; f++) for (let v = 0; v < 4; v++) cols.push(faceShade[f], faceShade[f], faceShade[f]);
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+      const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: this.atlas.texture, alphaTest: 0.35, vertexColors: true }));
       mesh.scale.setScalar(0.2);
-      this.heldRestPos.set(0.0, 0.1, 0);
-      // Minecraft's held block: turned 45 degrees with a slight forward tilt so
-      // the top and two side faces all show
-      this.heldIdleRot.set(0.08, -0.78, 0);
+      this.heldRestPos.set(-0.02, 0.14, 0);
+      // Minecraft's held block: a corner turned toward the eye (the rig sits
+      // right of the view axis, so the turn is past 45 degrees) and tipped
+      // forward so the top and two side faces all show
+      this.heldIdleRot.set(0.3, -1.12, 0);
       mesh.rotation.copy(this.heldIdleRot);
       this.heldMesh = mesh;
     } else if (id === I.MOB_CATCHER || id === I.MOB_CATCHER_FILLED) {
@@ -1137,18 +1142,36 @@ export class Renderer {
       // so tools/items in hand read with depth instead of as a flat card.
       const sprite = this.atlas.sprite(spriteNameFor(id, this.heldMob) ?? def(id).sprite!);
       const isBow = !!def(id).bow;
+      const isShield = def(id).name === 'shield';
       let zc = 0;
       let mesh: THREE.Mesh;
+      if (sprite && isShield) {
+        // the shield is held upright at the right edge, its face turned a
+        // little toward the centre (Minecraft's off-guard shield pose)
+        mesh = new THREE.Mesh(extrudeSpriteGeometry(sprite, 0.36), new THREE.MeshLambertMaterial({ vertexColors: true }));
+        this.heldIdleRot.set(0.05, -0.62, 0);
+        this.heldRestPos.set(0.03, 0.13, 0.02);
+        mesh.rotation.copy(this.heldIdleRot);
+        this.heldMesh = mesh;
+        this.heldMesh.position.copy(this.heldRestPos);
+        this.heldGroup.add(this.heldMesh);
+        return;
+      }
       if (sprite && !isBow) {
         const built = this.buildExtrudedItem(sprite, 0.4, 0.3);
         mesh = built.mesh;
         zc = built.zc;
+        // compact items (food, gems, buckets) sit higher so the whole sprite
+        // shows instead of being clipped by the bottom of the screen
+        if (!spriteAxis(sprite).long) this.heldRestPos.set(-0.03, 0.08, 0);
       } else if (sprite) {
-        // the bow stays centered (its draw pose rotates it about its middle);
-        // at rest it is laid on the same diagonal as the other items
-        mesh = new THREE.Mesh(extrudeSpriteGeometry(sprite, 0.42), new THREE.MeshLambertMaterial({ vertexColors: true }));
+        // the bow keeps its idle sprite plus Minecraft's three pulling frames;
+        // the draw pose swaps between them as the string comes back
+        const frames = ['bow', 'bow_pulling_0', 'bow_pulling_1', 'bow_pulling_2'];
+        this.bowGeos = frames.map((n) => extrudeSpriteGeometry(this.atlas.sprite(n) ?? sprite, 0.36));
+        mesh = new THREE.Mesh(this.bowGeos[0], new THREE.MeshLambertMaterial({ vertexColors: true }));
         zc = Math.PI / 4 - spriteAxis(sprite).angle;
-        this.heldRestPos.set(-0.07, 0.07, -0.06);
+        this.heldRestPos.set(-0.1, 0.13, -0.04);
       } else {
         mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.4), new THREE.MeshBasicMaterial({ color: 0xff00ff }));
       }
@@ -1160,11 +1183,6 @@ export class Renderer {
 
       mesh.rotation.copy(this.heldIdleRot);
       this.heldMesh = mesh;
-      if (def(id).bow) {
-        this.bowArrow = this.buildHeldArrow();
-        this.bowArrow.visible = false;
-        this.overlayScene.add(this.bowArrow);
-      }
     } else {
       // bare arm: a Steve-sleeve box poking in from the lower right
       const arm = new THREE.Group();
@@ -1219,32 +1237,34 @@ export class Renderer {
 
     if (drawingBow) {
       const pull = this.bowCharge;
-      // bow comes up to center-left and is held upright as the string draws
-      this.heldGroup.position.set(0.16, -0.18 + bob * 0.1 - lower * 0.5, -0.58 - pull * 0.02);
-      this.heldGroup.rotation.set(0, 0, 0);
-      if (this.heldMesh) {
-        // upright bow, limbs vertical, face turned slightly toward the camera
-        this.heldMesh.scale.setScalar(1.06 + pull * 0.05);
-        this.heldMesh.rotation.set(0, 0.22, 0);
-        this.heldMesh.position.set(0, 0, 0);
+      // swap in the matching pulling frame (Minecraft: 0 / 0.65 / 0.9 draw)
+      const stage = pull < 0.65 ? 1 : pull < 0.9 ? 2 : 3;
+      const mesh = this.heldMesh as THREE.Mesh | null;
+      if (mesh && this.bowGeos.length === 4 && stage !== this.bowStage) {
+        mesh.geometry = this.bowGeos[stage];
+        this.bowStage = stage;
       }
-      if (this.bowArrow) {
-        // arrow nocked on the bow, angled so the shaft reads as it points
-        // toward the crosshair; slides back toward the player as the draw deepens
-        this.bowArrow.visible = true;
-        this.bowArrow.position.set(0.11, -0.08, -0.44 + pull * 0.16);
-        this.bowArrow.rotation.set(0.03, 0.5, 0);
-        this.bowArrow.scale.setScalar(1.05);
+      // bow raised in front, right of the crosshair, face-on with its upper
+      // left tipped away so the nocked arrow points in toward the crosshair;
+      // a faint tremble builds as the draw is held at full strength
+      const shake = pull >= 0.9 ? Math.sin(this.bobT * 9) * 0.004 : 0;
+      this.heldGroup.position.set(0.17 + shake, -0.17 + bob * 0.1 - lower * 0.5, -0.56 + pull * 0.03);
+      this.heldGroup.rotation.set(0, 0, 0);
+      if (mesh) {
+        mesh.scale.setScalar(0.8 + pull * 0.05);
+        mesh.rotation.set(-0.42, -0.52, 0.02);
+        mesh.position.set(0, 0, 0);
       }
       return;
     }
 
-    if (this.bowArrow && this.heldMesh) {
-      this.heldMesh.scale.setScalar(1);
-      this.heldMesh.rotation.copy(this.heldIdleRot);
-      this.heldMesh.position.copy(this.heldRestPos);
+    if (this.bowGeos.length && this.heldMesh) {
+      const mesh = this.heldMesh as THREE.Mesh;
+      if (this.bowStage !== 0) { mesh.geometry = this.bowGeos[0]; this.bowStage = 0; }
+      mesh.scale.setScalar(1);
+      mesh.rotation.copy(this.heldIdleRot);
+      mesh.position.copy(this.heldRestPos);
     }
-    if (this.bowArrow) this.bowArrow.visible = false;
 
     // eating: lift the food toward the mouth and nudge it with each chew
     this.eatAmt += (this.eatTarget - this.eatAmt) * Math.min(1, dt * 10);
@@ -1361,23 +1381,6 @@ export class Renderer {
     button.position.set(0, 0, R * 1.04);
     g.add(button);
     g.scale.setScalar(1.05);
-    return g;
-  }
-
-  private buildHeldArrow(): THREE.Group {
-    const g = new THREE.Group();
-    const shaftMat = new THREE.MeshBasicMaterial({ color: 0x8a6232 });
-    const tipMat = new THREE.MeshBasicMaterial({ color: 0xd0d0d8 });
-    const featherMat = new THREE.MeshBasicMaterial({ color: 0xf6f6f6 });
-    const shaft = new THREE.Mesh(new THREE.BoxGeometry(0.020, 0.020, 0.40), shaftMat);
-    const tip = new THREE.Mesh(new THREE.BoxGeometry(0.038, 0.038, 0.07), tipMat);
-    tip.position.z = -0.24;
-    const featherA = new THREE.Mesh(new THREE.BoxGeometry(0.074, 0.016, 0.10), featherMat);
-    featherA.position.z = 0.23;
-    featherA.position.y = 0.040;
-    const featherB = featherA.clone();
-    featherB.position.y = -0.040;
-    g.add(shaft, tip, featherA, featherB);
     return g;
   }
 

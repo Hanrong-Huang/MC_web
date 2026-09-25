@@ -392,6 +392,10 @@ class Game {
     if (location.hash.includes('debugmobs')) {
       (window as unknown as { __game: unknown; __B: unknown }).__game = this; // dev: lets screenshot harnesses frame mobs
       (window as unknown as { __B: unknown }).__B = B; // dev: block-id enum for headless feature tests
+      (window as unknown as { __findId: unknown }).__findId = (name: string): number => {
+        for (let i = 1; i < 512; i++) if (hasDef(i) && def(i).name === name) return i;
+        return -1;
+      }; // dev: item id by registry name, for held-item/icon harnesses
       const p = this.player.pos;
       this.entities.spawnMob('horse', p.x + 3, p.y + 1, p.z);
       this.entities.spawnMob('wolf', p.x + 3, p.y + 1, p.z - 1.5);
@@ -1284,6 +1288,8 @@ class Game {
       if (this.state === 'sleeping') this.updateSleep(dt);
       this.player.update(dt);
       if (location.hash.includes('bowtest')) this.player.bowCharge = 0.9;
+      const devBow = (window as unknown as { __bowCharge?: number }).__bowCharge;
+      if (devBow !== undefined) this.player.bowCharge = devBow; // dev: harnesses hold a bow draw
       // mounting hint when the player climbs onto a horse
       if (this.player.isRiding() !== this.wasRiding) {
         this.wasRiding = this.player.isRiding();

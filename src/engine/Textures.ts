@@ -1530,12 +1530,13 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
   diamond_legs: (c) => pixmap(c, 0, 0, LEGS_MAP, DIAMONDAC),
   diamond_boots: (c) => pixmap(c, 0, 0, BOOTS_MAP, DIAMONDAC),
   stick: (c) => outlinePx(diagPx((a, cc) => (a >= -11 && a <= 11 ? (cc === 15 ? 'H' : cc === 16 ? 'h' : null) : null), HANDLE)).put(c, 0, 0),
-  coal: (c) => pixmap(c, 0, 0, [
-    '................', '................', '................', '.....OOOO.......',
-    '...OOKKKKO......', '..OKKkKKKKO.....', '..OKkKKKKKKO....', '.OKKKKKkKKKO....',
-    '.OKKkKKKKKKO....', '.OKKKKKKkKO.....', '..OKkKKKKKO.....', '...OOKKKOO......',
-    '.....OOO........', '................', '................', '................',
-  ], { O: '#0c0c0c', K: '#2b2b2b', k: '#4a4a4a' }),
+  // a faceted lump: lit upper-left facets, a glassy glint, shadowed underside
+  coal: (c) => outlinePx(spritePx([
+    '................', '................', '......hhh.......', '....hhwhKKK.....',
+    '...hwhKKKKKK....', '..hhKKKKKKKKK...', '..hKKKhKKKKKk...', '.hKKKhwhKKKKk...',
+    '.hKKKKhKKKKkk...', '.KKKKKKKKKkkk...', '..KKKKKKkkkk....', '...kKKkkkkk.....',
+    '.....kkkk.......', '................', '................', '................',
+  ], { h: '#565656', w: '#8c8c8c', K: '#303030', k: '#1c1c1c' }), 0.45).put(c, 0, 0),
   wood_pickaxe: (c) => pickaxePx(WOOD).put(c, 0, 0),
   wood_axe: (c) => axePx(WOOD).put(c, 0, 0),
   wood_shovel: (c) => shovelPx(WOOD).put(c, 0, 0),
@@ -1606,12 +1607,13 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     '...OWWWWWO......', '...OWWWWO.......', '..OWWWWO........', '..OHWWO.........',
     '..OHO...........', '.OHO............', '................', '................',
   ], { O: '#5d5d6a', W: '#f4f4f8', H: '#c8a868' }),
+  // a loose coil of string: a doubled strand with a lit and a shaded side
   string: (c) => outlinePx(spritePx([
-    '................', '................', '...........WW...', '..........W..W..',
-    '.........W...W..', '....WW..W...W...', '...W..WW...W....', '...W......W.....',
-    '....W....W......', '.....W..W.......', '......WW........', '.....W..........',
-    '....W...........', '...W............', '................', '................',
-  ], { W: '#f4f4f4' }), 0.55).put(c, 0, 0),
+    '................', '...........WW...', '..........Ws.W..', '.........Ws..Ws.',
+    '....WWs..Ws..Ws.', '...Ws.sWWs..Ws..', '...Ws..sW..Ws...', '....Ws..sWWs....',
+    '.....WWs..Ws....', '.........Ws.....', '........Ws......', '.......Ws.......',
+    '......Ws........', '.....Ws.........', '....Ws..........', '................',
+  ], { W: '#f6f6f6', s: '#bdbdc4' }), 0.4).put(c, 0, 0),
   gunpowder: (c) => outlinePx(spritePx([
     '................', '................', '................', '......g.g.......',
     '.....gKgKg......', '....KKgKKKgK....', '...KKKKgKKKKK...', '...KgKKKKKKgK...',
@@ -1624,12 +1626,12 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     if (a >= -13 && a <= 6 && (cc === 15 || cc === 16)) return cc === 15 ? 'H' : 'h';
     return null;
   }, { L: '#d8d8d8', m: '#8a8a8a', F: '#ffffff', f: '#cfcfcf', ...HANDLE })).put(c, 0, 0),
-  bow: (c) => pixmap(c, 0, 0, [
-    '................', '......OHHO......', '....OHHhhHO.....', '...OHhO..OHO....',
-    '..OHhO....OHO...', '..OHO......OW...', '.OHhO......W....', '.OHO......W.....',
-    '.OHO.....W......', '.OHhO...W.......', '..OHO..W........', '..OHhOW.........',
-    '...OWW..........', '....W...........', '................', '................',
-  ], { O: '#241b10', H: '#8a6232', h: '#a87c46', W: '#e8e8e8' }),
+  bow: (c) => bowSprite(c, -1),
+  // Minecraft's three draw frames: the string pulls back toward the lower right
+  // and the nocked arrow slides with it (swapped in by the held-bow draw pose)
+  bow_pulling_0: (c) => bowSprite(c, 0),
+  bow_pulling_1: (c) => bowSprite(c, 1),
+  bow_pulling_2: (c) => bowSprite(c, 2),
   mutton: (c) => meatSprite(c, '#d8555f', '#e88a92'),
   cooked_mutton: (c) => meatSprite(c, '#8a4a28', '#b5713f'),
   beef: (c) => steakPx(false).put(c, 0, 0),
@@ -1696,12 +1698,7 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     '...OHHHHHHO.....', '....OHHHHO......', '.....OOOO.......', '................',
     '................', '................', '................', '................',
   ], { O: '#4a2f14', H: '#9c6f3a', S: '#b86a32', C: '#e88724', P: '#d0a05a', B: '#a82048', G: '#4f9a38' }),
-  hoe: (c) => pixmap(c, 0, 0, [
-    '................', '....OOOOOO......', '...OMMMMMMO.....', '...OOOOOMMO.....',
-    '........OHhO....', '.......OHhO.....', '......OHhO......', '.....OHhO.......',
-    '....OHhO........', '...OHhO.........', '..OHhO..........', '.OHhO...........',
-    '.OhO............', '................', '................', '................',
-  ], WOOD),
+  hoe: (c) => hoePx(WOOD).put(c, 0, 0),
   rotten_flesh: (c) => pixmap(c, 0, 0, [
     '................', '................', '...OOO..OOO.....', '..ORRROORGRO....',
     '..ORGRRRRRRO....', '.ORRRRGRRRRRO...', '.ORRGRRRRGRRO...', '.ORRRRRGRRRO....',
@@ -1738,24 +1735,29 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     '..WLWWwWWWWW....', '..WWWWWWWwWWW...', '...wwWWWWWww....', '................',
     '................', '................', '................', '................',
   ], { W: '#ececec', w: '#c4c4c4', L: '#ffffff' }), 0.45).put(c, 0, 0),
-  leather: (c) => pixmap(c, 0, 0, [
-    '................', '................', '....OOOOOO......', '...OLLLLLLO.....',
-    '..OLLlLLLlLO....', '..OLLLLLLLLO....', '..OLlLLLLlLO....', '..OLLLLLLLLO....',
-    '..OLLlLLLLLO....', '...OLLLLLlO.....', '....OOOOOO......', '................',
-    '................', '................', '................', '................',
-  ], { O: '#5a3a1e', L: '#a06a3a', l: '#8a5a2e' }),
-  saddle: (c) => pixmap(c, 0, 0, [
-    '................', '................', '................', '.....OOOOOO.....',
-    '....OBBBBBBO....', '...OBBBBBBBBO...', '..OBKBBBBKBBO...', '..OBBBBBBBBBO...',
-    '...OOBBBBBOO...', '.....O.OO.O.....', '....O...O..O....', '................',
-    '................', '................', '................', '................',
-  ], { O: '#3a2410', B: '#7a4a22', K: '#caa84a' }),
-  horse_armor: (c) => pixmap(c, 0, 0, [
-    '................', '......OOOO......', '.....OMMMMO.....', '....OMMmMMMO....',
-    '...OMMMMMMMO....', '...OMmMMMmMO....', '...OMMMMMMMO....', '....OMMMMMO....',
-    '....O.OMMO.O....', '......OMMO......', '.....OMMMMO.....', '......OOOO......',
-    '................', '................', '................', '................',
-  ], { O: '#3f3f47', M: '#cfcfd6', m: '#a8a8b0' }),
+  // a tanned hide: four splayed corners, lighter grain and a darker belly
+  leather: (c) => outlinePx(spritePx([
+    '................', '................', '..LL........LL..', '..LlLLLLLLLLlL..',
+    '...LLlLLLlLLLL..', '...LLLLLLLLlL...', '..LLlLLdLLLLLL..', '..LLLLLddLLlLL..',
+    '...LLLLdLLLLL...', '...LlLLLLLlLL...', '..LLLLLLLLLLLL..', '..LlLLLLLLLLlL..',
+    '..LL........LL..', '................', '................', '................',
+  ], { L: '#a8693a', l: '#c98a54', d: '#84512a' }), 0.4).put(c, 0, 0),
+  // a leather riding saddle: raised pommel + cantle, dished seat, girth
+  // straps and two iron stirrups hanging below
+  saddle: (c) => outlinePx(spritePx([
+    '................', '................', '................', '..BB........BB..',
+    '..BbB......BbB..', '...BbBBBBBBbB...', '...BbbbbbbbbB...', '....BBBBBBBB....',
+    '.....S....S.....', '.....S....S.....', '....MMM..MMM....', '....M.M..M.M....',
+    '....MmM..MmM....', '................', '................', '................',
+  ], { B: '#6e4222', b: '#9a6234', S: '#4a2c16', M: '#c4c4cc', m: '#8e8e98' }), 0.4).put(c, 0, 0),
+  // iron horse armor: a plated horse head in profile (snout left, ear up,
+  // neck guard sweeping down the right) with a dark eye slit
+  horse_armor: (c) => outlinePx(spritePx([
+    '................', '.........hh.....', '........hMhh....', '.......hMMMMh...',
+    '.....hhMMMMMMh..', '...hhMMMKMMMMMh.', '..hMMMMMMMMMMMM.', '.hMMmMMMMMMMMMM.',
+    '.MMmmMMMM.MMMMm.', '..mmmm....MMMMm.', '..........MMMMm.', '..........MMMMm.',
+    '.........MMMMmm.', '.........mmmmm..', '................', '................',
+  ], { h: '#eeeef2', M: '#c9c9d0', m: '#9a9aa4', K: '#2a2a30' }), 0.4).put(c, 0, 0),
   emerald: (c) => outlinePx(spritePx([
     '................', '................', '................', '.......L........',
     '......LWG.......', '.....LLGGG......', '....LGGGGgg.....', '....LGGGGgg.....',
@@ -2007,33 +2009,84 @@ function filledCatcher(c: Ctx, kind: string): void {
   c.restore();
 }
 
-/** Bed item sprite: a 3/4 view with two wooden legs, a red mattress and a
- *  white pillow at the head end — the vanilla bed item silhouette. */
+/** Bed item sprite: a 3/4 view — the quilted top recedes as a parallelogram
+ *  over a red blanket side, a plump white pillow at the head end, the oak
+ *  frame rail and four stubby legs (the far two peek out behind). */
 function bedSprite(c: Ctx): void {
   pixmap(c, 0, 0, [
     '................',
     '................',
-    '...WWWWWkkkkkk..',
-    '..WwwwwWRRRRRRk.',
-    '..WwwwwWRrRRrRk.',
-    '..kWWWWkRRRRRRk.',
-    '..kSSSSkSSSSSSk.',
-    '..kssssksssssSk.',
-    '..kkkkkkkkkkkkk.',
-    '..kLLk......kLk.',
-    '..kllk......klk.',
-    '..kllk......klk.',
-    '...kk........kk.',
     '................',
-    '................',
+    '.....kkkkkkkkkk.',
+    '....kWWkRRRRRRRk',
+    '...kWwwkRrRRRrRk',
+    '..kWwwWkRRRrRRk.',
+    '.kWWWWkRRRRRRRk.',
+    '.kPPPPkBSSSSSSk.',
+    '.kppppkbsssssSk.',
+    '.kFFFFFFFFFFFFk.',
+    '.kffffffffffffk.',
+    '.kLkkk.....kLkk.',
+    '.kLLk......kLLk.',
+    '..kk........kk..',
     '................',
   ], {
-    k: '#241a12',              // dark outline
-    W: '#d8d8d2', w: '#f2f2ee', // pillow (shade + lit)
-    R: '#b02e2e', r: '#c64141', // blanket top (quilt seams brighter)
-    S: '#8e2323', s: '#7a1e1e', // mattress side in shadow
-    L: '#7a5a30', l: '#5e4524', // oak legs
+    k: '#2a1a12',               // dark outline
+    W: '#e4e4de', w: '#fbfbf7', // pillow top (shade + lit)
+    P: '#cfcfc8', p: '#b4b4ae', // pillow side
+    R: '#c23a3a', r: '#dc5454', // blanket top with brighter quilt stitches
+    B: '#9c2828', b: '#842020', // blanket fold where it meets the pillow
+    S: '#a62c2c', s: '#8a2222', // blanket side in shadow
+    F: '#9a7444', f: '#76562e', // oak frame rail
+    L: '#6a4c28',               // legs
   });
+}
+
+/** Bow sprite: the stave arcs around the upper left with the string on the
+ *  anti-diagonal. `stage` -1 is the idle bow; 0..2 are the draw frames, where
+ *  the string is pulled to a point toward the lower right and a nocked arrow
+ *  lies along the draw line with its flint head just past the grip. */
+function bowSprite(c: Ctx, stage: number): void {
+  pixmap(c, 0, 0, [
+    '................', '......OHHO......', '....OHHhhHO.....', '...OHhO..OHO....',
+    '..OHhO....OHO...', '..OHO......O....', '.OHhO...........', '.OHO............',
+    '.OHO............', '.OHhO...........', '..OHO...........', '..OHhO..........',
+    '...OO...........', '................', '................', '................',
+  ], { O: '#241b10', H: '#8a6232', h: '#a87c46' });
+  const px = (x: number, y: number, col: string): void => {
+    if (x < 0 || y < 0 || x > 15 || y > 15) return;
+    c.fillStyle = col;
+    c.fillRect(x, y, 1, 1);
+  };
+  const line = (x0: number, y0: number, x1: number, y1: number, col: string): void => {
+    const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
+    for (;;) {
+      px(x0, y0, col);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  };
+  const STRING = '#e8e8e8';
+  if (stage < 0) { line(12, 5, 4, 13, STRING); return; }
+  // pull point slides down the diagonal as the draw deepens
+  const P = [[9, 10], [10, 11], [11, 12]][stage];
+  line(12, 5, P[0], P[1], STRING);
+  line(4, 13, P[0], P[1], STRING);
+  // arrow: nock at the string, 8px shaft up-left, flint head, white fletching
+  for (let k = 1; k <= 8; k++) {
+    const x = P[0] - k, y = P[1] - k;
+    if (k >= 7) {
+      px(x, y, k === 8 ? '#e2e2e2' : '#b8b8b8');
+      if (k === 7) { px(x + 1, y - 1, '#8a8a8a'); px(x - 1, y + 1, '#8a8a8a'); }
+    } else {
+      px(x, y, k % 2 ? '#9a7040' : '#6b4a26');
+    }
+    if (k <= 2) { px(x + 1, y - 1, k === 1 ? '#ffffff' : '#d6d6d6'); px(x - 1, y + 1, k === 1 ? '#d6d6d6' : '#ffffff'); }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2249,6 +2302,9 @@ const PACK_MAP: Record<string, PackEntry> = {
   gunpowder: { paths: ['item/gunpowder'], kind: 'item' },
   arrow: { paths: ['item/arrow'], kind: 'item' },
   bow: { paths: ['item/bow'], kind: 'item' },
+  bow_pulling_0: { paths: ['item/bow_pulling_0'], kind: 'item' },
+  bow_pulling_1: { paths: ['item/bow_pulling_1'], kind: 'item' },
+  bow_pulling_2: { paths: ['item/bow_pulling_2'], kind: 'item' },
   mutton: { paths: ['item/mutton'], kind: 'item' },
   cooked_mutton: { paths: ['item/cooked_mutton'], kind: 'item' },
   beef: { paths: ['item/beef'], kind: 'item' },
@@ -2770,8 +2826,9 @@ const GAMEPLAY_ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
       for (let x = 0; x < TILE; x++) {
         const o = (y * TILE + x) * 4;
         if (d[o + 3] === 0) continue;
-        const band = (x + y) % 6;
-        const k = band === 0 ? 0.6 : band === 1 ? 0.38 : 0.16;
+        // a soft violet sheen in wide diagonal bands, gold still showing through
+        const band = (x + y) % 8;
+        const k = band === 0 ? 0.34 : band === 1 || band === 7 ? 0.2 : 0.07;
         d[o] = Math.round(d[o] * (1 - k) + 178 * k);
         d[o + 1] = Math.round(d[o + 1] * (1 - k) + 96 * k);
         d[o + 2] = Math.round(d[o + 2] * (1 - k) + 255 * k);

@@ -84,9 +84,16 @@ Pure-logic unit tests bundle with esbuild to `t.mjs` then run under node (RLE co
 
 When adding a feature, prefer adding/extending a `.mjs` harness and capturing a screenshot to confirm rendering, then clean up `shot-*.png` before committing.
 
-## Current status (2026-07)
+## Current status (2026-09)
 
-Latest pass — thrown mob catcher + bed/sleep rework:
+Latest pass — seven-track polish (UI, textures/items, audio, mobs, terrain, rendering/perf, gameplay) plus an item/bow/arrow pass:
+- **Generation runs in `gen-worker.ts`** (sync fallback in node). `WorldGenerator.generate()` must depend only on seed/dimension/chunk position; generated door/bed/wall-torch state goes through `putDoor`/`putBed`/`putTorch` and reaches the world via `generator.drainStates(world)` — anything else won't cross the worker boundary.
+- **Music** lives in `AudioMusic.ts` (seeded composer, menu theme via `setMenuMusic`); `Audio.ts` has separate music/sfx/ambient buses and `setMusicVolume`/`setSoundVolume`.
+- **Held items** (`Renderer.setHeldItem`): sprites are laid on Minecraft's diagonal via `spriteAxis`; held blocks bake per-face shading into vertex colours; the shield has its own upright pose; the bow swaps `bow` → `bow_pulling_0..2` geometries as `bowCharge` rises (the pulling sprites include the nocked arrow, so there is no separate held-arrow mesh).
+- **Arrows** are crossed side-view voxel profiles (`EntityManager.buildArrowMesh`), stick into the block they hit (`Entity.stuckT >= 0`), quiver, drop out if the block is mined, and the player's own are picked up by walking over them.
+- Dev hooks under `#debugmobs`: `window.__findId(name)` (item id by registry name) and `window.__bowCharge` (hold a bow draw in harnesses).
+
+Previous pass — thrown mob catcher + bed/sleep rework:
 - **Catcher is a projectile** (`EntityManager` kind `'catcher'`, `throwCatcher`/`updateCatcher`/`resolveCatcherHit`). Right-click throws; `CATCH_SLACK = 0.85` expands the mob AABB for the hit test; block hits, timeouts and animal bounces all drop the orb back as a pickup. Point-blank right-click on your own pet still recalls without a throw (`Player.use` handles that before throwing). `CAPTURABLE` is now every hostile kind, including the two flyers.
 - **Pet combat is two-sided**: wild hostiles pick a pet as `foe` and melee/shoot it, `hurt()` wires up mutual aggro, hostile arrows/fireballs damage pets, and pets regen between fights. Flying pets use `updateFlyingPet` (escort overhead, dive/fireball the target). Pets persist via `SaveState.pets` + `savePets`/`loadPets`, show in a HUD roster (`HUD.updatePets` ← `EntityManager.petStatus`), and toggle stay/follow through `interactMob`.
 - **Bed**: dedicated `bed` item sprite (icon + extruded held model), head-half top texture with a full-width painted pillow matching a 1.5/16 raised pillow box, and the `emitBox` winding fix that finally makes partial-block top faces visible.

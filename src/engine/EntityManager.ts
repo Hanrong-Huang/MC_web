@@ -122,6 +122,8 @@ export class Entity {
   // never the owner or another pet)
   owner: 'player' | 'skeleton' | 'emberghast' | 'pet' | 'petghast' = 'player';
   dmg = 0;
+  /** arrow embedded in a block: seconds since it struck (-1 = in flight) */
+  stuckT = -1;
   // particle fields
   life = 0;
   maxLife = 0;
@@ -224,6 +226,7 @@ export class EntityManager {
   private corpses: { mesh: THREE.Group; mats: THREE.MeshLambertMaterial[]; t: number; w: number; x: number; y: number; z: number }[] = [];
   private shadowTex: THREE.CanvasTexture | null = null;
   private particleMats = new Map<string, THREE.MeshBasicMaterial>();
+  private arrowSprite: HTMLCanvasElement | null = null;
   private spawnTick = 0;
   mobsEnabled = true;
 
@@ -628,19 +631,54 @@ export class EntityManager {
     if (e.age > 60) e.dead = true;
   }
 
+  /** Minecraft's arrow entity: two identical side-view arrows crossed along
+   *  the shaft (an X seen from behind), each extruded one pixel thick. The
+   *  item sprite's dark outline turned the shaft black at this scale, so the
+   *  entity gets its own unoutlined horizontal profile. Tip points down +z,
+   *  which is what lookAt aims along the flight path. */
+  private buildArrowMesh(): THREE.Group {
+    if (!this.arrowSprite) {
+      const c = document.createElement('canvas');
+      c.width = 16; c.height = 16;
+      const ctx = c.getContext('2d')!;
+      const rows = [
+        '................',
+        '..W.............',
+        '.WWw.........L..',
+        '.WwwHhHhHhHhLLL.',
+        '.WwwhHhHhHhHmmmL',
+        '.WWw.........m..',
+        '..W.............',
+      ];
+      const pal: Record<string, string> = {
+        W: '#f4f4f4', w: '#c8c8cc',   // goose-feather fletching
+        H: '#9c7440', h: '#6e4e28',   // oak shaft
+        L: '#e0e0e0', m: '#9a9a9a',   // flint head
+      };
+      rows.forEach((row, y) => {
+        for (let x = 0; x < 16; x++) {
+          const col = pal[row[x]];
+          if (!col) continue;
+          ctx.fillStyle = col;
+          ctx.fillRect(x, y + 5, 1, 1);
+        }
+      });
+      this.arrowSprite = c;
+    }
+    const g = new THREE.Group();
+    const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+    for (let i = 0; i < 2; i++) {
+      const geo = extrudeSpriteGeometry(this.arrowSprite, 0.5);
+      geo.rotateY(-Math.PI / 2); // tip (+x) onto +z
+      if (i) geo.rotateZ(Math.PI / 2);
+      g.add(new THREE.Mesh(geo, mat));
+    }
+    return g;
+  }
+
   shootArrow(owner: 'player' | 'skeleton', x: number, y: number, z: number,
     dx: number, dy: number, dz: number, speed: number, dmg: number): void {
-    const mesh = new THREE.Group();
-    const shaft = new THREE.Mesh(
-      new THREE.BoxGeometry(0.05, 0.05, 0.5),
-      new THREE.MeshLambertMaterial({ color: 0x8a6232 }),
-    );
-    const tip = new THREE.Mesh(
-      new THREE.BoxGeometry(0.07, 0.07, 0.1),
-      new THREE.MeshLambertMaterial({ color: 0xc8c8d0 }),
-    );
-    tip.position.z = 0.28;
-    mesh.add(shaft, tip);
+    const mesh = this.buildArrowMesh();
     const len = Math.hypot(dx, dy, dz) || 1;
     const e = new Entity('arrow', { x, y, z }, { w: 0.1, h: 0.1 }, mesh);
     e.vel = { x: (dx / len) * speed, y: (dy / len) * speed, z: (dz / len) * speed };
@@ -1015,6 +1053,7 @@ export class EntityManager {
   }
 
   private updateArrow(e: Entity, dt: number): void {
+    if (e.stuckT >= 0) { this.updateStuckArrow(e, dt); return; }
     const speed = Math.hypot(e.vel.x, e.vel.y, e.vel.z);
     const steps = Math.max(1, Math.ceil(speed * dt / 0.45));
     const sdt = dt / steps;
@@ -1032,8 +1071,26 @@ export class EntityManager {
         e.dead = true;
         if (fireball) { this.fireballBurst(e.pos.x, e.pos.y, e.pos.z); return; }
         this.audio.play('arrowHit');
-        if (e.owner === 'player' && Math.random() < 0.7) {
-          this.spawnDrop(e.pos.x - e.vel.x * sdt, e.pos.y - e.vel.y * sdt, e.pos.z - e.vel.z * sdt, I.ARROW, 1);
+        if (e.owner === 'player' || e.owner === 'skeleton') {
+          // arrows bury their tip in the block and quiver (vanilla), staying
+          // put until picked up or the block under them is broken
+          const len = Math.hypot(e.vel.x, e.vel.y, e.vel.z) || 1;
+          const ux = e.vel.x / len, uy = e.vel.y / len, uz = e.vel.z / len;
+          // walk back to where the shaft entered the block, then sit the
+          // 0.5-long arrow so only its flint tip (~0.1) is buried
+          for (let k = 0; k < 24; k++) {
+            const bid = this.world.getBlock(Math.floor(e.pos.x), Math.floor(e.pos.y), Math.floor(e.pos.z));
+            if (bid === B.AIR || !def(bid).solid) break;
+            e.pos.x -= ux * 0.03; e.pos.y -= uy * 0.03; e.pos.z -= uz * 0.03;
+          }
+          e.pos.x -= ux * 0.14; e.pos.y -= uy * 0.14; e.pos.z -= uz * 0.14;
+          e.dead = false;
+          e.stuckT = 0;
+          e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+          e.mesh.lookAt(e.pos.x + e.vel.x, e.pos.y + e.vel.y, e.pos.z + e.vel.z);
+          e.mesh.userData.rest = e.mesh.quaternion.clone();
+          e.vel = { x: e.vel.x / len, y: e.vel.y / len, z: e.vel.z / len }; // keep the heading for the wobble
+          e.age = 0;
         }
         return;
       }
@@ -1083,6 +1140,43 @@ export class EntityManager {
     if (e.age > 30 || e.pos.y < -8) e.dead = true;
     e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
     e.mesh.lookAt(e.pos.x + e.vel.x, e.pos.y + e.vel.y, e.pos.z + e.vel.z);
+  }
+
+  /** An arrow embedded in a block: quivers briefly, can be walked over to pick
+   *  up (the player's own), and drops out if its block is mined away. */
+  private updateStuckArrow(e: Entity, dt: number): void {
+    e.stuckT += dt;
+    // the block the tip is buried in: a little ahead along the heading
+    const tx = Math.floor(e.pos.x + e.vel.x * 0.3);
+    const ty = Math.floor(e.pos.y + e.vel.y * 0.3);
+    const tz = Math.floor(e.pos.z + e.vel.z * 0.3);
+    const id = this.world.getBlock(tx, ty, tz);
+    if (id === B.AIR || id === B.WATER || !def(id).solid) {
+      // support gone: fall out of the hole
+      e.stuckT = -1;
+      e.vel = { x: e.vel.x * 0.5, y: 0, z: e.vel.z * 0.5 };
+      return;
+    }
+    const rest = e.mesh.userData.rest as THREE.Quaternion | undefined;
+    if (rest) {
+      e.mesh.quaternion.copy(rest);
+      if (e.stuckT < 0.4) {
+        // damped quiver about the shaft's pivot
+        const k = (1 - e.stuckT / 0.4);
+        e.mesh.rotateX(Math.sin(e.stuckT * 70) * 0.12 * k);
+        e.mesh.rotateY(Math.cos(e.stuckT * 55) * 0.06 * k);
+      }
+    }
+    const p = this.player;
+    if (e.owner === 'player' && p && !p.dead &&
+      Math.abs(p.pos.x - e.pos.x) < 1.1 && Math.abs(p.pos.z - e.pos.z) < 1.1 &&
+      e.pos.y > p.pos.y - 0.6 && e.pos.y < p.pos.y + 2.2) {
+      e.dead = true;
+      this.spawnDrop(p.pos.x, p.pos.y + 0.5, p.pos.z, I.ARROW, 1);
+      return;
+    }
+    // vanilla despawns grounded arrows after a minute
+    if (e.stuckT > (e.owner === 'player' ? 60 : 20)) e.dead = true;
   }
 
   private updateTnt(e: Entity, dt: number): void {
