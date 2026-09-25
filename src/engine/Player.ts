@@ -78,6 +78,8 @@ export interface PlayerDeps {
   toast: (msg: string) => void;
   /** a gameplay milestone happened (advancement id) */
   onAdvance?: (id: string) => void;
+  /** light a fire in an air cell (flint & steel); false if it can't burn there */
+  ignite?: (x: number, y: number, z: number) => boolean;
 }
 
 export class Player {
@@ -105,6 +107,9 @@ export class Player {
   blocking = false;
   /** looking through a spyglass (right mouse held) */
   scoping = false;
+  /** seconds left on fire (set by fire/lava, put out by water or rain) */
+  fireT = 0;
+  private burnTickT = 0;
   /** remaining air bubbles (x2 half-bubbles like hearts), 20 = full */
   air = 20;
   dead = false;
@@ -554,16 +559,25 @@ export class Player {
       const x0 = Math.floor(this.pos.x - hw), x1 = Math.floor(this.pos.x + hw);
       const y0 = Math.floor(this.pos.y), y1 = Math.floor(this.pos.y + BOX.h);
       const z0 = Math.floor(this.pos.z - hw), z1 = Math.floor(this.pos.z + hw);
-      let inLava = false;
+      let inLava = false, inFire = false;
       for (let by = y0; by <= y1 && !inLava; by++) {
         for (let bz = z0; bz <= z1 && !inLava; bz++) {
           for (let bx = x0; bx <= x1 && !inLava; bx++) {
-            if (world.getBlock(bx, by, bz) === B.LAVA) inLava = true;
+            const id = world.getBlock(bx, by, bz);
+            if (id === B.LAVA) inLava = true;
+            else if (id === B.FIRE) inFire = true;
           }
         }
       }
+      const fireProof = this.effects.has('fire_resistance');
+      if (inFire && !inLava) {
+        this.lavaT = 0.5;
+        if (!fireProof) this.fireT = Math.max(this.fireT, 8);
+        this.damage(1, undefined, 'Went up in flames');
+      }
       if (inLava) {
         this.lavaT = 0.5;
+        if (!fireProof) this.fireT = Math.max(this.fireT, 15);
         this.damage(3, undefined, 'Tried to swim in lava');
         // rising embers around the player
         const px = this.pos.x, py = this.pos.y + 0.5, pz = this.pos.z;
@@ -573,6 +587,19 @@ export class Player {
           );
         }
       }
+    }
+
+    // on fire: a point of damage a second until it burns out or water douses it
+    if (inWaterNow || this.mode === 'creative') this.fireT = 0;
+    if (this.fireT > 0) {
+      this.fireT = Math.max(0, this.fireT - dt);
+      this.burnTickT += dt;
+      if (this.burnTickT >= 1) {
+        this.burnTickT = 0;
+        if (!this.effects.has('fire_resistance')) this.damage(1, undefined, 'Burned to death');
+      }
+    } else {
+      this.burnTickT = 0;
     }
 
     // portal detection
@@ -1423,6 +1450,18 @@ export class Player {
       if (this.tryIgnitePortal(t.x + t.nx, t.y + t.ny, t.z + t.nz)) {
         audio.play('fuse');
         this.damageHeldTool();
+        return;
+      }
+      // otherwise strike a flame: TNT is lit directly, anything else catches
+      // fire on the clicked face
+      if (t.id === B.TNT) {
+        this.deps.igniteTnt(t.x, t.y, t.z);
+        this.damageHeldTool();
+        return;
+      }
+      if (this.deps.ignite?.(t.x + t.nx, t.y + t.ny, t.z + t.nz)) {
+        audio.play('fuse');
+        this.damageHeldTool();
       } else {
         audio.play('fail');
       }
@@ -1855,7 +1894,7 @@ export class Player {
     if (this.mode === 'creative' || this.dead) return;
     if (this.hurtCooldown > 0) return;
     // Fire Resistance shrugs off lava, magma and fireballs entirely
-    if (this.effects.has('fire_resistance') && cause && /lava|magma|fireball/i.test(cause)) return;
+    if (this.effects.has('fire_resistance') && cause && /lava|magma|fireball|flames|burn/i.test(cause)) return;
     // a raised shield turns aside melee from the front, projectiles and blasts
     if (this.isBlocking() && this.shieldCovers(source, cause)) {
       this.hurtCooldown = 0.5;
@@ -1945,6 +1984,7 @@ export class Player {
     this.saturation = 5;
     this.air = 20;
     this.exhaustion = 0;
+    this.fireT = 0;
     this.clearEffects();
     this.fallDist = 0;
     this.dead = false;

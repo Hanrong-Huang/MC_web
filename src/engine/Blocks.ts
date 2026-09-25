@@ -87,6 +87,8 @@ export enum B {
   /** head half of a 2-block bed (foot half is B.BED) */
   BED_HEAD = 82,
   AMETHYST_ORE = 83,
+  /** open flame from flint & steel / lightning; spreads over flammable blocks */
+  FIRE = 99,
 }
 
 export enum I {
@@ -401,6 +403,13 @@ blockDef({
   opaque: false, occludes: false,
   drop: null, // breaking either half drops a single bed item (handled in Player)
   faces: { top: 'bed_head_top', bottom: 'planks', sides: 'bed_side' },
+});
+blockDef({
+  // a light-emitting crossed-flame billboard; burns out unless it sits on netherrack
+  id: B.FIRE, name: 'fire', label: 'Fire', hardness: 0, sound: 'none',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'fire', bottom: 'fire', sides: 'fire' },
+  drop: null,
 });
 blockDef({
   id: B.TORCH, name: 'torch', label: 'Torch', hardness: 0, sound: 'wood',
@@ -791,7 +800,7 @@ blockDef({
   solid: true, opaque: false, occludes: false
 });
 
-itemDef({ id: I.FLINT_AND_STEEL, name: 'flint_and_steel', label: 'Flint and Steel', sprite: 'flint_and_steel', stack: 1 });
+itemDef({ id: I.FLINT_AND_STEEL, name: 'flint_and_steel', label: 'Flint and Steel', sprite: 'flint_and_steel', stack: 1, durability: 64 });
 itemDef({ id: I.QUARTZ, name: 'quartz', label: 'Nether Quartz', sprite: 'quartz', stack: 64 });
 itemDef({ id: I.REDSTONE, name: 'redstone', label: 'Redstone Dust', sprite: 'redstone', stack: 64 });
 itemDef({ id: I.NETHER_BRICK, name: 'nether_brick', label: 'Nether Brick', sprite: 'nether_brick', stack: 64 });
@@ -853,6 +862,23 @@ export const CROSS_BLOCKS = new Set<number>([
   B.CARROT_0, B.CARROT_1, B.CARROT_2,
   B.POTATO_0, B.POTATO_1, B.POTATO_2,
   B.BEETROOT_0, B.BEETROOT_1, B.BEETROOT_2,
+  B.FIRE,
+]);
+
+/** How readily a block burns: `burn` = chance of being consumed by adjacent
+ *  fire, `catch` = how eagerly flames leap into the air next to it (vanilla's
+ *  flammability / encouragement, scaled 0..100). */
+export const FLAMMABLE = new Map<number, { burn: number; catch: number }>([
+  [B.PLANKS, { burn: 20, catch: 5 }],
+  [B.LOG, { burn: 5, catch: 5 }], [B.BIRCH_LOG, { burn: 5, catch: 5 }],
+  [B.SPRUCE_LOG, { burn: 5, catch: 5 }], [B.JUNGLE_LOG, { burn: 5, catch: 5 }],
+  [B.LEAVES, { burn: 60, catch: 30 }], [B.BIRCH_LEAVES, { burn: 60, catch: 30 }],
+  [B.SPRUCE_LEAVES, { burn: 60, catch: 30 }], [B.JUNGLE_LEAVES, { burn: 60, catch: 30 }],
+  [B.WOOL, { burn: 60, catch: 30 }],
+  [B.TABLE, { burn: 20, catch: 5 }], [B.LADDER, { burn: 20, catch: 5 }], [B.TRAPDOOR, { burn: 20, catch: 5 }],
+  [B.TNT, { burn: 100, catch: 15 }],
+  [B.TALL_GRASS, { burn: 100, catch: 60 }], [B.POPPY, { burn: 100, catch: 60 }],
+  [B.DANDELION, { burn: 100, catch: 60 }], [B.SAPLING, { burn: 100, catch: 60 }],
 ]);
 
 /** Blocks that pop off when the block under them is removed.

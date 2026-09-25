@@ -16,6 +16,8 @@ export interface StatusView {
   /** 0..1 swing recharge; the meter only shows while recharging */
   attackCharge: number;
   scoping: boolean;
+  /** player is burning: flames lick up the bottom of the view */
+  onFire: boolean;
 }
 
 const ROMAN = ['', ' II', ' III', ' IV', ' V'];
@@ -120,6 +122,25 @@ function goldHeart(half: boolean): HTMLCanvasElement {
   return c;
 }
 
+/** Redraw a strip of pixel flames (white-hot base, red tips) into `c`. */
+function paintFlames(c: HTMLCanvasElement, phase: number): void {
+  const ctx = c.getContext('2d')!;
+  ctx.clearRect(0, 0, c.width, c.height);
+  const ramp = ['#fff3b8', '#ffd84a', '#ffab24', '#ff7b1c', '#e24a17', '#a92c10'];
+  for (let x = 0; x < c.width; x++) {
+    // taller tongues toward the screen edges, like vanilla's first-person fire
+    const edge = Math.abs(x / (c.width - 1) - 0.5) * 2;
+    const wave = Math.sin(x * 0.9 + phase * 7) * 0.5 + Math.sin(x * 0.37 - phase * 11) * 0.5;
+    const h = Math.max(2, Math.round(c.height * (0.28 + edge * 0.55 + wave * 0.16)));
+    for (let y = c.height - 1; y >= c.height - h; y--) {
+      const t = (c.height - 1 - y) / h;
+      if (t > 0.6 && Math.random() < (t - 0.6) * 1.4) continue;
+      ctx.fillStyle = ramp[Math.min(ramp.length - 1, Math.floor(t * ramp.length))];
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+}
+
 function fmtTime(t: number): string {
   const s = Math.max(0, Math.ceil(t));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -131,6 +152,9 @@ export class StatusHUD {
   private attackEl: HTMLDivElement;
   private attackFill: HTMLDivElement;
   private scopeEl: HTMLDivElement;
+  private fireEl: HTMLCanvasElement;
+  private firePhase = 0;
+  private fireRedrawAt = 0;
   private lastAbsorbKey = '';
   private lastEffectsKey = '';
   private iconCache = new Map<string, HTMLCanvasElement>();
@@ -173,6 +197,16 @@ export class StatusHUD {
         + ' rgba(40,30,20,0.9) 34.4vmin, #050403 36vmin, #000 100%)',
     });
     root.appendChild(this.scopeEl);
+
+    // burning: a band of animated pixel flames along the bottom of the view
+    this.fireEl = document.createElement('canvas');
+    this.fireEl.id = 'burn-overlay';
+    this.fireEl.width = 64; this.fireEl.height = 22;
+    Object.assign(this.fireEl.style, {
+      position: 'absolute', left: '0', bottom: '0', width: '100%', height: '46vh',
+      imageRendering: 'pixelated', pointerEvents: 'none', zIndex: '4', opacity: '0.82', display: 'none',
+    });
+    root.appendChild(this.fireEl);
   }
 
   private icon(id: EffectId): HTMLCanvasElement {
@@ -241,6 +275,18 @@ export class StatusHUD {
 
     // --- spyglass vignette -----------------------------------------------------
     this.scopeEl.style.display = show && v.scoping ? 'block' : 'none';
+
+    // --- on-fire flames (redrawn ~12x a second for the flicker) ------------------
+    const burning = show && v.onFire;
+    this.fireEl.style.display = burning ? 'block' : 'none';
+    if (burning) {
+      const now = performance.now();
+      if (now >= this.fireRedrawAt) {
+        this.fireRedrawAt = now + 80;
+        this.firePhase += 0.08;
+        paintFlames(this.fireEl, this.firePhase);
+      }
+    }
   }
 
   dispose(): void {
@@ -248,5 +294,6 @@ export class StatusHUD {
     this.effectsEl.remove();
     this.attackEl.remove();
     this.scopeEl.remove();
+    this.fireEl.remove();
   }
 }

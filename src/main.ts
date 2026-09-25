@@ -30,6 +30,7 @@ import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef, isSolid
 import { Weather } from './engine/Weather';
 import { getControls, setControls } from './engine/ControlsSettings';
 import { AdvancementTracker } from './engine/Advancements';
+import { FireSystem } from './engine/Fire';
 import type { Entity } from './engine/EntityManager';
 
 const DAY_LENGTH = 1200; // 20 real minutes
@@ -102,6 +103,10 @@ class Game {
   /** golden hearts, effect badges, attack meter, spyglass vignette */
   private status: StatusHUD;
   private wasScoping = false;
+  /** spreading fires (flint & steel, lightning) */
+  private fire!: FireSystem;
+  private fireAcc = 0;
+  private mobBurnAcc = 0;
 
   constructor(app: App, slot: string, save: SaveState | null, fresh: { seed: number; mode: GameMode } | null) {
     this.app = app;
@@ -145,6 +150,10 @@ class Game {
         const biome = this.world.generator.biomeAt(Math.floor(wx), Math.floor(wz));
         return biome === 'snow' || biome === 'taiga';
       },
+    });
+    this.fire = new FireSystem(this.world, {
+      rainingAt: (x, y, z) => this.isRainingOn(x, y, z),
+      igniteTnt: (x, y, z) => this.entities.spawnTnt(x, y, z),
     });
     this.adv.onChange = () => {
       let t: { id: string; label: string; icon: string } | null;
@@ -236,6 +245,7 @@ class Game {
       onTeleport: () => this.teleportPlayerDimension(),
       toast: (msg) => this.hud.toast(msg),
       onAdvance: (id) => this.adv.unlock(id),
+      ignite: (x, y, z) => this.fire.ignite(x, y, z),
     });
 
     if (save) {
@@ -245,6 +255,7 @@ class Game {
       this.dayTime = save.environment?.dayTime ?? 0.1;
       this.spawnPoint = save.spawn ?? null;
       if (save.advancements) this.adv.load(save.advancements);
+      this.fire.load(save.fires);
       
       const ow = this.world.dimData.overworld;
       for (const [k, v] of Object.entries(save.world ?? {})) ow.savedChunks.set(k, v);
@@ -878,10 +889,44 @@ class Game {
     this.hud.toast('Good morning');
   }
 
+  /** Is rain falling on this spot right now (Overworld, open sky, not snow)? */
+  private isRainingOn(x: number, y: number, z: number): boolean {
+    const w = this.weather;
+    if (this.world.dimension !== 'overworld' || w.kind === 'clear' || w.intensity < 0.3) return false;
+    const biome = this.world.generator.biomeAt(Math.floor(x), Math.floor(z));
+    if (biome === 'desert') return false;
+    return this.world.skyLight(Math.floor(x), Math.floor(y) + 1, Math.floor(z)) >= 0.99;
+  }
+
+  /** Fire upkeep at 20 Hz: flames spread/burn out, mobs standing in fire
+   *  scorch, and rain puts out a burning player. */
+  private tickFire(dt: number): void {
+    this.fireAcc += dt;
+    if (this.fireAcc >= 0.25) {
+      this.fire.tick(this.fireAcc);
+      this.fireAcc = 0;
+    }
+    const p = this.player;
+    if (p.fireT > 0 && this.isRainingOn(p.pos.x, p.pos.y + 1, p.pos.z)) p.fireT = 0;
+    this.mobBurnAcc += dt;
+    if (this.mobBurnAcc < 0.5 || this.fire.count === 0) return;
+    this.mobBurnAcc = 0;
+    for (const e of this.entities.entities) {
+      if (e.dead || !this.entities.isMob(e)) continue;
+      const bx = Math.floor(e.pos.x), bz = Math.floor(e.pos.z);
+      const by = Math.floor(e.pos.y);
+      if (this.world.getBlock(bx, by, bz) === B.FIRE || this.world.getBlock(bx, by + 1, bz) === B.FIRE) {
+        this.entities.hurt(e, 1, Math.random() - 0.5, Math.random() - 0.5);
+      }
+    }
+  }
+
   /** Lightning struck at (x,y,z): ignite TNT, scorch mobs, flash + thunder. */
   private onLightning(x: number, y: number, z: number): void {
     this.audio.play('thunder');
     this.adv.unlock('thunder');
+    // the bolt can set the strike point alight
+    if (Math.random() < 0.6) this.fire.ignite(x, y, z);
     // ignite exposed TNT
     for (let dy = -1; dy <= 1; dy++) {
       for (let dz = -1; dz <= 1; dz++) {
@@ -1185,6 +1230,7 @@ class Game {
       villageSpawns: this.world.generator.villageSpawns.map((s) => ({ ...s })),
       pets: this.entities.savePets(),
       advancements: this.adv.serialize(),
+      ...(this.fire.count > 0 ? { fires: this.fire.serialize() } : {}),
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
       lastPlayed: Date.now(),
     };
@@ -1386,6 +1432,7 @@ class Game {
       effects: this.player.effectList(),
       attackCharge: this.player.attackCharge(),
       scoping,
+      onFire: this.player.fireT > 0 && this.player.mode === 'survival',
     });
     this.hud.updatePets(this.entities.petStatus());
     if (this.state === 'container' && this.container?.kind === 'furnace') this.hud.updateFurnace();
@@ -1429,6 +1476,7 @@ class Game {
     }
     this.player.tick(0.05);
     this.entities.tick(isNight);
+    this.tickFire(0.05);
 
     // phantom spawns: 3+ nights without sleep, at night, survival mode
     if (isNight && this.player.mode === 'survival' && this.nightsAwake >= 3) {

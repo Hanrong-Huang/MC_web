@@ -69,6 +69,8 @@ export interface SaveState {
   pets?: { kind: string; x: number; y: number; z: number; hp: number; sitting: boolean }[];
   /** unlocked advancement ids */
   advancements?: string[];
+  /** burning fires: "dimension|x,y,z" + seconds of burn left */
+  fires?: { k: string; t: number }[];
   lastPlayed: number;
 }
 

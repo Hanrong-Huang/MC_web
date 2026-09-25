@@ -710,15 +710,17 @@ export class Renderer {
   }
 
   private buildExtrudedItem(sprite: HTMLCanvasElement): THREE.Mesh {
-    const isMetallic = this.heldId !== 0 && (
+    // golden apples/carrots are food, not metal; and without an environment
+    // map a high metalness renders the sprite near-black, so keep it a sheen
+    const isMetallic = this.heldId !== 0 && !def(this.heldId).food && (
       def(this.heldId).name.includes('iron') ||
       def(this.heldId).name.includes('gold') ||
       def(this.heldId).name.includes('diamond')
     );
     const mat = new THREE.MeshStandardMaterial({
       vertexColors: true,
-      roughness: isMetallic ? 0.22 : 0.8,
-      metalness: isMetallic ? 0.82 : 0.05,
+      roughness: isMetallic ? 0.4 : 0.8,
+      metalness: isMetallic ? 0.3 : 0.05,
     });
     return new THREE.Mesh(extrudeSpriteGeometry(sprite, 0.56), mat);
   }

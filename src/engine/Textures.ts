@@ -2374,3 +2374,26 @@ Object.assign(PACK_MAP, {
   shears: { paths: ['item/shears'], kind: 'item' },
   spyglass: { paths: ['item/spyglass'], kind: 'item' },
 } satisfies Record<string, PackEntry>);
+
+/** Fire tile: licking flame tongues, white-hot at the base, red at the tips. */
+function paintFire(ctx: Ctx, x0: number, y0: number): void {
+  let seed = 1723;
+  const rand = (): number => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  const heights = [9, 12, 15, 11, 8, 11, 14, 16, 12, 9, 12, 15, 13, 9, 11, 13];
+  const ramp = ['#fff6c4', '#ffe066', '#ffc12a', '#ff9420', '#f2651a', '#c93a14'];
+  for (let x = 0; x < TILE; x++) {
+    const h = Math.max(4, heights[x] - ((rand() * 3) | 0));
+    for (let y = TILE - 1; y >= TILE - h; y--) {
+      const t = (TILE - 1 - y) / h; // 0 at the base, ~1 at the tip
+      // the upper half frays into separate tongues
+      if (t > 0.55 && rand() < (t - 0.55) * 0.9) continue;
+      const i = Math.min(ramp.length - 1, Math.floor(t * ramp.length + (rand() - 0.5) * 1.2));
+      ctx.fillStyle = ramp[Math.max(0, i)];
+      ctx.fillRect(x0 + x, y0 + y, 1, 1);
+    }
+  }
+}
+Object.assign(TILE_PAINTERS, { fire: paintFire });
+Object.assign(PACK_MAP, {
+  fire: { paths: ['block/fire_0', 'block/fire_layer_0'], kind: 'tile' },
+} satisfies Record<string, PackEntry>);
