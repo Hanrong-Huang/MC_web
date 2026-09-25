@@ -7,13 +7,15 @@ import * as THREE from 'three';
 import { Atlas, extrudeSpriteGeometry, shapedItemGeometry, hasShapedItemModel, BLOCK_SPRITE_ICONS } from './Textures';
 import type { ChunkMeshData, GeoArrays } from './Mesher';
 import { B, def, hasDef, spriteNameFor, I, CROSS_BLOCKS } from './Blocks';
+import { buildOrbRig, disposeOrb, fitFigurine, ORB_GLOW, ORB_IDLE_GLOW, OrbRig } from './CatcherOrb';
+import { MobModels } from './MobModels';
+import type { MobKind } from './EntityManager';
 
-/** Inner-core glow colors for the held filled-catcher orb, keyed by mob kind. */
-const MOB_ORB_COLORS: Record<string, number> = {
-  zombie: 0x5d9b54, skeleton: 0xe6e6dc, spider: 0x6a5560,
-  creeper: 0x6bcf57, cinderling: 0xf07a2a, ashstalker: 0xe06a2a,
-  emberghast: 0xf0e6dc, phantom: 0x6fb6c8,
-};
+/** Held-orb throw timeline (fractions of ORB_THROW_TIME): the wind-up ends and
+ *  the orb leaves the hand at ORB_RELEASE (EntityManager.CATCHER_WINDUP s). */
+const ORB_THROW_TIME = 0.55;
+const ORB_WIND = 0.2;
+const ORB_RELEASE = 0.22;
 
 export interface ChunkGeometry {
   solid: THREE.BufferGeometry | null;
@@ -95,6 +97,233 @@ vec3 skyColor(vec3 d) {
 }
 `;
 
+// Cheap animated caustic web (iterated domain warp), roughly 0..1 with thin
+// bright filaments. Used for the underwater light on terrain and the light
+// dancing on shallow water.
+const CAUSTIC_GLSL = /* glsl */ `
+float caustic(vec2 uv, float t) {
+  vec2 p = mod(uv * 6.28318, 6.28318) - 250.0;
+  vec2 i = p;
+  float c = 1.0;
+  for (int n = 0; n < 4; n++) {
+    float tt = t * (1.0 - 3.5 / float(n + 1));
+    i = p + vec2(cos(tt - i.x) + sin(tt + i.y), sin(tt - i.y) + cos(tt + i.x));
+    c += 1.0 / length(vec2(p.x / (sin(i.x + tt) / 0.005), p.y / (cos(i.y + tt) / 0.005)));
+  }
+  c = 1.17 - pow(c * 0.25, 1.4);
+  return clamp(pow(abs(c), 8.0), 0.0, 1.5);
+}
+`;
+
+// Screen-space sway applied to clip positions while the eye is under water.
+const WOBBLE_GLSL = /* glsl */ `
+vec2 underwaterWobble(vec4 clip, float t) {
+  vec2 s = clip.xy / max(clip.w, 0.001);
+  return vec2(sin(t * 1.7 + s.y * 5.0), cos(t * 1.3 + s.x * 4.0)) * 0.006 * clip.w;
+}
+`;
+
+// Water: its own shader so the fluid can be rich without taxing terrain.
+// The mesher packs per-vertex water data (see Mesher's WATER VERTEX note):
+//   atint = (flow x, flow z | fall speed, face kind 0 top / 1 side / 2 under)
+//   uv    = (water depth below the surface, shoreline 0..1)
+// The fragment picks the still or flowing tile straight from the atlas with
+// world-space, flow-scrolled coordinates (textureGrad keeps the per-tile mips
+// seam-free), colours by depth (turquoise shallows -> deep blue), and adds
+// ripple normals, Fresnel sky + cloud reflection, sun/moon glints, shoreline
+// and waterfall foam, and caustic sparkle in the shallows.
+const WATER_VERT = /* glsl */ `
+attribute vec2 alight;
+attribute vec3 atint;
+uniform float uTime;
+uniform float uFogNear;
+uniform float uFogFar;
+uniform float uFogVert;
+uniform float uUnder;
+varying vec2 vLight;
+varying vec3 vFlow;
+varying vec2 vDS;
+varying vec3 vWorld;
+varying vec4 vFog;
+${WOBBLE_GLSL}
+${SKY_GLSL}
+void main() {
+  vLight = alight;
+  vFlow = atint;
+  vDS = uv;
+  vec4 wp = modelMatrix * vec4(position, 1.0);
+  // long crossing swells (a function of world position, so shared corners stay
+  // welded); the whole sheet sits a touch low so waves never poke through
+  float sw = sin(uTime * 1.25 + wp.x * 0.55 + wp.z * 0.23) * 0.5
+    + sin(uTime * 1.65 - wp.x * 0.31 + wp.z * 0.64) * 0.33
+    + sin(uTime * 2.7 + wp.x * 1.13 + wp.z * 0.87) * 0.17;
+  wp.y += sw * 0.04 - 0.045;
+  vWorld = wp.xyz;
+  gl_Position = projectionMatrix * viewMatrix * wp;
+  gl_Position.xy += underwaterWobble(gl_Position, uTime) * uUnder;
+  vec3 toV = wp.xyz - cameraPosition;
+  float dist = max(length(toV.xz), abs(toV.y) * uFogVert);
+  vFog = vec4(0.0, 0.0, 0.0, smoothstep(uFogNear, uFogFar, dist));
+  if (vFog.a > 0.0) vFog.rgb = skyColor(normalize(toV));
+}
+`;
+
+const WATER_FRAG = /* glsl */ `
+uniform sampler2D map;
+uniform sampler2D uCloudMap;
+uniform vec4 uStillRect;
+uniform vec4 uFlowRect;
+uniform float uWaterLum;
+uniform float uFade;
+uniform float uTime;
+uniform float uGlint;
+uniform float uUnder;
+uniform vec3 uSkyLight;
+uniform vec3 uTorchCol;
+uniform vec3 uAmbient;
+uniform vec3 uTintMul;
+uniform vec3 uCloudCol;
+uniform vec3 uCloudInfo; // layer origin x, z, visibility
+varying vec2 vLight;
+varying vec3 vFlow;
+varying vec2 vDS;
+varying vec3 vWorld;
+varying vec4 vFog;
+${SKY_GLSL}
+${CAUSTIC_GLSL}
+float bayer2(vec2 a) { a = floor(a); return fract(dot(a, vec2(0.5, a.y * 0.75))); }
+float bayer4(vec2 a) { return bayer2(0.5 * a) * 0.25 + bayer2(a); }
+// one tile of the atlas, wrapped in world space with explicit gradients so
+// the fract() wrap doesn't drop to the smallest mip along tile seams
+float tileLum(vec4 r, vec2 p) {
+  vec2 sz = r.zw - r.xy;
+  vec3 c = textureGrad(map, r.xy + fract(p) * sz, dFdx(p) * sz, dFdy(p) * sz).rgb;
+  return dot(c, vec3(0.2126, 0.7152, 0.0722)) / uWaterLum;
+}
+const vec3 SHALLOW = vec3(0.045, 0.36, 0.50);
+const vec3 DEEP = vec3(0.007, 0.036, 0.19);
+const vec3 FOAM = vec3(0.86, 0.93, 0.97);
+void main() {
+  if (uFade < 0.999 && bayer4(gl_FragCoord.xy) >= uFade) discard;
+  float t = uTime;
+  float kind = vFlow.z;
+  vec2 p = vWorld.xz;
+  vec3 toCam = cameraPosition - vWorld;
+  float dist = length(toCam);
+  vec3 v = toCam / dist;
+  vec3 light = max(max(vLight.x * uSkyLight, vLight.y * uTorchCol), uAmbient);
+  float skyVis = smoothstep(0.15, 0.75, vLight.x);
+
+  // --- texture: still shimmer / flowing streaks / falling sheets -------------
+  float detail;
+  float foam = 0.0;
+  vec2 ripple = vec2(0.0);
+  float fade = 1.0 / (1.0 + dist * 0.045); // ripple detail eases off with distance
+  if (kind < 0.5) {
+    float spd = length(vFlow.xy);
+    // still: two layers drifting against each other
+    float still = 0.5 * (tileLum(uStillRect, p + vec2(t * 0.045, t * 0.02))
+      + tileLum(uStillRect, p * 0.5 + vec2(0.37 - t * 0.03, 0.61 + t * 0.041)));
+    // flowing: the streak tile rotated onto the flow and scrolled downstream
+    vec2 fd = spd > 0.001 ? vFlow.xy / spd : vec2(0.0, 1.0);
+    vec2 q = vec2(dot(p, vec2(fd.y, -fd.x)), dot(p, fd) - t * (0.9 + spd * 0.7));
+    float flowing = tileLum(uFlowRect, q);
+    float fk = smoothstep(0.02, 0.35, spd);
+    detail = mix(still, flowing, fk);
+    // ripple normals: crossing wavelets, advected downstream on moving water
+    vec2 pa = p - fd * t * spd * 1.4;
+    ripple += vec2(0.8, 0.6) * cos(dot(pa, vec2(0.8, 0.6)) * 3.3 + t * 2.1);
+    ripple += vec2(-0.5, 0.87) * cos(dot(pa, vec2(-0.5, 0.87)) * 4.7 - t * 2.6) * 0.7;
+    ripple += vec2(0.28, -0.96) * cos(dot(pa, vec2(0.28, -0.96)) * 7.3 + t * 3.4) * 0.45;
+    ripple += vec2(-0.93, -0.36) * cos(dot(pa, vec2(-0.93, -0.36)) * 11.0 - t * 4.1) * 0.3;
+    ripple *= (0.05 + fk * 0.05) * fade;
+    // lapping shoreline foam: a wobbly band hugging solid edges, plus a
+    // little white water on fast flows
+    // (vDS.y is 1 at corners touching a shore or a plunging waterfall); the
+    // texture's lighter crests break the band into lapping patches
+    float lap = 0.5 + 0.5 * sin(t * 1.6 + p.x * 1.3 - p.y * 0.9);
+    foam = smoothstep(0.35, 0.95, vDS.y) * smoothstep(0.85, 1.3, still + lap * 0.35) * 0.8;
+    foam += fk * smoothstep(1.25, 1.6, flowing) * 0.2;
+  } else if (kind < 1.5) {
+    // side faces: sheets sliding down (fast on waterfalls, lazy on lake edges)
+    float spd = vFlow.y;
+    vec2 q = vec2(vWorld.x + vWorld.z, vWorld.y + t * (0.35 + spd * 1.6));
+    detail = tileLum(uFlowRect, q);
+    foam = spd * smoothstep(1.08, 1.4, detail) * 0.7;
+  } else {
+    detail = tileLum(uStillRect, p + vec2(t * 0.03, 0.0));
+  }
+
+  // --- body colour: depth-graded, lit, caustic sparkle in the shallows ------
+  float depth = vDS.x;
+  float dk = 1.0 - exp(-depth * 0.42);
+  vec3 body = mix(SHALLOW, DEEP, dk) * light * mix(0.8, 1.25, clamp(detail - 0.3, 0.0, 1.0));
+  if (kind < 0.5) body += SHALLOW * light * caustic(p * 0.22, t * 0.5) * (1.0 - dk) * 0.9 * skyVis;
+  else if (kind < 1.5) body = mix(body, SHALLOW * light * 1.7, 0.4 * vFlow.y); // aerated falls
+  float alpha = kind < 0.5 ? mix(0.42, 0.9, dk) : kind < 1.5 ? 0.78 : 0.7;
+
+  // --- surface normal -------------------------------------------------------
+  vec3 gn = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+  bool below = false;
+  if (dot(gn, v) < 0.0) gn = -gn;
+  if (kind < 0.5 && gn.y < 0.0) below = true; // looking up at the surface
+  vec3 n = normalize(gn + vec3(-ripple.x, 0.0, -ripple.y) * (below ? -1.0 : 1.0));
+  float cv = clamp(dot(n, v), 0.0, 1.0);
+
+  vec3 col;
+  if (below) {
+    // from under water: a bright Snell's window straight up, total internal
+    // reflection (dark water) toward the edges
+    float win = smoothstep(0.55, 0.8, cv);
+    vec3 up = mix(uHorizon, uZenith, 0.45) * (0.35 + 0.65 * skyVis) + SHALLOW * light * 0.5;
+    col = mix(body * 0.7, up * 1.1 + body * 0.3, win);
+    alpha = mix(0.92, 0.55, win);
+  } else {
+    // Fresnel: glassy looking down, a mirror of sky and clouds at grazing angles
+    float F = 0.02 + 0.98 * pow(1.0 - cv, 5.0);
+    if (kind > 0.5) F *= 0.35;
+    vec3 r = reflect(-v, n);
+    r.y = abs(r.y);
+    vec3 refl = skyColor(r);
+    if (r.y > 0.015 && uCloudInfo.z > 0.0) {
+      // the real cloud layer, intersected along the reflected ray
+      float th = (172.0 - vWorld.y) / r.y;
+      vec2 hit = vWorld.xz + r.xz * th;
+      float cf = 1.0 - smoothstep(136.0, 340.0, length(hit - cameraPosition.xz));
+      if (cf > 0.0) {
+        float cell = texture2D(uCloudMap, (hit - uCloudInfo.xy) / 768.0).r;
+        refl = mix(refl, uCloudCol, cell * cf * uCloudInfo.z);
+      }
+    }
+    // under an overhang or deep in a cave the sky isn't there to reflect
+    refl = mix(body * 0.6, refl, skyVis);
+    col = mix(body, refl, F);
+    alpha = mix(alpha, 1.0, F);
+    // sun glint (sharp sparkle + soft sheen) and a faint moon path at night
+    float sunUp = smoothstep(-0.05, 0.1, uSunDir.y);
+    vec3 hs = normalize(uSunDir + v);
+    float ns = max(dot(n, hs), 0.0);
+    // the sharp term only fires on the texture's crests, so the sun path
+    // breaks into pixel glitter instead of a blown-out blob
+    float glitter = smoothstep(0.95, 1.35, detail);
+    float spec = (pow(ns, 700.0) * 3.5 * glitter + pow(ns, 160.0) * 0.12) * uGlint * sunUp;
+    vec3 hm = normalize(-uSunDir + v);
+    float moon = pow(max(dot(n, hm), 0.0), 300.0) * 1.6 * (1.0 - uGlint) * step(uSunDir.y, 0.0);
+    col += (uSkyLight * spec + vec3(0.55, 0.62, 0.8) * moon) * skyVis;
+    alpha = max(alpha, min(1.0, spec + moon));
+  }
+
+  // foam rides on top of everything
+  col = mix(col, FOAM * light, foam);
+  alpha = max(alpha, foam * 0.95);
+
+  col *= uTintMul;
+  col = mix(col, vFog.rgb, vFog.a);
+  gl_FragColor = vec4(col, alpha);
+  #include <colorspace_fragment>
+}
+`;
+
 // Chunk shader: vertex 'alight' = (sky-lit, torch-lit). Sky light is tinted
 // by the time of day (warm at dusk, blue moonlight at night); torch light is a
 // warm, gently flickering color. The torch channel carries flag bits (+2 sway,
@@ -112,9 +341,8 @@ varying vec2 vUv2;
 varying vec3 vWorld;
 varying float vLava;
 varying vec4 vFog; // rgb = sky color behind this vertex, a = fog amount
-#ifdef WATER_WAVE
-varying vec3 vRefl;
-#endif
+uniform float uUnder;
+${WOBBLE_GLSL}
 ${SKY_GLSL}
 void main() {
   vUv2 = uv;
@@ -131,11 +359,9 @@ void main() {
     wp.x += sin(uTime * 1.7 + ph) * 0.028 * gust;
     wp.z += cos(uTime * 1.3 + ph * 1.21) * 0.022 * gust;
   }
-#ifdef WATER_WAVE
-  wp.y += (sin(uTime * 1.7 + wp.x * 0.9 + wp.z * 0.7) + sin(uTime * 1.13 - wp.x * 0.43 + wp.z * 1.27)) * 0.018 - 0.036;
-#endif
   vWorld = wp.xyz;
   gl_Position = projectionMatrix * viewMatrix * wp;
+  gl_Position.xy += underwaterWobble(gl_Position, uTime) * uUnder;
   // fog evaluated per vertex (chunk faces are 1 block, so it interpolates
   // cleanly) — keeps the per-pixel cost at a texture fetch + a few MADs
   vec3 toV = wp.xyz - cameraPosition;
@@ -145,9 +371,6 @@ void main() {
   vec3 dir = normalize(toV);
   vFog = vec4(0.0, 0.0, 0.0, smoothstep(uFogNear, uFogFar, dist));
   if (vFog.a > 0.0) vFog.rgb = skyColor(dir); // near geometry skips the sky math
-#ifdef WATER_WAVE
-  vRefl = skyColor(normalize(vec3(dir.x, abs(dir.y), dir.z)));
-#endif
 }
 `;
 
@@ -169,9 +392,8 @@ varying vec2 vUv2;
 varying vec3 vWorld;
 varying float vLava;
 varying vec4 vFog;
-#ifdef WATER_WAVE
-varying vec3 vRefl;
-#endif
+uniform float uUnder;
+${CAUSTIC_GLSL}
 // 4x4 ordered (Bayer) dither for the chunk fade-in (stays in the opaque pass)
 float bayer2(vec2 a) { a = floor(a); return fract(dot(a, vec2(0.5, a.y * 0.75))); }
 float bayer4(vec2 a) { return bayer2(0.5 * a) * 0.25 + bayer2(a); }
@@ -187,27 +409,11 @@ void main() {
     col = tex.rgb * (1.05 + 0.18 * churn);
   }
   float alpha = tex.a * uOpacity;
-  vec3 toCam = cameraPosition - vWorld;
-#ifdef WATER_WAVE
-  vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
-  vec3 v = normalize(toCam);
-  if (dot(n, v) < 0.0) n = -n;
-  if (abs(n.y) > 0.5) {
-    // animated ripples on the surface
-    float t = uTime;
-    n = normalize(n + vec3(
-      sin(vWorld.x * 2.3 + t * 1.9) * 0.05 + sin(vWorld.z * 3.7 - t * 2.3) * 0.03,
-      0.0,
-      cos(vWorld.z * 2.1 + t * 1.7) * 0.05 + cos(vWorld.x * 3.1 + t * 2.1) * 0.03));
+  if (uUnder > 0.5 && vLava < 0.5) {
+    // eye under water: sunlight caustics dance over everything in view
+    float c = caustic(vWorld.xz * 0.2 + vWorld.y * 0.05, uTime * 0.6);
+    col += tex.rgb * vTint * uSkyLight * max(vLight.x, 0.3) * c * 2.2;
   }
-  float fres = pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 3.0);
-  vec3 refl = vRefl * (0.35 + 0.65 * min(1.0, vLight.x * 1.6));
-  col = mix(col, refl, fres * 0.5);
-  // sun glint
-  float spec = pow(max(dot(reflect(-uSunDir, n), v), 0.0), 120.0);
-  col += vec3(1.0, 0.92, 0.78) * spec * uGlint * vLight.x * 2.5;
-  alpha = mix(alpha, 0.96, fres);
-#endif
   col *= uTintMul; // e.g. the blue cast when the eye is under water
   col = mix(col, vFog.rgb, vFog.a);
   gl_FragColor = vec4(col, alpha);
@@ -377,6 +583,8 @@ export class Renderer {
     uGlint: { value: 0 } as U<number>,
     uTintMul: { value: new THREE.Color(1, 1, 1) } as U<THREE.Color>,
     uFogVert: { value: 0.4 } as U<number>,
+    uUnder: { value: 0 } as U<number>, // 1 while the eye is under water
+
   };
   private viewNear = 66;
   private viewFar = 120;
@@ -393,6 +601,8 @@ export class Renderer {
   private stars: THREE.Points;
   private starsMat: THREE.ShaderMaterial;
   private clouds: THREE.Group;
+  /** cloud cell coverage (1 texel per cell, repeating), for water reflections */
+  private cloudMap: THREE.DataTexture | null = null;
   private cloudTiles: { cx: number; cz: number; meshes: THREE.Mesh[] }[] = [];
   private cloudMat: THREE.ShaderMaterial;
   private static readonly CLOUD_CELL = 12;
@@ -422,6 +632,13 @@ export class Renderer {
   /** the held item is a capture orb, which gets a slow idle spin */
   private heldIsOrb = false;
   private orbSpin = 0;
+  /** the held orb's parts (button glow, dome, figurine) for its idle/throw animation */
+  private orbRig: OrbRig | null = null;
+  /** 0..1 progress of the wind-up / throw / follow-through (1 = idle) */
+  private orbThrowT = 1;
+  private orbT = 0;
+  /** builds the little captive figurine shown inside a held filled orb */
+  private orbModels: MobModels | null = null;
   private swingT = 1; // 0..1, 1 = idle
   private raiseT = 1; // 0..1, drives the raise-up when the held item changes
   private bowCharge = 0;
@@ -463,7 +680,7 @@ export class Renderer {
     this.scene.background = null;
 
     this.solidMat = this.makeChunkMaterial({ alphaTest: 0.35, opacity: 1, transparent: false });
-    this.waterMat = this.makeChunkMaterial({ alphaTest: 0, opacity: 0.72, transparent: true, wave: true });
+    this.waterMat = this.makeWaterMaterial();
 
     // entity lights (chunk lighting is baked; these affect Lambert mob materials)
     this.hemi = new THREE.HemisphereLight(0xbfd6ff, 0x6b5a45, 0.95);
@@ -574,6 +791,9 @@ export class Renderer {
       this.cloudTiles.push({ cx: t.cx, cz: t.cz, meshes: [dm, cm] });
     }
     this.scene.add(this.clouds);
+    // water reflects the same cloud layer (same map, color and drift)
+    this.waterMat.uniforms.uCloudMap.value = this.cloudMap;
+    this.waterMat.uniforms.uCloudCol = this.cloudMat.uniforms.uCloudCol;
     this.skyObjs = [this.clouds, this.stars, this.sun, this.sunHalo, this.moon];
 
     // held-item overlay: soft sky fill + a key light from the upper left so the
@@ -632,6 +852,49 @@ export class Renderer {
       transparent: opts.transparent,
       side: opts.transparent ? THREE.DoubleSide : THREE.FrontSide,
     });
+  }
+
+  /** The fluid material (see WATER_FRAG); cloud uniforms are wired up once
+   *  the cloud layer exists. */
+  private makeWaterMaterial(): THREE.ShaderMaterial {
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        ...this.env,
+        map: { value: this.atlas.texture },
+        uFade: { value: 1 },
+        uStillRect: { value: new THREE.Vector4() },
+        uFlowRect: { value: new THREE.Vector4() },
+        uWaterLum: { value: 0.1 },
+        uCloudMap: { value: null },
+        uCloudCol: { value: new THREE.Color(1, 1, 1) },
+        uCloudInfo: { value: new THREE.Vector3(0, 0, 0) },
+      },
+      vertexShader: WATER_VERT,
+      fragmentShader: WATER_FRAG,
+      transparent: true,
+      side: THREE.DoubleSide,
+    });
+    return mat;
+  }
+
+  /** Point the water shader at the still/flow tiles and measure the still
+   *  tile's mean luminance (so a resource-pack water normalises the same). */
+  private waterTilesGen = -1;
+  private refreshWaterTiles(): void {
+    if (this.waterTilesGen === this.atlas.generation) return;
+    this.waterTilesGen = this.atlas.generation;
+    const u = this.waterMat.uniforms;
+    const s = this.atlas.rect('water'), f = this.atlas.rect('water_flow');
+    (u.uStillRect.value as THREE.Vector4).set(s.u0, s.v0, s.u1, s.v1);
+    (u.uFlowRect.value as THREE.Vector4).set(f.u0, f.v0, f.u1, f.v1);
+    const cv = this.atlas.canvas;
+    const x0 = Math.round(s.u0 * cv.width), y0 = Math.round(s.v0 * cv.height);
+    const w = Math.max(1, Math.round((s.u1 - s.u0) * cv.width)), h = Math.max(1, Math.round((s.v1 - s.v0) * cv.height));
+    const d = cv.getContext('2d')!.getImageData(x0, y0, w, h).data;
+    const lin = (c: number): number => Math.pow(c / 255, 2.2);
+    let sum = 0;
+    for (let i = 0; i < d.length; i += 4) sum += 0.2126 * lin(d[i]) + 0.7152 * lin(d[i + 1]) + 0.0722 * lin(d[i + 2]);
+    u.uWaterLum.value = Math.max(0.01, sum / (w * h));
   }
 
   private makeSkyQuad(tex: THREE.Texture, size: number, blending: THREE.Blending): THREE.Mesh {
@@ -739,6 +1002,7 @@ export class Renderer {
     };
     const cell = new Uint8Array(N * N);
     for (let z = 0; z < N; z++) for (let x = 0; x < N; x++) cell[z * N + x] = val(x, z) > 0.58 ? 1 : 0;
+    this.cloudMap = cloudMapTexture(cell, N);
     const filled = (x: number, z: number): boolean => cell[((z % N + N) % N) * N + ((x % N + N) % N)] === 1;
 
     // mesh a 2x2 repeat so the layer always covers +-N/2 cells around the camera
@@ -904,6 +1168,7 @@ export class Renderer {
   updateEnvironment(t: number, camX: number, camZ: number, elapsed: number,
     weatherDark = 0, flash = 0, isNether = false): number {
     const e = this.env;
+    this.refreshWaterTiles();
     const ang = t * Math.PI * 2;
     const sunY = Math.sin(ang);
     const sunX = Math.cos(ang);
@@ -944,6 +1209,7 @@ export class Renderer {
       this.moon.visible = false;
       this.stars.visible = false;
       this.clouds.visible = false;
+      (this.waterMat.uniforms.uCloudInfo.value as THREE.Vector3).z = 0;
       return 0.2;
     }
     this.viewNearOverride = -1; this.viewFarOverride = -1;
@@ -1034,6 +1300,7 @@ export class Renderer {
     if (weatherDark > 0) cc.lerp(this.tmpC.copy(CLOUD_RAIN).multiplyScalar(0.2 + 0.8 * dayK), Math.min(1, weatherDark * 1.8));
     if (flash > 0) cc.lerp(FLASH_WHITE, flash);
     cu.uCloudAlpha.value = 0.8 + weatherDark * 0.35;
+    (this.waterMat.uniforms.uCloudInfo.value as THREE.Vector3).set(ox, oz, Math.min(1, cu.uCloudAlpha.value) * 0.85);
     return light;
   }
 
@@ -1065,6 +1332,13 @@ export class Renderer {
     this.heldId = id;
     this.heldMob = mob;
     this.heldIsOrb = false;
+    if (this.heldMesh && this.orbRig) {
+      // the orb (and a captive figurine's multi-material boxes) frees itself
+      this.heldGroup.remove(this.heldMesh);
+      disposeOrb(this.heldMesh);
+      this.heldMesh = null;
+    }
+    this.orbRig = null;
     this.raiseT = 0; // animate the new item up into view
     if (this.heldMesh) {
       this.heldGroup.remove(this.heldMesh);
@@ -1146,10 +1420,10 @@ export class Renderer {
       mesh.rotation.copy(this.heldIdleRot);
       this.heldMesh = mesh;
     } else if (id === I.MOB_CATCHER || id === I.MOB_CATCHER_FILLED) {
-      // the capture orb is a real little 3D sphere (glass shell + metal band),
-      // not a flat extruded card — it reads as a ball that gently spins in hand
+      // the capture orb is a real little 3D ball (layered glass dome, metal
+      // band, glowing button; a filled one shows its captive inside), not a
+      // flat extruded card — it bobs and turns gently in the hand
       const orb = this.buildCatcherOrb(id === I.MOB_CATCHER_FILLED ? this.heldMob : undefined);
-      orb.rotation.copy(this.heldIdleRot);
       this.heldMesh = orb;
       this.heldIsOrb = true;
     } else if (id !== 0 && hasDef(id) && (def(id).sprite || spriteNameFor(id, this.heldMob))) {
@@ -1325,13 +1599,64 @@ export class Renderer {
       sw2 * 0.35,
       sw * 0.3,
     );
-    // the capture orb floats and slowly spins on its own axis in the hand
-    if (this.heldIsOrb && this.heldMesh) {
-      this.orbSpin += dt * 1.3;
-      this.heldMesh.rotation.set(0.12, this.orbSpin, 0);
-      // lift + pull the orb in so the whole ball sits in view, gently floating
-      this.heldMesh.position.set(-0.06, 0.06 + Math.sin(this.bobT * 0.6) * 0.012, 0.04);
+    if (this.heldIsOrb && this.heldMesh && this.orbRig) this.animateHeldOrb(dt);
+  }
+
+  /** Play the held orb's wind-up -> throw -> follow-through (the thrown orb
+   *  leaves the hand at ORB_RELEASE, matching EntityManager's launch delay). */
+  triggerOrbThrow(): void {
+    this.orbThrowT = 0;
+  }
+
+  /** Held orb: floats and sways in the palm with a breathing button glow; on a
+   *  throw it cocks back (spinning up), snaps forward and vanishes from the
+   *  hand, then the next orb rises back into the palm. */
+  private animateHeldOrb(dt: number): void {
+    const rig = this.orbRig!, mesh = this.heldMesh!;
+    this.orbT += dt;
+    if (this.orbThrowT < 1) this.orbThrowT = Math.min(1, this.orbThrowT + dt / ORB_THROW_TIME);
+    const u = this.orbThrowT;
+    const ease = (k: number): number => k * k * (3 - 2 * k);
+    // idle: lifted + pulled in so the whole ball shows, floating and swaying
+    let px = -0.1, py = 0.18 + Math.sin(this.orbT * 1.7) * 0.01, pz = 0.02;
+    let rx = 0.2 + Math.sin(this.orbT * 1.1) * 0.05, rz = Math.sin(this.orbT * 0.8) * 0.06;
+    let scale = 1, spinRate = 0, flare = 0;
+    if (u < ORB_WIND) {
+      // wind-up: draw back, up and out to the right, tipping back, spinning up
+      const k = ease(u / ORB_WIND);
+      px += 0.07 * k; py += 0.08 * k; pz += 0.12 * k; rx -= 0.8 * k; rz -= 0.3 * k;
+      spinRate = 16 * k; flare = k;
+    } else if (u < ORB_RELEASE + 0.1) {
+      // the throw: whip forward and down toward the crosshair; the orb leaves
+      const j = (u - ORB_WIND) / (ORB_RELEASE + 0.1 - ORB_WIND);
+      const k = ease(Math.min(1, j * 1.4));
+      px += 0.07 - 0.2 * k; py += 0.08 - 0.13 * k; pz += 0.12 - 0.5 * k; rx += -0.8 + 1.6 * k; rz += -0.3 + 0.3 * k;
+      spinRate = 16; flare = 1 - k;
+      if (u >= ORB_RELEASE) scale = 0;
+    } else if (u < 1) {
+      // follow-through: the empty hand settles, then the next orb rises in
+      const f = (u - ORB_RELEASE - 0.1) / (1 - ORB_RELEASE - 0.1);
+      const back = 1 - ease(Math.min(1, f * 1.6));
+      px -= 0.13 * back; py -= 0.05 * back; pz -= 0.38 * back; rx += 0.8 * back;
+      scale = f < 0.4 ? 0 : ease((f - 0.4) / 0.6);
+      py -= (1 - scale) * 0.12;
     }
+    const full = this.heldId === I.MOB_CATCHER_FILLED;
+    if (spinRate > 0) this.orbSpin += dt * spinRate;
+    else if (!full) this.orbSpin += dt * 0.9;       // an empty orb turns lazily
+    else {
+      // a full one turns back so its captive faces you
+      this.orbSpin = Math.atan2(Math.sin(this.orbSpin), Math.cos(this.orbSpin));
+      this.orbSpin *= 1 - Math.min(1, dt * 3);
+    }
+    rig.spin.rotation.y = full && spinRate === 0 ? this.orbSpin + Math.sin(this.orbT * 0.7) * 0.5 : this.orbSpin;
+    mesh.position.set(px, py, pz);
+    mesh.rotation.set(rx, 0, rz);
+    mesh.scale.setScalar(Math.max(0.001, scale));
+    // the button breathes (quicker when something is inside) and flares on a wind-up
+    const pulse = 0.5 + 0.5 * Math.sin(this.orbT * (full ? 4.2 : 2.2));
+    (rig.halo.material as THREE.SpriteMaterial).opacity = Math.min(1, 0.35 + pulse * 0.4 + flare * 0.5);
+    rig.halo.scale.setScalar(rig.R * (1 + pulse * 0.25 + flare * 0.8));
   }
 
   /** Extruded pixel item with its pivot moved to the grip (the low end of the
@@ -1357,46 +1682,35 @@ export class Renderer {
     return { mesh: new THREE.Mesh(geo, mat), zc: Math.PI / 4 - ax.angle };
   }
 
-  /** A held capture orb: glassy amethyst shell, dark metal equatorial band with
-   *  a glowing button, and (when filled) a glowing inner core in the mob color. */
+  /** A held capture orb (see CatcherOrb): a filled one carries a little
+   *  figurine of its captive standing under the glass, lit in its colour. */
   private buildCatcherOrb(mob?: string): THREE.Group {
-    const g = new THREE.Group();
-    // the held rig sits 0.58 from the eye, so a 0.44-wide ball filled half the
-    // screen; 0.28 across reads as a ball in the fist without blocking the view
-    const R = 0.14;
-    const shell = new THREE.Mesh(
-      new THREE.SphereGeometry(R, 22, 18),
-      new THREE.MeshStandardMaterial({
-        color: 0x9a6fd6, roughness: 0.12, metalness: 0.1,
-        transparent: true, opacity: mob ? 0.6 : 0.74, depthWrite: false,
-        emissive: 0x3a2a5a, emissiveIntensity: 0.45,
-      }),
-    );
+    // the held rig sits ~0.6 from the eye: 0.24 across reads as a ball in the
+    // palm without blocking the view
+    const R = 0.12;
+    let fig: THREE.Object3D | undefined;
     if (mob) {
-      // captured creature glowing inside the glass (drawn first, glass over it)
-      const col = MOB_ORB_COLORS[mob] ?? 0xffffff;
-      const core = new THREE.Mesh(
-        new THREE.SphereGeometry(R * 0.56, 14, 12),
-        new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.9, roughness: 0.5 }),
-      );
-      g.add(core);
+      this.orbModels ??= new MobModels();
+      try {
+        fig = fitFigurine(this.orbModels.build(mob as MobKind).mesh, R);
+      } catch {
+        fig = undefined; // unknown kind: an empty-looking but lit orb
+      }
     }
-    shell.renderOrder = 2; // glass last so the core + band show through it
-    g.add(shell);
-    const band = new THREE.Mesh(
-      new THREE.TorusGeometry(R * 1.0, R * 0.11, 8, 26),
-      new THREE.MeshStandardMaterial({ color: 0x2a2038, roughness: 0.4, metalness: 0.65 }),
-    );
-    band.rotation.x = Math.PI / 2;
-    g.add(band);
-    const button = new THREE.Mesh(
-      new THREE.SphereGeometry(R * 0.17, 10, 8),
-      new THREE.MeshStandardMaterial({ color: 0xe0c9ff, emissive: 0x9a6fd6, emissiveIntensity: 0.6 }),
-    );
-    button.position.set(0, 0, R * 1.04);
-    g.add(button);
-    g.scale.setScalar(1.05);
-    return g;
+    const rig = buildOrbRig(R, mob ? (ORB_GLOW[mob] ?? ORB_IDLE_GLOW) : ORB_IDLE_GLOW, fig);
+    if (mob) {
+      // the captive's colour glows up from the floor of the orb
+      const c = new THREE.Color(ORB_GLOW[mob] ?? ORB_IDLE_GLOW);
+      rig.floor.color.copy(c).multiplyScalar(0.35);
+      // (tinted emissive rather than a point light: adding a light would
+      // recompile every overlay shader mid-game)
+      fig?.traverse((o) => {
+        const m = (o as THREE.Mesh).material as THREE.MeshLambertMaterial | undefined;
+        if (m && 'emissive' in m) m.emissive.copy(c).multiplyScalar(0.12);
+      });
+    }
+    this.orbRig = rig;
+    return rig.root;
   }
 
   // --- frame ----------------------------------------------------------------
@@ -1417,8 +1731,9 @@ export class Renderer {
     if (m === 'water') {
       e.uFlat.value = 1;
       e.uFlatCol.value.copy(WATER_FOG).multiplyScalar(0.12 + this.daylight * 0.88);
-      e.uTintMul.value.setRGB(0.5, 0.72, 1.0);
-      near = 1; far = 30;
+      e.uTintMul.value.setRGB(0.55, 0.8, 1.0);
+      e.uUnder.value = 1;
+      near = 0; far = 26;
     } else if (m === 'lava') {
       e.uFlat.value = 1;
       e.uFlatCol.value.copy(LAVA_FOG);
@@ -1443,6 +1758,7 @@ export class Renderer {
       e.uFlat.value = savedFlat;
       e.uFlatCol.value.copy(savedFlatCol);
       e.uTintMul.value.setRGB(1, 1, 1);
+      e.uUnder.value = 0;
       for (let i = 0; i < skyObjs.length; i++) if (hidden & (1 << i)) skyObjs[i].visible = true;
     }
     this.three.clearDepth();
@@ -1464,4 +1780,16 @@ function chunkBeforeRender(this: THREE.Mesh, _r: THREE.WebGLRenderer, _s: THREE.
   const f = this.userData.fade as number;
   const u = mat.uniforms.uFade;
   if (u.value !== f) { u.value = f; mat.uniformsNeedUpdate = true; }
+}
+
+/** Repeating nearest-filtered map of the cloud cells (red 1 = cloud). */
+function cloudMapTexture(cell: Uint8Array, n: number): THREE.DataTexture {
+  const data = new Uint8Array(n * n * 4);
+  for (let i = 0; i < n * n; i++) { data[i * 4] = cell[i] ? 255 : 0; data[i * 4 + 3] = 255; }
+  const tex = new THREE.DataTexture(data, n, n, THREE.RGBAFormat);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.needsUpdate = true;
+  return tex;
 }

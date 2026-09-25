@@ -56,12 +56,25 @@ const thrown = await page.evaluate(async () => {
   const ey = p.pos.y + p.eyeHeight();
   ent.throwCatcher(p.pos.x + d.x * 0.4, ey, p.pos.z + d.z * 0.4, d.x, d.y, d.z);
   p.inventory.consumeSelected();
-  await new Promise((r) => setTimeout(r, 900));
+  // the orb then draws the mob in, drops, wobbles 1-3 times and clicks shut,
+  // leaving a filled catcher on the ground: wait for it, then walk onto it
+  let drop = null;
+  for (let i = 0; i < 40 && !drop; i++) {
+    await new Promise((r) => setTimeout(r, 150));
+    drop = ent.entities.find((e) => e.kind === 'drop' && e.itemId === 183 && !e.dead) ?? null;
+  }
+  const dropMob = drop?.mob;
+  const zombieGone = z.dead; // captured the moment the orb touched it
+  const home = { ...p.pos };
+  if (drop) { p.pos.x = drop.pos.x; p.pos.y = drop.pos.y; p.pos.z = drop.pos.z; }
+  await new Promise((r) => setTimeout(r, 1200));
+  p.pos.x = home.x; p.pos.y = home.y; p.pos.z = home.z;
+  p.vel = { x: 0, y: 0, z: 0 };
   const filled = p.inventory.slots.filter((s) => s && s.id === 183);
   return {
     before,
     after: p.inventory.slots[0]?.count ?? 0,
-    zombieGone: z.dead,
+    zombieGone, dropMob,
     filledCount: filled.length,
     filledMob: filled[0]?.mob,
     orbsInFlight: ent.entities.filter((e) => e.kind === 'catcher').length,
@@ -98,8 +111,9 @@ const animal = await page.evaluate(async () => {
   const filledBefore = p.inventory.slots.filter((s) => s && s.id === 183).length;
   const dropsBefore = ent.entities.filter((e) => e.kind === 'drop' && e.itemId === 182).length;
   const ey = p.pos.y + p.eyeHeight();
-  ent.throwCatcher(p.pos.x + d.x * 0.4, ey, p.pos.z + d.z * 0.4, d.x, d.y, d.z);
-  await new Promise((r) => setTimeout(r, 900));
+  const orb = ent.throwCatcher(p.pos.x + d.x * 0.4, ey, p.pos.z + d.z * 0.4, d.x, d.y, d.z);
+  // the orb winds up for a moment before it flies: wait for it to resolve
+  for (let i = 0; i < 20 && !orb.dead; i++) await new Promise((r) => setTimeout(r, 150));
   return {
     cowAlive: !cow.dead,
     newFilled: p.inventory.slots.filter((s) => s && s.id === 183).length - filledBefore,
@@ -118,7 +132,7 @@ const slack = await page.evaluate(async () => {
   c.state = 'idle';
   const ey = p.pos.y + p.eyeHeight();
   ent.throwCatcher(p.pos.x + d.x * 0.4, ey, p.pos.z + d.z * 0.4, d.x, d.y, d.z);
-  await new Promise((r) => setTimeout(r, 900));
+  for (let i = 0; i < 20 && !c.dead; i++) await new Promise((r) => setTimeout(r, 150));
   return { creeperGone: c.dead };
 });
 
@@ -186,7 +200,7 @@ console.log('IDLEPET:', JSON.stringify(idlePet));
 console.log('PERSIST:', JSON.stringify(persist));
 
 const pass =
-  thrown.zombieGone === true && thrown.filledCount === 1 && thrown.filledMob === 'zombie' &&
+  thrown.zombieGone === true && thrown.dropMob === 'zombie' && thrown.filledCount === 1 && thrown.filledMob === 'zombie' &&
   thrown.orbsInFlight === 0 &&
   missed.dropsAfter === missed.dropsBefore + 1 && missed.stillFlying === 0 &&
   animal.cowAlive === true && animal.newFilled === 0 && animal.newDrops === 1 &&

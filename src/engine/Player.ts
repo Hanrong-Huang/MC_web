@@ -7,6 +7,7 @@ import { Input } from './Input';
 import { Renderer } from './Renderer';
 import { AudioEngine } from './Audio';
 import { moveEntity, hasSupport, inWater, eyeInWater, boxIntersectsBlock, Vec3 } from './Physics';
+import { waterFX } from './WaterFX';
 import {
   B, I, def, hasDef, breakTime, attackDamage, isSolid, canHarvest, FLOOR_BLOCKS, SELF_STACKING, mobLabel,
   attackCooldown, attackStrength, foodSaturation, pickItemFor, LEAF_BLOCKS,
@@ -201,6 +202,12 @@ export class Player {
   private cactusT = 0;
   private lavaT = 0;
   private swimSoundT = 0;
+  /** feet were in water last frame (splash on entry, drip on exit) */
+  private feetWet = false;
+  /** seconds the body has been in water (a quick dip doesn't count as climbing out) */
+  private soakT = 0;
+  private dripT = 0;
+  private rippleT = 0;
 
   portalTimer = 0;
   portalCooldown = 0;
@@ -578,6 +585,7 @@ export class Player {
       if (space && this.onGround) {
         const leap = this.effects.get('jump_boost');
         this.vel.y = leap ? Math.sqrt(2 * GRAVITY * (1.25 + 0.55 * (leap.amp + 1))) : JUMP_VELOCITY;
+        this.deps.audio.play('jump');
         this.onGround = false;
         this.addExhaustion(this.sprinting ? 0.2 : 0.05);
         // sprint-jump: a forward shove along the facing direction (vanilla +0.2 b/tick)
@@ -591,6 +599,7 @@ export class Player {
     // integrate with collision
     const wasOnGround = this.onGround;
     const glideSpeed = this.gliding ? Math.hypot(this.vel.x, this.vel.z) : 0;
+    const preVy = this.vel.y; // impact speed for a splash (collision zeroes it)
     const res = moveEntity(world, this.pos, this.vel, dt, BOX, this.sneaking, wasOnGround);
     // flying into a wall on a glider hurts (vanilla "kinetic energy")
     if (this.gliding && (res.hitX || res.hitZ) && glideSpeed > 9 && this.mode === 'survival') {
@@ -599,14 +608,7 @@ export class Player {
     const inWaterNow = inWater(world, this.pos, BOX);
     // touching water cancels accumulated fall distance (no fall damage into water)
     if (inWaterNow) this.fallDist = 0;
-    this.swimSoundT = Math.max(0, this.swimSoundT - dt);
-    if (!wasInWater && inWaterNow) {
-      this.deps.audio.play('splash');
-      this.swimSoundT = 0.45;
-    } else if (inWaterNow && this.swimSoundT <= 0 && Math.hypot(this.vel.x, this.vel.z) > 0.7) {
-      this.deps.audio.play('splash');
-      this.swimSoundT = 0.85;
-    }
+    this.updateWaterFx(dt, inWaterNow, preVy);
     // climb out of water: swimming into a 1-block ledge hops you up onto it (so you
     // don't get stuck bobbing), and holding jump against any wall pushes upward.
     if (wasInWater && (res.hitX || res.hitZ)) {
@@ -632,7 +634,7 @@ export class Player {
           if (below !== B.AIR && hasDef(below)) {
             this.deps.entities.spawnBlockParticles(
               Math.floor(this.pos.x), Math.floor(this.pos.y), Math.floor(this.pos.z), below, 6);
-            this.deps.audio.step(def(below).sound, below);
+            this.deps.audio.land(def(below).sound, below, this.fallDist);
           }
         }
         const leap = this.effects.get('jump_boost');
@@ -658,7 +660,7 @@ export class Player {
       if (this.stepDist > 2.1) {
         this.stepDist = 0;
         const below = world.getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y - 0.5), Math.floor(this.pos.z));
-        if (below !== B.AIR && hasDef(below)) this.deps.audio.step(def(below).sound, below);
+        if (below !== B.AIR && hasDef(below)) this.deps.audio.step(def(below).sound, below, this.sprinting ? 'sprint' : this.sneaking ? 'sneak' : 'walk');
       }
       // vanilla: walking is free, sprinting costs 0.1 exhaustion per metre
       if (this.sprinting) this.addExhaustion(Math.hypot(this.vel.x, this.vel.z) * dt * 0.1);
@@ -943,6 +945,48 @@ export class Player {
 
   underwaterEye(): boolean {
     return eyeInWater(this.deps.world, this.pos, this.eyeHeight());
+  }
+
+  /** Water feedback: an impact splash sized by fall speed when the feet break
+   *  the surface, strokes + a ripple wake while wading/swimming, breath
+   *  bubbles under water, and a dripping exit after a proper soak. */
+  private updateWaterFx(dt: number, bodyWet: boolean, vy: number): void {
+    const world = this.deps.world, audio = this.deps.audio, p = this.pos;
+    const feet = world.getBlock(Math.floor(p.x), Math.floor(p.y + 0.05), Math.floor(p.z)) === B.WATER;
+    const under = this.underwaterEye();
+    this.swimSoundT = Math.max(0, this.swimSoundT - dt);
+    this.rippleT -= dt;
+    if (feet && !this.feetWet) {
+      // a hop in is a plop, a long drop a crash (running in adds a little)
+      const k = Math.max(Math.min(1, Math.max(0, (-vy - 2) / 16)), Math.min(0.3, Math.hypot(this.vel.x, this.vel.z) * 0.05));
+      audio.waterSplash(k);
+      waterFX.splash(p.x, p.y + 0.3, p.z, k);
+      this.swimSoundT = 0.5;
+    }
+    if (bodyWet) this.soakT += dt;
+    if (this.feetWet && !feet && !this.flying && this.soakT > 0.5) {
+      audio.waterExit();
+      this.dripT = 1.5;
+    }
+    if (!feet) this.soakT = 0;
+    this.feetWet = feet;
+
+    const sp = Math.hypot(this.vel.x, this.vel.z);
+    if ((feet || bodyWet) && !this.flying && sp > 0.7 && this.swimSoundT <= 0) {
+      audio.swimStroke(under, bodyWet ? 1 : 0.6);
+      this.swimSoundT = this.sprinting ? 0.45 : 0.62;
+      if (under) waterFX.bubbles(p.x, p.y + this.eyeHeight() - 0.3, p.z, 2);
+    }
+    if (feet && !under && this.rippleT <= 0) {
+      // wake while moving, a slow lazy ring while treading water
+      waterFX.ripple(p.x, p.y + 0.5, p.z, sp > 0.4 ? 0.5 : 0.35);
+      this.rippleT = sp > 0.4 ? 0.3 : 1.3;
+    }
+    if (under && Math.random() < dt * 0.6) waterFX.bubbles(p.x, p.y + this.eyeHeight() - 0.15, p.z, 2 + ((Math.random() * 3) | 0));
+    if (this.dripT > 0) {
+      this.dripT -= dt;
+      if (Math.random() < dt * 16) waterFX.drips(p.x, p.y, p.z, 1.6, 1);
+    }
   }
 
   // --- targeting / breaking --------------------------------------------------
@@ -1682,7 +1726,7 @@ export class Player {
       const ey = this.pos.y + this.eyeHeight();
       ent.throwCatcher(this.pos.x + d.x * 0.4, ey + d.y * 0.4 - 0.1, this.pos.z + d.z * 0.4, d.x, d.y, d.z);
       this.placeCooldown = 0.35;
-      this.deps.renderer.triggerSwing();
+      this.deps.renderer.triggerOrbThrow();
       if (this.mode === 'survival') this.inventory.consumeSelected();
       this.inventory.onChange();
       return;
@@ -1776,10 +1820,7 @@ export class Player {
       this.eatT += dt;
       this.eating = true;
       this.chewT -= dt;
-      if (this.chewT <= 0) {
-        this.chewT = 0.25;
-        audio.play(heldDef.id === I.MILK_BUCKET ? 'splash' : isDrink(heldDef.id) ? 'bubble' : 'eat', isDrink(heldDef.id) ? 0.6 : 1);
-      }
+      if (this.chewT <= 0) { this.chewT = 0.25; audio.play(isDrink(heldDef.id) ? 'drink' : 'eat'); }
       if (this.eatT >= 1.6) {
         const eaten = heldDef.id;
         if (heldDef.food) {
@@ -1940,7 +1981,7 @@ export class Player {
         return;
       }
       if (this.deps.ignite?.(t.x + t.nx, t.y + t.ny, t.z + t.nz)) {
-        audio.play('fuse');
+        audio.play('ignite');
         this.damageHeldTool();
       } else {
         audio.play('fail');
@@ -2445,6 +2486,7 @@ export class Player {
     document.getElementById('vignette')?.classList.add('flash');
     if (this.hp <= 0) {
       this.dead = true;
+      this.deps.audio.play('death');
       this.cancelBreaking();
       this.deps.onDeath();
     }

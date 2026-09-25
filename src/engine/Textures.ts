@@ -569,14 +569,34 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
   },
   leaves: (c, x, y) => leavesPx(pal(['#1d4a12', '#265c18', '#306e1f', '#3a7f26', '#458f2e', '#52a038']), 206, 46, 0.55).put(c, x, y),
   water: (c, x, y) => {
-    // still water: soft horizontal swells with a few bright ripple glints
-    const ramp = pal(['#2a4ea6', '#2f55b0', '#345cba', '#3a64c4', '#416dcd', '#4a78d6']);
-    const f = fbm(107, [[4, 0.6, 8], [8, 0.4, 16]], 1.8);
-    const p = rampFill(new Px(), ramp, f, 108, 0.25);
-    const r = mulberry32(2107);
-    for (let i = 0; i < 6; i++) {
-      const gx = (r() * 16) | 0, gy = (r() * 16) | 0, len = 2 + ((r() * 3) | 0);
-      for (let k = 0; k < len; k++) p.set(gx + k, gy, k === 0 || k === len - 1 ? '#5c86de' : '#7ea0ea');
+    // still water: soft swells crossed by a wobbly web of lighter wave crests
+    // (tileable; the water shader drifts two copies of it against each other)
+    const ramp = pal(['#284a9e', '#2d52aa', '#325ab5', '#3862bf', '#3f6bc9', '#4775d2']);
+    const f = fbm(107, [[4, 0.6, 4], [8, 0.4, 8]], 1.6);
+    const p = rampFill(new Px(), ramp, f, 108, 0.18);
+    const cells = voronoi(2107, 6, 1);
+    for (let py = 0; py < 16; py++) {
+      for (let px = 0; px < 16; px++) {
+        const k = cellAt(cells, px, py);
+        const edge = k !== cellAt(cells, px + 1, py) || k !== cellAt(cells, px, py + 1);
+        if (!edge) continue;
+        const bright = f(px, py) > 0.5;
+        p.set(px, py, bright ? '#86a8ee' : '#5f86dc');
+      }
+    }
+    for (let i = 3; i < p.d.length; i += 4) p.d[i] = 200;
+    p.put(c, x, y);
+  },
+  water_flow: (c, x, y) => {
+    // flowing water: streaks stretched along the tile's v axis, which the
+    // shader turns to face downstream / downhill
+    const ramp = pal(['#26479a', '#2c50a8', '#3259b4', '#3a63c0', '#436fcb', '#4f7bd5']);
+    const f = fbm(1107, [[8, 0.6, 2], [16, 0.4, 4]], 1.9);
+    const p = rampFill(new Px(), ramp, f, 1108, 0.12);
+    const r = mulberry32(3107);
+    for (let i = 0; i < 9; i++) {
+      const gx = (r() * 16) | 0, gy = (r() * 16) | 0, len = 3 + ((r() * 5) | 0);
+      for (let k = 0; k < len; k++) p.set(gx, gy + k, k === 0 || k === len - 1 ? '#6a8fe0' : '#93b1f0');
     }
     for (let i = 3; i < p.d.length; i += 4) p.d[i] = 200;
     p.put(c, x, y);
@@ -1918,96 +1938,150 @@ function seedsPx(mid: string, hi: string, lo: string): Px {
   return outlinePx(p, 0.4);
 }
 
-// A capture orb on a clean 14px circle: clear glass dome up top (so whatever is
-// inside reads at hotbar size), a dark metal equator band with a round glowing
-// button, and a polished amethyst base. Shared by the empty + filled sprites.
-const ORB_ROWS = [
-  '................',
-  '.....kkkkkk.....',
-  '...kkhhaaaakk...',
-  '..khhhaaaaaask..',
-  '..khhaaaaaassk..',
-  '.khaaaaaaaassck.',
-  '.kaaaaappaaassk.',
-  '.kBBBBpwwpBBBBk.',
-  '.kBBBBpwwpBBBBk.',
-  '.kAAAAAppAAAAAk.',
-  '.kAAAAAADDDDDDk.',
-  '..kAAAADDDDDDk..',
-  '..kADDDDDDDEEk..',
-  '...kkDDDEEEkk...',
-  '.....kkkkkk.....',
-  '................',
-];
-const ORB_PAL: Record<string, string> = {
-  k: '#20142e', h: '#ffffff', a: '#e3d5fa', s: '#c2a9e4', c: '#a98fd0',
-  B: '#241b30', p: '#a97fe0', w: '#fff4ff',
-  A: '#8f63cf', D: '#5f4189', E: '#43305f',
+// A capture orb on a clean 14px disc, seen a little from above and lit from the
+// upper left: a big clear glass dome (fresnel-dark rim, bright spec arc) over a
+// dark metal band that curves down across the front to a round glowing button,
+// and a polished amethyst base with a reflected-light rim. Filled orbs show the
+// captive's face through the glass, tint the glass toward its colour and light
+// the button to match. Shared by the empty + filled sprites.
+const ORB_R = 7;
+const ORB_L: RGB = [-0.5, -0.62, 0.6];
+const ORB_OUT = '#1a1030';
+
+/** Captive drawn through the dome: rows start at y=2, centred on x=7.5 (so a
+ *  6-wide face covers x 5..10); only glass pixels take paint, so wider rows
+ *  (legs, wings, a ghast's bulk) clip to the dome. `haze` tints the glass and
+ *  lights the button. */
+interface OrbOccupant { rows: string[]; pal: Record<string, string>; haze: string }
+const ORB_OCCUPANTS: Record<string, OrbOccupant> = {
+  // green head under dark hair, black eyes, the teal shirt collar at the chin
+  zombie: {
+    rows: ['hhhhhh', 'hGhGGh', 'GGGGGG', 'eeGGee', 'GgnngG', 'cccccc'],
+    pal: { h: '#35592c', G: '#5f9e4e', g: '#4d8a3e', e: '#141414', n: '#3c6d31', c: '#2f9fa8' },
+    haze: '#8fdc76',
+  },
+  // bone-white skull, hollow sockets, nose hole, a grin of teeth
+  skeleton: {
+    rows: ['sSSSSs', 'SSSSSS', 'eeSSee', 'SSnnSS', 'tStStS', '.ssss.'],
+    pal: { S: '#e2dfd4', s: '#b4b1a8', e: '#1e1e1e', n: '#4c4a46', t: '#6e6c64' },
+    haze: '#6a5c94',
+  },
+  // the creeper's black frown on mottled green
+  creeper: {
+    rows: ['cCCcCC', 'kkCCkk', 'kkCckk', 'CCkkCC', 'CkkkkC', 'CkCCkC'],
+    pal: { C: '#5fc44c', c: '#48a53a', k: '#141414' },
+    haze: '#9ae884',
+  },
+  // dark head, big red eyes, fangs, legs splayed out to the glass edge
+  spider: {
+    rows: ['..ssssss..', 'k.SrSSrS.k', 'kkRRSSRRkk', 'k.RRSSRR.k', 'kkSSSSSSkk', '..sfssfs..'],
+    pal: { s: '#2e2429', S: '#43363d', k: '#231b1f', r: '#c8301e', R: '#ff4a30', f: '#d9c8aa' },
+    haze: '#e0604a',
+  },
+  // grey-blue head with glowing green eyes, wings swept out to both sides
+  phantom: {
+    rows: ['...pPPp...', '.ppPPPPpp.', 'ppPPPPPPpp', '.pggPPggp.', '..PkkkkP..', '...pPPp...'],
+    pal: { P: '#5a6e94', p: '#3d4c6a', g: '#a6ff80', k: '#161a24' },
+    haze: '#a6f28e',
+  },
+  // charcoal imp: glowing ember horns, blazing eyes, molten grin
+  cinderling: {
+    rows: ['o....o', 'oCCCCo', 'CCCCCC', 'yyCCyy', 'CCCCCC', 'CooooC'],
+    pal: { C: '#352b26', y: '#ffd24a', o: '#ff7a1a' },
+    haze: '#ffa050',
+  },
+  // charred beast: pricked ears, ember-lit eyes, a wide glowing maw
+  ashstalker: {
+    rows: ['C....C', 'CCCCCC', 'CcCCcC', 'CyCCyC', 'cCCCCc', 'oooooo'],
+    pal: { C: '#2b221e', c: '#6a2e14', y: '#ffc23a', o: '#ff6a10' },
+    haze: '#ff8a3a',
+  },
+  // a hulking charcoal cube: blazing eyes, a big molten mouth, ember tendrils
+  emberghast: {
+    rows: ['CCCCCCCC', 'CCCCCCCC', 'CyyCCyyC', 'CCCCCCCC', 'CCoOOoCC', 'o.o..o.o'],
+    pal: { C: '#2e2622', y: '#ffd24a', o: '#ff5a10', O: '#ffb040' },
+    haze: '#ff7a30',
+  },
 };
+
+function orbPx(occ?: OrbOccupant): Px {
+  const p = new Px();
+  const inDisc = (x: number, y: number): boolean => Math.hypot(x - 7.5, y - 7.5) <= ORB_R;
+  const edge = (x: number, y: number): boolean =>
+    !inDisc(x + 1, y) || !inDisc(x - 1, y) || !inDisc(x, y + 1) || !inDisc(x, y - 1);
+  // the band sags toward the viewer: rows 7 at the rim down to 9 mid-front
+  const bandTop = (x: number): number => {
+    const u = (x - 7.5) / ORB_R;
+    return Math.round(6 + 3 * Math.sqrt(Math.max(0, 1 - u * u)));
+  };
+  const ll = Math.hypot(ORB_L[0], ORB_L[1], ORB_L[2]);
+  const haze = occ ? hex(occ.haze) : null;
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      if (!inDisc(x, y)) continue;
+      if (edge(x, y)) { p.set(x, y, ORB_OUT); continue; }
+      const nx = (x - 7.5) / ORB_R, ny = (y - 7.5) / ORB_R;
+      const nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
+      const lam = Math.max(0, (nx * ORB_L[0] + ny * ORB_L[1] + nz * ORB_L[2]) / ll);
+      const rim = 1 - nz;
+      const bt = bandTop(x);
+      if (y < bt) {
+        // glass: bright where it faces the light, darker toward the thick rim
+        let c: RGB = hex(lam > 0.78 ? '#f1ebff' : lam > 0.5 ? '#d7c9f4' : '#b7a0e2');
+        if (rim > 0.55) c = hex('#9579cc');
+        // the far half of the band, seen faintly through the clear glass
+        const u = (x - 7.5) / ORB_R;
+        if (y === Math.round(8.2 - 2.4 * Math.sqrt(Math.max(0, 1 - u * u)))) c = mixC(c, hex('#4f4066'), 0.3);
+        // a full orb's glass is smokier, so the captive stands out against it
+        if (haze) c = mixC(shade(c, 0.78), haze, 0.3);
+        p.set(x, y, c);
+      } else if (y < bt + 2) {
+        // band: lit top edge, shadowed lower edge, fading to the right
+        const base = hex(y === bt ? '#4f4066' : '#261d34');
+        p.set(x, y, shade(base, x < 5 ? 1.15 : x > 10 ? 0.8 : 1));
+      } else {
+        // amethyst base: four tones + a reflected-light rim at the lower right
+        let c = hex(lam > 0.72 ? '#b58cf0' : lam > 0.5 ? '#8f63cf' : lam > 0.28 ? '#6a48a4' : '#4a3278');
+        if (rim > 0.6 && nx + ny > 0.7) c = hex('#7a58b6');
+        p.set(x, y, c);
+      }
+    }
+  }
+  // the captive's face through the glass (never over the outline or band)
+  if (occ) {
+    occ.rows.forEach((row, r) => {
+      const x0 = Math.round(8 - row.length / 2);
+      for (let i = 0; i < row.length; i++) {
+        const col = occ.pal[row[i]];
+        const x = x0 + i, y = 2 + r;
+        if (col && y < bandTop(x) && inDisc(x, y) && !edge(x, y)) p.set(x, y, col);
+      }
+    });
+  }
+  // glass specular arc at the upper left (+ a far glint on the empty orb)
+  p.set(4, 3, '#ffffff'); p.set(3, 4, '#ffffff'); p.set(3, 5, '#e9e2fb');
+  if (!occ) { p.set(5, 2, '#ffffff'); p.set(11, 4, '#f6f2ff'); }
+  // amethyst base gloss
+  p.set(3, 11, '#d9c4ff'); p.set(4, 12, '#c7a8fa');
+  // button: a dark ring set into the band, glowing core (captive-coloured when full)
+  for (const y of [9, 10]) { p.set(6, y, '#120a1c'); p.set(9, y, '#120a1c'); }
+  for (const x of [7, 8]) { p.set(x, 8, '#120a1c'); p.set(x, 11, '#120a1c'); }
+  const glow = haze ?? hex('#e8dcff');
+  p.set(7, 9, mixC(glow, [255, 255, 255], 0.75));
+  p.set(8, 9, mixC(glow, [255, 255, 255], 0.35));
+  p.set(7, 10, glow);
+  p.set(8, 10, shade(glow, 0.72));
+  return p;
+}
 
 /** Empty mob catcher: the bare capture orb. */
 function catcherShell(c: Ctx): void {
-  pixmap(c, 0, 0, ORB_ROWS, ORB_PAL);
+  orbPx().put(c, 0, 0);
 }
 
-/** Per-mob occupant drawn inside the glass dome (8 wide x 4 tall, placed at
- *  x=4,y=2). 'B' body, 'A' shade, 'e' dark eye, 'g' glowing eye. */
-const ORB_OCCUPANTS: Record<string, { rows: string[]; base: string; accent: string; glow: string }> = {
-  zombie: {
-    rows: ['..BBBB..', '.BBBBBB.', '.BeBBeB.', '.BBAABB.'],
-    base: '#5c9455', accent: '#3f6b3b', glow: '#8fd67e',
-  },
-  skeleton: {
-    rows: ['..BBBB..', '.BBBBBB.', '.BeBBeB.', '..BAAB..'],
-    base: '#e2e2d8', accent: '#a8a89e', glow: '#ffffff',
-  },
-  spider: {
-    rows: ['.BBBBBB.', 'BBgBBgBB', '.BBBBBB.', '..BAAB..'],
-    base: '#4a3a41', accent: '#251d21', glow: '#e2564a',
-  },
-  creeper: {
-    rows: ['.BBBBBB.', '.BeBBeB.', '.BBeeBB.', '.BeeeeB.'],
-    base: '#62b552', accent: '#2f6b2a', glow: '#8ede78',
-  },
-  cinderling: {
-    rows: ['.B.BB.B.', '.BBBBBB.', '.BgBBgB.', '.BBAABB.'],
-    base: '#df6a1f', accent: '#8a3a10', glow: '#ffd777',
-  },
-  ashstalker: {
-    rows: ['..BBBB..', '.BBBBBB.', '.BgBBgB.', '.BAAAAB.'],
-    base: '#c25a1f', accent: '#5f2a10', glow: '#ffb44a',
-  },
-  emberghast: {
-    rows: ['.BBBBBB.', '.BeBBeB.', '.BBBBBB.', '.BeeeeB.'],
-    base: '#ece6e0', accent: '#b5aca4', glow: '#ff9040',
-  },
-  phantom: {
-    rows: ['A.BBBB.A', '.BBBBBB.', '.BgBBgB.', '..BBBB..'],
-    base: '#5b8b9b', accent: '#315764', glow: '#a6f2ff',
-  },
-};
-
-/** Filled mob catcher: the orb with its captive showing through the glass dome,
- *  plus a colored haze so the ball reads as "occupied" at a glance. */
+/** Filled mob catcher: the orb with its captive's face showing through the dome. */
 function filledCatcher(c: Ctx, kind: string): void {
-  const occ = ORB_OCCUPANTS[kind] ?? ORB_OCCUPANTS.zombie;
-  pixmap(c, 0, 0, ORB_ROWS, ORB_PAL);
-  // faint tint of the captive's color across the dome interior (glass haze)
-  c.save();
-  c.globalAlpha = 0.3;
-  c.fillStyle = occ.base;
-  c.fillRect(2, 2, 12, 5);
-  c.restore();
-  pixmap(c, 4, 2, occ.rows, {
-    B: occ.base, A: occ.accent, g: occ.glow, e: '#161318',
-  });
-  // glass specular back on top so the dome still reads as glass over the mob
-  c.save();
-  c.globalAlpha = 0.6;
-  c.fillStyle = '#f7f2ff';
-  c.fillRect(3, 3, 2, 1);
-  c.fillRect(3, 4, 1, 1);
-  c.restore();
+  orbPx(ORB_OCCUPANTS[kind] ?? ORB_OCCUPANTS.zombie).put(c, 0, 0);
 }
 
 /** Bed item sprite: a 3/4 view — the quilted top recedes as a parallelogram
@@ -2200,6 +2274,7 @@ const PACK_MAP: Record<string, PackEntry> = {
   leaves: { paths: ['block/oak_leaves', 'block/leaves_oak'], tint: '#59ae30', kind: 'tile' },
   glass: { paths: ['block/glass'], kind: 'tile' },
   water: { paths: ['block/water_still'], tint: '#3f76e4', kind: 'tile' },
+  water_flow: { paths: ['block/water_flow'], tint: '#3f76e4', kind: 'tile' },
   lava: { paths: ['block/lava_still', 'block/lava'], kind: 'tile' },
   obsidian: { paths: ['block/obsidian'], kind: 'tile' },
   table_top: { paths: ['block/crafting_table_top'], kind: 'tile' },
@@ -2680,7 +2755,7 @@ export class Atlas {
           const [x, y] = this.slotXY(idx);
           this.ctx.clearRect(x, y, TILE, TILE);
           this.ctx.drawImage(tmp, x, y);
-          if (name === 'water') {
+          if (name === 'water' || name === 'water_flow') {
             // ensure water stays translucent
             const img2 = this.ctx.getImageData(x, y, TILE, TILE);
             for (let i = 3; i < img2.data.length; i += 4) {

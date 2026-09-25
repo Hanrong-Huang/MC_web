@@ -12,13 +12,14 @@ import { AudioEngine } from './Audio';
 import { SEA_LEVEL } from './WorldGenerator';
 import type { Player } from './Player';
 import { MobModels, LimbSet, MOB_EXPOSURE, rollVariant } from './MobModels';
+import { buildOrbRig, setOrbOpen, disposeOrb, orbGlowTexture, orbStarTexture, ORB_GLOW, ORB_IDLE_GLOW, OrbRig } from './CatcherOrb';
 
 export type MobKind =
   | 'pig' | 'chicken' | 'sheep' | 'cow'
   | 'zombie' | 'skeleton' | 'spider' | 'creeper'
   | 'wolf' | 'villager' | 'phantom' | 'horse' | 'cat'
   | 'cinderling' | 'ashstalker' | 'emberghast';
-export type EntityKind = 'drop' | MobKind | 'arrow' | 'tnt' | 'falling' | 'particle' | 'bobber' | 'catcher';
+export type EntityKind = 'drop' | MobKind | 'arrow' | 'tnt' | 'falling' | 'particle' | 'bobber' | 'catcher' | 'orbfx';
 
 const MOB_KINDS = new Set<EntityKind>([
   'pig', 'chicken', 'sheep', 'cow',
@@ -199,6 +200,8 @@ export class Entity {
   shadow: THREE.Mesh | null = null;
   /** mesh handed to the death-topple animation; don't dispose on removal */
   corpse = false;
+  /** thrown-catcher / capture-effect state ('catcher' and 'orbfx' kinds) */
+  orb: OrbState | null = null;
 
   constructor(kind: EntityKind, pos: Vec3, box: { w: number; h: number }, mesh: THREE.Group) {
     this.kind = kind;
@@ -338,29 +341,35 @@ export class EntityManager {
   }
 
   /** Capture a wild capturable mob into a catcher. Returns the mob kind, or
-   *  null if this mob can't be captured. Marks the mob dead without loot. */
-  captureMob(e: Entity): string | null {
+   *  null if this mob can't be captured. Marks the mob dead without loot.
+   *  `fx` false leaves the mesh + effects to the caller (the thrown orb draws
+   *  the mob in itself). */
+  captureMob(e: Entity, fx = true): string | null {
     if (!this.isMob(e) || e.dead) return null;
     if (!CAPTURABLE.has(e.kind)) return null;
     const kind = e.kind;
     e.dead = true;                 // removed by the update loop; skips loot/poof
     e.target = null;
     this.clearFoe(e);
-    this.spawnCaptureSparkle(e.pos.x, e.pos.y + e.box.h * 0.5, e.pos.z);
-    this.audio.play('snap');
+    if (fx) {
+      const cy = e.pos.y + e.box.h * 0.5;
+      this.orbBurst(e.pos.x, cy, e.pos.z, ORB_GLOW[kind as string] ?? ORB_IDLE_GLOW, 14);
+      this.audio.play('orbClick', this.orbVol(e.pos.x, cy, e.pos.z));
+    }
     this.onCapture?.(kind as string);
     return kind;
   }
 
-  /** Recall an owned pet back into a catcher. Returns its kind (or null). */
+  /** Recall an owned pet back into a catcher. Returns its kind (or null). The
+   *  pet dissolves into a beam that streams back to the player's hand. */
   recallPet(e: Entity): string | null {
     if (!this.isPet(e) || e.dead) return null;
     const kind = e.kind;
     e.dead = true;
     e.target = null;
     this.clearFoe(e);
-    this.spawnCaptureSparkle(e.pos.x, e.pos.y + e.box.h * 0.5, e.pos.z);
-    this.audio.play('snap');
+    this.startRecallFx(e);
+    this.audio.play('orbRecall', this.orbVol(e.pos.x, e.pos.y, e.pos.z));
     return kind;
   }
 
@@ -372,7 +381,9 @@ export class EntityManager {
     }
   }
 
-  /** Release a captured mob as a pet at the given spot. Returns the new entity. */
+  /** Release a captured mob as a pet at the given spot. Returns the new entity
+   *  (live at once); an orb tossed from the hand pops open there in a flash and
+   *  the pet grows out of it. */
   releaseMob(kind: MobKind, x: number, y: number, z: number, yaw: number): Entity {
     const e = this.spawnMob(kind, x, y, z);
     e.tamed = true;
@@ -381,47 +392,58 @@ export class EntityManager {
     e.target = null;
     e.hp = MOB_STATS[kind].hp;     // release at full health
     e.yaw = yaw;
-    this.spawnCaptureSparkle(x, y + 0.4, z);
-    this.spawnHearts(x, y + 0.7, z);
-    this.audio.play('pop');
+    e.visYaw = yaw;
+    this.startReleaseFx(e);
     return e;
   }
 
   // --- thrown capture orb -------------------------------------------------------
+  //
+  // A throw winds up for CATCHER_WINDUP s (matching the held orb's wind-up),
+  // then flies spinning with a sparkle trail. On a capturable mob the orb pops
+  // open, a beam draws the shrinking mob inside, the dome snaps shut, and the
+  // orb drops to the ground, wobbles 1-3 times and clicks shut in a burst of
+  // stars — then lies there as a filled-catcher pickup. The mob is captured
+  // (dead, onCapture fired) the moment the orb touches it.
 
   /** How far off-centre a thrown orb may pass a mob and still catch it. Generous
    *  on purpose: the orb arcs, so a strict hitbox made every throw a coin flip. */
   private static readonly CATCH_SLACK = 0.85;
+  /** seconds between the throw input and the orb leaving the hand */
+  static readonly CATCHER_WINDUP = 0.12;
+  private static readonly ORB_R = 0.16;
+  private static readonly ABSORB_TIME = 0.78;
+  private static readonly WOBBLE_TIME = 0.64;
 
   /** Throw a capture orb along a direction. Captures the first capturable mob it
    *  brushes past, recalls an owned pet, and drops back as a pickup on a miss. */
   throwCatcher(x: number, y: number, z: number, dx: number, dy: number, dz: number): Entity {
-    const mesh = this.buildThrownOrb();
-    const e = new Entity('catcher', { x, y, z }, { w: 0.3, h: 0.3 }, mesh);
+    const { wrap, rig, pivot } = this.buildThrownOrb();
+    const e = new Entity('catcher', { x, y, z }, { w: 0.3, h: 0.3 }, wrap);
     const len = Math.hypot(dx, dy, dz) || 1;
     const speed = 17;
     e.vel = { x: (dx / len) * speed, y: (dy / len) * speed + 1.2, z: (dz / len) * speed };
+    e.orb = { phase: 'windup', t: 0, rig, pivot, wobbles: 0 };
+    wrap.visible = false;
+    wrap.position.set(x, y, z);
     this.entities.push(e);
-    this.scene.add(mesh);
-    this.audio.play('bow');
+    this.scene.add(wrap);
+    this.audio.play('orbThrow');
     return e;
   }
 
-  /** Small amethyst orb model for the thrown ball (glass shell + metal band). */
-  private buildThrownOrb(): THREE.Group {
-    const g = new THREE.Group();
-    const R = 0.15;
-    g.add(new THREE.Mesh(
-      new THREE.SphereGeometry(R, 12, 10),
-      new THREE.MeshLambertMaterial({ color: 0xb794ec, emissive: 0x5a3f86, transparent: true, opacity: 0.9 }),
-    ));
-    const band = new THREE.Mesh(
-      new THREE.TorusGeometry(R * 1.02, R * 0.16, 6, 16),
-      new THREE.MeshLambertMaterial({ color: 0x2b2138 }),
-    );
-    band.rotation.x = Math.PI / 2;
-    g.add(band);
-    return g;
+  /** The thrown orb: wrapper at the orb's centre -> pivot at its ground contact
+   *  (so wobbles rock on the floor) -> the orb rig. */
+  private buildThrownOrb(): { wrap: THREE.Group; rig: OrbRig; pivot: THREE.Group } {
+    const R = EntityManager.ORB_R;
+    const wrap = new THREE.Group();
+    const pivot = new THREE.Group();
+    pivot.position.y = -R;
+    wrap.add(pivot);
+    const rig = buildOrbRig(R);
+    rig.root.position.y = R;
+    pivot.add(rig.root);
+    return { wrap, rig, pivot };
   }
 
   /** The mob a flying orb should act on, or null. Capturable mobs and owned pets
@@ -444,10 +466,29 @@ export class EntityManager {
   }
 
   private updateCatcher(e: Entity, dt: number): void {
+    const o = e.orb;
+    if (!o) { e.dead = true; return; }
+    o.t += dt;
+    switch (o.phase) {
+      case 'windup':
+        // the held orb is still being cocked back: the thrown one isn't out yet
+        if (o.t >= EntityManager.CATCHER_WINDUP) { o.phase = 'fly'; o.t = 0; e.mesh.visible = true; }
+        return;
+      case 'fly': this.flyCatcher(e, o, dt); return;
+      case 'absorb': this.absorbCatcher(e, o, dt); return;
+      case 'fall': this.fallCatcher(e, o, dt); return;
+      case 'wobble': this.wobbleCatcher(e, o); return;
+      default: this.killOrbEntity(e);
+    }
+  }
+
+  /** In flight: arc under gravity, test mobs + blocks along the path, spin and
+   *  shed a two-tone sparkle trail. */
+  private flyCatcher(e: Entity, o: OrbState, dt: number): void {
     const speed = Math.hypot(e.vel.x, e.vel.y, e.vel.z);
     const steps = Math.max(1, Math.ceil(speed * dt / 0.25));
     const sdt = dt / steps;
-    for (let s = 0; s < steps && !e.dead; s++) {
+    for (let s = 0; s < steps; s++) {
       e.vel.y -= 13 * sdt;
       const px = e.pos.x, py = e.pos.y, pz = e.pos.z;
       e.pos.x += e.vel.x * sdt;
@@ -458,46 +499,507 @@ export class EntityManager {
       const id = this.world.getBlock(Math.floor(e.pos.x), Math.floor(e.pos.y), Math.floor(e.pos.z));
       if (id !== B.AIR && id !== B.WATER && id !== B.TORCH && def(id).solid) {
         // clanged off the terrain: the orb survives and lands as a pickup
-        e.dead = true;
-        this.audio.play('click');
+        this.audio.play('orbWobble', this.orbVol(px, py, pz) * 0.8);
+        this.orbBurst(px, py, pz, ORB_IDLE_GLOW, 5);
         this.spawnDrop(px, py, pz, I.MOB_CATCHER, 1);
+        this.killOrbEntity(e);
         return;
       }
     }
-    // amethyst sparkle trail so the arc is easy to read in flight
-    if (Math.random() < 0.5) this.spawnCaptureSparkle(e.pos.x, e.pos.y, e.pos.z, 1);
+    // spin along the flight path + a sparkle trail so the arc is easy to read
     e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
-    e.mesh.rotation.x += dt * 9;
-    e.mesh.rotation.y += dt * 5;
+    if (o.rig) {
+      o.rig.spin.rotation.y += dt * 14;
+      o.rig.root.rotation.x += dt * 9;
+    }
+    o.trail = (o.trail ?? 0) + dt;
+    while (o.trail > 0.018) {
+      o.trail -= 0.018;
+      const white = Math.random() < 0.4;
+      this.spawnOrbSpark(
+        e.pos.x + (Math.random() - 0.5) * 0.12, e.pos.y + (Math.random() - 0.5) * 0.12, e.pos.z + (Math.random() - 0.5) * 0.12, {
+          vel: { x: (Math.random() - 0.5) * 0.5, y: (Math.random() - 0.3) * 0.5, z: (Math.random() - 0.5) * 0.5 },
+          life: 0.3 + Math.random() * 0.25, size: white ? 0.14 : 0.2,
+          color: white ? 0xffffff : 0xb98cff, star: white,
+        });
+    }
     if (e.age > 8 || e.pos.y < -8) {
-      e.dead = true;
       if (e.pos.y > -8) this.spawnDrop(e.pos.x, e.pos.y, e.pos.z, I.MOB_CATCHER, 1);
+      this.killOrbEntity(e);
     }
   }
 
   /** A thrown orb reached a mob: recall a pet, capture a hostile, or bounce off
    *  a peaceful animal (which keeps the orb, dropped at its feet). */
   private resolveCatcherHit(e: Entity, m: Entity): void {
-    e.dead = true;
     const p = this.player;
+    const o = e.orb!;
     if (this.isPet(m)) {
+      // your own pet: it streams back to your hand along a beam
       const kind = this.recallPet(m);
+      this.orbBurst(e.pos.x, e.pos.y, e.pos.z, ORB_IDLE_GLOW, 8);
+      this.killOrbEntity(e);
       if (kind && p) {
         p.giveFilledCatcher(kind);
+        p.inventory.onChange();
         this.onToast?.(`Recalled ${mobLabel(kind)}`);
       }
       return;
     }
-    const kind = this.captureMob(m);
-    if (kind && p) {
-      p.giveFilledCatcher(kind);
-      this.onToast?.(`Captured ${mobLabel(kind)}!`);
+    // the victim's mesh outlives it: the orb draws it in (see absorbCatcher)
+    const mesh = m.mesh, mats = m.materials;
+    const kind = this.captureMob(m, false);
+    if (kind) {
+      m.corpse = true;             // keep the mesh; the orb owns it now
+      if (m.shadow) m.shadow.visible = false;
+      o.phase = 'absorb';
+      o.t = 0;
+      o.mob = kind as string;
+      o.victim = mesh;
+      o.victimMats = mats;
+      o.vFrom = { x: m.pos.x, y: m.pos.y, z: m.pos.z };
+      o.vH = m.box.h;
+      o.hover = { x: e.pos.x, y: e.pos.y, z: e.pos.z };
+      // bounce back off the mob a little and hang there while it opens
+      const hl = Math.hypot(e.vel.x, e.vel.z) || 1;
+      o.back = { x: -e.vel.x / hl, y: 0, z: -e.vel.z / hl };
+      e.vel = { x: 0, y: 0, z: 0 };
+      // face the open dome at the mob
+      if (o.rig) {
+        o.rig.root.rotation.set(0, Math.atan2(m.pos.x - e.pos.x, m.pos.z - e.pos.z), 0);
+        o.rig.spin.rotation.set(0, 0, 0);
+      }
+      e.mesh.add(mesh);            // reparent: offsets are set each frame
+      this.audio.play('orbOpen', this.orbVol(e.pos.x, e.pos.y, e.pos.z));
       return;
     }
     // peaceful mob: bounces off, orb recoverable on the ground
     this.audio.play('fail');
+    this.orbBurst(e.pos.x, e.pos.y, e.pos.z, ORB_IDLE_GLOW, 5);
     this.spawnDrop(m.pos.x, m.pos.y + m.box.h * 0.5, m.pos.z, I.MOB_CATCHER, 1);
+    this.killOrbEntity(e);
     this.onToast?.('Catchers only work on hostile mobs');
+  }
+
+  /** The dome swings open, a beam locks on and draws the shrinking, glowing
+   *  mob inside, then the dome snaps shut and the orb starts to fall. */
+  private absorbCatcher(e: Entity, o: OrbState, dt: number): void {
+    const T = EntityManager.ABSORB_TIME;
+    const t = o.t;
+    const rig = o.rig!;
+    const glow = new THREE.Color(ORB_GLOW[o.mob ?? ''] ?? ORB_IDLE_GLOW);
+    // hover: drift back off the mob and up a touch, settling
+    const h = o.hover!, b = o.back!;
+    const drift = 1 - Math.exp(-t * 7);
+    e.pos.x = h.x + b.x * 0.45 * drift;
+    e.pos.y = h.y + 0.35 * drift;
+    e.pos.z = h.z + b.z * 0.45 * drift;
+    e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+    // dome: open over 0.12 s, hold, shut over the last 0.12 s
+    const open = t < 0.12 ? t / 0.12 : t < T - 0.14 ? 1 : Math.max(0, (T - 0.02 - t) / 0.12);
+    setOrbOpen(rig, open * open * (3 - 2 * open));
+    rig.floor.color.copy(glow).multiplyScalar(0.3 + open * 0.7);
+    // the mob: pulled from where it stood into the orb, shrinking and glowing
+    const k = Math.max(0, Math.min(1, (t - 0.08) / (T - 0.26)));
+    const pull = k * k;
+    const v = o.victim;
+    if (v) {
+      if (k >= 1) {
+        e.mesh.remove(v);
+        disposeGroup(v);
+        o.victim = undefined;
+      } else {
+        const f = o.vFrom!;
+        const s = Math.max(0.02, 1 - k * 0.98);
+        const vh = (o.vH ?? 1) * s;
+        // feet position that puts the mob's middle on the orb centre at the end
+        const tx = e.pos.x, ty = e.pos.y - vh * 0.5, tz = e.pos.z;
+        v.position.set(
+          f.x + (tx - f.x) * pull - e.pos.x,
+          f.y + (ty - f.y) * pull - e.pos.y,
+          f.z + (tz - f.z) * pull - e.pos.z);
+        v.scale.setScalar(s);
+        v.rotation.y += dt * k * 12; // swirl as it's drawn in
+        for (const m of o.victimMats ?? []) m.emissive.copy(glow).multiplyScalar(0.25 + k * 0.9);
+        this.orbBeam(e, o, v.position.x, v.position.y + vh * 0.5, v.position.z, 1 - k * 0.6);
+        // motes stream along the beam into the orb
+        if (Math.random() < 0.9) {
+          const wx = v.position.x + e.pos.x, wy = v.position.y + vh * 0.5 + e.pos.y, wz = v.position.z + e.pos.z;
+          this.spawnOrbSpark(wx + (Math.random() - 0.5) * 0.5 * s, wy + (Math.random() - 0.5) * 0.6 * s, wz + (Math.random() - 0.5) * 0.5 * s, {
+            life: 0.3, size: 0.16, color: Math.random() < 0.5 ? glow.getHex() : 0xffffff, star: true,
+            home: { x: e.pos.x, y: e.pos.y, z: e.pos.z },
+          });
+        }
+      }
+    }
+    if (!o.victim) this.orbBeam(e, o, 0, 0, 0, 0);
+    // the button glows with the captive's colour once it's inside
+    rig.button.color.copy(glow).lerp(new THREE.Color(0xffffff), 0.5 * (1 - k));
+    (rig.halo.material as THREE.SpriteMaterial).color.copy(glow);
+    (rig.halo.material as THREE.SpriteMaterial).opacity = 0.5 + k * 0.5;
+    rig.halo.scale.setScalar(rig.R * (1.1 + k * 1.6));
+    if (t >= T) {
+      setOrbOpen(rig, 0);
+      if (o.beam) { e.mesh.remove(o.beam); disposeOrb(o.beam); o.beam = undefined; }
+      if (o.victim) { e.mesh.remove(o.victim); disposeGroup(o.victim); o.victim = undefined; }
+      o.phase = 'fall';
+      o.t = 0;
+      e.vel = { x: 0, y: 0.6, z: 0 };
+      rig.floor.color.setHex(0x2a1c44);
+      this.orbBurst(e.pos.x, e.pos.y, e.pos.z, glow.getHex(), 6);
+    }
+  }
+
+  /** Stretch the capture beam from the orb (wrapper origin) to a local point;
+   *  `a` <= 0 hides it. */
+  private orbBeam(e: Entity, o: OrbState, x: number, y: number, z: number, a: number): void {
+    if (a <= 0) { if (o.beam) o.beam.visible = false; return; }
+    if (!o.beam) {
+      const glow = ORB_GLOW[o.mob ?? ''] ?? ORB_IDLE_GLOW;
+      const beam = new THREE.Mesh(
+        new THREE.CylinderGeometry(1, 1, 1, 10, 1, true),
+        new THREE.MeshBasicMaterial({ color: glow, transparent: true, opacity: 0.5, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }),
+      );
+      const core = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.4, 0.4, 1, 8, 1, true),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }),
+      );
+      beam.add(core);
+      o.beam = beam;
+      e.mesh.add(beam);
+    }
+    const beam = o.beam;
+    const len = Math.hypot(x, y, z);
+    if (len < 0.05) { beam.visible = false; return; }
+    beam.visible = true;
+    beam.position.set(x / 2, y / 2, z / 2);
+    beam.quaternion.setFromUnitVectors(UP, TMP_V.set(x / len, y / len, z / len));
+    const r = 0.05 + 0.025 * Math.sin(o.t * 40);
+    beam.scale.set(r, len, r);
+    (beam.material as THREE.MeshBasicMaterial).opacity = 0.45 * a;
+  }
+
+  /** Closed orb drops to the ground (one small bounce), then starts wobbling. */
+  private fallCatcher(e: Entity, o: OrbState, dt: number): void {
+    const R = EntityManager.ORB_R;
+    e.vel.y -= 16 * dt;
+    let ny = e.pos.y + e.vel.y * dt;
+    const bx = Math.floor(e.pos.x), bz = Math.floor(e.pos.z);
+    const under = this.world.getBlock(bx, Math.floor(ny - R), bz);
+    const floorHit = under !== B.AIR && under !== B.TORCH && (def(under).solid || def(under).liquid);
+    let landed = false;
+    if (floorHit && e.vel.y < 0) {
+      ny = Math.floor(ny - R) + 1 + R;
+      if (def(under).liquid) ny -= 0.12; // bob half-sunk on water/lava
+      if (e.vel.y < -3.2 && !o.bounced) {
+        o.bounced = true;
+        e.vel.y = -e.vel.y * 0.28;
+        this.audio.play('orbWobble', this.orbVol(e.pos.x, ny, e.pos.z) * 0.6);
+      } else {
+        e.vel.y = 0;
+        landed = true;
+      }
+    }
+    e.pos.y = ny;
+    if (o.rig) o.rig.root.rotation.x *= 1 - Math.min(1, dt * 8);
+    e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+    if (landed || o.t > 5 || e.pos.y < -8) {
+      o.phase = 'wobble';
+      o.t = 0;
+      // 1-3 suspenseful wobbles (Pokemon-style), then the click
+      o.wobbles = 1 + Math.floor(Math.random() * 3);
+    }
+  }
+
+  /** Rock side to side on the floor, the button blinking; after the last one
+   *  the latch clicks, stars burst out and the orb lies there as a pickup. */
+  private wobbleCatcher(e: Entity, o: OrbState): void {
+    const W = EntityManager.WOBBLE_TIME;
+    const rig = o.rig!;
+    const idx = Math.floor(o.t / W);
+    const glow = ORB_GLOW[o.mob ?? ''] ?? ORB_IDLE_GLOW;
+    const halo = rig.halo.material as THREE.SpriteMaterial;
+    if (idx < o.wobbles) {
+      const u = (o.t - idx * W) / (W * 0.66); // rock for 2/3 of the slot, then rest
+      if ((o.lastWob ?? -1) !== idx) {
+        o.lastWob = idx;
+        this.audio.play('orbWobble', this.orbVol(e.pos.x, e.pos.y, e.pos.z));
+      }
+      const rock = u < 1 ? Math.sin(u * Math.PI * 2) * 0.42 * (1 - u * 0.35) : 0;
+      if (o.pivot) o.pivot.rotation.z = rock;
+      // the button blinks a warning red while the captive struggles
+      const on = u < 1 && Math.sin(u * Math.PI * 6) > 0;
+      rig.button.color.setHex(on ? 0xff4a5a : glow);
+      halo.color.setHex(on ? 0xff4a5a : glow);
+      halo.opacity = on ? 0.9 : 0.4;
+      return;
+    }
+    if (o.pivot) o.pivot.rotation.z = 0;
+    if (o.t < o.wobbles * W + 0.1) return;
+    // click: latched shut
+    const kind = o.mob ?? 'zombie';
+    this.audio.play('orbClick', this.orbVol(e.pos.x, e.pos.y, e.pos.z));
+    this.orbStarBurst(e.pos.x, e.pos.y + 0.1, e.pos.z, glow);
+    const d = this.spawnDrop(e.pos.x, e.pos.y, e.pos.z, I.MOB_CATCHER_FILLED, 1, undefined, kind);
+    d.vel = { x: 0, y: 2.6, z: 0 };
+    this.onToast?.(`Captured ${mobLabel(kind)}!`);
+    this.killOrbEntity(e);
+  }
+
+  /** Remove an orb entity now, freeing its rig + any held victim/beam. */
+  private killOrbEntity(e: Entity): void {
+    if (e.dead) return;
+    e.dead = true;
+    e.corpse = true;               // removal loop leaves the mesh to us
+    this.scene.remove(e.mesh);
+    const o = e.orb;
+    if (o?.victim) { e.mesh.remove(o.victim); disposeGroup(o.victim); }
+    if (o?.pet && !o.pet.dead && !o.grown) this.finishReleaseGrow(o.pet);
+    disposeOrb(e.mesh);
+    e.orb = null;
+  }
+
+  // --- capture / release / recall effects ('orbfx' entities) ------------------
+
+  private orbVol(x: number, y: number, z: number): number {
+    const p = this.player;
+    if (!p) return 1;
+    return Math.max(0.12, 1 - Math.hypot(p.pos.x - x, p.pos.y - y, p.pos.z - z) / 32);
+  }
+
+  /** Where the player's hand is in the world (recall beams + release tosses end/start there). */
+  private handPos(): Vec3 | null {
+    const p = this.player;
+    if (!p) return null;
+    const d = p.lookDir();
+    const rx = -d.z, rz = d.x; // right of the view
+    const rl = Math.hypot(rx, rz) || 1;
+    return {
+      x: p.pos.x + d.x * 0.5 + (rx / rl) * 0.28,
+      y: p.pos.y + p.eyeHeight() - 0.35 + d.y * 0.5,
+      z: p.pos.z + d.z * 0.5 + (rz / rl) * 0.28,
+    };
+  }
+
+  private orbFxCount(): number {
+    let n = 0;
+    for (const e of this.entities) if (e.kind === 'orbfx') n++;
+    return n;
+  }
+
+  /** One additive glow/star sprite: drifts on `vel` under `grav`, or homes in
+   *  on `home` (motes streaming along a beam). */
+  private spawnOrbSpark(x: number, y: number, z: number, s: {
+    vel?: Vec3; grav?: number; life: number; size: number; color: number; star?: boolean; home?: Vec3;
+  }): void {
+    if (this.orbFxCount() > 220) return;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: s.star ? orbStarTexture() : orbGlowTexture(), color: s.color,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    }));
+    sprite.scale.setScalar(s.size);
+    const g = new THREE.Group();
+    g.add(sprite);
+    g.position.set(x, y, z);
+    const e = new Entity('orbfx', { x, y, z }, { w: 0.05, h: 0.05 }, g);
+    e.vel = s.vel ? { ...s.vel } : { x: 0, y: 0, z: 0 };
+    e.pGrav = s.grav ?? 0;
+    e.maxLife = e.life = s.life;
+    e.orb = { phase: 'spark', t: 0, rig: null, wobbles: 0, size: s.size, home: s.home, spin: (Math.random() - 0.5) * 8 };
+    this.entities.push(e);
+    this.scene.add(g);
+  }
+
+  /** A soft ring of glow motes (capture flash, bounce puff, block clang). */
+  private orbBurst(x: number, y: number, z: number, color: number, n: number): void {
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2 + Math.random() * 0.4;
+      const sp = 1.4 + Math.random() * 1.2;
+      this.spawnOrbSpark(x, y, z, {
+        vel: { x: Math.cos(a) * sp, y: 0.6 + Math.random() * 1.6, z: Math.sin(a) * sp },
+        grav: 2, life: 0.4 + Math.random() * 0.3, size: 0.18 + Math.random() * 0.1,
+        color: i % 3 === 0 ? 0xffffff : color, star: i % 2 === 0,
+      });
+    }
+  }
+
+  /** The capture "click": a fountain of gold-white stars plus a captive-coloured ring. */
+  private orbStarBurst(x: number, y: number, z: number, color: number): void {
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      const sp = 1.6 + Math.random() * 0.8;
+      this.spawnOrbSpark(x, y, z, {
+        vel: { x: Math.cos(a) * sp, y: 3 + Math.random() * 1.5, z: Math.sin(a) * sp },
+        grav: 7, life: 0.7 + Math.random() * 0.3, size: 0.26, color: i % 2 ? 0xfff2a0 : 0xffffff, star: true,
+      });
+    }
+    this.orbBurst(x, y, z, color, 10);
+    this.spawnOrbSpark(x, y, z, { life: 0.35, size: 1.4, color });
+  }
+
+  /** Per-frame update for the capture effects. */
+  private updateOrbFx(e: Entity, dt: number): void {
+    const o = e.orb;
+    if (!o) { e.dead = true; return; }
+    o.t += dt;
+    if (o.phase === 'spark') this.updateOrbSpark(e, o, dt);
+    else if (o.phase === 'recall') this.updateRecallFx(e, o, dt);
+    else if (o.phase === 'release') this.updateReleaseFx(e, o, dt);
+    else this.killOrbEntity(e);
+  }
+
+  private updateOrbSpark(e: Entity, o: OrbState, dt: number): void {
+    e.life -= dt;
+    if (e.life <= 0) { this.killOrbEntity(e); return; }
+    const k = e.life / e.maxLife;
+    if (o.home) {
+      // accelerate into the target along a slight swirl
+      const h = o.home, pull = Math.min(1, dt * (5 + (1 - k) * 18));
+      e.pos.x += (h.x - e.pos.x) * pull;
+      e.pos.y += (h.y - e.pos.y) * pull;
+      e.pos.z += (h.z - e.pos.z) * pull;
+    } else {
+      e.vel.y -= e.pGrav * dt;
+      const damp = 1 - Math.min(1, 2.2 * dt);
+      e.vel.x *= damp; e.vel.z *= damp;
+      e.pos.x += e.vel.x * dt;
+      e.pos.y += e.vel.y * dt;
+      e.pos.z += e.vel.z * dt;
+    }
+    e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+    const sprite = e.mesh.children[0] as THREE.Sprite;
+    const tw = 0.75 + 0.25 * Math.sin(o.t * 30 + e.maxLife * 50); // twinkle
+    sprite.scale.setScalar((o.size ?? 0.2) * Math.max(0.05, Math.min(1, k * 1.6)) * tw);
+    sprite.material.rotation += dt * (o.spin ?? 0);
+    sprite.material.opacity = Math.min(1, k * 2);
+  }
+
+  /** Recall: the pet's mesh dissolves into a glowing beam that streams back
+   *  to the player's hand. */
+  private startRecallFx(pet: Entity): void {
+    const wrap = new THREE.Group();
+    wrap.position.set(pet.pos.x, pet.pos.y, pet.pos.z);
+    const fx = new Entity('orbfx', { ...pet.pos }, { w: 0.1, h: 0.1 }, wrap);
+    pet.corpse = true;
+    if (pet.shadow) pet.shadow.visible = false;
+    const mesh = pet.mesh;
+    this.scene.remove(mesh);
+    mesh.position.set(0, 0, 0);
+    wrap.add(mesh);
+    fx.orb = {
+      phase: 'recall', t: 0, rig: null, wobbles: 0,
+      mob: pet.kind as string, victim: mesh, victimMats: pet.materials, vH: pet.box.h,
+    };
+    this.entities.push(fx);
+    this.scene.add(wrap);
+  }
+
+  private updateRecallFx(e: Entity, o: OrbState, dt: number): void {
+    const T = 0.5;
+    const hand = this.handPos() ?? { x: e.pos.x, y: e.pos.y + 1.5, z: e.pos.z };
+    const hx = hand.x - e.pos.x, hy = hand.y - e.pos.y, hz = hand.z - e.pos.z;
+    const k = Math.min(1, o.t / T);
+    const glow = new THREE.Color(ORB_GLOW[o.mob ?? ''] ?? ORB_IDLE_GLOW);
+    const v = o.victim;
+    if (v) {
+      const s = Math.max(0.02, 1 - k);
+      const pull = k * k;
+      const vh = (o.vH ?? 1) * s;
+      v.scale.setScalar(s);
+      v.position.set(hx * pull, hy * pull - vh * 0.5 * pull, hz * pull);
+      v.rotation.y += dt * 10 * k;
+      for (const m of o.victimMats ?? []) m.emissive.copy(glow).multiplyScalar(0.3 + k);
+      // the beam runs from the pet to the hand
+      this.orbBeamBetween(e, o, v.position.x, v.position.y + vh * 0.5, v.position.z, hx, hy, hz, 1 - k * 0.5);
+      if (Math.random() < 0.9) {
+        this.spawnOrbSpark(e.pos.x + v.position.x + (Math.random() - 0.5) * 0.5 * s,
+          e.pos.y + v.position.y + vh * Math.random(), e.pos.z + v.position.z + (Math.random() - 0.5) * 0.5 * s, {
+            life: 0.3, size: 0.15, color: Math.random() < 0.5 ? glow.getHex() : 0xffffff, star: true, home: hand,
+          });
+      }
+    }
+    if (o.t >= T) this.killOrbEntity(e);
+  }
+
+  /** Beam between two local points of an fx wrapper. */
+  private orbBeamBetween(e: Entity, o: OrbState, ax: number, ay: number, az: number,
+    bx: number, by: number, bz: number, a: number): void {
+    this.orbBeam(e, o, bx - ax, by - ay, bz - az, a);
+    if (o.beam) o.beam.position.set((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2);
+  }
+
+  /** Release: an orb tossed from the hand lands at the spot, pops open in a
+   *  flash and the pet grows up out of it. */
+  private startReleaseFx(pet: Entity): void {
+    const R = EntityManager.ORB_R;
+    const { wrap, rig, pivot } = this.buildThrownOrb();
+    const glow = ORB_GLOW[pet.kind as string] ?? ORB_IDLE_GLOW;
+    rig.button.color.setHex(glow);
+    (rig.halo.material as THREE.SpriteMaterial).color.setHex(glow);
+    const to = { x: pet.pos.x, y: pet.pos.y + R, z: pet.pos.z };
+    const from = this.handPos() ?? { x: to.x, y: to.y + 1, z: to.z };
+    const fx = new Entity('orbfx', { ...from }, { w: 0.1, h: 0.1 }, wrap);
+    wrap.position.set(from.x, from.y, from.z);
+    rig.root.rotation.y = Math.atan2(from.x - to.x, from.z - to.z); // button toward the player
+    fx.orb = { phase: 'release', t: 0, rig, pivot, wobbles: 0, mob: pet.kind as string, pet, from, to };
+    pet.mesh.scale.setScalar(0.001);
+    this.entities.push(fx);
+    this.scene.add(wrap);
+    this.audio.play('orbThrow', 0.7);
+  }
+
+  private updateReleaseFx(e: Entity, o: OrbState, dt: number): void {
+    const TOSS = 0.28, POP = 0.36, GROW = 0.5, END = 1.15;
+    const t = o.t, rig = o.rig!, pet = o.pet;
+    const from = o.from!, to = o.to!;
+    const glow = ORB_GLOW[o.mob ?? ''] ?? ORB_IDLE_GLOW;
+    if (t < TOSS) {
+      // a short lob from the hand to the spot
+      const k = t / TOSS;
+      e.pos.x = from.x + (to.x - from.x) * k;
+      e.pos.y = from.y + (to.y - from.y) * k + Math.sin(k * Math.PI) * 0.5;
+      e.pos.z = from.z + (to.z - from.z) * k;
+      rig.spin.rotation.y += dt * 16;
+    } else {
+      e.pos.x = to.x; e.pos.y = to.y; e.pos.z = to.z;
+      rig.spin.rotation.y *= 1 - Math.min(1, dt * 12);
+      if (!o.popped) {
+        o.popped = true;
+        this.audio.play('orbRelease', this.orbVol(to.x, to.y, to.z));
+        // the flash: a big soft bloom + a ring of motes and stars
+        this.spawnOrbSpark(to.x, to.y + 0.3, to.z, { life: 0.4, size: 2.2, color: 0xffffff });
+        this.spawnOrbSpark(to.x, to.y + 0.3, to.z, { life: 0.55, size: 1.5, color: glow });
+        this.orbBurst(to.x, to.y + 0.2, to.z, glow, 14);
+      }
+    }
+    e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+    // dome: pops open at TOSS, shuts again as the orb fades
+    const open = t < TOSS ? 0 : t < POP ? (t - TOSS) / (POP - TOSS) : t < END - 0.3 ? 1 : Math.max(0, (END - 0.15 - t) / 0.15);
+    setOrbOpen(rig, open);
+    rig.floor.color.setHex(glow).multiplyScalar(0.2 + open * 0.8);
+    // the pet grows out of the orb with a little overshoot, glowing white-hot first
+    if (pet && !pet.dead) {
+      const g = Math.max(0, Math.min(1, (t - TOSS) / GROW));
+      const back = g >= 1 ? 1 : 1 + 2.2 * Math.pow(g - 1, 3) + 1.2 * Math.pow(g - 1, 2); // ease-out-back
+      pet.mesh.scale.setScalar(Math.max(0.001, g <= 0 ? 0.001 : back));
+      const heat = 1 - g;
+      for (const m of pet.materials) m.emissive.setRGB(heat * 0.9, heat * 0.85, heat);
+      if (g >= 1 && !o.grown) { o.grown = true; this.finishReleaseGrow(pet); }
+    }
+    // then the empty orb shrinks away in a few sparkles
+    const fade = t > END - 0.25 ? Math.max(0, (END - t) / 0.25) : Math.min(1, t / 0.08);
+    rig.root.scale.setScalar(Math.max(0.001, fade));
+    if (t >= END) {
+      this.orbBurst(e.pos.x, e.pos.y, e.pos.z, ORB_IDLE_GLOW, 5);
+      this.killOrbEntity(e);
+    }
+  }
+
+  /** Settle a released pet at full size with its normal shading. */
+  private finishReleaseGrow(pet: Entity): void {
+    pet.mesh.scale.setScalar(1);
+    for (const m of pet.materials) m.emissive.setRGB(0, 0, 0);
+    this.spawnHearts(pet.pos.x, pet.pos.y + pet.box.h + 0.2, pet.pos.z);
   }
 
   /** A soft round contact shadow plane, parented under a mob. */
@@ -952,6 +1454,7 @@ export class EntityManager {
         case 'particle': this.updateParticle(e, dt, camQ); break;
         case 'bobber': this.updateBobber(e, dt); break;
         case 'catcher': this.updateCatcher(e, dt); break;
+        case 'orbfx': this.updateOrbFx(e, dt); break;
         default: this.updateMob(e, dt); break;
       }
     }
@@ -2889,3 +3392,39 @@ function disposeGroup(g: THREE.Object3D): void {
     if (m.geometry) m.geometry.dispose();
   });
 }
+
+/** Thrown-catcher phases + the capture/release/recall effects' state. */
+interface OrbState {
+  phase: 'windup' | 'fly' | 'absorb' | 'fall' | 'wobble' | 'spark' | 'recall' | 'release';
+  t: number;
+  rig: OrbRig | null;
+  /** ground-contact pivot the wobble rocks on */
+  pivot?: THREE.Group;
+  wobbles: number;
+  lastWob?: number;
+  trail?: number;
+  bounced?: boolean;
+  /** captured / recalled / released mob kind */
+  mob?: string;
+  /** a captured or recalled mob's mesh, parented under the effect while it's drawn in */
+  victim?: THREE.Object3D;
+  victimMats?: THREE.MeshLambertMaterial[];
+  vFrom?: Vec3;
+  vH?: number;
+  hover?: Vec3;
+  back?: Vec3;
+  beam?: THREE.Mesh;
+  // sparks
+  size?: number;
+  home?: Vec3;
+  spin?: number;
+  // release
+  pet?: Entity;
+  from?: Vec3;
+  to?: Vec3;
+  popped?: boolean;
+  grown?: boolean;
+}
+
+const UP = new THREE.Vector3(0, 1, 0);
+const TMP_V = new THREE.Vector3();

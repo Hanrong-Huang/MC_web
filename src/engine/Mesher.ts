@@ -381,6 +381,12 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
     }
     return n > 0 ? sum / n : LIQUID_EDGE_HEIGHT;
   };
+  /** Water column depth from this cell down (cells of water, capped). */
+  const waterDepth = (x: number, y: number, z: number): number => {
+    let d = 0;
+    while (d < 12 && get(x, y - d, z) === B.WATER) d++;
+    return d;
+  };
 
   // biome tint per column, computed lazily
   TINT_SET.fill(0);
@@ -560,6 +566,31 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
         const waterTopOpen = isLiquid && get(x, y + 1, z) !== id;
         // flag bits packed onto the torch channel (stripped in the shader)
         const flag = isLava ? FLAG_LAVA : isLeaf ? FLAG_SWAY : 0;
+        // water carries its own vertex data (see WATER VERTEX below): surface
+        // flow / fall speed in atint, depth + shoreline in uv
+        let flowX = 0, flowZ = 0, fall = 0, selfDepth = 0;
+        if (isWater) {
+          selfDepth = waterDepth(x, y, z);
+          fall = get(x, y + 1, z) === id || get(x, y - 1, z) === B.AIR ? 1 : 0;
+          if (waterTopOpen) {
+            // downhill gradient of the surface: toward lower neighbours and
+            // (strongly) toward open drops
+            const hs = liquidCellHeight(id, x, y, z);
+            for (let d = 0; d < 4; d++) {
+              const dx = d === 0 ? 1 : d === 1 ? -1 : 0, dz = d === 2 ? 1 : d === 3 ? -1 : 0;
+              const nb = get(x + dx, y, z + dz);
+              let diff: number;
+              if (nb === id) diff = hs - liquidCellHeight(id, x + dx, y, z + dz);
+              else if (nb === B.AIR) {
+                const under = get(x + dx, y - 1, z + dz);
+                diff = under === B.AIR || under === id ? hs * 2 : hs * 0.5;
+              } else continue;
+              flowX += dx * diff; flowZ += dz * diff;
+            }
+            const fl = Math.hypot(flowX, flowZ);
+            if (fl > 1e-4) { const k = Math.min(1, fl * 16) / fl; flowX *= k; flowZ *= k; } else { flowX = 0; flowZ = 0; }
+          }
+        }
 
         for (let face = 0; face < 6; face++) {
           const n = FACE_NORMALS[face];
@@ -569,7 +600,7 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           if (isLiquid) {
             if (nb === id) continue;
             if (OPAQUE_LUT[nb]) continue;
-            if (nb !== B.AIR && !LEAF_LUT[nb] && nb !== B.TORCH && face !== 2) continue;
+            if (nb !== B.AIR && !LEAF_LUT[nb] && nb !== B.TORCH && nb !== B.GLASS && face !== 2) continue;
           } else if (opaque) {
             if (OPAQUE_LUT[nb]) continue;
           } else {
@@ -626,6 +657,30 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
             const aoc = corner === 0 ? ao0 : corner === 1 ? ao1 : corner === 2 ? ao2 : ao3;
             const k = shade * AO_SHADE[aoc];
             if (isLava) torch = 1 / k; // self-lit: full brightness after shading
+            if (isWater) {
+              // WATER VERTEX: atint = (flow x, flow z | fall speed, face kind
+              // 0 top / 1 side / 2 underside), uv = (depth below, shoreline)
+              let wr = flowX, wg = flowZ, wu = selfDepth, wv = 0;
+              const kindF = face === 2 ? 0 : face === 3 ? 2 : 1;
+              if (face === 2) {
+                // corner depth/shore: average the 4 columns sharing the corner;
+                // solid ones count as zero depth and mark a shoreline
+                let sum = 0, cnt = 0, shore = 0;
+                for (let q = 0; q < 4; q++) {
+                  const qx = x + px - 1 + (q & 1), qz = z + pz - 1 + (q >> 1);
+                  const qid = get(qx, y, qz);
+                  if (qid === id) {
+                    sum += waterDepth(qx, y, qz); cnt++;
+                    if (get(qx, y + 1, qz) === id) shore = 1; // whitewater where a fall plunges in
+                  } else if (qid !== B.AIR) { cnt++; shore = 1; }
+                }
+                wu = cnt ? sum / cnt : selfDepth; wv = shore;
+              } else if (kindF === 1) {
+                wr = 0; wg = fall ? 1 : Math.hypot(flowX, flowZ) * 0.5;
+              }
+              target.v(x + px, y + py, z + pz, k * sky, k * torch, wr, wg, kindF, wu, wv);
+              continue;
+            }
             target.v(x + px, y + py, z + pz, k * sky, k * torch + flag,
               tint[0], tint[1], tint[2],
               a ? rect.u1 : rect.u0,

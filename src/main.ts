@@ -37,6 +37,7 @@ import { Weather } from './engine/Weather';
 import { getControls, setControls } from './engine/ControlsSettings';
 import { AdvancementTracker } from './engine/Advancements';
 import { FireSystem } from './engine/Fire';
+import { waterFX } from './engine/WaterFX';
 import type { Entity } from './engine/EntityManager';
 
 const DAY_LENGTH = 1200; // 20 real minutes
@@ -95,7 +96,6 @@ class Game {
   private saving = false;
   private weather!: Weather;
   private adv = new AdvancementTracker();
-  private rainSoundT = 0;
   private survivedNight = false;
   private nightsAwake = 0;
   private phantomSpawnT = 0;
@@ -142,6 +142,7 @@ class Game {
     this.input = new Input(this.renderer.canvas);
     this.entities = new EntityManager(this.renderer.scene, this.world, this.atlas, this.audio);
     this.entities.setPlayer(this.player);
+    waterFX.attach(this.renderer.scene, this.world, this.audio);
     this.entities.onKill = (kind) => {
       if (['zombie', 'skeleton', 'spider', 'creeper'].includes(kind)) this.adv.unlock('kill_mob');
       this.lastKilledKind = kind;
@@ -991,7 +992,7 @@ class Game {
 
   /** Lightning struck at (x,y,z): ignite TNT, scorch mobs, flash + thunder. */
   private onLightning(x: number, y: number, z: number): void {
-    this.audio.play('thunder', Math.max(0.35, 1 - Math.hypot(x - this.player.pos.x, z - this.player.pos.z) / 160));
+    this.audio.thunder(Math.hypot(x - this.player.pos.x, z - this.player.pos.z));
     this.adv.unlock('thunder');
     // the bolt can set the strike point alight
     if (Math.random() < 0.6) this.fire.ignite(x, y, z);
@@ -1383,6 +1384,7 @@ class Game {
       this.world.updateDoorSwings(dt);
       this.processMeshing(8);
       this.entities.update(dt, this.elapsed, this.renderer.camera.quaternion);
+      waterFX.update(dt, this.world, this.renderer.camera.position, this.renderer.daylight, this.entities.entities);
       this.throwables.update(dt);
       this.xpOrbs.update(dt, this.player.dead || this.player.mode !== 'survival' ? null : this.player.pos, (n) => {
         this.player.addXp(n);
@@ -1394,29 +1396,11 @@ class Game {
       this.weather.setSuppressed(this.world.dimension !== 'overworld');
       this.weather.update(dt, pp.x, pp.y + this.player.eyeHeight(), pp.z);
 
-      // continuous rain bed driven by weather state (snow uses wind gusts)
-      const w = this.weather;
+      // weather beds (rain / snow / blizzard wind), wind, foliage, surf,
+      // streams, fire, cave echo, village life and the chase music all follow
+      // a probe of the player's surroundings (Audio.listen → AudioScape)
       const biome = this.world.generator.biomeAt(Math.floor(pp.x), Math.floor(pp.z));
-      const cold = biome === 'snow' || biome === 'taiga';
-      if (w.kind !== 'clear' && w.intensity > 0.25 && !cold) {
-        // fade the bed toward the target volume; cheap to call each frame
-        this.rainSoundT -= dt;
-        if (this.rainSoundT <= 0) {
-          this.rainSoundT = 2.0;
-          this.audio.setRain(w.kind === 'thunder' ? 'thunder' : 'rain', w.intensity, this.world.skyLight(Math.floor(pp.x), Math.floor(pp.y + 1.6), Math.floor(pp.z)) < 1);
-        }
-      } else {
-        // clear or snow: ensure the rain bed is off
-        this.rainSoundT -= dt;
-        if (this.rainSoundT <= 0) {
-          this.rainSoundT = 2.0;
-          this.audio.setRain('off');
-          // snow gets occasional soft wind gusts instead
-          if (w.kind !== 'clear' && w.intensity > 0.25 && cold) {
-            this.audio.weatherLoop('snow', w.intensity, Math.sin(this.dayTime * Math.PI * 2) < -0.06);
-          }
-        }
-      }
+      this.audio.listen(dt, this.world, this.player, this.entities.entities, this.weather);
 
       this.tickAcc += dt;
       while (this.tickAcc >= 0.05) {
