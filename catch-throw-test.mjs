@@ -59,7 +59,7 @@ const thrown = await page.evaluate(async () => {
   // the orb then draws the mob in, drops, wobbles 1-3 times and clicks shut,
   // leaving a filled catcher on the ground: wait for it, then walk onto it
   let drop = null;
-  for (let i = 0; i < 40 && !drop; i++) {
+  for (let i = 0; i < 100 && !drop; i++) {
     await new Promise((r) => setTimeout(r, 150));
     drop = ent.entities.find((e) => e.kind === 'drop' && e.itemId === 183 && !e.dead) ?? null;
   }
