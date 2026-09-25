@@ -4,7 +4,7 @@
 // with full cursor-stack slot interactions.
 
 import { Atlas, drawHeart, drawShank, drawBubble, drawArmor } from '../engine/Textures';
-import { Inventory, Slot, matchRecipe, FurnaceState, ChestState, SMELT_TIME, allRecipes, RecipeView } from '../engine/Inventory';
+import { Inventory, Slot, matchRecipe, FurnaceState, ChestState, SMELT_TIME, allRecipes, RecipeView, furnaceSlotFor } from '../engine/Inventory';
 import { def, CREATIVE_ITEMS, I, B, spriteNameFor, mobLabel } from '../engine/Blocks';
 import { SaveSummary, SlotData } from '../engine/Persistence';
 import { AudioEngine } from '../engine/Audio';
@@ -1113,8 +1113,23 @@ export class HUD {
    *  otherwise shuffle between the hotbar row and the main grid (vanilla feel). */
   private quickMovePlayer(view: ContainerView, inv: Inventory, i: number): void {
     let moved: boolean;
+    const s = inv.slots[i];
+    const furnaceDest = view.kind === 'furnace' && view.furnace && s ? furnaceSlotFor(s.id) : null;
+    const armor = s ? def(s.id).armor : undefined;
     if (view.kind === 'chest' && view.chest) {
       moved = this.transfer(inv.slots, i, view.chest.slots, 0, view.chest.slots.length);
+    } else if (furnaceDest && view.furnace) {
+      // furnace open: smeltables to the input, fuel to the fuel slot
+      const f = view.furnace;
+      const arr: Slot[] = [f[furnaceDest]];
+      moved = this.transfer(inv.slots, i, arr, 0, 1);
+      f[furnaceDest] = arr[0];
+    } else if (armor && view.kind === 'inventory' && !inv.armor[armor.slot] && s) {
+      // shift-clicking armor straight onto the body
+      inv.armor[armor.slot] = { id: s.id, count: 1, ...(s.dur !== undefined ? { dur: s.dur } : {}) };
+      inv.slots[i] = null;
+      this.audio.play('click');
+      moved = true;
     } else if (i < 9) {
       moved = this.transfer(inv.slots, i, inv.slots, 9, 36);
     } else {

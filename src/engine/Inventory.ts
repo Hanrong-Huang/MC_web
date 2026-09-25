@@ -341,6 +341,14 @@ export function fuelSeconds(id: number): number {
   return hasDef(id) ? (def(id).fuel ?? 0) : 0;
 }
 
+/** Shift-click routing into a furnace: smeltables go to the input slot,
+ *  pure fuels to the fuel slot (logs smelt first, like vanilla), else null. */
+export function furnaceSlotFor(id: number): 'input' | 'fuel' | null {
+  if (smeltResult(id) !== undefined) return 'input';
+  if (fuelSeconds(id) > 0) return 'fuel';
+  return null;
+}
+
 export const SMELT_TIME = 10; // seconds per item, per the spec
 
 export class FurnaceState {

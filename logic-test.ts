@@ -1,6 +1,6 @@
 // Node-side logic tests (no DOM): RLE codec, crafting matcher, furnace, break times.
 import { rleEncode, rleDecode } from './src/engine/Persistence.ts';
-import { matchRecipe, FurnaceState, ChestState, Slot, smeltResult } from './src/engine/Inventory.ts';
+import { matchRecipe, FurnaceState, ChestState, Slot, smeltResult, furnaceSlotFor } from './src/engine/Inventory.ts';
 import {
   B, I, breakTime, canHarvest, attackCooldown, attackStrength, foodSaturation, pickItemFor, def,
 } from './src/engine/Blocks.ts';
@@ -136,6 +136,13 @@ check('golden carrot saturation 14.4', Math.abs(foodSaturation(I.GOLDEN_CARROT) 
 check('steak saturation 12.8', Math.abs(foodSaturation(I.COOKED_BEEF) - 12.8) < 1e-9);
 check('golden apples always edible', !!def(I.GOLDEN_APPLE).alwaysEdible && !!def(I.MILK_BUCKET).alwaysEdible);
 check('bread is not always edible', !def(I.BREAD).alwaysEdible);
+
+// --- shift-click routing into a furnace ---
+check('ore shift-clicks to furnace input', furnaceSlotFor(B.IRON_ORE) === 'input');
+check('logs smelt before they burn', furnaceSlotFor(B.LOG) === 'input');
+check('coal shift-clicks to fuel', furnaceSlotFor(I.COAL) === 'fuel');
+check('lava bucket shift-clicks to fuel', furnaceSlotFor(I.LAVA_BUCKET) === 'fuel');
+check('diamond sword stays put', furnaceSlotFor(I.DIAMOND_SWORD) === null);
 
 // --- pick block ---
 check('pick lit furnace -> furnace', pickItemFor(B.FURNACE_LIT) === B.FURNACE);
