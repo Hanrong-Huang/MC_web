@@ -776,6 +776,7 @@ export class World {
     chunk.heightmap = res.heightmap;
     for (const t of res.torches) chunk.torches.add(t);
     for (const t of res.glowers) chunk.glowers.add(t);
+    chunk.tint = res.tint;
     chunk.ready = true;
     // the worker generator's door/torch/bed states + new village spots
     for (const [k, v] of res.doors) if (!this.doorStates.has(k)) this.doorStates.set(k, v);
@@ -786,6 +787,22 @@ export class World {
       if (!vs.some((o) => o.x === s.x && o.y === s.y && o.z === s.z)) vs.push(s);
     }
     this.installChunk(key, chunk);
+  }
+
+  /** A fresh copy of a chunk's per-column biome tint (256 x rgb, index
+   *  lz*16+lx), cached on the chunk: tints never change, and computing them
+   *  on the main thread costs noise evaluations for every column. */
+  columnTints(cx: number, cz: number): Float32Array {
+    const c = this.getChunk(cx, cz);
+    if (c?.tint) return c.tint.slice();
+    const tint = new Float32Array(256 * 3);
+    const out = { r: 1, g: 1, b: 1 };
+    for (let i = 0; i < 256; i++) {
+      this.generator.grassTint(cx * CX + (i & 15), cz * CZ + (i >> 4), out);
+      tint[i * 3] = out.r; tint[i * 3 + 1] = out.g; tint[i * 3 + 2] = out.b;
+    }
+    if (c) c.tint = tint.slice();
+    return tint;
   }
 
   /** Stop background workers (world is being discarded). */

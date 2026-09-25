@@ -42,6 +42,8 @@ export class Chunk {
   modified = false;
   /** generation finished */
   ready = false;
+  /** cached biome grass/foliage tint per column (256 x rgb), filled lazily */
+  tint: Float32Array | null = null;
 
   constructor(cx: number, cz: number) {
     this.cx = cx;

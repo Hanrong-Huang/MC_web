@@ -1910,15 +1910,7 @@ class Game {
       }
     }
     const bx = cx * CX, bz = cz * CZ;
-    const tint = new Float32Array(256 * 3);
-    const out = { r: 1, g: 1, b: 1 };
-    for (let lz = 0; lz < 16; lz++) {
-      for (let lx = 0; lx < 16; lx++) {
-        this.world.generator.grassTint(bx + lx, bz + lz, out);
-        const i = (lz * 16 + lx) * 3;
-        tint[i] = out.r; tint[i + 1] = out.g; tint[i + 2] = out.b;
-      }
-    }
+    const tint = this.world.columnTints(cx, cz); // cached per chunk (worker-computed)
     transfers.push(tint.buffer);
     // only the state entries within the center chunk (+1 block for door/liquid edges)
     const inRange = (k: string): boolean => {

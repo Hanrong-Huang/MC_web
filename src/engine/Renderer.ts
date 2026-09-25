@@ -579,18 +579,22 @@ export class Renderer {
     this.overlayScene.add(this.heldGroup);
     this.setHeldItem(0);
 
-    // compile both chunk programs now (during the loading screen) instead of
-    // stalling a frame mid-flight the first time water scrolls into view. It
-    // must be this scene: three keys programs on its lights + fog too.
+    // compile both chunk programs and draw them once now (during the loading
+    // screen) instead of stalling a frame mid-flight the first time water
+    // scrolls into view: it must be this scene (three keys programs on its
+    // lights + fog), and a real draw lets the driver finish its pipeline
+    // setup for the blend state too (a 0.4 s hitch under SwiftShader).
     {
       const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0, 0, 0, 0], 3));
+      g.setAttribute('position', new THREE.Float32BufferAttribute([-0.01, -0.01, -1, 0.01, -0.01, -1, 0, 0.01, -1], 3));
       g.setAttribute('alight', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 2));
       g.setAttribute('atint', new THREE.Float32BufferAttribute([1, 1, 1, 1, 1, 1, 1, 1, 1], 3));
       g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 2));
       const warm = [new THREE.Mesh(g, this.solidMat), new THREE.Mesh(g, this.waterMat)];
+      for (const m of warm) m.frustumCulled = false;
       this.scene.add(...warm);
       this.three.compile(this.scene, this.camera);
+      this.three.render(this.scene, this.camera);
       this.scene.remove(...warm);
       g.dispose();
     }
