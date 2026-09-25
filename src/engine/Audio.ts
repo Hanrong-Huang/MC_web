@@ -19,7 +19,8 @@ export type SfxName =
   | 'explode' | 'bow' | 'snap' | 'fuse' | 'arrowHit' | 'whoosh' | 'lowdur'
   | 'thunder' | 'rain' | 'splash' | 'hoof' | 'mount'
   | 'submerge' | 'emerge'
-  | 'chestOpen' | 'chestClose' | 'advancement' | 'equip' | 'lavaPop' | 'bubble';
+  | 'chestOpen' | 'chestClose' | 'advancement' | 'equip' | 'lavaPop' | 'bubble'
+  | 'orbThrow' | 'orbOpen' | 'orbWobble' | 'orbClick' | 'orbRelease' | 'orbRecall';
 
 /** Ambient mood selector for ambientTick. */
 export type AmbientEnv = 'day' | 'night' | 'cave' | 'nether';
@@ -1118,6 +1119,81 @@ export class AudioEngine {
         break;
       }
       case 'rain': break;
+      case 'orbThrow': case 'orbOpen': case 'orbWobble': case 'orbClick': case 'orbRelease': case 'orbRecall':
+        this.catcherSfx(e, name);
+        break;
+    }
+  }
+
+  /** Mob-catcher effects: the throw, the captive being drawn in, the rattling
+   *  wobbles, the latch click + success chime, a release and a recall. */
+  private catcherSfx(e: Ev, name: SfxName): void {
+    switch (name) {
+      case 'orbThrow': {
+        // an overarm swish with a glassy ting as the orb leaves the hand
+        const p = rand(0.92, 1.1);
+        this.nz(e, { dur: 0.26, vol: 0.34, type: 'bandpass', f: 500 * p, f1: 2600 * p, q: 1.3, attack: 0.09 });
+        this.nz(e, { at: 0.1, dur: 0.18, vol: 0.12, type: 'highpass', f: 3500, attack: 0.02 });
+        this.fm(e, { at: 0.1, f: 2349 * p, ratio: 2.76, index: 0.5, dur: 0.35, vol: 0.05 });
+        break;
+      }
+      case 'orbOpen': {
+        // the dome pops, a rising suction pulls the mob in, then the lid claps shut
+        this.knock(e, 0, 1250, 0.2, 0.05);
+        this.nz(e, { at: 0.03, dur: 0.6, vol: 0.4, type: 'bandpass', f: 300, f1: 3200, q: 2.2, attack: 0.35 });
+        this.tn(e, { at: 0.03, dur: 0.58, f: 220, f1: 1320, glide: 0.55, vol: 0.09, type: 'triangle', attack: 0.25 });
+        [1318.5, 1568, 1975.5, 2637].forEach((f, i) =>
+          this.fm(e, { at: 0.12 + i * 0.1, f, ratio: 3.01, index: 0.5, dur: 0.4, vol: 0.035 }));
+        this.knock(e, 0.66, 980, 0.32, 0.06);
+        this.nz(e, { at: 0.66, dur: 0.03, vol: 0.18, type: 'bandpass', f: 4200, q: 1.5 });
+        break;
+      }
+      case 'orbWobble': {
+        // the orb rocks on the ground: a hollow rattle, rim taps on each side
+        const p = rand(0.94, 1.06);
+        this.knock(e, 0, 760 * p, 0.3, 0.07);
+        this.knock(e, 0.11, 640 * p, 0.22, 0.06);
+        this.nz(e, { dur: 0.2, vol: 0.12, color: 'pink', type: 'bandpass', f: 2200, q: 1.2, curve: this.grains(6, 0.8, 1.2, 0.2) });
+        this.tn(e, { at: 0.02, dur: 0.12, f: 1480 * p, f1: 1400 * p, vol: 0.03, type: 'triangle' });
+        break;
+      }
+      case 'orbClick': {
+        // the latch catches (a crisp two-part click), then a bright success chime
+        this.tn(e, { dur: 0.02, f: 3200, f1: 2200, vol: 0.3, type: 'square', lp: 5000, attack: 0.001 });
+        this.knock(e, 0.035, 1100, 0.45, 0.05);
+        this.nz(e, { dur: 0.03, vol: 0.3, type: 'highpass', f: 4000 });
+        [1046.5, 1318.5, 1568, 2093].forEach((f, i) =>
+          this.fm(e, { at: 0.16 + i * 0.07, f, ratio: 2, index: 1, dur: 0.9 - i * 0.1, vol: 0.075, idxDur: 0.2 }));
+        this.fm(e, { at: 0.44, f: 3136, ratio: 3.5, index: 0.4, dur: 0.9, vol: 0.03 });
+        break;
+      }
+      case 'orbRelease': {
+        // the dome snaps open with a flash: a pop, a burst of air, a shimmering sweep up
+        this.knock(e, 0, 1150, 0.35, 0.05);
+        this.nz(e, { dur: 0.4, vol: 0.4, type: 'bandpass', f: 3000, f1: 600, q: 1, attack: 0.005 });
+        this.tn(e, { dur: 0.3, f: 180, f1: 70, vol: 0.2 });
+        this.tn(e, { at: 0.04, dur: 0.5, f: 660, f1: 1760, glide: 0.35, vol: 0.06, type: 'triangle', attack: 0.02 });
+        [1568, 2093, 2637].forEach((f, i) =>
+          this.fm(e, { at: 0.08 + i * 0.06, f, ratio: 3.01, index: 0.6, dur: 0.6, vol: 0.04 }));
+        break;
+      }
+      case 'orbRecall': {
+        // a humming beam draws the pet back: a falling shimmer into a soft clack
+        this.nz(e, { dur: 0.55, vol: 0.3, type: 'bandpass', f: 3400, f1: 400, q: 2, attack: 0.08 });
+        const hum = this.tn(e, { dur: 0.55, f: 880, f1: 330, glide: 0.5, vol: 0.08, type: 'triangle', attack: 0.05 });
+        const ctx = this.ctx!;
+        const l = ctx.createOscillator();
+        l.frequency.value = 18;
+        const lg = ctx.createGain();
+        lg.gain.value = 40;
+        l.connect(lg).connect(hum.detune);
+        e.nodes.push(lg);
+        this.run(e, l, e.t, e.t + 0.58);
+        [2637, 2093, 1568, 1318.5].forEach((f, i) =>
+          this.fm(e, { at: i * 0.08, f, ratio: 3.01, index: 0.5, dur: 0.35, vol: 0.03 }));
+        this.knock(e, 0.52, 940, 0.28, 0.05);
+        break;
+      }
     }
   }
 
