@@ -239,13 +239,13 @@ export class WorldGenerator {
       h += (duneH - h) * dry * (1 - plat);
     }
     // swamp basins sit near sea level with shallow, flat waterlogged ground
-    const swampK = smoothstep(0.38, 0.44, t) * smoothstep(0.68, 0.76, m) * smoothstep(0.35, 0.1, cont) *
+    const swampK = smoothstep(0.37, 0.43, t) * smoothstep(0.68, 0.74, m) * smoothstep(0.35, 0.1, cont) *
       (1 - smoothstep(0.05, 0.2, peak));
     if (swampK > 0) {
-      // hovering right at sea level: roughly half the ground floods into
+      // hovering right at sea level: over half the ground floods into
       // shallow, irregular pools between muddy hummocks
-      const swampH = SEA_LEVEL - 0.2 + hills * 2.2 + detail * 1.4;
-      h += (swampH - h) * swampK * 0.8;
+      const swampH = SEA_LEVEL - 0.4 + hills * 2.4 + detail * 1.6;
+      h += (swampH - h) * swampK;
     }
 
     // lowland lakes: noise basins carved below sea level wherever the ground is low
@@ -283,7 +283,7 @@ export class WorldGenerator {
     if (t < 0.3) return SNOW;
     if (t < 0.43 && m > 0.45) return TAIGA;
     if (t > 0.6 && m < 0.42 && h < SEA_LEVEL + 30) return DESERT;
-    if (t > 0.4 && m > 0.72 && h <= SEA_LEVEL + 6) return SWAMP;
+    if (t > 0.4 && m > 0.71 && h <= SEA_LEVEL + 5) return SWAMP;
     if (t > 0.56 && m > 0.62 && h < SEA_LEVEL + 24) return JUNGLE; // hot + very humid lowlands
     if (m > 0.52) return FOREST;
     return PLAINS;
@@ -386,7 +386,7 @@ export class WorldGenerator {
     }
     this.sTop = B.GRASS; this.sFill = B.DIRT;
     if (b === TAIGA && pat > 0.55 && slope <= 1) this.sTop = B.DIRT; // bare needle-litter patches
-    if (b === SWAMP && h <= SEA_LEVEL) this.sTop = B.DIRT;
+    if (b === SWAMP && h <= SEA_LEVEL && pat < -0.2) this.sTop = B.DIRT; // mud flats at the waterline
     // highland soil is a thin skin: where a step face is exposed, show rock
     // under the turf instead of brown dirt bands
     if (rocky || h > SEA_LEVEL + 24) {
@@ -400,7 +400,7 @@ export class WorldGenerator {
       const h = this.heightAt(wx, wz);
       const biome = this.biomeAt(wx, wz);
       if (h < SEA_LEVEL + 2 || h > 80 || biome === 'snow' || biome === 'forest' || biome === 'swamp' ||
-        biome === 'jungle') return null;
+        biome === 'jungle' || this.inVillage(wx, wz, 3)) return null;
       for (let dz = -1; dz <= 1; dz++) {
         for (let dx = -1; dx <= 1; dx++) {
           const nh = this.heightAt(wx + dx, wz + dz);
@@ -1358,6 +1358,17 @@ export class WorldGenerator {
         }
       }
     }
+    // flower beds flanking the front wall (temperate styles only)
+    if (!st.flat && !smithy) {
+      for (const u of [0, W - 1]) {
+        const wx = toX(u, -1), wz = toZ(u, -1);
+        if (!this.inChunk(chunk, wx, wz) || Math.abs(u - doorU) <= 1) continue;
+        const g = this.heightAt(wx, wz);
+        if (g < y - 1 || g > y) continue;
+        this.put(chunk, wx, g, wz, B.GRASS);
+        this.put(chunk, wx, g + 1, wz, hash2(this.seed ^ 0xf1ea, wx, wz) < 0.5 ? B.POPPY : B.DANDELION);
+      }
+    }
     // door + porch light
     this.putDoor(chunk, toX(doorU, 0), y + 1, toZ(doorU, 0), side, false);
     this.putTorch(chunk, toX(doorU + 1, -1), y + 3, toZ(doorU + 1, -1), side);
@@ -1560,6 +1571,14 @@ export class WorldGenerator {
       if ((b === PLAINS || b === FOREST || b === SWAMP || b === JUNGLE) && oy >= SEA_LEVEL && oy <= SEA_LEVEL + 12 &&
         this.slopeAt(ox + 3, oz + 3, oy) <= 1 && !this.inVillage(ox + 3, oz + 3, 8)) {
         this.placePond(chunk, ox, oy, oz);
+      }
+    }
+    // ruined nether portal: a broken obsidian frame in a splash of netherrack
+    if (roll(0x9071) < 0.004) {
+      const ox = at(0x9072, 8, scx * CX + 4), oz = at(0x9073, 8, scz * CZ + 4);
+      const [lo, hi] = this.groundRange(ox - 1, oz - 1, 6, 3);
+      if (lo > SEA_LEVEL && hi - lo <= 3 && hi <= 110 && !this.inVillage(ox, oz, 10)) {
+        this.placeRuinedPortal(chunk, ox, lo, oz, roll(0x9074) < 0.5);
       }
     }
     // boulders and stone outcrops make taiga, plains and mountain terrain easier to read
@@ -1981,6 +2000,57 @@ export class WorldGenerator {
       const cx = ox + (W >> 1), cz = oz + (D >> 1);
       const gy = this.heightAt(cx, cz);
       if (gy > SEA_LEVEL && Math.abs(gy - oy) <= 3) this.put(chunk, cx, gy + 1, cz, B.CHEST_LOOT);
+    }
+  }
+
+  /** Ruined nether portal: a 4x6 obsidian frame with blocks knocked out (some
+   *  lying in the grass nearby), scorched netherrack and magma around its foot,
+   *  and a loot chest. Enough of the frame survives to be worth repairing. */
+  private placeRuinedPortal(chunk: Chunk, ox: number, g: number, oz: number, alongX: boolean): void {
+    const S = this.seed ^ 0x9075;
+    const at = (a: number, dy: number, id: number): void =>
+      this.put(chunk, alongX ? ox + a : ox, g + dy, alongX ? oz : oz + a, id);
+    // scorched ground
+    for (let dx = -4; dx <= 5; dx++) {
+      for (let dz = -4; dz <= 4; dz++) {
+        const wx = ox + (alongX ? dx : dz), wz = oz + (alongX ? dz : dx);
+        const d = Math.hypot(dx - 1.5, dz);
+        const r = hash2(S, wx, wz);
+        if (d > 4.3 || r > 1.15 - d * 0.2) continue;
+        const gy = this.heightAt(wx, wz);
+        if (Math.abs(gy - g) > 2 || gy <= SEA_LEVEL) continue;
+        this.put(chunk, wx, gy, wz, r < 0.1 ? B.MAGMA : r < 0.16 ? B.GRAVEL : B.NETHERRACK);
+        this.clearCol(chunk, wx, wz, gy + 1, gy + 2);
+      }
+    }
+    for (let a = -1; a <= 4; a++) this.underpin(chunk, alongX ? ox + a : ox, alongX ? oz : oz + a, g, B.NETHERRACK);
+    // frame
+    for (let a = 0; a < 4; a++) {
+      for (let dy = 1; dy <= 6; dy++) {
+        const edge = a === 0 || a === 3 || dy === 1 || dy === 6;
+        if (!edge) { at(a, dy, B.AIR); continue; }
+        const key = hash3(S ^ 1, ox + a, g + dy, oz);
+        // bottom corners stay; higher blocks are likelier to have fallen
+        const broken = !(dy === 1 && (a === 0 || a === 3)) && key < 0.12 + dy * 0.06;
+        at(a, dy, broken ? B.AIR : B.OBSIDIAN);
+        if (broken && key < 0.1 + dy * 0.03) {
+          // the fallen block lies in the grass a few steps out
+          const fa = a + Math.floor(hash3(S ^ 2, ox + a, dy, oz) * 5) - 2;
+          const fs = (hash3(S ^ 3, ox + a, dy, oz) < 0.5 ? -1 : 1) * (2 + Math.floor(hash3(S ^ 4, ox + a, dy, oz) * 2));
+          const wx = alongX ? ox + fa : ox + fs, wz = alongX ? oz + fs : oz + fa;
+          const gy = this.heightAt(wx, wz);
+          if (Math.abs(gy - g) <= 2 && gy > SEA_LEVEL) this.put(chunk, wx, gy + 1, wz, B.OBSIDIAN);
+        }
+      }
+    }
+    // loot beside the frame, sometimes a gold block half-buried in the rubble
+    const cx = alongX ? ox + 5 : ox + 1, cz = alongX ? oz + 1 : oz + 5;
+    const cy = this.heightAt(cx, cz);
+    if (Math.abs(cy - g) <= 2) this.put(chunk, cx, cy + 1, cz, B.CHEST_LOOT);
+    if (hash2(S ^ 5, ox, oz) < 0.3) {
+      const bx = alongX ? ox - 2 : ox - 1, bz = alongX ? oz - 1 : oz - 2;
+      const by = this.heightAt(bx, bz);
+      if (Math.abs(by - g) <= 2) this.put(chunk, bx, by, bz, B.GOLD_BLOCK);
     }
   }
 
