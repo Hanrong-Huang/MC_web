@@ -57,7 +57,7 @@ const SFX_GAIN: Partial<Record<SfxName, number>> = {
 const MAT_GAIN: Record<Mat, [number, number]> = {
   stone: [0.9, 1.7], wood: [1.25, 1.6], grass: [0.56, 0.9], plant: [1, 1], gravel: [1, 1],
   sand: [0.4, 0.63], soul: [0.45, 0.63], snow: [1.4, 1.25], wool: [1, 1.4], metal: [0.8, 1.4],
-  glass: [0.63, 1.7], nether: [0.8, 1], amethyst: [0.56, 1.25], none: [0, 0],
+  glass: [0.5, 1.7], nether: [0.8, 1], amethyst: [0.56, 1.25], none: [0, 0],
 };
 
 const clamp = (v: number, a: number, b: number): number => Math.max(a, Math.min(b, v));
@@ -135,6 +135,7 @@ export class AudioEngine {
   private netherBed: { src: AudioBufferSourceNode; g: GainNode; nodes: AudioNode[] } | null = null;
   private unlocked = false;
   private resuming = false;
+  private level = 1;           // loudness of the effect being built (scales ducking)
 
   constructor() {
     try {
@@ -860,7 +861,8 @@ export class AudioEngine {
   // one-shot effects
   // ==========================================================================
 
-  play(name: SfxName): void {
+  /** Play a named effect; vol (0..1) scales it, e.g. for distance. */
+  play(name: SfxName, vol = 1): void {
     this.ensure();
     if (!this.ctx) return;
     const gaps: Partial<Record<SfxName, number>> = {
@@ -870,8 +872,9 @@ export class AudioEngine {
     const g = gaps[name];
     if (g !== undefined && !this.gate(name, g)) return;
     if (name === 'rain') { this.setRain('rain', 0.5); return; }
-    const e = this.open('sfx', SFX_GAIN[name] ?? 1);
+    const e = this.open('sfx', (SFX_GAIN[name] ?? 1) * clamp(vol, 0, 1.5));
     if (!e) return;
+    this.level = clamp(vol, 0, 1);
     this.buildSfx(e, name);
     this.seal(e);
   }
@@ -1014,7 +1017,7 @@ export class AudioEngine {
         this.tn(e, { dur: 0.9, f: 70, f1: 26, vol: 0.85 });
         this.nz(e, { at: 0.05, dur: 2.6, vol: 0.55, color: 'brown', type: 'lowpass', f: 320, f1: 90, curve: this.grains(10, 0.3, 1.3, 0.5) });
         this.nz(e, { at: 0.1, dur: 1.4, vol: 0.18, color: 'pink', type: 'bandpass', f: 1600, q: 0.8, curve: this.grains(26, 0.95, 1.4, 0.05) });
-        this.duck(0.7, 0.6, 2.5);
+        this.duck(0.7 * this.level, 0.6, 2.5);
         break;
       }
       case 'bow': {
@@ -1067,7 +1070,7 @@ export class AudioEngine {
         this.nz(e, { dur: 0.25, vol: 0.6, type: 'highpass', f: 900, curve: this.grains(8, 0.95, 2) });
         this.nz(e, { at: 0.05, dur: rand(4.5, 6.5), vol: 0.9, color: 'brown', type: 'lowpass', f: 420, f1: 120, curve: this.grains(7, 0.05, 1.1, 0.35) });
         this.tn(e, { at: 0.05, dur: 2.2, f: 55, f1: 30, vol: 0.4, attack: 0.08 });
-        this.duck(0.55, 1.5, 3);
+        this.duck(0.55 * this.level, 1.5, 3);
         break;
       }
       case 'splash': {
@@ -1212,7 +1215,7 @@ export class AudioEngine {
     }
     this.rainState = kind;
     const r = this.rain;
-    this.glide(r.g.gain, (kind === 'thunder' ? 0.5 : 0.36) * (0.35 + 0.65 * k), 1.2);
+    this.glide(r.g.gain, (kind === 'thunder' ? 0.25 : 0.18) * (0.35 + 0.65 * k), 1.2);
     this.glide(r.roar.gain, kind === 'thunder' ? 0.25 * k : 0.1 * k, 1.2);
     this.glide(r.lp.frequency, kind === 'thunder' ? 7500 : 5200 + 1800 * k, 1.2);
   }
@@ -1243,7 +1246,7 @@ export class AudioEngine {
       src.connect(lp).connect(g).connect(this.amb);
       src.onended = () => { src.disconnect(); lp.disconnect(); g.disconnect(); };
       src.start();
-      this.glide(g.gain, 0.22, 0.5);
+      this.glide(g.gain, 0.12, 0.5);
       this.uw = { src, g, nodes: [lp] };
       this.bubbleT = 0.3;
     } else if (!on && this.uw) {
@@ -1442,7 +1445,7 @@ export class AudioEngine {
       case 'cat': {
         if (!hurt && !death && chance(0.25)) {
           // purr: a low, amplitude-flickering rumble
-          this.nz(e, { dur: 1.2, vol: 0.35, color: 'brown', type: 'lowpass', f: 500, curve: this.grains(30, 0.3, 1, 0.3) });
+          this.nz(e, { dur: 1.2, vol: 0.18, color: 'brown', type: 'lowpass', f: 320, curve: this.grains(30, 0.3, 1, 0.3) });
         } else if (hurt) {
           this.vox(e, { dur: 0.28, vol: 0.26, pitch: [700 * p, 900 * p, 600 * p], formants: [[[900, 1200], 4, 1], [[2600], 6, 0.5]], rough: [40, 40], breath: 0.2 });
         } else {
@@ -1618,8 +1621,8 @@ export class AudioEngine {
     const e = this.open('music', 1, { at, to, pan });
     if (!e) return;
     const dur = Math.min(clamp(5 * Math.pow(220 / f, 0.4), 1, 6), hold + 0.6);
-    this.fm(e, { f, ratio: 1, index: 0.9 + v, dur, vol: 0.1 * v, idxDur: 0.9 });
-    this.fm(e, { f: f * 2, ratio: 7, index: 0.3, dur: Math.min(0.5, dur), vol: 0.018 * v, idxDur: 0.2 });
+    this.fm(e, { f, ratio: 1, index: 0.9 + v, dur, vol: 0.2 * v, idxDur: 0.9 });
+    this.fm(e, { f: f * 2, ratio: 7, index: 0.3, dur: Math.min(0.5, dur), vol: 0.036 * v, idxDur: 0.2 });
   }
 
   /** Bell / celesta: inharmonic FM with a long shimmering decay. */
@@ -1627,8 +1630,8 @@ export class AudioEngine {
     const e = this.open('music', 1, { at, to, pan });
     if (!e) return;
     const dur = ratio === 4 ? clamp(hold, 1.2, 2.2) : clamp(hold + 1.5, 2, 5);
-    this.fm(e, { f, ratio, index: ratio === 4 ? 0.8 : 1.4, dur, vol: 0.075 * v, idxDur: 0.6 });
-    this.tn(e, { at: 0, dur: dur * 0.7, f: f * 2.01, vol: 0.012 * v });
+    this.fm(e, { f, ratio, index: ratio === 4 ? 0.8 : 1.4, dur, vol: 0.19 * v, idxDur: 0.6 });
+    this.tn(e, { at: 0, dur: dur * 0.7, f: f * 2.01, vol: 0.03 * v });
   }
 
   /** Warm pad: two detuned soft-saw voices spread left/right through a
@@ -1804,13 +1807,13 @@ export class AudioEngine {
     const lfo = ctx.createOscillator();
     lfo.frequency.value = 0.09;
     const lg = ctx.createGain();
-    lg.gain.value = 0.1;
+    lg.gain.value = 0.04;
     lfo.connect(lg).connect(g.gain);
     src.connect(lp).connect(g).connect(this.amb);
     src.onended = () => { try { lfo.stop(); } catch { /* already */ } for (const n of [src, lp, g, lfo, lg]) n.disconnect(); };
     src.start(0, Math.random());
     lfo.start();
-    this.glide(g.gain, 0.3, 3);
+    this.glide(g.gain, 0.12, 3);
     this.netherBed = { src, g, nodes: [lp, lfo, lg] };
   }
 
@@ -1924,7 +1927,7 @@ export class AudioEngine {
     const groups = 3 + ((Math.random() * 4) | 0);
     const gap = rand(0.35, 0.55);
     for (let g = 0; g < groups; g++) {
-      for (let k = 0; k < 3; k++) this.tn(e, { at: g * gap + k * 0.035, dur: 0.028, f, vol: 0.018, attack: 0.004 });
+      for (let k = 0; k < 3; k++) this.tn(e, { at: g * gap + k * 0.035, dur: 0.028, f, vol: 0.05, attack: 0.004 });
     }
     this.seal(e);
   }
@@ -1934,7 +1937,7 @@ export class AudioEngine {
     const e = this.open('amb', 1, { pan: rand(-0.8, 0.8) });
     if (!e) return;
     const dur = rand(0.8, 1.6);
-    this.vox(e, { dur, vol: 0.012, pitch: [rand(180, 240), rand(200, 260), rand(170, 230)], type: 'sawtooth', attack: dur * 0.3, release: dur * 0.4, formants: [[[2400], 3, 1], [[4200], 4, 0.5]], vib: [rand(3, 6), 60] });
+    this.vox(e, { dur, vol: 0.035, pitch: [rand(180, 240), rand(200, 260), rand(170, 230)], type: 'sawtooth', attack: dur * 0.3, release: dur * 0.4, formants: [[[2400], 3, 1], [[4200], 4, 0.5]], vib: [rand(3, 6), 60] });
     this.seal(e);
   }
 
@@ -1954,7 +1957,7 @@ export class AudioEngine {
     if (!e) return;
     const f = rand(95, 140);
     for (const at of [0, 0.2]) {
-      this.vox(e, { at, dur: 0.14, vol: 0.08, pitch: [f, f * 0.85], attack: 0.01, formants: [[[600], 4, 1], [[1400], 5, 0.4]], rough: [25, 120], direct: 0.4 });
+      this.vox(e, { at, dur: 0.14, vol: 0.16, pitch: [f, f * 0.85], attack: 0.01, formants: [[[600], 4, 1], [[1400], 5, 0.4]], rough: [25, 120], direct: 0.4 });
     }
     this.seal(e);
   }
@@ -1969,7 +1972,7 @@ export class AudioEngine {
       // a low, slowly-wavering moan — the classic cave unease
       const dur = rand(2.6, 4.6);
       const b = rand(58, 100);
-      this.vox(e, { dur, vol: 0.12, pitch: [b, b * 1.07, b * 0.94], type: 'sawtooth', attack: dur * 0.4, release: dur * 0.5, formants: [[[380, 300], 3, 1], [[700], 4, 0.3]], vib: [0.7, 30], breath: 0.1 });
+      this.vox(e, { dur, vol: 0.3, pitch: [b, b * 1.07, b * 0.94], type: 'sawtooth', attack: dur * 0.4, release: dur * 0.5, formants: [[[380, 300], 3, 1], [[700], 4, 0.3]], vib: [0.7, 30], breath: 0.1 });
     } else if (r < 0.45) {
       // a reversed swell that stops dead
       const dur = rand(1.5, 2.6);
@@ -1978,16 +1981,16 @@ export class AudioEngine {
     } else if (r < 0.7) {
       // a lone drip, echoing into the reverb
       const f = rand(1400, 2200);
-      this.tn(e, { dur: 0.08, f: f * 0.7, f1: f, glide: 0.02, vol: 0.06 });
-      this.tn(e, { at: rand(0.3, 0.9), dur: 0.07, f: f * 0.8, f1: f * 1.1, glide: 0.02, vol: 0.03 });
+      this.tn(e, { dur: 0.08, f: f * 0.7, f1: f, glide: 0.02, vol: 0.16 });
+      this.tn(e, { at: rand(0.3, 0.9), dur: 0.07, f: f * 0.8, f1: f * 1.1, glide: 0.02, vol: 0.08 });
     } else if (r < 0.87) {
       // distant rockfall rumble with a trickle of pebbles
-      this.nz(e, { dur: rand(1.4, 2.4), vol: 0.35, color: 'brown', type: 'lowpass', f: 200, f1: 60, curve: this.grains(8, 0.3, 1.2, 0.4) });
+      this.nz(e, { dur: rand(1.4, 2.4), vol: 0.22, color: 'brown', type: 'lowpass', f: 200, f1: 60, curve: this.grains(8, 0.3, 1.2, 0.4) });
       this.nz(e, { at: 0.3, dur: 1, vol: 0.06, color: 'pink', type: 'bandpass', f: 1500, curve: this.grains(10, 0.95) });
     } else {
       // footsteps somewhere in the dark
       for (let i = 0; i < 3; i++) {
-        this.nz(e, { at: i * rand(0.45, 0.55), dur: 0.14, vol: 0.12, color: 'pink', type: 'bandpass', f: 1100, q: 0.8, curve: this.grains(6, 0.9, 1.3) });
+        this.nz(e, { at: i * rand(0.45, 0.55), dur: 0.14, vol: 0.4, color: 'pink', type: 'bandpass', f: 1100, q: 0.8, curve: this.grains(6, 0.9, 1.3) });
       }
     }
     this.seal(e);
@@ -2009,8 +2012,8 @@ export class AudioEngine {
       const e = this.open('amb', 1, { pan: rand(-0.6, 0.6) });
       if (!e) return;
       const dur = rand(2.5, 4);
-      this.nz(e, { dur, vol: 0.3, color: 'brown', type: 'lowpass', f: 260, f1: 90, attack: dur * 0.35 });
-      this.tn(e, { dur, f: rand(40, 55), f1: rand(32, 40), vol: 0.1, attack: dur * 0.3 });
+      this.nz(e, { dur, vol: 0.2, color: 'brown', type: 'lowpass', f: 260, f1: 90, attack: dur * 0.35 });
+      this.tn(e, { dur, f: rand(40, 55), f1: rand(32, 40), vol: 0.07, attack: dur * 0.3 });
       this.seal(e);
     } else {
       this.mobSound('emberghast', rand(0.12, 0.25), 'idle', rand(-0.8, 0.8));

@@ -858,7 +858,7 @@ class Game {
 
   /** Lightning struck at (x,y,z): ignite TNT, scorch mobs, flash + thunder. */
   private onLightning(x: number, y: number, z: number): void {
-    this.audio.play('thunder');
+    this.audio.play('thunder', Math.max(0.35, 1 - Math.hypot(x - this.player.pos.x, z - this.player.pos.z) / 160));
     this.adv.unlock('thunder');
     // ignite exposed TNT
     for (let dy = -1; dy <= 1; dy++) {

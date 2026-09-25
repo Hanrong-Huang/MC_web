@@ -800,7 +800,7 @@ export class EntityManager {
   // --- explosions -----------------------------------------------------------------
 
   explode(x: number, y: number, z: number, power: number, cause = 'Blown up by TNT'): void {
-    this.audio.play('explode');
+    this.audio.play('explode', this.player ? Math.max(0.2, 1 - Math.hypot(this.player.pos.x - x, this.player.pos.y - y, this.player.pos.z - z) / 60) : 1);
     const r = Math.ceil(power);
     const cx = Math.floor(x), cy = Math.floor(y), cz = Math.floor(z);
     for (let dy = -r; dy <= r; dy++) {
