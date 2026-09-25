@@ -800,7 +800,7 @@ export class EntityManager {
   // --- explosions -----------------------------------------------------------------
 
   explode(x: number, y: number, z: number, power: number, cause = 'Blown up by TNT'): void {
-    this.audio.play('explode');
+    this.audio.play('explode', this.player ? Math.max(0.2, 1 - Math.hypot(this.player.pos.x - x, this.player.pos.y - y, this.player.pos.z - z) / 60) : 1);
     const r = Math.ceil(power);
     const cx = Math.floor(x), cy = Math.floor(y), cz = Math.floor(z);
     for (let dy = -r; dy <= r; dy++) {
@@ -1675,7 +1675,7 @@ export class EntityManager {
 
       // idle voices, attenuated by distance
       if (d < 24 && Math.random() < (e.state === 'chase' ? 0.008 : 0.0035)) {
-        this.audio.mobSound(e.kind, (1 - d / 24) * 0.9);
+        this.audio.mobSound(e.kind, (1 - d / 24) * 0.9, 'idle', ((e.pos.x - p.pos.x) * Math.cos(p.yaw) - (e.pos.z - p.pos.z) * Math.sin(p.yaw)) / Math.max(1, d) * 0.7);
       }
 
       if (stats.hostile && e.state !== 'fuse' && !this.isPet(e)) {
@@ -1912,6 +1912,7 @@ export class EntityManager {
     e.vel.z += (kbZ / len) * 7;
     e.vel.y = Math.max(e.vel.y, 5);
     this.audio.play('hit');
+    this.audio.mobSound(e.kind as string, 0.85, e.hp <= 0 ? 'death' : 'hurt');
     if (!MOB_STATS[e.kind as MobKind].hostile) {
       e.state = 'flee';
       e.stateTime = 5;
