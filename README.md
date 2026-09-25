@@ -1,210 +1,56 @@
 # Voxelcraft
 
-A Minecraft-style voxel sandbox written from scratch in **TypeScript + Three.js**
-(Three.js is used only as the WebGL wrapper — chunking, meshing, lighting,
-physics, AI, crafting, and persistence are all custom). No game engines, no
-voxel/physics libraries, no copied assets: every texture is generated as
-16x16 pixel art in code.
+A Minecraft-style sandbox that runs in your browser. Explore, mine, craft, build and survive in an endless procedurally generated world, with nothing to install.
 
-## Run
+### ▶ [Play now: hanrong-huang.github.io/MC_web](https://hanrong-huang.github.io/MC_web/)
+
+Works in any modern desktop browser. Phones and tablets get touch controls. Every texture, mob, sound and music track is generated in code, with no downloaded assets.
+
+## Getting started
+
+1. Open the link above and create a world. Pick **Survival** for the full challenge or **Creative** to build freely.
+2. Click the game to capture the mouse. Press **Esc** at any time to pause.
+3. On your first day, punch a tree for logs, craft planks and a crafting table, make a wooden pickaxe, and build a shelter before night falls.
+
+Your worlds are saved in your browser automatically (every 60 s, and when you choose **Save & Quit**).
+
+## Controls
+
+| Key | Action |
+|---|---|
+| **WASD** + mouse | Move and look |
+| **Space** | Jump (swim up / fly up) |
+| **Shift** or double-tap **W** | Sprint |
+| **Ctrl** | Sneak (you won't fall off edges) |
+| **Left click** | Mine blocks / attack |
+| **Right click** | Place blocks · use items · open chests and furnaces · eat · draw a bow · block with a shield |
+| **Middle click** | Pick the block you're looking at |
+| **E** | Inventory and crafting |
+| **1–9** / scroll | Choose hotbar slot |
+| **Q** / **Ctrl+Q** | Drop one item / the whole stack |
+| **F** | Fly (Creative) |
+| **F3** | Debug info |
+| **Esc** | Pause, options and save |
+
+## What you can do
+
+- **Explore** varied biomes, including plains, forests, deserts, snowy mountains, jungles, swamps and oceans. You'll also find caves, rivers, villages, temples, ruins, mineshafts and shipwrecks.
+- **Survive** your health, hunger and the night. Zombies, skeletons, creepers and spiders come out after dark.
+- **Craft** tools from wood up to diamond, plus armor, food, a bow and arrows, a shield, beds, chests, furnaces and more. The recipe book shows what you can make.
+- **Farm and tame**: grow wheat, carrots and potatoes; breed animals; tame wolves and cats; ride horses; shear sheep.
+- **Catch mobs** with the Mob Catcher, a thrown orb that traps hostile mobs so you can release them as loyal pets that fight beside you.
+- **Build** with a huge block palette, doors, ladders, torches, redstone levers and lamps, pistons and TNT.
+- **Swim** in living water: it streams downhill and down waterfalls, reflects the sky and clouds, foams at the shore and glitters in the sun. Dive in for a splash, caustic light and muffled sound under the surface.
+- **Venture to the Nether** through an obsidian portal.
+- **Relax** to generative music and ambient sound that change with the biome, the weather and the time of day.
+
+## Run it locally
 
 ```bash
 npm install
 npm run dev        # open the printed localhost URL
 ```
 
-`npm run build` type-checks and produces a static bundle in `dist/`.
+`npm run build` type-checks the project and outputs a static site to `dist/`. Every push to `main` deploys it to GitHub Pages.
 
-## Controls
-
-| Input | Action |
-|---|---|
-| WASD / mouse | Move / look (click the canvas to capture the mouse) |
-| Double-W or Shift | Sprint (5.612 m/s, widened FOV) |
-| Ctrl | Sneak (1.295 m/s, can't fall off edges) — descend while flying |
-| Space | Jump (1.25 blocks) — ascend while flying |
-| F, or double-Space in creative | Toggle flight (2.5x speed) |
-| Left click | Break blocks (hold; per-block times + crack overlay) / attack mobs |
-| Right click | Place block · open table/furnace/chest · use bed · ignite TNT · hold to eat or draw the bow · hold to raise a shield or look through a spyglass |
-| Middle click | Pick block (selects it in the hotbar; creative conjures a stack) |
-| Q / Ctrl+Q | Toss one held item / the whole stack |
-| E | Inventory (2x2 crafting) / creative block panel |
-| 1–9, scroll | Hotbar selection |
-| F3 | Debug overlay (FPS, XYZ, facing, chunk, biome) |
-| Esc | Pause (Save Game, mode toggle, render distance, Save & Quit) |
-
-## Features
-
-- **World**: 16x16x128 chunks streamed to render distance 8 (configurable 6–12),
-  multi-octave simplex terrain with temperature/humidity biomes (plains, forest,
-  desert, snow mountains), **meandering rivers** that carve through hills,
-  **3D-noise cave systems** (spaghetti tunnels + caverns), sea level, beaches,
-  and furnished huts (crafting table, furnace, loot chest, torch).
-- **Flora**: three tree species — oak, **birch** (white scarred bark), and
-  conical **spruce** taiga trees in the snow biome — plus tall grass, poppies,
-  dandelions, **cactus** (it hurts), and sugar cane along river banks; plants
-  render as crossed billboards, pop off when unsupported, and cane/cactus
-  stack and can be farmed.
-- **Dungeons**: buried cobblestone rooms (often breached by caves) holding
-  **loot chests** — generated chests roll weighted treasure (ingots, diamonds,
-  food, arrows, a bow if you're lucky) the first time they're opened; hut
-  chests do the same.
-- **Ores & progression**: coal everywhere, iron below y=54, gold below y=30,
-  diamond below y=14, rare **amethyst** (gold-tier rarity, stone pick or
-  better), plus gravel pockets (flint). Tool tiers
-  wood → stone → iron → diamond with real Minecraft-style gates: stone needs a
-  wooden pick, iron needs stone, gold/diamond need iron. Wrong tier = slow
-  break, no drops. Tools have **durability** (bar shown on the icon) and snap
-  when worn out.
-- **Lighting**: per-face shading + per-vertex ambient occlusion + heightmap
-  skylight, and **BFS flood-fill torch light** carried in a second vertex
-  channel — a custom shader keeps torch pools warm and bright at night while
-  skylight dims, with a faint moonlight floor. Torches pop off if their
-  support is mined; cave mobs won't spawn near them.
-- **Mobs**: pigs, chickens, sheep, cows (wander, flee, drop porkchops /
-  feathers / wool+mutton / beef); zombies and **skeleton archers** (arrows with
-  real ballistics and line-of-sight checks) that burn off at dawn when
-  sky-exposed; **spiders** (fast, neutral in daylight); **creepers** (hiss,
-  flash, explode — craters included). Hostiles also spawn in dark caves at any
-  hour. All mobs are hierarchical box models with sine-wave walk cycles.
-- **Combat**: 1.9-style melee — each swing recharges over the weapon's attack
-  speed (fists fast, swords brisk, axes slow but heavy; a meter under the
-  crosshair shows it) and deals damage scaled by the charge. Charged hits
-  while falling **crit**, a charged sword **sweeps** mobs crowding your
-  target, a sprinting hit knocks back harder, and mobs have vanilla's brief
-  hurt immunity so click-spam doesn't pay. A **shield** (hold right-click)
-  turns aside melee from the front, arrows, fireballs and blasts. The
-  **bow** — hold right-click to draw (FOV zoom), release to loose an arrow;
-  arrows can be picked back up.
-- **Gear & items**: **golden** tools (mine faster than diamond, harvest like
-  wood, wear out fast) and armor; **shears** (shear sheep — the fleece grows
-  back — and clip leaves/grass whole); a **spyglass** (hold to zoom);
-  **milk** a cow with a bucket and drink it to clear status effects;
-  **golden apples** (Regeneration II + Absorption) and the enchanted kind
-  (plus Resistance and Fire Resistance). Active effects show as badges with
-  countdowns and Absorption as golden hearts.
-- **Fire**: flint & steel (or lightning) lights fires that creep across
-  leaves, wool and wood, eat them, set off TNT, burn out after a while
-  (forever on netherrack) and are doused by rain. Standing in fire or lava
-  sets you alight until water puts you out.
-- **Explosives**: creepers and craftable **TNT** (right-click to ignite,
-  chain reactions, container contents spill, sand/gravel above craters fall).
-- **Physics extras**: falling **sand and gravel** (turn into falling-block
-  entities and chain upward), fall damage, swimming, block-break particles.
-- **Crafting**: 2x2 personal grid and 3x3 table — planks, sticks, torches,
-  table, furnace, chest, bed, TNT, bow, arrows, sandstone, stone bricks, wool,
-  resource blocks (iron/gold/diamond, both directions), and 16 tools across
-  4 tiers. Furnace smelts ores → ingots, sand → glass, cobble → stone,
-  any log → charcoal, and cooks 4 meats; a lava bucket burns for 1000 s and
-  hands back the bucket. Shift-click routes smeltables/fuel into the furnace
-  and armor onto your body.
-- **Pets**: craft a **mob catcher** from 8 amethyst (hollow frame — amethyst ore
-  is about as common as iron below y=62) and **throw it** with right-click. Any
-  hostile it brushes past (zombie, skeleton, spider, creeper, cinderling,
-  ashstalker, phantom, emberghast) is captured, with a generous ~0.85-block
-  catch radius; peaceful animals bounce it off, and a miss simply lands on the
-  ground to be picked back up. The filled catcher shows the trapped mob peering
-  through the glass. Right-click air to release it as a loyal **pet** that
-  follows you (wolf-style, teleporting if left behind), locks onto whatever you
-  attack or whatever hurts you, fights it — wild mobs fight back, so pets take
-  real damage and heal back up between scraps — and can be told to stay with a
-  bare-handed right-click. Captured flyers escort you overhead; a pet emberghast
-  lobs fireballs at your target. A HUD strip lists each pet with its health and
-  whether it is staying or fighting, and pets are saved with the world. Aim an
-  empty catcher at your own pet and right-click to recall it.
-- **Storage & rest**: **chests** (27 slots, contents persist, spill when broken)
-  and **beds**. A bed sets your respawn point; sleeping follows the vanilla
-  rules — only from dusk until just before dawn (or any time in a thunderstorm),
-  never with a monster within 8 blocks or a block on top of the bed, and a bed
-  used outside the Overworld **explodes**. While asleep the view lies on the
-  pillow with a *Zzz…* banner and a **Leave Bed** button (Esc also works); the
-  night skips to dawn and clears the weather.
-- **Survival**: 10 hearts + 10 hunger shanks, vanilla **saturation** (a
-  hidden buffer each food refills by its own amount; a full, well-fed bar
-  heals quickly), exhaustion, regen, starvation,
-  **drowning with an air-bubble meter**, cactus contact damage, 7 foods
-  (incl. apples from oak leaves and rotten flesh from zombies), death/respawn
-  at your bed.
-- **Feel**: view bobbing while walking, item-name popups on hotbar switch,
-  slot tooltips, and synthesized **mob voices** (oinks, baas, moos, clucks,
-  groans, hisses, and skeleton rattles) attenuated by distance.
-- **Farming & growth**: break tall grass for seeds, craft a **hoe**, till
-  grass/dirt into farmland, plant and harvest **wheat** (3 visual growth
-  stages), bake **bread**. Leaves drop **saplings** that grow into
-  biome-appropriate trees; grass spreads onto exposed dirt and dies under
-  opaque blocks — all driven by MC-style surface **random ticks**.
-- **Music**: a generative Web Audio composer plays calm piano-and-pad pieces
-  every few minutes — major-pentatonic by day, minor at night — entirely
-  synthesized, no audio files. Music and sounds toggle from the pause menu
-  (persisted).
-- **Effects**: continuous chip particles at the mined face, bigger break
-  bursts, landing dust + thud on hard falls, white poofs on mob deaths,
-  TNT chain flashes.
-- **Extra visuals**: per-vertex **biome tinting** for grass, foliage, and
-  tall grass (dry plains go yellow-green, humid forests deep green, cold
-  biomes pale).
-- **Water** (`WATER_FRAG` in `Renderer.ts`, fed per-vertex flow/depth/shore
-  data by the mesher): still water shimmers with two drifting texture layers,
-  flowing water streams downhill along its surface slope and down waterfalls,
-  depth-graded colour (clear turquoise shallows over the seabed, deep blue
-  in the middle), Fresnel reflection of the sky *and the real cloud layer*,
-  sun glints / moon path, lapping shoreline foam and whitewater where falls
-  plunge in, caustic sparkle in the shallows. Under water: caustics on the
-  terrain, a screen wobble, blue fog and a Snell's-window surface overhead.
-  `WaterFX.ts` adds splash droplets, ripples and bubbles (one instanced draw),
-  and water sounds scale with impact speed: splash on entry, swim strokes,
-  a dripping exit, and a babbling/roaring bed near flowing water and falls.
-  Mobs and items that fall in splash too.
-- **Creative**: infinite blocks, instant breaking, flight, full item panel.
-- **Persistence**: RLE-compressed chunk diffs + player/inventory/durability/
-  chest/furnace/spawn-point/time state in IndexedDB across three save slots.
-  **Save Game** from the pause menu, **autosave every 60 s**, and
-  Save & Quit — pick the world from the title screen to resume exactly where
-  you left off.
-- **Resource packs**: load an *unzipped* pack folder using the standard
-  `assets/minecraft/textures/{block,item}/*.png` layout to swap in real
-  textures (tinting handled).
-- **Audio**: Web Audio synthesis for digging/steps per block class, combat,
-  bow shots, explosions, fuses, tool breaks, eating, pickups, ambient pads.
-
-## Architecture
-
-```
-src/main.ts                  app + game loop (uniform 20 Hz tick), day cycle, saves, autosave
-src/engine/Noise.ts          seeded PRNG, hashing, 2D + 3D simplex, fBm
-src/engine/Blocks.ts         block/item registry: hardness, tool tiers, durability, drops, food, fuel
-src/engine/Textures.ts       procedural 16x16 atlas, item sprites, icons, resource-pack loader
-src/engine/Chunk.ts          16x16x128 Uint8Array chunk + heightmap + torch index
-src/engine/WorldGenerator.ts biomes, terrain, caves, ores, trees, structures
-src/engine/World.ts          chunk streaming, block edits, DDA raycast, block entities
-src/engine/Mesher.ts         face culling, shading, AO, skylight + torch flood-fill, torch models
-src/engine/Renderer.ts       custom chunk shader (2-channel light), sky/sun/moon/clouds/fog, held item
-src/engine/Physics.ts        swept AABB collision, sneak edge guard, ray-AABB
-src/engine/Player.ts         movement, mining, bow, eating, durability, health/hunger, modes
-src/engine/Input.ts          pointer lock, keys, double-tap, edge-queued clicks
-src/engine/Inventory.ts      slots, shaped recipes, furnace + chest state
-src/engine/EntityManager.ts  drops, 8 mobs, arrows, TNT, falling blocks, particles, explosions
-src/engine/Persistence.ts    RLE codec + IndexedDB save slots
-src/engine/Audio.ts          Web Audio synthesis
-src/ui/HUD.ts                menus, hotbar, hearts, durability bars, container screens
-```
-
-## Tests
-
-- `node smoke-test.mjs` — boots the game headless in Edge (SwiftShader), creates a
-  world, and fails on any console error.
-- `node persist-test.mjs` — save & quit, reload, verifies exact position restoration.
-- `npx esbuild logic-test.ts --bundle --format=esm --platform=node --outfile=t.mjs && node t.mjs`
-  — unit tests for the RLE codec, all recipes, smelting, furnace timing, chest
-  serialization, and tool-tier/break-time math.
-- `npx esbuild light-test.ts --bundle --format=esm --platform=node --outfile=t.mjs && node t.mjs`
-  — deterministic torch flood-fill test (placement, attenuation, removal).
-- `node catch-throw-test.mjs` — thrown mob catcher: capture inside the catch
-  radius, misses landing as pickups, animals bouncing it off, pet follow/fight,
-  the stay toggle, idle pets keeping full health, and pet save data.
-- `node verify-bed-catcher.mjs` — screenshots the placed bed from four angles and
-  all four facings, the bed/orb sprites at 8x, the held bed and orb, and the
-  sleeping (bed) screen.
-
-Dev helpers: open the game with `#night` to start just after sundown, or
-`#debugcatch` for a stocked hotbar of catchers and a line of throwable targets.
+Built from scratch with **TypeScript + Three.js**. Three.js is only the WebGL wrapper; the world generation, meshing, lighting, physics, mob AI, crafting and saving are all hand-written. Contributor notes are in [`CLAUDE.md`](CLAUDE.md).

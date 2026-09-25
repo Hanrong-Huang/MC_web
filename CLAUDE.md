@@ -36,7 +36,7 @@ Always run `npm run build` (or at least `npx tsc --noEmit`) before committing â€
 
 ## Architecture map
 
-See the table in `README.md` for the full per-file breakdown. The big/hot files:
+`src/engine/` holds one module per system (Noise, Chunk, World, WorldGenerator + gen-worker, Mesher + mesh-worker, Renderer, Physics, Player, Input, Inventory, Blocks, Textures, MobModels, EntityManager, Audio + AudioMusic, Weather, Fire, Persistence, Advancements); `src/ui/` holds the HUD and menus. The big/hot files:
 
 | File | Responsibility |
 |---|---|
@@ -80,7 +80,7 @@ Headless harnesses (`node <name>.mjs`) boot the game in Edge/SwiftShader and fai
 
 Two harness gotchas worth remembering: editing `src/` while a harness runs triggers a Vite HMR reload that wipes `window.__game` mid-test, and a zombie/skeleton spawned under open sky in daylight burns away before a thrown orb reaches it (set `g.dayTime = 0.72` first).
 
-Pure-logic unit tests bundle with esbuild to `t.mjs` then run under node (RLE codec, recipes, smelting, torch flood-fill) â€” see the Tests section of `README.md` for exact commands. `t.mjs` is a throwaway bundle output; don't commit meaningful work to it.
+Pure-logic unit tests bundle with esbuild to `t.mjs` then run under node (RLE codec, recipes, smelting, torch flood-fill): `npx esbuild logic-test.ts --bundle --format=esm --platform=node --outfile=t.mjs && node t.mjs` (same for `light-test.ts`). `t.mjs` is a throwaway bundle output; don't commit meaningful work to it.
 
 When adding a feature, prefer adding/extending a `.mjs` harness and capturing a screenshot to confirm rendering, then clean up `shot-*.png` before committing.
 
