@@ -1,8 +1,12 @@
 // Sliding AABB collision for the player, mobs, and item drops.
 // Entities are positioned by the center of their feet (pos.y = bottom of AABB).
+// Full blocks collide as unit cells; shaped blocks (slabs, stairs, fences,
+// panes, gates ...) collide with their own boxes, and a walker steps up any
+// ledge up to STEP_HEIGHT (a slab or a stair) without jumping.
 
 import { World } from './World';
-import { B, def, hasDef } from './Blocks';
+import { B, def, hasDef, SHAPED, shapeBoxes, connectsTo } from './Blocks';
+import type { Box } from './Blocks';
 
 export interface Vec3 { x: number; y: number; z: number }
 export interface EntBox { w: number; h: number } // full width (x=z) and height
@@ -15,15 +19,53 @@ export interface MoveResult {
 }
 
 const EPS = 0.001;
+/** vanilla step height: walk straight up slabs and stairs */
+const STEP_HEIGHT = 0.6;
+const FULL: Box[] = [[0, 0, 0, 1, 1, 1]];
+const NONE: Box[] = [];
 
-/** Is the block at this cell a barrier for movement? Includes closed doors and
- *  closed trapdoors standing upright (not flush with the floor). */
-function blocksMovement(world: World, x: number, y: number, z: number): boolean {
+/** Collision boxes of the cell (block-local), empty when it doesn't block.
+ *  Includes closed doors (full cell) and shaped blocks' partial boxes. */
+function cellBoxes(world: World, x: number, y: number, z: number): Box[] {
   const id = world.getBlock(x, y, z);
-  if (id !== B.AIR && id !== B.WATER && hasDef(id) && def(id).solid) return true;
+  if (id === B.AIR || id === B.WATER) return NONE;
+  if (SHAPED.has(id)) {
+    const key = `${x},${y},${z}`;
+    if (id === B.FENCE_GATE) {
+      const st = world.doorStates.get(key);
+      return shapeBoxes(id, st?.facing ?? 0, 0, !!st?.open, true) ?? FULL;
+    }
+    let conn = 0;
+    if (id === B.OAK_FENCE || id === B.GLASS_PANE) {
+      if (connectsTo(id, world.getBlock(x, y, z - 1))) conn |= 1;
+      if (connectsTo(id, world.getBlock(x, y, z + 1))) conn |= 2;
+      if (connectsTo(id, world.getBlock(x - 1, y, z))) conn |= 4;
+      if (connectsTo(id, world.getBlock(x + 1, y, z))) conn |= 8;
+      if (id === B.GLASS_PANE && conn === 0) conn = world.bedFacings.get(key) === 1 ? 1 | 2 : 4 | 8;
+    }
+    return hasDef(id) && def(id).solid ? shapeBoxes(id, world.bedFacings.get(key) ?? 0, conn, false, true) ?? FULL : NONE;
+  }
+  if (hasDef(id) && def(id).solid) return FULL;
   // doors block while closed
-  if (id === B.DOOR_LOWER || id === B.DOOR_UPPER) {
-    return world.isDoorClosed(x, y, z);
+  if (id === B.DOOR_LOWER || id === B.DOOR_UPPER) return world.isDoorClosed(x, y, z) ? FULL : NONE;
+  return NONE;
+}
+
+/** Does any block box overlap the entity AABB at `pos`? */
+function overlapsAny(world: World, pos: Vec3, box: EntBox): boolean {
+  const hw = box.w / 2;
+  const minX = pos.x - hw, maxX = pos.x + hw, minY = pos.y, maxY = pos.y + box.h;
+  const minZ = pos.z - hw, maxZ = pos.z + hw;
+  for (let by = Math.floor(minY) - 1; by <= Math.floor(maxY - EPS / 2); by++) {
+    for (let bz = Math.floor(minZ); bz <= Math.floor(maxZ - EPS / 2); bz++) {
+      for (let bx = Math.floor(minX); bx <= Math.floor(maxX - EPS / 2); bx++) {
+        for (const b of cellBoxes(world, bx, by, bz)) {
+          if (bx + b[3] > minX + EPS && bx + b[0] < maxX - EPS &&
+            by + b[4] > minY + EPS && by + b[1] < maxY - EPS &&
+            bz + b[5] > minZ + EPS && bz + b[2] < maxZ - EPS) return true;
+        }
+      }
+    }
   }
   return false;
 }
@@ -35,34 +77,61 @@ function collideAxis(world: World, pos: Vec3, box: EntBox, axis: 'x' | 'y' | 'z'
   const minZ = pos.z - hw, maxZ = pos.z + hw;
 
   const x0 = Math.floor(minX), x1 = Math.floor(maxX - EPS / 2);
-  const y0 = Math.floor(minY), y1 = Math.floor(maxY - EPS / 2);
+  const y0 = Math.floor(minY) - 1, y1 = Math.floor(maxY - EPS / 2); // -1: fences stand 1.5 tall
   const z0 = Math.floor(minZ), z1 = Math.floor(maxZ - EPS / 2);
 
+  // the most restrictive face among every overlapping box wins
   let hit = false;
+  let limit = 0;
+  const d = axis === 'x' ? vel.x : axis === 'y' ? vel.y : vel.z;
   for (let by = y0; by <= y1; by++) {
     for (let bz = z0; bz <= z1; bz++) {
       for (let bx = x0; bx <= x1; bx++) {
-        if (!blocksMovement(world, bx, by, bz)) continue;
-        // resolve along the moving axis
-        if (axis === 'x') {
-          if (vel.x > 0) pos.x = bx - hw - EPS;
-          else if (vel.x < 0) pos.x = bx + 1 + hw + EPS;
-          vel.x = 0;
-        } else if (axis === 'y') {
-          if (vel.y > 0) pos.y = by - box.h - EPS;
-          else if (vel.y < 0) pos.y = by + 1 + EPS;
-          vel.y = 0;
-        } else {
-          if (vel.z > 0) pos.z = bz - hw - EPS;
-          else if (vel.z < 0) pos.z = bz + 1 + hw + EPS;
-          vel.z = 0;
+        const boxes = cellBoxes(world, bx, by, bz);
+        for (const b of boxes) {
+          const bx0 = bx + b[0], bx1 = bx + b[3], by0 = by + b[1], by1 = by + b[4], bz0 = bz + b[2], bz1 = bz + b[5];
+          if (!(bx1 > minX && bx0 < maxX && by1 > minY && by0 < maxY && bz1 > minZ && bz0 < maxZ)) continue;
+          const lo = axis === 'x' ? bx0 : axis === 'y' ? by0 : bz0;
+          const hi = axis === 'x' ? bx1 : axis === 'y' ? by1 : bz1;
+          if (d > 0) { if (!hit || lo < limit) limit = lo; }
+          else if (!hit || hi > limit) limit = hi;
+          hit = true;
         }
-        hit = true;
-        return hit; // re-test from the corrected position is unnecessary for unit cells
       }
     }
   }
-  return hit;
+  if (!hit) return false;
+  // resolve along the moving axis (a still axis only reports the contact)
+  if (axis === 'x') {
+    if (d > 0) pos.x = limit - hw - EPS;
+    else if (d < 0) pos.x = limit + hw + EPS;
+    vel.x = 0;
+  } else if (axis === 'y') {
+    if (d > 0) pos.y = limit - box.h - EPS;
+    else if (d < 0) pos.y = limit + EPS;
+    vel.y = 0;
+  } else {
+    if (d > 0) pos.z = limit - hw - EPS;
+    else if (d < 0) pos.z = limit + hw + EPS;
+    vel.z = 0;
+  }
+  return true;
+}
+
+/** Try to walk `delta` along `axis` by first lifting up to STEP_HEIGHT onto a
+ *  low ledge (slab, stair). Commits and returns true only if it fits. */
+function tryStep(world: World, pos: Vec3, box: EntBox, axis: 'x' | 'z', delta: number): boolean {
+  const start = { ...pos };
+  pos.y += STEP_HEIGHT;
+  if (overlapsAny(world, pos, box)) { Object.assign(pos, start); return false; }
+  if (axis === 'x') pos.x += delta; else pos.z += delta;
+  if (overlapsAny(world, pos, box)) { Object.assign(pos, start); return false; }
+  // settle back down onto whatever we stepped up on
+  const down = { x: 0, y: -STEP_HEIGHT - 0.01, z: 0 };
+  pos.y += down.y;
+  if (collideAxis(world, pos, box, 'y', down) && pos.y >= start.y + EPS) return true;
+  Object.assign(pos, start); // nothing to climb onto
+  return false;
 }
 
 /**
@@ -87,18 +156,29 @@ export function moveEntity(
       res.hitY = true;
       if (fallingBefore <= 0) res.onGround = true;
     }
-    // X (with sneak edge guard)
-    const oldX = pos.x;
-    pos.x += vel.x * sdt;
-    if (collideAxis(world, pos, box, 'x', vel)) res.hitX = true;
+    const grounded = wasOnGround || res.onGround;
+    // X (with sneak edge guard + step-up onto low ledges)
+    const oldX = pos.x, dx = vel.x * sdt;
+    pos.x += dx;
+    if (collideAxis(world, pos, box, 'x', vel)) {
+      const blockedX = pos.x;
+      pos.x = oldX;
+      if (grounded && dx !== 0 && tryStep(world, pos, box, 'x', dx)) vel.x = dx / sdt;
+      else { pos.x = blockedX; res.hitX = true; }
+    }
     if (sneak && wasOnGround && !hasSupport(world, pos, box)) {
       pos.x = oldX;
       vel.x = 0;
     }
     // Z
-    const oldZ = pos.z;
-    pos.z += vel.z * sdt;
-    if (collideAxis(world, pos, box, 'z', vel)) res.hitZ = true;
+    const oldZ = pos.z, dz = vel.z * sdt;
+    pos.z += dz;
+    if (collideAxis(world, pos, box, 'z', vel)) {
+      const blockedZ = pos.z;
+      pos.z = oldZ;
+      if (grounded && dz !== 0 && tryStep(world, pos, box, 'z', dz)) vel.z = dz / sdt;
+      else { pos.z = blockedZ; res.hitZ = true; }
+    }
     if (sneak && wasOnGround && !hasSupport(world, pos, box)) {
       pos.z = oldZ;
       vel.z = 0;
@@ -115,13 +195,18 @@ export function moveEntity(
 /** Is there solid ground under the AABB within `depth` blocks? */
 export function hasSupport(world: World, pos: Vec3, box: EntBox, depth = 0.6): boolean {
   const hw = box.w / 2;
-  const x0 = Math.floor(pos.x - hw), x1 = Math.floor(pos.x + hw - EPS);
-  const z0 = Math.floor(pos.z - hw), z1 = Math.floor(pos.z + hw - EPS);
-  const y0 = Math.floor(pos.y - depth), y1 = Math.floor(pos.y - EPS);
+  const minX = pos.x - hw, maxX = pos.x + hw, minZ = pos.z - hw, maxZ = pos.z + hw;
+  const x0 = Math.floor(minX), x1 = Math.floor(maxX - EPS);
+  const z0 = Math.floor(minZ), z1 = Math.floor(maxZ - EPS);
+  const y0 = Math.floor(pos.y - depth) - 1, y1 = Math.floor(pos.y - EPS);
   for (let by = y0; by <= y1; by++) {
     for (let bz = z0; bz <= z1; bz++) {
       for (let bx = x0; bx <= x1; bx++) {
-        if (blocksMovement(world, bx, by, bz)) return true;
+        for (const b of cellBoxes(world, bx, by, bz)) {
+          if (bx + b[3] <= minX || bx + b[0] >= maxX || bz + b[5] <= minZ || bz + b[2] >= maxZ) continue;
+          const top = by + b[4], bot = by + b[1];
+          if (top > pos.y - depth && bot < pos.y - EPS) return true;
+        }
       }
     }
   }

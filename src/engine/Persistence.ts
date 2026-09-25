@@ -1,7 +1,8 @@
 // Run-length chunk compression + promise-wrapped IndexedDB save-slot store.
 // (localStorage is deliberately not used: its ~5MB cap is too small for worlds.)
 
-export interface SlotData { id: number; count: number; dur?: number; mob?: string }
+/** `ench`: enchantments on the stack ({ sharpness: 3 }); absent on plain items. */
+export interface SlotData { id: number; count: number; dur?: number; mob?: string; ench?: Record<string, number> }
 export type MaybeSlot = SlotData | null;
 
 export interface FurnaceSave {
@@ -28,6 +29,11 @@ export interface PlayerSave {
   absorb?: number;
   /** active status effects: id, level (0 = I), seconds left, full duration */
   effects?: { id: string; amp: number; t: number; total: number }[];
+  /** experience: whole levels + progress (0..1) toward the next (absent in older saves) */
+  xpLevel?: number;
+  xpProgress?: number;
+  /** where the player last died, for the recovery compass */
+  lastDeath?: { x: number; y: number; z: number; dim: 'overworld' | 'nether' };
 }
 
 export interface SaveState {
@@ -71,6 +77,8 @@ export interface SaveState {
   advancements?: string[];
   /** burning fires: "dimension|x,y,z" + seconds of burn left */
   fires?: { k: string; t: number }[];
+  /** food cooking on campfires: "dimension|x,y,z" -> up to 4 raw items + seconds cooked */
+  campfires?: { k: string; items: number[]; t: number[] }[];
   lastPlayed: number;
 }
 

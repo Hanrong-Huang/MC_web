@@ -5,10 +5,11 @@
 import * as THREE from 'three';
 import { mulberry32 } from './Noise';
 import { def, TINTED_TILES } from './Blocks';
+import { B, hasDef, SHAPED, shapeBoxes, SLAB_KINDS, WOOL_COLORS, POTIONS } from './Blocks';
 
 const TILE = 16;
 const COLS = 8;
-const ROWS = 16;
+const ROWS = 32;
 
 type Ctx = CanvasRenderingContext2D;
 
@@ -568,14 +569,34 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
   },
   leaves: (c, x, y) => leavesPx(pal(['#1d4a12', '#265c18', '#306e1f', '#3a7f26', '#458f2e', '#52a038']), 206, 46, 0.55).put(c, x, y),
   water: (c, x, y) => {
-    // still water: soft horizontal swells with a few bright ripple glints
-    const ramp = pal(['#2a4ea6', '#2f55b0', '#345cba', '#3a64c4', '#416dcd', '#4a78d6']);
-    const f = fbm(107, [[4, 0.6, 8], [8, 0.4, 16]], 1.8);
-    const p = rampFill(new Px(), ramp, f, 108, 0.25);
-    const r = mulberry32(2107);
-    for (let i = 0; i < 6; i++) {
-      const gx = (r() * 16) | 0, gy = (r() * 16) | 0, len = 2 + ((r() * 3) | 0);
-      for (let k = 0; k < len; k++) p.set(gx + k, gy, k === 0 || k === len - 1 ? '#5c86de' : '#7ea0ea');
+    // still water: soft swells crossed by a wobbly web of lighter wave crests
+    // (tileable; the water shader drifts two copies of it against each other)
+    const ramp = pal(['#284a9e', '#2d52aa', '#325ab5', '#3862bf', '#3f6bc9', '#4775d2']);
+    const f = fbm(107, [[4, 0.6, 4], [8, 0.4, 8]], 1.6);
+    const p = rampFill(new Px(), ramp, f, 108, 0.18);
+    const cells = voronoi(2107, 6, 1);
+    for (let py = 0; py < 16; py++) {
+      for (let px = 0; px < 16; px++) {
+        const k = cellAt(cells, px, py);
+        const edge = k !== cellAt(cells, px + 1, py) || k !== cellAt(cells, px, py + 1);
+        if (!edge) continue;
+        const bright = f(px, py) > 0.5;
+        p.set(px, py, bright ? '#86a8ee' : '#5f86dc');
+      }
+    }
+    for (let i = 3; i < p.d.length; i += 4) p.d[i] = 200;
+    p.put(c, x, y);
+  },
+  water_flow: (c, x, y) => {
+    // flowing water: streaks stretched along the tile's v axis, which the
+    // shader turns to face downstream / downhill
+    const ramp = pal(['#26479a', '#2c50a8', '#3259b4', '#3a63c0', '#436fcb', '#4f7bd5']);
+    const f = fbm(1107, [[8, 0.6, 2], [16, 0.4, 4]], 1.9);
+    const p = rampFill(new Px(), ramp, f, 1108, 0.12);
+    const r = mulberry32(3107);
+    for (let i = 0; i < 9; i++) {
+      const gx = (r() * 16) | 0, gy = (r() * 16) | 0, len = 3 + ((r() * 5) | 0);
+      for (let k = 0; k < len; k++) p.set(gx, gy + k, k === 0 || k === len - 1 ? '#6a8fe0' : '#93b1f0');
     }
     for (let i = 3; i < p.d.length; i += 4) p.d[i] = 200;
     p.put(c, x, y);
@@ -1917,96 +1938,150 @@ function seedsPx(mid: string, hi: string, lo: string): Px {
   return outlinePx(p, 0.4);
 }
 
-// A capture orb on a clean 14px circle: clear glass dome up top (so whatever is
-// inside reads at hotbar size), a dark metal equator band with a round glowing
-// button, and a polished amethyst base. Shared by the empty + filled sprites.
-const ORB_ROWS = [
-  '................',
-  '.....kkkkkk.....',
-  '...kkhhaaaakk...',
-  '..khhhaaaaaask..',
-  '..khhaaaaaassk..',
-  '.khaaaaaaaassck.',
-  '.kaaaaappaaassk.',
-  '.kBBBBpwwpBBBBk.',
-  '.kBBBBpwwpBBBBk.',
-  '.kAAAAAppAAAAAk.',
-  '.kAAAAAADDDDDDk.',
-  '..kAAAADDDDDDk..',
-  '..kADDDDDDDEEk..',
-  '...kkDDDEEEkk...',
-  '.....kkkkkk.....',
-  '................',
-];
-const ORB_PAL: Record<string, string> = {
-  k: '#20142e', h: '#ffffff', a: '#e3d5fa', s: '#c2a9e4', c: '#a98fd0',
-  B: '#241b30', p: '#a97fe0', w: '#fff4ff',
-  A: '#8f63cf', D: '#5f4189', E: '#43305f',
+// A capture orb on a clean 14px disc, seen a little from above and lit from the
+// upper left: a big clear glass dome (fresnel-dark rim, bright spec arc) over a
+// dark metal band that curves down across the front to a round glowing button,
+// and a polished amethyst base with a reflected-light rim. Filled orbs show the
+// captive's face through the glass, tint the glass toward its colour and light
+// the button to match. Shared by the empty + filled sprites.
+const ORB_R = 7;
+const ORB_L: RGB = [-0.5, -0.62, 0.6];
+const ORB_OUT = '#1a1030';
+
+/** Captive drawn through the dome: rows start at y=2, centred on x=7.5 (so a
+ *  6-wide face covers x 5..10); only glass pixels take paint, so wider rows
+ *  (legs, wings, a ghast's bulk) clip to the dome. `haze` tints the glass and
+ *  lights the button. */
+interface OrbOccupant { rows: string[]; pal: Record<string, string>; haze: string }
+const ORB_OCCUPANTS: Record<string, OrbOccupant> = {
+  // green head under dark hair, black eyes, the teal shirt collar at the chin
+  zombie: {
+    rows: ['hhhhhh', 'hGhGGh', 'GGGGGG', 'eeGGee', 'GgnngG', 'cccccc'],
+    pal: { h: '#35592c', G: '#5f9e4e', g: '#4d8a3e', e: '#141414', n: '#3c6d31', c: '#2f9fa8' },
+    haze: '#8fdc76',
+  },
+  // bone-white skull, hollow sockets, nose hole, a grin of teeth
+  skeleton: {
+    rows: ['sSSSSs', 'SSSSSS', 'eeSSee', 'SSnnSS', 'tStStS', '.ssss.'],
+    pal: { S: '#e2dfd4', s: '#b4b1a8', e: '#1e1e1e', n: '#4c4a46', t: '#6e6c64' },
+    haze: '#6a5c94',
+  },
+  // the creeper's black frown on mottled green
+  creeper: {
+    rows: ['cCCcCC', 'kkCCkk', 'kkCckk', 'CCkkCC', 'CkkkkC', 'CkCCkC'],
+    pal: { C: '#5fc44c', c: '#48a53a', k: '#141414' },
+    haze: '#9ae884',
+  },
+  // dark head, big red eyes, fangs, legs splayed out to the glass edge
+  spider: {
+    rows: ['..ssssss..', 'k.SrSSrS.k', 'kkRRSSRRkk', 'k.RRSSRR.k', 'kkSSSSSSkk', '..sfssfs..'],
+    pal: { s: '#2e2429', S: '#43363d', k: '#231b1f', r: '#c8301e', R: '#ff4a30', f: '#d9c8aa' },
+    haze: '#e0604a',
+  },
+  // grey-blue head with glowing green eyes, wings swept out to both sides
+  phantom: {
+    rows: ['...pPPp...', '.ppPPPPpp.', 'ppPPPPPPpp', '.pggPPggp.', '..PkkkkP..', '...pPPp...'],
+    pal: { P: '#5a6e94', p: '#3d4c6a', g: '#a6ff80', k: '#161a24' },
+    haze: '#a6f28e',
+  },
+  // charcoal imp: glowing ember horns, blazing eyes, molten grin
+  cinderling: {
+    rows: ['o....o', 'oCCCCo', 'CCCCCC', 'yyCCyy', 'CCCCCC', 'CooooC'],
+    pal: { C: '#352b26', y: '#ffd24a', o: '#ff7a1a' },
+    haze: '#ffa050',
+  },
+  // charred beast: pricked ears, ember-lit eyes, a wide glowing maw
+  ashstalker: {
+    rows: ['C....C', 'CCCCCC', 'CcCCcC', 'CyCCyC', 'cCCCCc', 'oooooo'],
+    pal: { C: '#2b221e', c: '#6a2e14', y: '#ffc23a', o: '#ff6a10' },
+    haze: '#ff8a3a',
+  },
+  // a hulking charcoal cube: blazing eyes, a big molten mouth, ember tendrils
+  emberghast: {
+    rows: ['CCCCCCCC', 'CCCCCCCC', 'CyyCCyyC', 'CCCCCCCC', 'CCoOOoCC', 'o.o..o.o'],
+    pal: { C: '#2e2622', y: '#ffd24a', o: '#ff5a10', O: '#ffb040' },
+    haze: '#ff7a30',
+  },
 };
+
+function orbPx(occ?: OrbOccupant): Px {
+  const p = new Px();
+  const inDisc = (x: number, y: number): boolean => Math.hypot(x - 7.5, y - 7.5) <= ORB_R;
+  const edge = (x: number, y: number): boolean =>
+    !inDisc(x + 1, y) || !inDisc(x - 1, y) || !inDisc(x, y + 1) || !inDisc(x, y - 1);
+  // the band sags toward the viewer: rows 7 at the rim down to 9 mid-front
+  const bandTop = (x: number): number => {
+    const u = (x - 7.5) / ORB_R;
+    return Math.round(6 + 3 * Math.sqrt(Math.max(0, 1 - u * u)));
+  };
+  const ll = Math.hypot(ORB_L[0], ORB_L[1], ORB_L[2]);
+  const haze = occ ? hex(occ.haze) : null;
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      if (!inDisc(x, y)) continue;
+      if (edge(x, y)) { p.set(x, y, ORB_OUT); continue; }
+      const nx = (x - 7.5) / ORB_R, ny = (y - 7.5) / ORB_R;
+      const nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
+      const lam = Math.max(0, (nx * ORB_L[0] + ny * ORB_L[1] + nz * ORB_L[2]) / ll);
+      const rim = 1 - nz;
+      const bt = bandTop(x);
+      if (y < bt) {
+        // glass: bright where it faces the light, darker toward the thick rim
+        let c: RGB = hex(lam > 0.78 ? '#f1ebff' : lam > 0.5 ? '#d7c9f4' : '#b7a0e2');
+        if (rim > 0.55) c = hex('#9579cc');
+        // the far half of the band, seen faintly through the clear glass
+        const u = (x - 7.5) / ORB_R;
+        if (y === Math.round(8.2 - 2.4 * Math.sqrt(Math.max(0, 1 - u * u)))) c = mixC(c, hex('#4f4066'), 0.3);
+        // a full orb's glass is smokier, so the captive stands out against it
+        if (haze) c = mixC(shade(c, 0.78), haze, 0.3);
+        p.set(x, y, c);
+      } else if (y < bt + 2) {
+        // band: lit top edge, shadowed lower edge, fading to the right
+        const base = hex(y === bt ? '#4f4066' : '#261d34');
+        p.set(x, y, shade(base, x < 5 ? 1.15 : x > 10 ? 0.8 : 1));
+      } else {
+        // amethyst base: four tones + a reflected-light rim at the lower right
+        let c = hex(lam > 0.72 ? '#b58cf0' : lam > 0.5 ? '#8f63cf' : lam > 0.28 ? '#6a48a4' : '#4a3278');
+        if (rim > 0.6 && nx + ny > 0.7) c = hex('#7a58b6');
+        p.set(x, y, c);
+      }
+    }
+  }
+  // the captive's face through the glass (never over the outline or band)
+  if (occ) {
+    occ.rows.forEach((row, r) => {
+      const x0 = Math.round(8 - row.length / 2);
+      for (let i = 0; i < row.length; i++) {
+        const col = occ.pal[row[i]];
+        const x = x0 + i, y = 2 + r;
+        if (col && y < bandTop(x) && inDisc(x, y) && !edge(x, y)) p.set(x, y, col);
+      }
+    });
+  }
+  // glass specular arc at the upper left (+ a far glint on the empty orb)
+  p.set(4, 3, '#ffffff'); p.set(3, 4, '#ffffff'); p.set(3, 5, '#e9e2fb');
+  if (!occ) { p.set(5, 2, '#ffffff'); p.set(11, 4, '#f6f2ff'); }
+  // amethyst base gloss
+  p.set(3, 11, '#d9c4ff'); p.set(4, 12, '#c7a8fa');
+  // button: a dark ring set into the band, glowing core (captive-coloured when full)
+  for (const y of [9, 10]) { p.set(6, y, '#120a1c'); p.set(9, y, '#120a1c'); }
+  for (const x of [7, 8]) { p.set(x, 8, '#120a1c'); p.set(x, 11, '#120a1c'); }
+  const glow = haze ?? hex('#e8dcff');
+  p.set(7, 9, mixC(glow, [255, 255, 255], 0.75));
+  p.set(8, 9, mixC(glow, [255, 255, 255], 0.35));
+  p.set(7, 10, glow);
+  p.set(8, 10, shade(glow, 0.72));
+  return p;
+}
 
 /** Empty mob catcher: the bare capture orb. */
 function catcherShell(c: Ctx): void {
-  pixmap(c, 0, 0, ORB_ROWS, ORB_PAL);
+  orbPx().put(c, 0, 0);
 }
 
-/** Per-mob occupant drawn inside the glass dome (8 wide x 4 tall, placed at
- *  x=4,y=2). 'B' body, 'A' shade, 'e' dark eye, 'g' glowing eye. */
-const ORB_OCCUPANTS: Record<string, { rows: string[]; base: string; accent: string; glow: string }> = {
-  zombie: {
-    rows: ['..BBBB..', '.BBBBBB.', '.BeBBeB.', '.BBAABB.'],
-    base: '#5c9455', accent: '#3f6b3b', glow: '#8fd67e',
-  },
-  skeleton: {
-    rows: ['..BBBB..', '.BBBBBB.', '.BeBBeB.', '..BAAB..'],
-    base: '#e2e2d8', accent: '#a8a89e', glow: '#ffffff',
-  },
-  spider: {
-    rows: ['.BBBBBB.', 'BBgBBgBB', '.BBBBBB.', '..BAAB..'],
-    base: '#4a3a41', accent: '#251d21', glow: '#e2564a',
-  },
-  creeper: {
-    rows: ['.BBBBBB.', '.BeBBeB.', '.BBeeBB.', '.BeeeeB.'],
-    base: '#62b552', accent: '#2f6b2a', glow: '#8ede78',
-  },
-  cinderling: {
-    rows: ['.B.BB.B.', '.BBBBBB.', '.BgBBgB.', '.BBAABB.'],
-    base: '#df6a1f', accent: '#8a3a10', glow: '#ffd777',
-  },
-  ashstalker: {
-    rows: ['..BBBB..', '.BBBBBB.', '.BgBBgB.', '.BAAAAB.'],
-    base: '#c25a1f', accent: '#5f2a10', glow: '#ffb44a',
-  },
-  emberghast: {
-    rows: ['.BBBBBB.', '.BeBBeB.', '.BBBBBB.', '.BeeeeB.'],
-    base: '#ece6e0', accent: '#b5aca4', glow: '#ff9040',
-  },
-  phantom: {
-    rows: ['A.BBBB.A', '.BBBBBB.', '.BgBBgB.', '..BBBB..'],
-    base: '#5b8b9b', accent: '#315764', glow: '#a6f2ff',
-  },
-};
-
-/** Filled mob catcher: the orb with its captive showing through the glass dome,
- *  plus a colored haze so the ball reads as "occupied" at a glance. */
+/** Filled mob catcher: the orb with its captive's face showing through the dome. */
 function filledCatcher(c: Ctx, kind: string): void {
-  const occ = ORB_OCCUPANTS[kind] ?? ORB_OCCUPANTS.zombie;
-  pixmap(c, 0, 0, ORB_ROWS, ORB_PAL);
-  // faint tint of the captive's color across the dome interior (glass haze)
-  c.save();
-  c.globalAlpha = 0.3;
-  c.fillStyle = occ.base;
-  c.fillRect(2, 2, 12, 5);
-  c.restore();
-  pixmap(c, 4, 2, occ.rows, {
-    B: occ.base, A: occ.accent, g: occ.glow, e: '#161318',
-  });
-  // glass specular back on top so the dome still reads as glass over the mob
-  c.save();
-  c.globalAlpha = 0.6;
-  c.fillStyle = '#f7f2ff';
-  c.fillRect(3, 3, 2, 1);
-  c.fillRect(3, 4, 1, 1);
-  c.restore();
+  orbPx(ORB_OCCUPANTS[kind] ?? ORB_OCCUPANTS.zombie).put(c, 0, 0);
 }
 
 /** Bed item sprite: a 3/4 view — the quilted top recedes as a parallelogram
@@ -2199,6 +2274,7 @@ const PACK_MAP: Record<string, PackEntry> = {
   leaves: { paths: ['block/oak_leaves', 'block/leaves_oak'], tint: '#59ae30', kind: 'tile' },
   glass: { paths: ['block/glass'], kind: 'tile' },
   water: { paths: ['block/water_still'], tint: '#3f76e4', kind: 'tile' },
+  water_flow: { paths: ['block/water_flow'], tint: '#3f76e4', kind: 'tile' },
   lava: { paths: ['block/lava_still', 'block/lava'], kind: 'tile' },
   obsidian: { paths: ['block/obsidian'], kind: 'tile' },
   table_top: { paths: ['block/crafting_table_top'], kind: 'tile' },
@@ -2529,12 +2605,16 @@ export class Atlas {
     if (cached) return cached;
     const d = def(id);
     const [c, ctx] = makeCanvas(32, 32);
-    if (d.name === 'bed') {
+    if (d.name === 'bed' || BLOCK_SPRITE_ICONS.has(d.name)) {
       // hand-drawn 3/4-view bed sprite (legs + mattress + pillow); an isometric
       // slice of the block tiles never read as a bed at hotbar size
-      const s = this.itemSprites.get('bed');
+      const s = this.itemSprites.get(d.name);
       ctx.imageSmoothingEnabled = false;
       if (s) ctx.drawImage(s, 0, 0, 16, 16, 0, 0, 32, 32);
+    } else if (d.block && d.faces && ICON_SHAPES[d.name]) {
+      // partial blocks (slabs, stairs, fences, anvil ...) as little iso models
+      const top = this.tileCanvas(d.faces.top), side = this.tileCanvas(d.faces.sides);
+      ICON_SHAPES[d.name].forEach((b, i) => this.drawIsoBox(ctx, top, side, side, b, i === 0));
     } else if (d.block && d.faces && ICON_BOXES[d.name]) {
       // thin/small redstone parts: a true little isometric box, not a full tile
       const t = this.tileCanvas(d.faces.top);
@@ -2675,7 +2755,7 @@ export class Atlas {
           const [x, y] = this.slotXY(idx);
           this.ctx.clearRect(x, y, TILE, TILE);
           this.ctx.drawImage(tmp, x, y);
-          if (name === 'water') {
+          if (name === 'water' || name === 'water_flow') {
             // ensure water stays translucent
             const img2 = this.ctx.getImageData(x, y, TILE, TILE);
             for (let i = 3; i < img2.data.length; i += 4) {
@@ -3096,3 +3176,712 @@ Object.assign(PACK_MAP, {
   paper: { paths: ['item/paper'], kind: 'item' },
   book: { paths: ['item/book'], kind: 'item' },
 } satisfies Record<string, PackEntry>);
+
+// =============================================================================
+// Building + decoration pass: tiles for masonry, ice, pumpkins/melons, coloured
+// wool, garden plants and the shaped utility blocks (lantern, anvil, cake ...),
+// item sprites for the new foods, potions, dyes and exploration gear, the
+// inventory icon shapes for partial blocks, and the in-hand/dropped geometry
+// of shaped blocks. Self-contained: it only reads the shared pixel toolkit.
+// =============================================================================
+
+/** `col` scaled by k as an RGB triple (Px.set wants hex or RGB, not shadeHex's rgb() string). */
+const shadeRGB = (col: string, k: number): RGB => shade(hex(col), k).map((v) => Math.max(0, Math.min(255, v))) as RGB;
+
+/** Speckle moss over a tile (mossy cobble / stone bricks). */
+function mossOver(p: Px, seed: number, amount: number): Px {
+  const f = fbm(seed, [[4, 0.55], [8, 0.3], [16, 0.15]], 1.9);
+  const r = mulberry32(seed + 7);
+  const moss = pal(['#3c5a1e', '#4a6b24', '#58802c', '#679334', '#78a43e']);
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      const v = f(x, y) + (r() - 0.5) * 0.28 + (y / 15) * 0.12; // moss pools low
+      if (v < 1 - amount) continue;
+      const k = (v - (1 - amount)) / amount;
+      p.set(x, y, moss[clampI(k * moss.length + (r() - 0.5) * 1.4, moss.length)]);
+    }
+  }
+  return p;
+}
+
+/** Random-walk cracks: a dark fissure with a lit lip above it. */
+function cracksOver(p: Px, seed: number, n: number, dark: RGB, lip: RGB): Px {
+  const r = mulberry32(seed);
+  for (let i = 0; i < n; i++) {
+    let x = (r() * 16) | 0, y = (r() * 16) | 0;
+    const len = 5 + ((r() * 6) | 0);
+    const dx = r() < 0.5 ? 1 : -1;
+    for (let k = 0; k < len; k++) {
+      p.set(x, y, dark);
+      if (r() < 0.6) p.set(x, y - 1, lip);
+      if (r() < 0.55) x += dx; else y += 1;
+    }
+  }
+  return p;
+}
+
+const BRICK_R = pal(['#6e2c1e', '#7d3424', '#8c3c2a', '#994630', '#a55037', '#b05b40']);
+const PUMPKIN_R = pal(['#8e470a', '#a4560d', '#bb6710', '#cf7815', '#df8b1d', '#eca028']);
+const MELON_R = pal(['#3f6612', '#4d7a17', '#5b8c1c', '#6b9e22', '#7eb02a']);
+const ICE_R = pal(['#7fa8f0', '#8db3f3', '#9bbdf5', '#a9c7f7', '#b8d2fa', '#cadefc']);
+const IRON_DARK = pal(['#23262b', '#2f3338', '#3b4046', '#4a5058', '#5c636c', '#737b85']);
+
+function pumpkinSidePx(seed: number): Px {
+  const r = mulberry32(seed);
+  const n = tileNoise(seed + 1, 4, 8);
+  return new Px().fill((x, y) => {
+    const k = x & 3; // four ribs across the face, a groove between each
+    let i = k === 0 ? 0.6 : k === 1 ? 2.6 : k === 2 ? 3.6 : 2.2;
+    i += (n(x, y) - 0.5) * 1.4 + (r() - 0.5) * 0.6;
+    if (y === 0 || y === 15) i -= 1.2; // rounded top/bottom shade
+    else if (y === 1 || y === 14) i -= 0.5;
+    return PUMPKIN_R[clampI(i, PUMPKIN_R.length)];
+  });
+}
+
+function pumpkinTopPx(): Px {
+  const r = mulberry32(8811);
+  const p = new Px().fill((x, y) => {
+    const a = Math.atan2(y - 7.5, x - 7.5), d = Math.hypot(x - 7.5, y - 7.5);
+    const rib = ((a / (Math.PI * 2) + 1) * 8) % 1; // eight segments meeting at the stem
+    let i = 1.5 + Math.sin(rib * Math.PI) * 2.6 - d * 0.08 + (r() - 0.5) * 0.7;
+    if (rib < 0.12 || rib > 0.88) i -= 1.4;
+    return PUMPKIN_R[clampI(i, PUMPKIN_R.length)];
+  });
+  // woody stem in the middle
+  for (const [x, y, c] of [[7, 7, '#5b6b1c'], [8, 7, '#4a5816'], [7, 8, '#6f7f22'], [8, 8, '#3c4712'],
+    [6, 7, '#73481c'], [9, 8, '#73481c'], [7, 6, '#73481c'], [8, 9, '#5a3814']] as [number, number, string][]) p.set(x, y, c);
+  return p;
+}
+
+function jackFacePx(): Px {
+  const p = pumpkinSidePx(8812);
+  const face = [
+    '................', '................', '................', '....#......#....',
+    '...###....###...', '..#####..#####..', '................', '.......##.......',
+    '................', '.##..######..##.', '.##############.', '..############..',
+    '...##.####.##...', '................', '................', '................',
+  ];
+  // carve: bright candle-lit interior, darker rind at the cut edge
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      if (face[y][x] !== '#') continue;
+      const edge = face[y - 1]?.[x] !== '#' || face[y + 1]?.[x] !== '#' || face[y][x - 1] !== '#' || face[y][x + 1] !== '#';
+      p.set(x, y, edge ? '#f7a823' : y > 8 ? '#ffe36b' : '#ffd24a');
+    }
+  }
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      if (face[y][x] === '#') continue;
+      if (face[y - 1]?.[x] === '#') p.set(x, y, '#6a3206'); // shadow under the cut
+    }
+  }
+  return p;
+}
+
+function melonSidePx(): Px {
+  const r = mulberry32(8813);
+  const wob = tileNoise(8814, 1, 4);
+  return new Px().fill((x, y) => {
+    const s = (x + Math.round((wob(0, y) - 0.5) * 3) + 16) % 5;
+    if (s === 0) return mixC(MELON_R[4], hex('#c9d964'), 0.55 + r() * 0.2);
+    if (s === 1) return MELON_R[3];
+    return MELON_R[clampI(1 + r() * 2.2, MELON_R.length)];
+  });
+}
+
+function melonTopPx(): Px {
+  const r = mulberry32(8815);
+  const p = new Px().fill((x, y) => {
+    const d = Math.max(Math.abs(x - 7.5), Math.abs(y - 7.5));
+    const ring = Math.floor(d) % 3 === 0;
+    return ring ? mixC(MELON_R[4], hex('#c9d964'), 0.4) : MELON_R[clampI(1 + r() * 2.4, MELON_R.length)];
+  });
+  p.set(7, 7, '#6b5a1c'); p.set(8, 8, '#4f4214'); p.set(8, 7, '#7d6a24'); p.set(7, 8, '#5a4b18');
+  return p;
+}
+
+/** Recolour the white wool tile to `col`, keeping its weave. */
+function dyedWool(ctx: Ctx, x0: number, y0: number, col: string): void {
+  const [tmp, tctx] = makeCanvas(16, 16);
+  TILE_PAINTERS.wool(tctx, 0, 0);
+  const img = tctx.getImageData(0, 0, 16, 16);
+  const d = img.data;
+  const [cr, cg, cb] = hex(col);
+  for (let i = 0; i < d.length; i += 4) {
+    const t = Math.max(0, Math.min(1, (d[i] / 255 - 0.79) / 0.18)); // weave brightness 0..1
+    const k = 0.78 + t * 0.36;
+    d[i] = Math.min(255, cr * k + t * 10);
+    d[i + 1] = Math.min(255, cg * k + t * 10);
+    d[i + 2] = Math.min(255, cb * k + t * 10);
+  }
+  tctx.putImageData(img, 0, 0);
+  ctx.drawImage(tmp, x0, y0);
+}
+
+/** Crossed-billboard plant from a pixel map (transparent background). */
+function plantTile(rows: string[], colors: Record<string, string>): (c: Ctx, x: number, y: number) => void {
+  return (c, x, y) => { c.clearRect(x, y, 16, 16); pixmap(c, x, y, rows, colors); };
+}
+const STEM_G = { G: '#4f8f2e', g: '#2f6a1e', l: '#78b43e' };
+
+/** Log with horizontal grain (the long faces of a campfire log). */
+function campLogPx(): Px {
+  const ramp = pal(['#2e2012', '#3d2b18', '#4b361e', '#5a4326', '#6a502e']);
+  const f = fbm(8820, [[1, 0.5, 8], [2, 0.5, 16]], 2);
+  const r = mulberry32(8821);
+  return new Px().fill((x, y) => ramp[clampI(f(x, y) * ramp.length + (r() - 0.5) * 0.8 - ((y & 3) === 3 ? 1.4 : 0), ramp.length)]);
+}
+
+const DECOR_TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = {
+  bricks: (c, x, y) => bricksPx(BRICK_R, hex('#a9a095'), 8, 4, 8801, 1.14, 0.84).put(c, x, y),
+  clay: (c, x, y) => {
+    const ramp = pal(['#8b91a0', '#939aa8', '#9aa1ae', '#a1a7b4', '#a8aeba', '#afb5c1']);
+    const p = rampFill(new Px(), ramp, fbm(8802, [[4, 0.5], [8, 0.3], [16, 0.2]], 1.3), 8803, 0.3);
+    const r = mulberry32(8804);
+    for (let i = 0; i < 6; i++) { const px = (r() * 16) | 0, py = (r() * 16) | 0; p.set(px, py, ramp[0]); p.set(px, py - 1, ramp[5]); }
+    p.put(c, x, y);
+  },
+  mossy_cobble: (c, x, y) => mossOver(cobblePx(8805), 8806, 0.42).put(c, x, y),
+  mossy_stone_bricks: (c, x, y) => mossOver(bricksPx(STONE_R, hex('#4a4a4a'), 16, 8, 122, 1.14, 0.84), 8807, 0.36).put(c, x, y),
+  cracked_stone_bricks: (c, x, y) => cracksOver(bricksPx(STONE_R, hex('#4a4a4a'), 16, 8, 122, 1.14, 0.84), 8808, 4,
+    hex('#3a3a3a'), hex('#9c9c9c')).put(c, x, y),
+  chiseled_stone_bricks: (c, x, y) => {
+    const p = stonePx(8809);
+    for (let i = 0; i < 16; i++) {
+      p.set(i, 0, STONE_R[6]); p.set(0, i, STONE_R[6]); p.set(i, 15, '#4a4a4a'); p.set(15, i, '#4a4a4a');
+      p.set(i, 1, STONE_R[5]); p.set(1, i, STONE_R[5]); p.set(i, 14, STONE_R[1]); p.set(14, i, STONE_R[1]);
+    }
+    // a carved roundel: dark groove, lit on the lower-right lip
+    for (let yy = 2; yy < 14; yy++) {
+      for (let xx = 2; xx < 14; xx++) {
+        const d = Math.hypot(xx - 7.5, yy - 7.5);
+        if (d > 4.3 && d < 5.4) p.set(xx, yy, xx + yy > 15 ? STONE_R[6] : STONE_R[0]);
+        else if (d < 1.6) p.set(xx, yy, xx + yy > 15 ? STONE_R[1] : STONE_R[6]);
+      }
+    }
+    p.put(c, x, y);
+  },
+  ice: (c, x, y) => {
+    const f = fbm(8830, [[2, 0.5, 4], [4, 0.3], [16, 0.2]], 1.4);
+    const p = rampFill(new Px(), ICE_R, f, 8831, 0.18);
+    // long diagonal glints + a few frozen bubbles
+    for (let i = 0; i < 6; i++) { p.set(3 + i, 12 - i, '#e6f0ff'); p.set(9 + i, 14 - i, '#dce9fe'); }
+    for (let i = 0; i < 3; i++) p.set(10 + i, 4 - i, '#eef5ff');
+    cracksOver(p, 8832, 2, hex('#6b93dc'), hex('#d7e6fd'));
+    p.put(c, x, y);
+  },
+  packed_ice: (c, x, y) => {
+    const ramp = pal(['#7c9fe0', '#86a8e6', '#90b1eb', '#9abaef', '#a4c2f2']);
+    const p = rampFill(new Px(), ramp, fbm(8833, [[8, 0.5], [16, 0.5]], 1.1), 8834, 0.5);
+    const r = mulberry32(8835);
+    for (let i = 0; i < 9; i++) p.set((r() * 16) | 0, (r() * 16) | 0, '#c4d8f8');
+    p.put(c, x, y);
+  },
+  terracotta: (c, x, y) => {
+    const ramp = pal(['#8a4a31', '#935036', '#99563a', '#9f5c3f', '#a66343']);
+    rampFill(new Px(), ramp, fbm(8836, [[4, 0.5], [16, 0.5]], 1.1), 8837, 0.4).put(c, x, y);
+  },
+  pumpkin_side: (c, x, y) => pumpkinSidePx(8810).put(c, x, y),
+  pumpkin_top: (c, x, y) => pumpkinTopPx().put(c, x, y),
+  jack_o_lantern: (c, x, y) => jackFacePx().put(c, x, y),
+  melon_side: (c, x, y) => melonSidePx().put(c, x, y),
+  melon_top: (c, x, y) => melonTopPx().put(c, x, y),
+  pumpkin_stem: plantTile([
+    '................', '................', '................', '........ll......',
+    '.......lGGl.....', '......lGg..l....', '.......G..G.....', '.......G...Gg...',
+    '.......Gg..gG...', '......gG........', '...GG.G.........', '..GlgGG.........',
+    '....gG..........', '.....G..........', '.....Gg.........', '.....Gg.........',
+  ], STEM_G),
+  melon_stem: plantTile([
+    '................', '................', '................', '.......ll.......',
+    '......lGGl......', '.....lG..gl.....', '......G...G.....', '......Gg...G....',
+    '.......G...gG...', '.......Gg.......', '..GG....G.......', '.GlgGG..G.......',
+    '....gGG.G.......', '.......GG.......', '.......Gg.......', '.......Gg.......',
+  ], { G: '#5f9b2c', g: '#3b7420', l: '#9cc84c' }),
+  cornflower: plantTile([
+    '................', '................', '......B.b.......', '.....bBLBb......',
+    '....BLBwBLB.....', '.....bBLBb......', '......b.B.......', '.......G........',
+    '......gG........', '.......G.g......', '.....g.GGg......', '.....gGG........',
+    '.......G........', '.......G........', '.......g........', '................',
+  ], { B: '#4a6ee0', b: '#2f47a8', L: '#8fb0ff', w: '#e8f0ff', G: '#4f8f2e', g: '#2f6a1e' }),
+  allium: plantTile([
+    '................', '......pPp.......', '.....pPLPp......', '....pPLPPPp.....',
+    '....PPPPPLP.....', '....pPLPPPp.....', '.....pPPPp......', '......pGp.......',
+    '.......G........', '.......G........', '.......G........', '.....g.G........',
+    '.....gGG.g......', '.......GGg......', '.......G........', '.......g........',
+  ], { P: '#b35fe0', p: '#7d3aa8', L: '#e0a8ff', G: '#4f8f2e', g: '#2f6a1e' }),
+  oxeye_daisy: plantTile([
+    '................', '................', '.......W........', '....W.WwW.W.....',
+    '.....WwYYwW.....', '....WwYyYYwW....', '.....WwYYwW.....', '....W.WwW.W.....',
+    '.......G........', '.......G.g......', '......gGGg......', '.......G........',
+    '......gG........', '.......G........', '.......g........', '................',
+  ], { W: '#f4f4f0', w: '#cfd0c8', Y: '#f2c82a', y: '#c99a14', G: '#4f8f2e', g: '#2f6a1e' }),
+  brown_mushroom: plantTile([
+    '................', '................', '................', '................',
+    '................', '................', '................', '.....bbbbbb.....',
+    '...bBBLLBBBBb...', '..bBBBBBBBBBBb..', '..dddddddddddd..', '......sSs.......',
+    '......sSs.......', '......sSs.......', '......sSs.......', '................',
+  ], { B: '#9a6a48', b: '#7a5034', L: '#c09070', d: '#5c3a26', s: '#c8bca4', S: '#e4dac4' }),
+  red_mushroom: plantTile([
+    '................', '................', '................', '................',
+    '................', '......rrrr......', '....rRWRRWRr....', '...rRRRRRRRWr...',
+    '...RWRRRWRRRR...', '...dddddddddd...', '......sSs.......', '......sSs.......',
+    '......sSs.......', '......sSs.......', '......sSs.......', '................',
+  ], { R: '#d2261e', r: '#a31a14', W: '#f2ecec', d: '#7a120e', s: '#c8bca4', S: '#e4dac4' }),
+  // flat lantern (inventory icon + held model): hook, cap, glowing glass, base
+  lantern: plantTile([
+    '................', '.......oo.......', '......o..o......', '.......oo.......',
+    '......OOOO......', '.....OMMMMO.....', '....OmmmmmmO....', '....OyGGGGyO....',
+    '....OyGWWGyO....', '....OyGWWGyO....', '....OyGGGGyO....', '....OmmmmmmO....',
+    '....OOOOOOOO....', '................', '................', '................',
+  ], { o: '#3b4046', O: '#23262b', M: '#5c636c', m: '#4a5058', y: '#f2b53a', G: '#ffe58a', W: '#fff7cf' }),
+  // lantern model faces (UVs follow the model's pixel positions)
+  lantern_model: (c, x, y) => {
+    const p = new Px(); // starts fully transparent
+    for (let yy = 0; yy <= 6; yy++) { p.set(7, yy, yy % 3 === 2 ? IRON_DARK[1] : IRON_DARK[3]); p.set(8, yy, yy % 3 === 0 ? IRON_DARK[1] : IRON_DARK[4]); }
+    for (let xx = 6; xx <= 9; xx++) { p.set(xx, 7, IRON_DARK[4]); p.set(xx, 8, IRON_DARK[2]); }
+    for (let xx = 5; xx <= 10; xx++) { p.set(xx, 9, IRON_DARK[3]); p.set(xx, 15, IRON_DARK[2]); }
+    for (let yy = 10; yy <= 14; yy++) {
+      p.set(5, yy, IRON_DARK[1]); p.set(10, yy, IRON_DARK[1]);
+      for (let xx = 6; xx <= 9; xx++) p.set(xx, yy, (xx === 7 || xx === 8) && yy >= 11 && yy <= 13 ? '#fff7cf' : xx === 6 || xx === 9 ? '#f2b53a' : '#ffe58a');
+    }
+    p.put(c, x, y);
+  },
+  lantern_model_top: (c, x, y) => new Px().fill((xx, yy) => {
+    const e = xx === 5 || xx === 10 || yy === 5 || yy === 10;
+    return e ? IRON_DARK[2] : (xx === 7 || xx === 8) && (yy === 7 || yy === 8) ? IRON_DARK[0] : IRON_DARK[4];
+  }).put(c, x, y),
+  glass_pane_top: (c, x, y) => new Px().fill((xx, yy) =>
+    (xx === 7 || xx === 8 || yy === 7 || yy === 8) ? (xx === 7 || yy === 7 ? '#e8f4f8' : '#bcd8e0') : '#a7c9d4').put(c, x, y),
+  smooth_stone_slab_side: (c, x, y) => {
+    const r = mulberry32(8840);
+    new Px().fill((xx, yy) => {
+      const h = yy & 7; // two stacked half-height plates
+      if (h === 0) return shadeRGB('#b8b8b8', 0.98 + r() * 0.04);
+      if (h === 7) return shadeRGB('#7c7c7c', 0.96 + r() * 0.06);
+      if (xx === 0) return shadeRGB('#b0b0b0', 1);
+      if (xx === 15) return shadeRGB('#8a8a8a', 1);
+      return shadeRGB('#a4a4a4', 0.96 + r() * 0.07);
+    }).put(c, x, y);
+  },
+  anvil: (c, x, y) => {
+    const f = fbm(8841, [[4, 0.5], [8, 0.5]], 1.2);
+    const p = rampFill(new Px(), IRON_DARK.slice(1), f, 8842, 0.35);
+    for (let i = 0; i < 16; i++) { p.set(i, 0, IRON_DARK[5]); p.set(i, 15, IRON_DARK[0]); }
+    p.put(c, x, y);
+  },
+  anvil_top: (c, x, y) => {
+    const f = fbm(8843, [[8, 0.5], [16, 0.5]], 1.1);
+    const p = rampFill(new Px(), IRON_DARK.slice(2), f, 8844, 0.3);
+    for (let yy = 4; yy <= 11; yy++) for (let xx = 2; xx <= 13; xx++) p.set(xx, yy, yy === 4 ? IRON_DARK[1] : yy === 11 ? IRON_DARK[5] : IRON_DARK[3]);
+    p.put(c, x, y);
+  },
+  enchanting_table_top: (c, x, y) => {
+    const p = new Px().fill((xx, yy) => ((xx + yy) & 1 ? '#a32b2b' : '#b53434'));
+    for (let i = 0; i < 16; i++) {
+      p.set(i, 0, '#6e1a1a'); p.set(0, i, '#6e1a1a'); p.set(i, 15, '#4d1010'); p.set(15, i, '#4d1010');
+    }
+    for (const [cx, cy] of [[2, 2], [13, 2], [2, 13], [13, 13]]) { // diamond corners
+      p.set(cx, cy, '#6ef3e0'); p.set(cx + 1, cy, '#2ec0b0'); p.set(cx, cy + 1, '#2ec0b0'); p.set(cx - 1, cy, '#b8fff4'); p.set(cx, cy - 1, '#b8fff4');
+    }
+    for (let i = 5; i <= 10; i++) { p.set(i, 5, '#d8b24a'); p.set(i, 10, '#a8842a'); p.set(5, i, '#d8b24a'); p.set(10, i, '#a8842a'); }
+    p.put(c, x, y);
+  },
+  enchanting_table_side: (c, x, y) => {
+    const ob = pal(['#0c0913', '#141020', '#1c162a', '#241d36', '#2f2544']);
+    const p = rampFill(new Px(), ob, fbm(8845, [[4, 0.5], [8, 0.5]], 1.8), 8846, 0.25);
+    // the red cloth drapes over the top quarter, with a gold hem
+    for (let yy = 4; yy <= 7; yy++) for (let xx = 0; xx < 16; xx++) p.set(xx, yy, yy === 7 ? '#d8b24a' : (xx + yy) & 1 ? '#a32b2b' : '#b53434');
+    for (const xx of [1, 5, 10, 14]) { p.set(xx, 8, '#8a2020'); p.set(xx, 9, '#6e1a1a'); }
+    p.set(3, 12, '#6ef3e0'); p.set(12, 12, '#6ef3e0'); p.set(4, 12, '#2ec0b0'); p.set(13, 12, '#2ec0b0');
+    p.put(c, x, y);
+  },
+  ench_book: (c, x, y) => new Px().fill((xx, yy) => {
+    if (xx === 7 || xx === 8) return '#5a1a10';
+    const edge = xx === 0 || xx === 15 || yy === 0 || yy === 15;
+    return edge ? '#7a2a18' : (yy % 3 === 1 ? '#c9c2a8' : '#efe9d6');
+  }).put(c, x, y),
+  barrel_side: (c, x, y) => {
+    const p = planksPx(pal(['#6b4a24', '#7a552a', '#886031', '#946a38', '#a0743f', '#aa7e46']), hex('#4c3418'), 8847);
+    // rotate the boards upright: vertical staves read as a cask
+    const q = new Px();
+    for (let yy = 0; yy < 16; yy++) for (let xx = 0; xx < 16; xx++) q.set(xx, yy, p.get(yy, xx));
+    for (const band of [2, 13]) for (let xx = 0; xx < 16; xx++) { q.set(xx, band, IRON_DARK[3]); q.set(xx, band + 1, IRON_DARK[1]); }
+    q.put(c, x, y);
+  },
+  barrel_top: (c, x, y) => {
+    const p = planksPx(pal(['#7a552a', '#886031', '#946a38', '#a0743f', '#aa7e46', '#b4884e']), hex('#5a3e1e'), 8848);
+    for (let i = 0; i < 16; i++) { p.set(i, 0, IRON_DARK[2]); p.set(0, i, IRON_DARK[2]); p.set(i, 15, IRON_DARK[1]); p.set(15, i, IRON_DARK[1]); }
+    for (let yy = 6; yy <= 9; yy++) for (let xx = 6; xx <= 9; xx++) p.set(xx, yy, yy === 6 || xx === 6 ? '#2a1c0c' : '#3a2812');
+    p.put(c, x, y);
+  },
+  barrel_bottom: (c, x, y) => {
+    const p = planksPx(pal(['#6b4a24', '#7a552a', '#886031', '#946a38', '#a0743f', '#aa7e46']), hex('#4c3418'), 8849);
+    for (let i = 0; i < 16; i++) { p.set(i, 0, IRON_DARK[2]); p.set(0, i, IRON_DARK[2]); p.set(i, 15, IRON_DARK[1]); p.set(15, i, IRON_DARK[1]); }
+    p.put(c, x, y);
+  },
+  campfire_log: (c, x, y) => campLogPx().put(c, x, y),
+  campfire_log_end: (c, x, y) => ringsPx(pal(['#2e2012', '#3d2b18', '#4b361e', '#5a4326']),
+    pal(['#6a4a26', '#8a6436', '#9c7442', '#a8804c']), 8822).put(c, x, y),
+  campfire_ash: (c, x, y) => {
+    const r = mulberry32(8823);
+    new Px().fill(() => {
+      const v = r();
+      return v < 0.12 ? '#ff8a1e' : v < 0.2 ? '#c24a12' : v < 0.55 ? '#3a3533' : '#57504c';
+    }).put(c, x, y);
+  },
+  cake_top: (c, x, y) => {
+    const r = mulberry32(8850);
+    const p = new Px().fill(() => (r() < 0.2 ? '#e9e3de' : '#f7f3ef'));
+    for (const [cx, cy] of [[3, 4], [8, 3], [12, 6], [5, 9], [10, 11], [3, 13], [13, 13]]) { p.set(cx, cy, '#d8232a'); p.set(cx + 1, cy, '#a3161b'); }
+    p.put(c, x, y);
+  },
+  cake_side: (c, x, y) => {
+    const r = mulberry32(8851);
+    new Px().fill((xx, yy) => {
+      const h = yy & 7; // icing band + drips over sponge (both half-heights)
+      const drip = h === 2 && (xx % 5 === 1 || xx % 7 === 3);
+      if (h <= 1 || drip) return h === 0 ? '#fbf8f5' : '#e6e0da';
+      return shadeRGB(r() < 0.25 ? '#b0703a' : '#c27d44', h === 7 ? 0.8 : 1);
+    }).put(c, x, y);
+  },
+  cake_inner: (c, x, y) => {
+    const r = mulberry32(8852);
+    new Px().fill((xx, yy) => {
+      const h = yy & 7;
+      if (h <= 1) return h === 0 ? '#fbf8f5' : '#e6e0da';
+      if (h === 4) return '#d8232a'; // jam layer
+      return r() < 0.3 ? '#e6c28a' : '#f0d09c';
+    }).put(c, x, y);
+  },
+  cake_bottom: (c, x, y) => new Px().fill(() => '#a8683a').put(c, x, y),
+  flower_pot: (c, x, y) => {
+    const r = mulberry32(8853);
+    new Px().fill((xx, yy) => {
+      if (yy === 10) return '#8a4028'; // rim lip
+      if (yy === 11) return '#6a2e1c';
+      const lit = xx <= 6 ? 1.1 : xx >= 9 ? 0.86 : 1;
+      return shadeRGB(r() < 0.2 ? '#8e4a30' : '#9c5236', lit);
+    }).put(c, x, y);
+  },
+  flower_pot_top: (c, x, y) => new Px().fill((xx, yy) => {
+    const rim = xx === 5 || xx === 10 || yy === 5 || yy === 10;
+    return rim ? '#8a4028' : ((xx * 7 + yy * 3) % 5 === 0 ? '#3a2616' : '#4b3220');
+  }).put(c, x, y),
+  composter_side: (c, x, y) => {
+    const p = planksPx(pal(['#6b4a24', '#7a552a', '#886031', '#946a38', '#a0743f', '#aa7e46']), hex('#4c3418'), 8854);
+    for (let i = 0; i < 16; i++) { p.set(i, 0, '#5a3e1e'); p.set(0, i, '#5a3e1e'); p.set(i, 15, '#3e2a12'); p.set(15, i, '#3e2a12'); }
+    p.put(c, x, y);
+  },
+  composter_top: (c, x, y) => new Px().fill((xx, yy) => {
+    const rim = xx < 2 || xx > 13 || yy < 2 || yy > 13;
+    return rim ? ((xx + yy) & 1 ? '#946a38' : '#886031') : '#2a1c0c';
+  }).put(c, x, y),
+  composter_bottom: (c, x, y) => planksPx(pal(['#6b4a24', '#7a552a', '#886031', '#946a38', '#a0743f', '#aa7e46']), hex('#4c3418'), 8855).put(c, x, y),
+  compost: (c, x, y) => {
+    const r = mulberry32(8856);
+    new Px().fill(() => {
+      const v = r();
+      return v < 0.15 ? '#6a8a2a' : v < 0.3 ? '#4f6a1e' : v < 0.65 ? '#4a3420' : '#5c4228';
+    }).put(c, x, y);
+  },
+  compost_ready: (c, x, y) => {
+    const r = mulberry32(8857);
+    new Px().fill(() => {
+      const v = r();
+      return v < 0.28 ? '#ecebe4' : v < 0.4 ? '#c8c6bc' : v < 0.7 ? '#4a3420' : '#5c4228';
+    }).put(c, x, y);
+  },
+};
+for (const [, , stem, , col] of WOOL_COLORS) {
+  DECOR_TILE_PAINTERS[`${stem}_wool`] = (c, x, y) => dyedWool(c, x, y, col);
+}
+Object.assign(TILE_PAINTERS, DECOR_TILE_PAINTERS);
+
+// --- item sprites -------------------------------------------------------------
+
+/** Glass bottle with liquid `liq` (null = empty); `glint` adds sparkles. */
+function bottlePx(liq: string | null, glint = false): Px {
+  const rows = [
+    '................', '.......cc.......', '.......CC.......', '......gCCg......',
+    '......gnng......', '.....gnnnng.....', '....giiiiiig....', '...giiiiiiiig...',
+    '...giiiiiiiig...', '...giiiiiiiig...', '...giiiiiiiig...', '....giiiiiig....',
+    '.....gggggg.....', '................', '................', '................',
+  ];
+  const p = spritePx(rows, { c: '#8a6038', C: '#b88a58', g: '#d4e6f0' });
+  const [lr, lg, lb] = liq ? hex(liq) : [0, 0, 0];
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      const ch = rows[y][x];
+      if (ch === 'n' || (ch === 'i' && !liq)) p.set(x, y, '#eef6fa', 90);
+      else if (ch === 'i') {
+        const k = y === 6 ? 1.3 : x <= 5 ? 1.12 : x >= 10 ? 0.74 : 1;
+        p.set(x, y, [Math.min(255, lr * k + (y === 6 ? 20 : 0)), Math.min(255, lg * k + (y === 6 ? 20 : 0)), Math.min(255, lb * k + (y === 6 ? 20 : 0))]);
+      }
+    }
+  }
+  p.set(5, 7, '#ffffff'); p.set(5, 8, '#ffffff'); p.set(6, 8, liq ? '#ffffff' : '#f4fbff');
+  if (glint) { p.set(12, 3, '#fff7a0'); p.set(13, 6, '#fff7a0'); p.set(2, 4, '#d8ff8a'); }
+  return outlinePx(p, 0.4);
+}
+
+/** Round dye blob in a colour (a soft pile of powder). */
+function dyePx(col: string): Px {
+  const [r, g, b] = hex(col);
+  const c = (k: number): RGB => [Math.min(255, r * k + 18 * Math.max(0, k - 1)), Math.min(255, g * k + 18 * Math.max(0, k - 1)), Math.min(255, b * k + 18 * Math.max(0, k - 1))];
+  const rows = [
+    '................', '................', '................', '................',
+    '.......hh.......', '.....hhHHm......', '....hHHHHHm.....', '...hHHHMMMMm....',
+    '...hHHMMMMMm....', '..hHHMMMMMMmm...', '..HHMMMMMMMmm...', '..mMMMMMMMmmm...',
+    '...mmmmmmmmm....', '................', '................', '................',
+  ];
+  const p = spritePx(rows, {});
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      const ch = rows[y][x];
+      if (ch === 'h') p.set(x, y, c(1.35)); else if (ch === 'H') p.set(x, y, c(1.12));
+      else if (ch === 'M') p.set(x, y, c(1)); else if (ch === 'm') p.set(x, y, c(0.72));
+    }
+  }
+  return outlinePx(p, 0.4);
+}
+
+const DECOR_ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
+  clay_ball: (c) => outlinePx(spritePx([
+    '................', '................', '................', '................',
+    '.......hhh......', '.....hhHHHm.....', '....hHHHHHHm....', '....hHHHMHHm....',
+    '....HHHMMMHm....', '....mHMMMMmm....', '.....mmMMmm.....', '.......mm.......',
+    '................', '................', '................', '................',
+  ], { h: '#c4c9d4', H: '#a9afbc', M: '#949aa8', m: '#7c8290' }), 0.4).put(c, 0, 0),
+  brick: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '................',
+    '................', '....OOOOOOO.....', '...OLLLLLLMO....', '..OLLMMMMMMMO...',
+    '..OLMMMMMMMmO...', '.OMMMMMMMmmO....', '.OMmmmmmmmmO....', '..OOOOOOOOO.....',
+    '................', '................', '................', '................',
+  ], { O: '#3e160c', M: '#a8492e', m: '#7c3220', L: '#c8664a' }),
+  snowball: (c) => outlinePx(spritePx([
+    '................', '................', '................', '................',
+    '......hhhh......', '.....hWWWWs.....', '....hWWWWWWs....', '....hWWWWWWs....',
+    '....WWWWWWss....', '....sWWWWsss....', '.....sssss......', '................',
+    '................', '................', '................', '................',
+  ], { h: '#ffffff', W: '#eef4fb', s: '#b9cde4' }), 0.5).put(c, 0, 0),
+  sugar: (c) => outlinePx(spritePx([
+    '................', '................', '................', '................',
+    '................', '.......w........', '.....w.W.w......', '....wWWWWWw.....',
+    '...wWWsWWWWw....', '...WWWWWWsWW....', '..wWsWWWWWWWw...', '..sssssssssss...',
+    '................', '................', '................', '................',
+  ], { W: '#fbfbfb', w: '#e4e4e8', s: '#c4c4cc' }), 0.45).put(c, 0, 0),
+  cookie: (c) => outlinePx(spritePx([
+    '................', '................', '................', '.....hhhhh......',
+    '....hCCCCCc.....', '...hCCdCCCCc....', '...CCCCCCdCc....', '..hCdCCCCCCCc...',
+    '..CCCCCdCCCCc...', '..CCCCCCCCdCc...', '...CdCCCCCCc....', '...cCCCdCCcc....',
+    '....cccccccc....', '................', '................', '................',
+  ], { h: '#e0a45c', C: '#c98442', c: '#9a5e2a', d: '#4a2410' }), 0.4).put(c, 0, 0),
+  pumpkin_pie: (c) => outlinePx(spritePx([
+    '................', '................', '................', '................',
+    '................', '.....cccccc.....', '....cFFFFFFc....', '...cFFfFFfFFc...',
+    '..cFFFFFFFFFFc..', '..CFFFFfFFFFFC..', '..CCcccccccCCC..', '...CCCCCCCCCC...',
+    '....bbbbbbbb....', '................', '................', '................',
+  ], { F: '#e08a2a', f: '#f2b04e', c: '#e2b774', C: '#c68e48', b: '#8e5a24' }), 0.4).put(c, 0, 0),
+  melon_slice: (c) => outlinePx(spritePx([
+    '................', '................', '................', '................',
+    '................', '..g..........g..', '..gR........Rg..', '..gRR.K..K.RRg..',
+    '..glRRRRRRRRlg..', '...glRRKRRRlg...', '....glRRRRlg....', '.....gllllg.....',
+    '......gggg......', '................', '................', '................',
+  ], { g: '#3f7a1a', l: '#b6d46a', R: '#e4413a', K: '#24120e' }), 0.4).put(c, 0, 0),
+  glistering_melon: (c) => {
+    const p = outlinePx(spritePx([
+      '................', '................', '................', '................',
+      '................', '..y..........y..', '..yR........Ry..', '..yRR.Y..Y.RRy..',
+      '..ylRRRRRRRRly..', '...ylRRYRRRly...', '....ylRRRRly....', '.....yllllly....',
+      '......yyyy......', '................', '................', '................',
+    ], { y: '#d8a822', l: '#fff08a', R: '#f0645a', Y: '#fff6c0' }), 0.4);
+    p.set(3, 3, '#fffbe0'); p.set(12, 2, '#fffbe0'); p.set(13, 4, '#ffe066');
+    p.put(c, 0, 0);
+  },
+  pumpkin_seeds: (c) => seedsPx('#e8dcb0', '#fff6d6', '#b8a878').put(c, 0, 0),
+  melon_seeds: (c) => seedsPx('#2a2018', '#5a4a34', '#120c08').put(c, 0, 0),
+  mushroom_stew: (c) => pixmap(c, 0, 0, [
+    '................', '................', '................', '................',
+    '..OOOOOOOOOO....', '..OSSbSSrSSO....', '..OSbSSSSSbO....', '...OHHHHHHO.....',
+    '...OHHHHHHO.....', '....OHHHHO......', '.....OOOO.......', '................',
+    '................', '................', '................', '................',
+  ], { O: '#4a2f14', H: '#9c6f3a', S: '#c9a071', b: '#8a6446', r: '#c43a2a' }),
+  glass_bottle: (c) => bottlePx(null).put(c, 0, 0),
+  water_bottle: (c) => bottlePx('#3f66d8').put(c, 0, 0),
+  experience_bottle: (c) => bottlePx('#8ad83a', true).put(c, 0, 0),
+  map: (c) => {
+    const p = spritePx([
+      '................', '.OOOOOOOOOOOOOO.', '.OppppppppppppO.', '.OpGGGgBBBBGGpO.',
+      '.OpGgGGBBBbGGpO.', '.OpGGssBBBGGgpO.', '.OpgGsssBGGGGpO.', '.OpGGGsBBBGgGpO.',
+      '.OpGgGGBBrGGGpO.', '.OpGGGBBBGGsspO.', '.OpBBBBBGGGsspO.', '.OpBbBBGgGGGspO.',
+      '.OpBBBGGGGgGGpO.', '.OppppppppppppO.', '.OOOOOOOOOOOOOO.', '................',
+    ], { O: '#6f5a3a', p: '#e8dcb8', G: '#7fa84e', g: '#5c8a34', B: '#5a86d8', b: '#7ea4ea', s: '#d6c894', r: '#c8323a' });
+    p.put(c, 0, 0);
+  },
+  recovery_compass: (c) => dialPx(pal(['#1f3a44', '#2f6070', '#58a8b8']), (p) => {
+    for (const [x, y] of [[8, 7], [9, 6], [10, 5]]) p.set(x, y, '#3de8e0');
+    p.set(10, 4, '#b8fff8');
+    for (const [x, y] of [[7, 8], [6, 9], [5, 10]]) p.set(x, y, '#1a6e78');
+    p.set(7, 7, '#0e2a30'); p.set(8, 8, '#0a1e22');
+  }).put(c, 0, 0),
+  glider: (c) => outlinePx(spritePx([
+    '................', '..mMMMm..mMMMm..', '.mMLLMMmmMMLLMm.', '.MLLMMMMMMMMLLM.',
+    '.MLMMMMMMMMMMLM.', '.MMMdMMMMMMdMMM.', '..MMdMMMMMMdMM..', '..MMdMM..MMdMM..',
+    '..mMdMm..mMdMm..', '...MdM....MdM...', '...mdM....Mdm...', '....dm....md....',
+    '....m......m....', '................', '................', '................',
+  ], { M: '#8b86a8', L: '#c4c0dc', m: '#625e80', d: '#4c486a' }), 0.4).put(c, 0, 0),
+  firework_rocket: (c) => outlinePx(diagPx((a, cc) => {
+    if (a >= 3 && a <= 9 && cc >= 14 && cc <= 17) return a === 9 ? (cc <= 15 ? 'T' : 't') : cc <= 14 ? 'L' : cc === 17 ? 'd' : (a & 1) ? 'R' : 'W';
+    if (a >= 10 && a <= 11 && cc >= 15 && cc <= 16) return a === 11 ? 'T' : 't';
+    if (a >= -11 && a <= 2 && (cc === 15 || cc === 16)) return cc === 15 ? 'H' : 'h';
+    return null;
+  }, { L: '#ff8a80', R: '#d8322a', W: '#f4f4f4', d: '#8a1a14', T: '#6a6a6a', t: '#3a3a3a', ...HANDLE }), 0.35).put(c, 0, 0),
+  warp_pearl: (c) => outlinePx(spritePx([
+    '................', '................', '................', '................',
+    '......dddd......', '....dTTttTd.....', '...dTLLTtTTd....', '...dTLGgTTtd....',
+    '...dTTggGTTd....', '...dtTTGTTtd....', '....dttTTtd.....', '.....dddd.......',
+    '................', '................', '................', '................',
+  ], { d: '#0c3a36', T: '#1f7a6e', t: '#155a52', L: '#7ef0d8', G: '#62d86a', g: '#2e9a4a' }), 0.4).put(c, 0, 0),
+  // block item sprites (shown in hand/hotbar instead of an isometric slice)
+  cake: (c) => outlinePx(spritePx([
+    '................', '................', '................', '................',
+    '.....WWWWWW.....', '...WWWrWWWWWW...', '..WWWWWWWrWWWW..', '..wWWWWWWWWWWw..',
+    '..SwWwWWwWWwWS..', '..SSwSSwSSwSSS..', '..SSSSSSSSSSSS..', '..sSSSSSSSSSSs..',
+    '...ssssssssss...', '................', '................', '................',
+  ], { W: '#f7f3ef', w: '#dcd6d0', r: '#d8232a', S: '#c27d44', s: '#8e5428' }), 0.4).put(c, 0, 0),
+  flower_pot: (c) => outlinePx(spritePx([
+    '................', '................', '................', '................',
+    '................', '................', '......g.G.......', '.....gGGgG......',
+    '...RRRRRRRRR....', '...rDDDDDDDr....', '....PPPPPPp.....', '....PPPPPPp.....',
+    '....PPPPPPp.....', '.....PPPPp......', '................', '................',
+  ], { R: '#a8583a', r: '#7a3a24', D: '#3a2616', P: '#9c5236', p: '#6e3420', G: '#4f8f2e', g: '#2f6a1e' }), 0.4).put(c, 0, 0),
+  campfire: (c) => outlinePx(spritePx([
+    '................', '.......y........', '......yY........', '......YOy.......',
+    '.....yOOYy......', '.....YORROy.....', '....yORRROY.....', '....YORRRROy....',
+    '...LLLLLLLLLLl..', '..lLLLLLLLLLLl..', '..EllllllllllE..', '...aAaAaAaAaA...',
+    '................', '................', '................', '................',
+  ], { y: '#ffd24a', Y: '#ffb41e', O: '#ff7a1a', R: '#e2431a', L: '#6a502e', l: '#4b361e', E: '#9c7442', a: '#3a3533', A: '#ff8a1e' }), 0.35).put(c, 0, 0),
+};
+for (const [, , stem, , col] of WOOL_COLORS) {
+  DECOR_ITEM_PAINTERS[`${stem}_dye`] = (c) => dyePx(col).put(c, 0, 0);
+}
+for (const [, stem, , col] of POTIONS) {
+  DECOR_ITEM_PAINTERS[`potion_${stem}`] = (c) => bottlePx(col).put(c, 0, 0);
+}
+Object.assign(ITEM_PAINTERS, DECOR_ITEM_PAINTERS);
+Object.assign(PACK_MAP, {
+  bricks: { paths: ['block/bricks'], kind: 'tile' },
+  clay: { paths: ['block/clay'], kind: 'tile' },
+  mossy_cobble: { paths: ['block/mossy_cobblestone'], kind: 'tile' },
+  mossy_stone_bricks: { paths: ['block/mossy_stone_bricks'], kind: 'tile' },
+  cracked_stone_bricks: { paths: ['block/cracked_stone_bricks'], kind: 'tile' },
+  chiseled_stone_bricks: { paths: ['block/chiseled_stone_bricks'], kind: 'tile' },
+  ice: { paths: ['block/ice'], kind: 'tile' },
+  packed_ice: { paths: ['block/packed_ice'], kind: 'tile' },
+  terracotta: { paths: ['block/terracotta'], kind: 'tile' },
+  pumpkin_side: { paths: ['block/pumpkin_side'], kind: 'tile' },
+  pumpkin_top: { paths: ['block/pumpkin_top'], kind: 'tile' },
+  jack_o_lantern: { paths: ['block/jack_o_lantern'], kind: 'tile' },
+  melon_side: { paths: ['block/melon_side'], kind: 'tile' },
+  melon_top: { paths: ['block/melon_top'], kind: 'tile' },
+  cornflower: { paths: ['block/cornflower'], kind: 'tile' },
+  allium: { paths: ['block/allium'], kind: 'tile' },
+  oxeye_daisy: { paths: ['block/oxeye_daisy'], kind: 'tile' },
+  brown_mushroom: { paths: ['block/brown_mushroom'], kind: 'tile' },
+  red_mushroom: { paths: ['block/red_mushroom'], kind: 'tile' },
+  barrel_side: { paths: ['block/barrel_side'], kind: 'tile' },
+  barrel_top: { paths: ['block/barrel_top'], kind: 'tile' },
+  barrel_bottom: { paths: ['block/barrel_bottom'], kind: 'tile' },
+  cake_top: { paths: ['block/cake_top'], kind: 'tile' },
+  cake_side: { paths: ['block/cake_side'], kind: 'tile' },
+  cake_inner: { paths: ['block/cake_inner'], kind: 'tile' },
+  cake_bottom: { paths: ['block/cake_bottom'], kind: 'tile' },
+  clay_ball: { paths: ['item/clay_ball'], kind: 'item' },
+  brick: { paths: ['item/brick'], kind: 'item' },
+  snowball: { paths: ['item/snowball'], kind: 'item' },
+  sugar: { paths: ['item/sugar'], kind: 'item' },
+  cookie: { paths: ['item/cookie'], kind: 'item' },
+  pumpkin_pie: { paths: ['item/pumpkin_pie'], kind: 'item' },
+  melon_slice: { paths: ['item/melon_slice'], kind: 'item' },
+  glass_bottle: { paths: ['item/glass_bottle'], kind: 'item' },
+  map: { paths: ['item/map'], kind: 'item' },
+} satisfies Record<string, PackEntry>);
+for (const [, , stem] of WOOL_COLORS) {
+  PACK_MAP[`${stem}_wool`] = { paths: [`block/${stem}_wool`], kind: 'tile' };
+}
+
+// --- inventory icons + held/dropped geometry for shaped blocks ------------------
+
+/** Blocks shown in the inventory by their hand-drawn item sprite (like the bed). */
+export const BLOCK_SPRITE_ICONS = new Set<string>(['cake', 'flower_pot', 'campfire']);
+
+/** Isometric icon shapes for partial blocks: boxes [p0,p1,q0,q1,h0,h1], drawn in order. */
+export const ICON_SHAPES: Record<string, number[][]> = {
+  anvil: [[0.19, 0.81, 0.12, 0.88, 0, 0.25], [0.31, 0.69, 0.25, 0.75, 0.25, 0.62], [0, 1, 0.19, 0.81, 0.62, 1]],
+  enchanting_table: [[0, 1, 0, 1, 0, 0.75]],
+  oak_fence: [[0.06, 0.31, 0.38, 0.62, 0, 1], [0, 1, 0.44, 0.56, 0.38, 0.56], [0, 1, 0.44, 0.56, 0.75, 0.94], [0.69, 0.94, 0.38, 0.62, 0, 1]],
+  oak_fence_gate: [[0, 0.12, 0.44, 0.56, 0.31, 1], [0.12, 0.88, 0.44, 0.56, 0.38, 0.56], [0.12, 0.88, 0.44, 0.56, 0.75, 0.94],
+    [0.38, 0.62, 0.44, 0.56, 0.38, 0.94], [0.88, 1, 0.44, 0.56, 0.31, 1]],
+  composter: [[0, 1, 0, 1, 0, 1]],
+  glass_pane: [[0, 1, 0.44, 0.56, 0, 1]],
+};
+for (const [slab, stairs] of SLAB_KINDS) {
+  ICON_SHAPES[def(slab).name] = [[0, 1, 0, 1, 0, 0.5]];
+  if (stairs) ICON_SHAPES[def(stairs).name] = [[0, 1, 0, 1, 0, 0.5], [0, 1, 0.5, 1, 0.5, 1]];
+}
+
+/** Does this block hold/drop as its own little model (slab, stairs, fence ...)? */
+export function hasShapedItemModel(id: number): boolean {
+  return SHAPED.has(id) && hasDef(id) && def(id).solid && !BLOCK_SPRITE_ICONS.has(def(id).name);
+}
+
+/**
+ * Geometry for a shaped block held in hand or dropped, or null for a plain
+ * cube: its model boxes with atlas UVs cropped to each box, and Minecraft face
+ * shading baked into vertex colours. Centred on the origin like BoxGeometry.
+ */
+export function shapedItemGeometry(id: number, atlas: Atlas, size = 1): THREE.BufferGeometry | null {
+  if (!hasShapedItemModel(id)) return null;
+  const d = def(id);
+  let boxes = shapeBoxes(id, 0, 4 | 8, false, false);
+  if (id === B.OAK_FENCE) boxes = [[6 / 16, 0, 6 / 16, 10 / 16, 1, 10 / 16], [0, 6 / 16, 7 / 16, 1, 9 / 16, 9 / 16], [0, 12 / 16, 7 / 16, 1, 15 / 16, 9 / 16]];
+  if (id === B.FENCE_GATE) boxes = [[0, 5 / 16, 7 / 16, 2 / 16, 1, 9 / 16], [14 / 16, 5 / 16, 7 / 16, 1, 1, 9 / 16],
+    [2 / 16, 6 / 16, 7 / 16, 14 / 16, 9 / 16, 9 / 16], [2 / 16, 12 / 16, 7 / 16, 14 / 16, 15 / 16, 9 / 16]];
+  if (id === B.ANVIL) boxes = [[2 / 16, 0, 2 / 16, 14 / 16, 4 / 16, 14 / 16], [6 / 16, 4 / 16, 4 / 16, 10 / 16, 10 / 16, 12 / 16], [0, 10 / 16, 3 / 16, 1, 1, 13 / 16]];
+  if (id === B.COMPOSTER || id === B.JACK_O_LANTERN) boxes = [[0, 0, 0, 1, 1, 1]];
+  if (!boxes || boxes.length === 0) return null;
+  const pos: number[] = [], uvs: number[] = [], cols: number[] = [], idx: number[] = [];
+  const shadeOf = [0.64, 0.64, 1, 0.5, 0.82, 0.82];
+  const faces = d.faces!;
+  for (const [x0, y0, z0, x1, y1, z1] of boxes) {
+    // face corner lists (+x,-x,+y,-y,+z,-z) + uv mappers, counter-clockwise from outside
+    const F: [number[][], (p: number[]) => [number, number], string][] = [
+      [[[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], (p) => [1 - p[2], 1 - p[1]], faces.sides],
+      [[[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], (p) => [p[2], 1 - p[1]], faces.sides],
+      [[[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]], (p) => [p[0], p[2]], faces.top],
+      [[[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], (p) => [p[0], p[2]], faces.bottom],
+      [[[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], (p) => [p[0], 1 - p[1]], faces.front ?? faces.sides],
+      [[[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], (p) => [1 - p[0], 1 - p[1]], faces.sides],
+    ];
+    F.forEach(([corners, uvOf, tile], f) => {
+      const r = atlas.rect(tile);
+      const base = pos.length / 3;
+      for (const p of corners) {
+        pos.push((p[0] - 0.5) * size, (p[1] - 0.5) * size, (p[2] - 0.5) * size);
+        const [u, v] = uvOf(p);
+        uvs.push(r.u0 + u * (r.u1 - r.u0), r.v0 + v * (r.v1 - r.v0));
+        cols.push(shadeOf[f], shadeOf[f], shadeOf[f]);
+      }
+      idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    });
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}

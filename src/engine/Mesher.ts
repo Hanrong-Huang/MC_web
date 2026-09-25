@@ -8,7 +8,8 @@
 // light model stays 2-channel without another attribute.
 
 import { CX, CZ, CY } from './Chunk';
-import { B, def, hasDef, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES } from './Blocks';
+import { B, def, hasDef, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, connectsTo } from './Blocks';
+import type { Box } from './Blocks';
 import type { UVRect } from './Textures';
 
 // Minimal structural views of world/chunk/atlas so the mesher is pure logic and
@@ -237,7 +238,7 @@ function kindOf(id: number): number {
       : (id === B.TORCH || id === B.DOOR_LOWER || id === B.DOOR_UPPER || id === B.LADDER ||
         id === B.BED || id === B.BED_HEAD || id === B.TRAPDOOR || id === B.PRESSURE_PLATE ||
         id === B.LEVER || id === B.WOODEN_BUTTON || id === B.STONE_BUTTON ||
-        id === B.REDSTONE_WIRE || CROSS_BLOCKS.has(id)) ? 2 : 1;
+        id === B.REDSTONE_WIRE || CROSS_BLOCKS.has(id) || SHAPED.has(id)) ? 2 : 1;
     KIND[id] = k;
   }
   return k;
@@ -379,6 +380,12 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
       n++;
     }
     return n > 0 ? sum / n : LIQUID_EDGE_HEIGHT;
+  };
+  /** Water column depth from this cell down (cells of water, capped). */
+  const waterDepth = (x: number, y: number, z: number): number => {
+    let d = 0;
+    while (d < 12 && get(x, y - d, z) === B.WATER) d++;
+    return d;
   };
 
   // biome tint per column, computed lazily
@@ -526,6 +533,20 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           emitRedstoneWire(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), power);
           continue;
         }
+        if (SHAPED.has(id)) {
+          const wx = bx + x, wz = bz + z, key = `${wx},${y},${wz}`;
+          const gate = id === B.FENCE_GATE ? world.doorStates.get(key) : undefined;
+          const meta = gate ? gate.facing : world.bedFacings.get(key) ?? 0;
+          let conn = 0;
+          if (id === B.OAK_FENCE || id === B.GLASS_PANE) {
+            if (connectsTo(id, get(x, y, z - 1))) conn |= 1;
+            if (connectsTo(id, get(x, y, z + 1))) conn |= 2;
+            if (connectsTo(id, get(x - 1, y, z))) conn |= 4;
+            if (connectsTo(id, get(x + 1, y, z))) conn |= 8;
+          }
+          emitShaped(solid, atlas, id, x, y, z, meta, conn, !!gate?.open, get, skyAt, torchAt);
+          continue;
+        }
         if (CROSS_BLOCKS.has(id)) {
           const tileName = def(id).faces!.sides;
           const tint = TINTED_TILES.has(tileName) ? tintAt(x, z) : null;
@@ -545,6 +566,31 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
         const waterTopOpen = isLiquid && get(x, y + 1, z) !== id;
         // flag bits packed onto the torch channel (stripped in the shader)
         const flag = isLava ? FLAG_LAVA : isLeaf ? FLAG_SWAY : 0;
+        // water carries its own vertex data (see WATER VERTEX below): surface
+        // flow / fall speed in atint, depth + shoreline in uv
+        let flowX = 0, flowZ = 0, fall = 0, selfDepth = 0;
+        if (isWater) {
+          selfDepth = waterDepth(x, y, z);
+          fall = get(x, y + 1, z) === id || get(x, y - 1, z) === B.AIR ? 1 : 0;
+          if (waterTopOpen) {
+            // downhill gradient of the surface: toward lower neighbours and
+            // (strongly) toward open drops
+            const hs = liquidCellHeight(id, x, y, z);
+            for (let d = 0; d < 4; d++) {
+              const dx = d === 0 ? 1 : d === 1 ? -1 : 0, dz = d === 2 ? 1 : d === 3 ? -1 : 0;
+              const nb = get(x + dx, y, z + dz);
+              let diff: number;
+              if (nb === id) diff = hs - liquidCellHeight(id, x + dx, y, z + dz);
+              else if (nb === B.AIR) {
+                const under = get(x + dx, y - 1, z + dz);
+                diff = under === B.AIR || under === id ? hs * 2 : hs * 0.5;
+              } else continue;
+              flowX += dx * diff; flowZ += dz * diff;
+            }
+            const fl = Math.hypot(flowX, flowZ);
+            if (fl > 1e-4) { const k = Math.min(1, fl * 16) / fl; flowX *= k; flowZ *= k; } else { flowX = 0; flowZ = 0; }
+          }
+        }
 
         for (let face = 0; face < 6; face++) {
           const n = FACE_NORMALS[face];
@@ -554,7 +600,7 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           if (isLiquid) {
             if (nb === id) continue;
             if (OPAQUE_LUT[nb]) continue;
-            if (nb !== B.AIR && !LEAF_LUT[nb] && nb !== B.TORCH && face !== 2) continue;
+            if (nb !== B.AIR && !LEAF_LUT[nb] && nb !== B.TORCH && nb !== B.GLASS && face !== 2) continue;
           } else if (opaque) {
             if (OPAQUE_LUT[nb]) continue;
           } else {
@@ -611,6 +657,30 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
             const aoc = corner === 0 ? ao0 : corner === 1 ? ao1 : corner === 2 ? ao2 : ao3;
             const k = shade * AO_SHADE[aoc];
             if (isLava) torch = 1 / k; // self-lit: full brightness after shading
+            if (isWater) {
+              // WATER VERTEX: atint = (flow x, flow z | fall speed, face kind
+              // 0 top / 1 side / 2 underside), uv = (depth below, shoreline)
+              let wr = flowX, wg = flowZ, wu = selfDepth, wv = 0;
+              const kindF = face === 2 ? 0 : face === 3 ? 2 : 1;
+              if (face === 2) {
+                // corner depth/shore: average the 4 columns sharing the corner;
+                // solid ones count as zero depth and mark a shoreline
+                let sum = 0, cnt = 0, shore = 0;
+                for (let q = 0; q < 4; q++) {
+                  const qx = x + px - 1 + (q & 1), qz = z + pz - 1 + (q >> 1);
+                  const qid = get(qx, y, qz);
+                  if (qid === id) {
+                    sum += waterDepth(qx, y, qz); cnt++;
+                    if (get(qx, y + 1, qz) === id) shore = 1; // whitewater where a fall plunges in
+                  } else if (qid !== B.AIR) { cnt++; shore = 1; }
+                }
+                wu = cnt ? sum / cnt : selfDepth; wv = shore;
+              } else if (kindF === 1) {
+                wr = 0; wg = fall ? 1 : Math.hypot(flowX, flowZ) * 0.5;
+              }
+              target.v(x + px, y + py, z + pz, k * sky, k * torch, wr, wg, kindF, wu, wv);
+              continue;
+            }
             target.v(x + px, y + py, z + pz, k * sky, k * torch + flag,
               tint[0], tint[1], tint[2],
               a ? rect.u1 : rect.u0,
@@ -1049,4 +1119,227 @@ function emitRedstoneWire(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number,
   push(1, 0.01, 1, rect.u1, rect.v1);
   push(0, 0.01, 1, rect.u0, rect.v1);
   g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
+}
+
+// =============================================================================
+// Shaped blocks (slabs, stairs, fences, gates, panes, lanterns, anvil,
+// enchanting table, campfire, cake, flower pot, composter, jack o'lantern).
+// Each model is a list of boxes in 1/16 units whose UVs are cropped from the
+// tile by the box's own extent (Minecraft's default model UVs), shaded per face
+// like full blocks. Faces flush with the cell edge are culled against opaque
+// neighbours and lit from the neighbouring cell; inner faces use the block's
+// own light. Quads are wound counter-clockwise from outside (like FACE_GEO);
+// they do not go through emitBox.
+// =============================================================================
+
+interface Part {
+  b: Box;
+  /** tiles per face (+x, -x, +y, -y, +z, -z) */
+  t: string[];
+  /** UV shift in block units (lets a hanging lantern reuse the standing UVs) */
+  vOff?: number;
+  /** self-lit (lantern glass, embers) */
+  glow?: boolean;
+}
+interface Cross { tile: string; x0: number; x1: number; y0: number; y1: number; glow: boolean }
+
+const S16 = 1 / 16;
+const bx16 = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): Box =>
+  [x0 * S16, y0 * S16, z0 * S16, x1 * S16, y1 * S16, z1 * S16];
+/** Swap x and z of a box (rotates an x-aligned model onto the z axis). */
+const swapXZ = (b: Box): Box => [b[2], b[1], b[0], b[5], b[4], b[3]];
+const tiles6 = (side: string, top: string, bottom: string): string[] => [side, side, top, bottom, side, side];
+
+function shapedParts(id: number, meta: number, conn: number, open: boolean): { parts: Part[]; crosses: Cross[] } {
+  const d = def(id);
+  const f = d.faces!;
+  const std = tiles6(f.sides, f.top, f.bottom);
+  const parts: Part[] = [];
+  const crosses: Cross[] = [];
+  if (SLAB_IDS.has(id)) {
+    parts.push({ b: meta === 1 ? [0, 0.5, 0, 1, 1, 1] : [0, 0, 0, 1, 0.5, 1], t: std });
+  } else if (STAIR_IDS.has(id)) {
+    const fc = meta & 3, flip = (meta & 4) !== 0;
+    const y0 = flip ? 0 : 0.5, y1 = flip ? 0.5 : 1;
+    parts.push({ b: flip ? [0, 0.5, 0, 1, 1, 1] : [0, 0, 0, 1, 0.5, 1], t: std });
+    parts.push({
+      b: fc === 0 ? [0, y0, 0, 1, y1, 0.5] : fc === 1 ? [0, y0, 0, 0.5, y1, 1] : fc === 2 ? [0, y0, 0.5, 1, y1, 1] : [0.5, y0, 0, 1, y1, 1],
+      t: std,
+    });
+  } else switch (id) {
+    case B.OAK_FENCE: {
+      parts.push({ b: bx16(6, 0, 6, 10, 16, 10), t: std });
+      for (const [bit, a0, a1, alongX] of [[1, 0, 6, false], [2, 10, 16, false], [4, 0, 6, true], [8, 10, 16, true]] as [number, number, number, boolean][]) {
+        if (!(conn & bit)) continue;
+        for (const [r0, r1] of [[6, 9], [12, 15]]) {
+          parts.push({ b: alongX ? bx16(a0, r0, 7, a1, r1, 9) : bx16(7, r0, a0, 9, r1, a1), t: std });
+        }
+      }
+      break;
+    }
+    case B.GLASS_PANE: {
+      const pane = tiles6('glass', 'glass_pane_top', 'glass_pane_top');
+      let c = conn;
+      if (c === 0) c = meta === 1 ? 1 | 2 : 4 | 8; // a lone pane stands as a flat sheet
+      parts.push({ b: bx16(7, 0, 7, 9, 16, 9), t: pane });
+      if (c & 1) parts.push({ b: bx16(7, 0, 0, 9, 16, 7), t: pane });
+      if (c & 2) parts.push({ b: bx16(7, 0, 9, 9, 16, 16), t: pane });
+      if (c & 4) parts.push({ b: bx16(0, 0, 7, 7, 16, 9), t: pane });
+      if (c & 8) parts.push({ b: bx16(9, 0, 7, 16, 16, 9), t: pane });
+      break;
+    }
+    case B.FENCE_GATE: {
+      // modelled spanning x (facing 0/2); facing 1/3 turns it onto z
+      const bs: Box[] = [bx16(0, 5, 7, 2, 16, 9), bx16(14, 5, 7, 16, 16, 9)];
+      if (!open) {
+        bs.push(bx16(2, 6, 7, 14, 9, 9), bx16(2, 12, 7, 14, 15, 9), bx16(6, 9, 7, 8, 12, 9), bx16(8, 9, 7, 10, 12, 9));
+      } else {
+        // both leaves swung back against their posts, pointing into the yard
+        for (const [x0, x1] of [[0, 2], [14, 16]]) {
+          bs.push(bx16(x0, 6, 9, x1, 9, 16), bx16(x0, 12, 9, x1, 15, 16), bx16(x0, 9, 13, x1, 12, 15));
+        }
+      }
+      for (const b of bs) parts.push({ b: (meta & 1) ? swapXZ(b) : b, t: std });
+      break;
+    }
+    case B.LANTERN: {
+      const lt = tiles6('lantern_model', 'lantern_model_top', 'lantern_model_top');
+      const hang = meta === 1;
+      const o = hang ? 1 : 0;
+      parts.push({ b: bx16(5, o, 5, 11, 7 + o, 11), t: lt, vOff: o * S16, glow: true });
+      parts.push({ b: bx16(6, 7 + o, 6, 10, 9 + o, 10), t: lt, vOff: o * S16 });
+      if (hang) parts.push({ b: bx16(7.5, 10, 7.5, 8.5, 16, 8.5), t: lt });
+      else parts.push({ b: bx16(7.5, 9, 7.5, 8.5, 11, 8.5), t: lt, vOff: -4 * S16 });
+      break;
+    }
+    case B.ANVIL: {
+      const side = tiles6('anvil', 'anvil', 'anvil');
+      const top = tiles6('anvil', 'anvil_top', 'anvil');
+      const bs: [Box, string[]][] = [
+        [bx16(2, 0, 2, 14, 4, 14), side], [bx16(4, 4, 3, 12, 5, 13), side],
+        [bx16(6, 5, 4, 10, 10, 12), side], [bx16(0, 10, 3, 16, 16, 13), top],
+      ];
+      for (const [b, t] of bs) parts.push({ b: (meta & 1) ? swapXZ(b) : b, t });
+      break;
+    }
+    case B.ENCHANTING_TABLE:
+      parts.push({ b: [0, 0, 0, 1, 0.75, 1], t: std });
+      parts.push({ b: bx16(4, 13, 5, 12, 14, 11), t: tiles6('ench_book', 'ench_book', 'ench_book'), glow: true });
+      break;
+    case B.CAMPFIRE: {
+      const along = (end: 'x' | 'z'): string[] => end === 'x'
+        ? ['campfire_log_end', 'campfire_log_end', 'campfire_log', 'campfire_log', 'campfire_log', 'campfire_log']
+        : ['campfire_log', 'campfire_log', 'campfire_log', 'campfire_log', 'campfire_log_end', 'campfire_log_end'];
+      const xl: Box[] = [bx16(0, 0, 1, 16, 4, 5), bx16(0, 0, 11, 16, 4, 15)];
+      const zl: Box[] = [bx16(1, 3, 0, 5, 7, 16), bx16(11, 3, 0, 15, 7, 16)];
+      const rot = (meta & 1) === 1;
+      for (const b of xl) parts.push({ b: rot ? swapXZ(b) : b, t: along(rot ? 'z' : 'x') });
+      for (const b of zl) parts.push({ b: rot ? swapXZ(b) : b, t: along(rot ? 'x' : 'z') });
+      parts.push({ b: bx16(5, 0, 5, 11, 1, 11), t: tiles6('campfire_ash', 'campfire_ash', 'campfire_ash'), glow: true });
+      crosses.push({ tile: 'fire', x0: 0.1, x1: 0.9, y0: S16, y1: 1, glow: true });
+      break;
+    }
+    case B.CAKE: {
+      const bites = Math.min(6, meta);
+      const t = tiles6('cake_side', 'cake_top', 'cake_bottom');
+      if (bites > 0) t[1] = 'cake_inner';
+      parts.push({ b: bx16(1 + bites * 2, 0, 1, 15, 8, 15), t });
+      break;
+    }
+    case B.FLOWER_POT: {
+      parts.push({ b: bx16(5, 0, 5, 11, 6, 11), t: tiles6('flower_pot', 'flower_pot_top', 'flower_pot') });
+      if (meta && hasDef(meta) && def(meta).faces) {
+        crosses.push({ tile: def(meta).faces!.sides, x0: 0.22, x1: 0.78, y0: 4 * S16, y1: 4 * S16 + 0.72, glow: false });
+      }
+      break;
+    }
+    case B.COMPOSTER: {
+      const t = tiles6('composter_side', 'composter_top', 'composter_bottom');
+      parts.push({ b: bx16(0, 0, 0, 16, 2, 16), t });
+      parts.push({ b: bx16(0, 2, 0, 2, 16, 16), t }, { b: bx16(14, 2, 0, 16, 16, 16), t });
+      parts.push({ b: bx16(2, 2, 0, 14, 16, 2), t }, { b: bx16(2, 2, 14, 14, 16, 16), t });
+      if (meta > 0) {
+        const fill = meta >= 8 ? 'compost_ready' : 'compost';
+        parts.push({ b: bx16(2, 2, 2, 14, Math.min(15, 2 + meta * 1.65), 14), t: tiles6('composter_side', fill, fill) });
+      }
+      break;
+    }
+    case B.JACK_O_LANTERN: {
+      const t = tiles6('pumpkin_side', 'pumpkin_top', 'pumpkin_top');
+      const face = meta === 1 || meta === 4 || meta === 5 ? meta : 0;
+      t[face] = 'jack_o_lantern';
+      parts.push({ b: [0, 0, 0, 1, 1, 1], t });
+      break;
+    }
+  }
+  return { parts, crosses };
+}
+
+// face corner lists (counter-clockwise from outside) per box face, and the
+// neighbour offset each face looks toward
+const SH_NB: [number, number, number][] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+
+function emitShaped(
+  g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: number, z: number,
+  meta: number, conn: number, open: boolean,
+  get: (x: number, y: number, z: number) => number,
+  skyAt: (x: number, y: number, z: number) => number,
+  torchAt: (x: number, y: number, z: number) => number,
+): void {
+  const { parts, crosses } = shapedParts(id, meta, conn, open);
+  const ownSky = skyAt(x, y, z), ownTorch = torchAt(x, y, z);
+  for (const part of parts) {
+    const [x0, y0, z0, x1, y1, z1] = part.b;
+    const vo = part.vOff ?? 0;
+    for (let f = 0; f < 6; f++) {
+      const onEdge = f === 0 ? x1 >= 1 : f === 1 ? x0 <= 0 : f === 2 ? y1 >= 1 : f === 3 ? y0 <= 0 : f === 4 ? z1 >= 1 : z0 <= 0;
+      const [nx, ny, nz] = SH_NB[f];
+      let sky = ownSky, torch = ownTorch;
+      if (onEdge) {
+        if (OPAQUE_LUT[get(x + nx, y + ny, z + nz)]) continue;
+        sky = Math.max(sky, skyAt(x + nx, y + ny, z + nz));
+        torch = Math.max(torch, torchAt(x + nx, y + ny, z + nz));
+      } else if (OPAQUE_LUT[id]) {
+        continue; // an opaque shaped block is a full cube: nothing inside
+      }
+      if (part.glow) torch = Math.max(torch, 0.85);
+      const k = FACE_SHADE[f];
+      const r = atlas.rect(part.t[f]);
+      const du = r.u1 - r.u0, dv = r.v1 - r.v0;
+      let c: number[][];
+      switch (f) {
+        case 0: c = [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]]; break;
+        case 1: c = [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]]; break;
+        case 2: c = [[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]]; break;
+        case 3: c = [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]]; break;
+        case 4: c = [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]]; break;
+        default: c = [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]]; break;
+      }
+      const base = g.vertCount;
+      for (const [px, py, pz] of c) {
+        // Minecraft's default model UVs: sides map (horizontal, 1 - y), tops map (x, z)
+        const u = f === 0 ? 1 - pz : f === 1 ? pz : f === 4 ? px : f === 5 ? 1 - px : px;
+        const v = f === 2 || f === 3 ? pz : 1 - (py - vo);
+        g.v(x + px, y + py, z + pz, k * sky, k * torch, 1, 1, 1,
+          r.u0 + Math.max(0, Math.min(1, u)) * du, r.v0 + Math.max(0, Math.min(1, v)) * dv);
+      }
+      g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+  }
+  for (const cr of crosses) {
+    const r = atlas.rect(cr.tile);
+    const torch = cr.glow ? 1 : ownTorch;
+    const a = cr.x0, b = cr.x1;
+    for (const [px0, pz0, px1, pz1] of [[a, a, b, b], [a, b, b, a]]) {
+      for (const flip of [false, true]) {
+        const base = g.vertCount;
+        const pts = flip
+          ? [[px1, cr.y0, pz1], [px0, cr.y0, pz0], [px0, cr.y1, pz0], [px1, cr.y1, pz1]]
+          : [[px0, cr.y0, pz0], [px1, cr.y0, pz1], [px1, cr.y1, pz1], [px0, cr.y1, pz0]];
+        const us = [r.u0, r.u1, r.u1, r.u0], vs = [r.v1, r.v1, r.v0, r.v0];
+        for (let i = 0; i < 4; i++) g.v(x + pts[i][0], y + pts[i][1], z + pts[i][2], ownSky, torch, 1, 1, 1, us[i], vs[i]);
+        g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
+      }
+    }
+  }
 }

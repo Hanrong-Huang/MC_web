@@ -3,7 +3,11 @@ import { rleEncode, rleDecode } from './src/engine/Persistence.ts';
 import { matchRecipe, FurnaceState, ChestState, Slot, smeltResult, furnaceSlotFor } from './src/engine/Inventory.ts';
 import {
   B, B2, I, breakTime, canHarvest, attackCooldown, attackStrength, foodSaturation, pickItemFor, def,
+  CREATIVE_ITEMS, shapeBoxes, slabFullBlock, connectsTo, enchantsFor, enchantLabel, repairMaterial,
 } from './src/engine/Blocks.ts';
+import { craftRemainders } from './src/engine/Inventory.ts';
+import { xpForLevel } from './src/engine/Player.ts';
+import { campfireCooks } from './src/engine/Campfires.ts';
 
 let failures = 0;
 function check(name: string, cond: boolean): void {
@@ -165,6 +169,88 @@ check('pick wheat -> seeds', pickItemFor(B.WHEAT_2) === I.SEEDS);
 check('pick redstone wire -> dust', pickItemFor(B.REDSTONE_WIRE) === I.REDSTONE);
 check('pick water -> nothing', pickItemFor(B.WATER) === 0);
 check('pick stone -> stone', pickItemFor(B.STONE) === B.STONE);
+
+// --- building + decoration pass ---
+{
+  const r9 = (ids: number[]): number | undefined => matchRecipe(g9(ids), 3)?.id;
+  const CB = I.CLAY_BALL, BR = I.BRICK, WB = I.WATER_BOTTLE, GL = B.GLASS, SM = B.SMOOTH_STONE;
+  check('clay balls -> clay', r9([CB, CB, 0, CB, CB, 0, 0, 0, 0]) === B.CLAY);
+  check('clay ball smelts to brick', smeltResult(CB) === BR);
+  check('clay smelts to terracotta', smeltResult(B.CLAY) === B.TERRACOTTA);
+  check('bricks from 4 brick', r9([BR, BR, 0, BR, BR, 0, 0, 0, 0]) === B.BRICKS);
+  check('stone bricks smelt cracked', smeltResult(B.STONE_BRICKS) === B.CRACKED_STONE_BRICKS);
+  check('mossy cobble', r9([C, B.LEAVES, 0, 0, 0, 0, 0, 0, 0]) === B.MOSSY_COBBLE);
+  const slab = matchRecipe(g9([C, C, C, 0, 0, 0, 0, 0, 0]), 3);
+  check('3 cobble -> 6 cobble slabs', slab?.id === B.COBBLE_SLAB && slab.count === 6);
+  check('smooth stone slab', r9([SM, SM, SM, 0, 0, 0, 0, 0, 0]) === B.STONE_SLAB);
+  check('oak slab (not a door)', r9([P, P, P, 0, 0, 0, 0, 0, 0]) === B.OAK_SLAB);
+  const st = matchRecipe(g9([P, 0, 0, P, P, 0, P, P, P]), 3);
+  check('oak stairs x4', st?.id === B.OAK_STAIRS && st.count === 4);
+  check('stairs mirrored', r9([0, 0, C, 0, C, C, C, C, C]) === B.COBBLE_STAIRS);
+  check('fence', r9([P, S, P, P, S, P, 0, 0, 0]) === B.OAK_FENCE);
+  check('fence gate', r9([S, P, S, S, P, S, 0, 0, 0]) === B.FENCE_GATE);
+  check('glass panes x16', matchRecipe(g9([GL, GL, GL, GL, GL, GL, 0, 0, 0]), 3)?.count === 16);
+  check('lantern', r9([0, FE, 0, FE, B.TORCH, FE, 0, FE, 0]) === B.LANTERN);
+  check('compass unaffected by lantern', r9([0, FE, 0, FE, FE, FE, 0, FE, 0]) === I.COMPASS);
+  check("jack o'lantern", r9([B.PUMPKIN, 0, 0, B.TORCH, 0, 0, 0, 0, 0]) === B.JACK_O_LANTERN);
+  check('pumpkin -> seeds', r9([B.PUMPKIN, 0, 0, 0, 0, 0, 0, 0, 0]) === I.PUMPKIN_SEEDS);
+  check('anvil', r9([B.IRON_BLOCK, B.IRON_BLOCK, B.IRON_BLOCK, 0, FE, 0, FE, FE, FE]) === B.ANVIL);
+  check('enchanting table', r9([0, I.BOOK, 0, DI, B.OBSIDIAN, DI, B.OBSIDIAN, B.OBSIDIAN, B.OBSIDIAN]) === B.ENCHANTING_TABLE);
+  check('barrel', r9([P, B.OAK_SLAB, P, P, 0, P, P, B.OAK_SLAB, P]) === B.BARREL);
+  check('campfire (spruce)', r9([0, S, 0, S, I.COAL, S, B.SPRUCE_LOG, B.SPRUCE_LOG, B.SPRUCE_LOG]) === B.CAMPFIRE);
+  check('flower pot', r9([BR, 0, BR, 0, BR, 0, 0, 0, 0]) === B.FLOWER_POT);
+  check('composter', r9([B.OAK_SLAB, 0, B.OAK_SLAB, B.OAK_SLAB, 0, B.OAK_SLAB, B.OAK_SLAB, B.OAK_SLAB, B.OAK_SLAB]) === B.COMPOSTER);
+  check('sugar from cane', r9([B.SUGAR_CANE, 0, 0, 0, 0, 0, 0, 0, 0]) === I.SUGAR);
+  check('paper still from 3 cane', r9([B.SUGAR_CANE, B.SUGAR_CANE, B.SUGAR_CANE, 0, 0, 0, 0, 0, 0]) === I.PAPER);
+  check('cookies x8', matchRecipe(g9([WH, I.SUGAR, WH, 0, 0, 0, 0, 0, 0]), 3)?.count === 8);
+  check('pumpkin pie', r9([B.PUMPKIN, I.SUGAR, WH, 0, 0, 0, 0, 0, 0]) === I.PUMPKIN_PIE);
+  check('cake', r9([I.MILK_BUCKET, I.MILK_BUCKET, I.MILK_BUCKET, I.SUGAR, I.APPLE, I.SUGAR, WH, WH, WH]) === B.CAKE);
+  check('cake hands back buckets', craftRemainders(B.CAKE)[0]?.id === I.BUCKET && craftRemainders(B.CAKE)[0]?.count === 3);
+  check('mushroom stew', r9([B.BROWN_MUSHROOM, B.RED_MUSHROOM, 0, I.BOWL, 0, 0, 0, 0, 0]) === I.MUSHROOM_STEW);
+  check('poppy -> red dye', r9([B.POPPY, 0, 0, 0, 0, 0, 0, 0, 0]) === I.RED_DYE);
+  check('cactus smelts to lime dye', smeltResult(B.CACTUS) === I.LIME_DYE);
+  check('red + yellow -> orange', r9([I.RED_DYE, I.YELLOW_DYE, 0, 0, 0, 0, 0, 0, 0]) === I.ORANGE_DYE);
+  check('dye + wool -> blue wool', r9([I.BLUE_DYE, W, 0, 0, 0, 0, 0, 0, 0]) === B.BLUE_WOOL);
+  check('dyeing mirrored', r9([W, I.BLACK_DYE, 0, 0, 0, 0, 0, 0, 0]) === B.BLACK_WOOL);
+  check('glass bottles x3', matchRecipe(g9([GL, 0, GL, 0, GL, 0, 0, 0, 0]), 3)?.count === 3);
+  check('bucket still iron V', r9([FE, 0, FE, 0, FE, 0, 0, 0, 0]) === I.BUCKET);
+  check('swiftness potion', r9([WB, I.SUGAR, 0, 0, 0, 0, 0, 0, 0]) === I.POTION_SWIFTNESS);
+  check('night vision potion', r9([I.GOLDEN_CARROT, WB, 0, 0, 0, 0, 0, 0, 0]) === I.POTION_NIGHT_VISION);
+  check('healing potion', r9([WB, I.GLISTERING_MELON, 0, 0, 0, 0, 0, 0, 0]) === I.POTION_HEALING);
+  check('map', r9([I.PAPER, I.PAPER, I.PAPER, I.PAPER, I.COMPASS, I.PAPER, I.PAPER, I.PAPER, I.PAPER]) === I.MAP);
+  check('glider', r9([I.LEATHER, S, I.LEATHER, I.FEATHER, S, I.FEATHER, I.FEATHER, 0, I.FEATHER]) === I.GLIDER);
+  check('rockets x3', matchRecipe(g9([I.PAPER, G, 0, 0, 0, 0, 0, 0, 0]), 3)?.count === 3);
+  check('warp pearls', r9([0, I.AMETHYST, 0, I.AMETHYST, I.EMERALD, I.AMETHYST, 0, I.AMETHYST, 0]) === I.WARP_PEARL);
+  check('mob catcher still hollow amethyst', r9([I.AMETHYST, I.AMETHYST, I.AMETHYST, I.AMETHYST, 0, I.AMETHYST, I.AMETHYST, I.AMETHYST, I.AMETHYST]) === I.MOB_CATCHER);
+  check('recovery compass', r9([I.AMETHYST, I.AMETHYST, I.AMETHYST, I.AMETHYST, I.COMPASS, I.AMETHYST, I.AMETHYST, I.AMETHYST, I.AMETHYST]) === I.RECOVERY_COMPASS);
+  // every new recipe output must be a registered id with an icon source
+  for (const id of CREATIVE_ITEMS) {
+    const d = def(id);
+    if (!(d.faces || d.sprite)) check(`${d.name} has a texture`, false);
+  }
+  check('block ids fit a byte', CREATIVE_ITEMS.filter((id) => def(id).block).every((id) => id < 256));
+  // shapes + physics tables
+  check('bottom slab is half height', shapeBoxes(B.OAK_SLAB, 0, 0, false, true)?.[0][4] === 0.5);
+  check('top slab sits high', shapeBoxes(B.OAK_SLAB, 1, 0, false, true)?.[0][1] === 0.5);
+  check('stairs: two boxes', shapeBoxes(B.OAK_STAIRS, 2, 0, false, true)?.length === 2);
+  check('fence collides 1.5 tall', shapeBoxes(B.OAK_FENCE, 0, 0, false, true)?.[0][4] === 1.5);
+  check('open gate lets you through', shapeBoxes(B.FENCE_GATE, 0, 0, true, true)?.length === 0);
+  check('cake shrinks as eaten', (shapeBoxes(B.CAKE, 3, 0, false, true)?.[0][0] ?? 0) > (shapeBoxes(B.CAKE, 0, 0, false, true)?.[0][0] ?? 1));
+  check('slab doubles into its block', slabFullBlock(B.BRICK_SLAB) === B.BRICKS);
+  check('fences join fences', connectsTo(B.OAK_FENCE, B.OAK_FENCE) && connectsTo(B.OAK_FENCE, B.STONE) && !connectsTo(B.OAK_FENCE, B.TORCH));
+  check('panes join glass', connectsTo(B.GLASS_PANE, B.GLASS) && !connectsTo(B.GLASS_PANE, B.OAK_FENCE));
+  // enchanting + repair tables
+  check('swords take sharpness', enchantsFor(I.IRON_SWORD).some((e) => e.id === 'sharpness'));
+  check('boots take feather falling', enchantsFor(I.DIAMOND_BOOTS).some((e) => e.id === 'feather_falling'));
+  check('bread is not enchantable', enchantsFor(I.BREAD).length === 0);
+  check('enchant label', enchantLabel('efficiency', 3) === 'Efficiency III');
+  check('iron pick mends with iron', repairMaterial(I.IRON_PICK) === I.IRON_INGOT);
+  check('glider mends with feathers', repairMaterial(I.GLIDER) === I.FEATHER);
+  check('ice drops nothing (melts)', def(B.ICE).drop === null);
+  check('melon drops slices', def(B.MELON).drop?.id === I.MELON_SLICE);
+  check('xp curve', xpForLevel(0) === 7 && xpForLevel(16) === 42 && xpForLevel(31) === 121);
+  check('campfire cooks beef', campfireCooks(I.BEEF) === I.COOKED_BEEF && campfireCooks(B.IRON_ORE) === undefined);
+}
 
 console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');
 process.exit(failures ? 1 : 0);

@@ -1347,7 +1347,7 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 /* F1: hide the HUD (keeps menus working) */
 #app.hud-off #hud, #app.hud-off #screen-shade, #app.hud-off #pet-strip, #app.hud-off #toast,
 #app.hud-off #subtitles, #app.hud-off .adv-toast, #app.hud-off #effect-list,
-#app.hud-off #attack-meter { opacity: 0 !important; transition: none; }
+#app.hud-off #attack-meter, #app.hud-off #xp-bar { opacity: 0 !important; transition: none; }
 
 /* controls reference */
 #controls-overlay { z-index: 58; background: rgba(10,10,14,0.7); animation: fadein 0.16s ease both; padding: 12px; }
