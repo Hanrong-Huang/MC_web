@@ -266,7 +266,7 @@ function outpost(g: WorldGenerator, c: Chunk, lm: Landmark): void {
       f.set(u, y + top, v, rim ? B.SPRUCE_LOG : B.PLANKS);
       const corner = (u === T0 - 1 || u === T1 + 1) && (v === T0 - 1 || v === T1 + 1);
       if (corner) for (let dy = 1; dy <= 3; dy++) f.set(u, y + top + dy, v, B.SPRUCE_LOG);
-      else if (rim && (u + v) % 2 === 0) f.set(u, y + top + 1, v, B.SPRUCE_LOG); // railing
+      else if (rim) f.set(u, y + top + 1, v, B.OAK_FENCE); // railing
       f.set(u, y + top + 4, v, rim ? B.SPRUCE_LOG : B.PLANKS);
     }
   }
@@ -354,7 +354,7 @@ function mansion(g: WorldGenerator, c: Chunk, lm: Landmark): void {
   }
   for (let u = -1; u <= W; u++) f.set(u, y + 10 + half, half - 1, B.SPRUCE_LOG); // ridge beam
   // chimney
-  for (let dy = 1; dy <= 10 + half + 2; dy++) { f.set(W - 5, y + dy, D - 2, B.COBBLE); }
+  for (let dy = 1; dy <= 10 + half + 2; dy++) { f.set(W - 5, y + dy, D - 2, B.BRICKS); }
   f.set(W - 5, y + 1, D - 3, B.FURNACE_LIT);
   // interior partitions (ground + upper), with doorways
   const wallU = (u: number, y0: number, gapV: number[]): void => {
@@ -432,7 +432,7 @@ function mansion(g: WorldGenerator, c: Chunk, lm: Landmark): void {
   }
   for (const u of [8, 15]) {
     const gy = f.ground(u, -5);
-    if (Math.abs(gy - y) <= 3) { f.set(u, gy + 1, -5, B.COBBLE); f.set(u, gy + 2, -5, B.SPRUCE_LOG); f.torch(u, gy + 3, -5); }
+    if (Math.abs(gy - y) <= 3) { f.set(u, gy + 1, -5, B.COBBLE); f.set(u, gy + 2, -5, B.OAK_FENCE); f.set(u, gy + 3, -5, B.LANTERN); }
   }
 }
 
@@ -511,7 +511,7 @@ function windmill(g: WorldGenerator, c: Chunk, lm: Landmark): void {
       const eu = u === U0 || u === U1, ev = v === V0 || v === V1;
       if (!(eu || ev)) continue;
       for (let dy = 1; dy <= 3; dy++) {
-        let id = eu && ev ? B.LOG : dy === 1 ? B.COBBLE : B.PLANKS;
+        let id = eu && ev ? B.LOG : dy === 1 ? B.BRICKS : B.PLANKS;
         if (!(eu && ev) && dy === 2 && (u === 15 || v === 15)) id = B.GLASS;
         f.set(u, y + dy, v, id);
       }
@@ -563,7 +563,7 @@ function lighthouse(g: WorldGenerator, c: Chunk, lm: Landmark): void {
         const d = Math.hypot(du, dv);
         if (d > r + 0.35) continue;
         const wall = d > r - 0.75;
-        let id = wall ? (((dy - 1) >> 2) & 1 ? B.STONE_BRICKS : B.WOOL) : B.AIR;
+        let id = wall ? (((dy - 1) >> 2) & 1 ? B.RED_WOOL : B.WOOL) : B.AIR;
         if (wall && dy % 6 === 3 && du === 0) id = B.GLASS;
         f.set(cx + du, y + dy, cv + dv, id);
       }
@@ -669,8 +669,7 @@ function camp(g: WorldGenerator, c: Chunk, lm: Landmark): void {
   }
   const gy = f.ground(cx, cv);
   for (let du = -1; du <= 1; du++) for (let dv = -1; dv <= 1; dv++) f.set(cx + du, f.ground(cx + du, cv + dv), cv + dv, B.COBBLE);
-  f.set(cx, gy, cv, B.NETHERRACK);
-  f.set(cx, gy + 1, cv, B.FIRE);
+  f.set(cx, gy + 1, cv, B.CAMPFIRE);
   for (const [du, dv] of [[-3, 0], [3, 0], [0, 3]]) {
     const gyy = f.ground(cx + du, cv + dv);
     f.set(cx + du, gyy + 1, cv + dv, B.SPRUCE_LOG);
@@ -706,7 +705,9 @@ function trailRuins(g: WorldGenerator, c: Chunk, lm: Landmark): void {
       if (wall(u, v)) {
         const top = gy + (r < 0.3 ? 1 : r < 0.45 ? 2 : r < 0.75 ? 0 : -1);
         for (let yy = floor; yy <= top; yy++) {
-          f.set(u, yy, v, hash3(S ^ 1, lm.ox + u, yy, lm.oz + v) < 0.35 ? B.COBBLE : B.STONE_BRICKS);
+          const r2 = hash3(S ^ 1, lm.ox + u, yy, lm.oz + v);
+          f.set(u, yy, v, r2 < 0.2 ? B.MOSSY_COBBLE : r2 < 0.35 ? B.COBBLE : r2 < 0.55 ? B.MOSSY_STONE_BRICKS
+            : r2 < 0.7 ? B.CRACKED_STONE_BRICKS : B.STONE_BRICKS);
         }
         f.clear(u, v, top + 1, gy + 3);
       } else {
@@ -746,7 +747,8 @@ function sunkenRuins(g: WorldGenerator, c: Chunk, lm: Landmark): void {
         const hgt = 1 + Math.floor(hash3(S, lm.ox + u, 0, lm.oz + v) * hmax);
         for (let dy = 1; dy <= hgt; dy++) {
           const r = hash3(S ^ 1, lm.ox + u, dy, lm.oz + v);
-          f.set(u, gy + dy, v, r < 0.18 ? fillAt(gy + dy) : r < 0.55 ? B.STONE_BRICKS : r < 0.8 ? B.SANDSTONE : B.COBBLE);
+          f.set(u, gy + dy, v, r < 0.18 ? fillAt(gy + dy) : r < 0.4 ? B.MOSSY_STONE_BRICKS : r < 0.55 ? B.CRACKED_STONE_BRICKS
+            : r < 0.8 ? B.SANDSTONE : B.MOSSY_COBBLE);
         }
       }
     }
@@ -775,7 +777,7 @@ function library(g: WorldGenerator, c: Chunk, lm: Landmark): void {
   const y = lm.y;
   const brick = (u: number, yy: number, v: number): number => {
     const r = hash3(S, lm.ox + u, yy, lm.oz + v);
-    return r < 0.12 ? B.COBBLE : r < 0.16 ? B.SMOOTH_STONE : B.STONE_BRICKS;
+    return r < 0.1 ? B.MOSSY_STONE_BRICKS : r < 0.2 ? B.CRACKED_STONE_BRICKS : r < 0.24 ? B.MOSSY_COBBLE : B.STONE_BRICKS;
   };
   const hollow = (u0: number, v0: number, u1: number, v1: number, y0: number, y1: number): void => {
     for (let u = u0; u <= u1; u++) for (let v = v0; v <= v1; v++) for (let yy = y0; yy <= y1; yy++) {
@@ -799,6 +801,7 @@ function library(g: WorldGenerator, c: Chunk, lm: Landmark): void {
   // free-standing shelf stacks + reading tables in the middle
   for (const v of [18, 22]) for (let u = 6; u <= 10; u++) for (let dy = 1; dy <= 3; dy++) f.set(u, y + dy, v, B.BOOKSHELF);
   f.set(8, y + 1, 20, B.TABLE);
+  f.set(9, y + 1, 20, B.LANTERN);
   f.set(7, y + 1, 20, B.CHEST_LOOT);
   f.set(2, y + 6, 26, B.CHEST_LOOT);
   for (let dy = 1; dy <= 5; dy++) f.set(3, y + dy, 14, B.LADDER);
@@ -853,7 +856,7 @@ function ancientCity(g: WorldGenerator, c: Chunk, lm: Landmark): void {
   const y = lm.y, W = lm.w, D = lm.d;
   const tile = (u: number, v: number): number => {
     const r = hash3(S, lm.ox + u, 0, lm.oz + v);
-    return (u + v) % 4 === 0 ? B.SMOOTH_STONE : r < 0.55 ? B.COAL_BLOCK : r < 0.8 ? B.COBBLE : B.STONE_BRICKS;
+    return (u + v) % 4 === 0 ? B.SMOOTH_STONE : r < 0.55 ? B.COAL_BLOCK : r < 0.7 ? B.COBBLE : r < 0.85 ? B.CRACKED_STONE_BRICKS : B.STONE_BRICKS;
   };
   // carve the vault: an elliptical dome, 3..17 high
   for (let u = 0; u < W; u++) {

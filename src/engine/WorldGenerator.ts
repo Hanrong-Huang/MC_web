@@ -41,8 +41,8 @@ const blk = (name: string, fallback: number): number => {
 const ICE_SPIKE = blk('PACKED_ICE', blk('ICE', B.QUARTZ_BLOCK));
 const CALCITE = blk('CALCITE', B.QUARTZ_BLOCK);
 const MUSHROOM_STEM = blk('MUSHROOM_STEM', B.QUARTZ_BLOCK);
-const RED_CAP = blk('RED_MUSHROOM_BLOCK', B.NETHERRACK);
-const BROWN_CAP = blk('BROWN_MUSHROOM_BLOCK', B.DIRT);
+const RED_CAP = blk('RED_MUSHROOM_BLOCK', blk('RED_WOOL', B.NETHERRACK));
+const BROWN_CAP = blk('BROWN_MUSHROOM_BLOCK', blk('TERRACOTTA', B.DIRT));
 const MOSS = blk('MOSS_BLOCK', B.GRASS);
 /** badlands strata, bottom-up; repeats every BAND_N blocks with a wobble */
 const BADLANDS_BANDS = [
@@ -52,6 +52,10 @@ const BADLANDS_BANDS = [
   B.SANDSTONE, blk('LIGHT_GRAY_TERRACOTTA', B.SMOOTH_STONE),
 ];
 const RED_SAND = blk('RED_SAND', B.SAND);
+/** flower-forest / meadow palette, ordered so neighbouring drifts harmonise */
+const MEADOW_FLOWERS = [
+  blk('ALLIUM', B.POPPY), B.POPPY, blk('OXEYE_DAISY', B.DANDELION), B.DANDELION, blk('CORNFLOWER', B.POPPY),
+];
 
 interface Volcano { x: number; z: number; r: number; h: number; base: number; lava: number }
 interface Crater { x: number; z: number; r: number; floor: number }
@@ -1013,7 +1017,9 @@ export class WorldGenerator {
           const gr = vr === V_MEADOW ? 0.42 : vr === V_SAVANNA ? 0.38 : 0.12;
           if (r < fl) {
             const tint = this.flora.noise(wx * 0.05 - 300, wz * 0.05 + 300) + (hash2(this.seed ^ 0xf10b, wx, wz) - 0.5) * 0.9;
-            chunk.setRaw(x, h + 1, z, tint > 0 ? B.POPPY : B.DANDELION);
+            // drifts of each colour blend across the carpet
+            const k = Math.max(0, Math.min(MEADOW_FLOWERS.length - 1, Math.floor((tint + 1) * 0.5 * MEADOW_FLOWERS.length)));
+            chunk.setRaw(x, h + 1, z, MEADOW_FLOWERS[k]);
           } else if (r < fl + gr) chunk.setRaw(x, h + 1, z, B.TALL_GRASS);
         } else if (surface === RED_SAND && vr === V_BADLANDS) {
           if (r < 0.003 && this.cactusRoom(chunk, x, h, z)) {
