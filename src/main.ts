@@ -157,7 +157,7 @@ class Game {
     });
     this.adv.onChange = () => {
       let t: { id: string; label: string; icon: string } | null;
-      while ((t = this.adv.popToast())) this.hud.showAdvancementToast(t.icon, t.label);
+      while ((t = this.adv.popToast())) { this.hud.showAdvancementToast(t.icon, t.label); this.audio.play('advancement'); }
     };
 
     this.world.onChunkRemoved = (key) => this.renderer.removeChunk(key);
@@ -705,6 +705,7 @@ class Game {
       this.containerPos = null;
     }
     this.state = 'container';
+    if (kind === 'chest') this.audio.play('chestOpen');
     this.input.exitLock();
     this.hud.openContainer(this.container, this.player.inventory, this.player.mode);
   }
@@ -923,7 +924,7 @@ class Game {
 
   /** Lightning struck at (x,y,z): ignite TNT, scorch mobs, flash + thunder. */
   private onLightning(x: number, y: number, z: number): void {
-    this.audio.play('thunder');
+    this.audio.play('thunder', Math.max(0.35, 1 - Math.hypot(x - this.player.pos.x, z - this.player.pos.z) / 160));
     this.adv.unlock('thunder');
     // the bolt can set the strike point alight
     if (Math.random() < 0.6) this.fire.ignite(x, y, z);
@@ -948,6 +949,7 @@ class Game {
   private closeContainer(): void {
     if (this.state !== 'container') return;
     this.hud.closeContainer();
+    if (this.container?.kind === 'chest') this.audio.play('chestClose');
     this.container = null;
     this.containerPos = null;
     this.state = 'playing';
@@ -1307,7 +1309,7 @@ class Game {
         this.rainSoundT -= dt;
         if (this.rainSoundT <= 0) {
           this.rainSoundT = 2.0;
-          this.audio.setRain(w.kind === 'thunder' ? 'thunder' : 'rain', w.intensity);
+          this.audio.setRain(w.kind === 'thunder' ? 'thunder' : 'rain', w.intensity, this.world.skyLight(Math.floor(pp.x), Math.floor(pp.y + 1.6), Math.floor(pp.z)) < 1);
         }
       } else {
         // clear or snow: ensure the rain bed is off
@@ -2248,6 +2250,7 @@ class App {
 
   async showMenu(): Promise<void> {
     this.game = null;
+    this.audio.setMenuMusic(true);
     let saves: Awaited<ReturnType<SaveDB['list']>> = [];
     try {
       saves = await this.db.list();
@@ -2330,6 +2333,7 @@ class App {
       if (!save) return;
     }
     this.hud.hideMenu();
+    this.audio.setMenuMusic(false);
     this.game = new Game(this, slot, save, fresh);
     void this.game;
   }

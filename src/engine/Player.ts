@@ -49,9 +49,6 @@ export const EFFECT_LABELS: Record<EffectId, string> = {
   fire_resistance: 'Fire Resistance', hunger: 'Hunger',
 };
 
-/** sheep shorn by the player, and when their wool grows back (player clock) */
-const shornSheep = new WeakMap<Entity, number>();
-
 export interface PlayerDeps {
   world: World;
   input: Input;
@@ -134,7 +131,7 @@ export class Player {
   private blockT = 0;
   private shieldKnockT = 0;
   private regenEffT = 0;
-  /** running clock for per-mob hurt immunity + wool regrowth */
+  /** running clock for per-mob hurt immunity */
   private clock = 0;
   private lastHits = new WeakMap<Entity, { t: number; dmg: number }>();
   private eatT = 0;
@@ -503,10 +500,13 @@ export class Player {
           if (below !== B.AIR && hasDef(below)) {
             this.deps.entities.spawnBlockParticles(
               Math.floor(this.pos.x), Math.floor(this.pos.y), Math.floor(this.pos.z), below, 6);
-            this.deps.audio.step(def(below).sound);
+            this.deps.audio.step(def(below).sound, below);
           }
         }
-        const dmg = Math.floor(this.fallDist - 3);
+        let dmg = Math.floor(this.fallDist - 3);
+        // a hay bale breaks the fall (80% less damage, like vanilla)
+        const landedOn = world.getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y - 0.5), Math.floor(this.pos.z));
+        if (landedOn === B.HAY_BALE) dmg = Math.floor(dmg * 0.2);
         if (dmg > 0 && this.mode === 'survival') {
           this.damage(dmg, undefined, 'Fell from a high place');
           this.addExhaustion(0.3);
@@ -523,7 +523,7 @@ export class Player {
       if (this.stepDist > 2.1) {
         this.stepDist = 0;
         const below = world.getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y - 0.5), Math.floor(this.pos.z));
-        if (below !== B.AIR && hasDef(below)) this.deps.audio.step(def(below).sound);
+        if (below !== B.AIR && hasDef(below)) this.deps.audio.step(def(below).sound, below);
       }
       // vanilla: walking is free, sprinting costs 0.1 exhaustion per metre
       if (this.sprinting) this.addExhaustion(Math.hypot(this.vel.x, this.vel.z) * dt * 0.1);
@@ -799,7 +799,7 @@ export class Player {
     if (this.swingRepeat <= 0) {
       this.swingRepeat = 0.26;
       renderer.triggerSwing();
-      audio.dig(def(t.id).sound, 0.25);
+      audio.dig(def(t.id).sound, 0.25, 1, t.id);
       this.deps.entities.spawnHitParticles(t.x, t.y, t.z, t.nx, t.ny, t.nz, t.id);
     }
 
@@ -868,7 +868,7 @@ export class Player {
     }
 
     world.setBlock(x, y, z, B.AIR);
-    audio.dig(def(id).sound, 1);
+    audio.dig(def(id).sound, 1, 1, id);
     entities.spawnBlockParticles(x, y, z, id, 12);
     this.deps.onBreak(id);
 
@@ -986,7 +986,7 @@ export class Player {
     if (this.mode !== 'creative') this.inventory.slots[sel] = prev ?? null;
     this.placeCooldown = 0.35;
     this.deps.renderer.triggerSwing();
-    this.deps.audio.play('level');
+    this.deps.audio.play('equip');
     this.inventory.onChange();
   }
 
@@ -1240,23 +1240,19 @@ export class Player {
       return;
     }
 
-    // bucket on a cow -> milk; shears on a woolly sheep -> a shearing
-    if ((held?.id === I.BUCKET || held?.id === I.SHEARS) && this.placeCooldown <= 0) {
+    // bucket on a cow -> milk (shearing lives in EntityManager.interactMob)
+    if (held?.id === I.BUCKET && this.placeCooldown <= 0) {
       const d = this.lookDir();
       const hit = this.deps.entities.raycastMobs(
         this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z, d.x, d.y, d.z, 3.5,
       );
       if (hit && hit.dist < (this.target?.dist ?? 4.5) && !hit.entity.baby) {
-        if (held.id === I.BUCKET && hit.entity.kind === 'cow') {
+        if (hit.entity.kind === 'cow') {
           this.swapHeldBucket(I.MILK_BUCKET);
           this.deps.onAdvance?.('milk');
           this.placeCooldown = 0.4;
           this.deps.renderer.triggerSwing();
           audio.play('splash');
-          return;
-        }
-        if (held.id === I.SHEARS && hit.entity.kind === 'sheep' && this.shear(hit.entity)) {
-          this.placeCooldown = 0.4;
           return;
         }
       }
@@ -1269,7 +1265,16 @@ export class Player {
         this.lookDir().x, this.lookDir().y, this.lookDir().z, 3.5,
       );
       if (hit && hit.dist < (this.target?.dist ?? 4.5)) {
+        const woolly = hit.entity.kind === 'sheep' && !hit.entity.sheared;
         const res = this.deps.entities.interactMob(hit.entity, held?.id ?? 0);
+        // shears clipped the fleece: wear the shears and count the milestone
+        if (woolly && hit.entity.sheared) {
+          this.placeCooldown = 0.4;
+          this.deps.renderer.triggerSwing();
+          this.damageHeldTool();
+          this.deps.onAdvance?.('shear');
+          return;
+        }
         if (res === 'tamed') {
           this.placeCooldown = 0.4;
           if (this.mode === 'survival') this.inventory.consumeSelected(); // consume the bone
@@ -1654,45 +1659,9 @@ export class Player {
       }
       this.placeCooldown = 0.22;
       this.deps.renderer.triggerSwing();
-      audio.dig(heldDef.sound, 0.8);
+      audio.dig(heldDef.sound, 0.8, 1, placeId);
       if (this.mode === 'survival') this.inventory.consumeSelected();
       else this.inventory.onChange();
-    }
-  }
-
-  /** Shear a sheep: 1-3 wool pops off and the fleece hides until it regrows. */
-  private shear(sheep: Entity): boolean {
-    const regrow = shornSheep.get(sheep);
-    if (regrow !== undefined && regrow > this.clock) return false; // still bald
-    const n = 1 + Math.floor(Math.random() * 3);
-    for (let i = 0; i < n; i++) {
-      this.deps.entities.spawnDrop(sheep.pos.x, sheep.pos.y + 0.8, sheep.pos.z, B.WOOL, 1);
-    }
-    shornSheep.set(sheep, this.clock + 90 + Math.random() * 60);
-    this.setFleece(sheep, false);
-    this.deps.entities.spawnBlockParticles(
-      Math.floor(sheep.pos.x), Math.floor(sheep.pos.y + 0.5), Math.floor(sheep.pos.z), B.WOOL, 8);
-    this.deps.renderer.triggerSwing();
-    this.deps.audio.dig('grass', 0.8);
-    this.damageHeldTool();
-    this.deps.onAdvance?.('shear');
-    return true;
-  }
-
-  /** Show/hide a sheep's fleece (the mob model tags its wool boxes 'wool'). */
-  private setFleece(sheep: Entity, on: boolean): void {
-    sheep.mesh.traverse((o) => { if (o.name === 'wool') o.visible = on; });
-  }
-
-  /** Called at 20 Hz: let shorn sheep grow their wool back. */
-  private regrowWool(): void {
-    for (const e of this.deps.entities.entities) {
-      if (e.kind !== 'sheep') continue;
-      const t = shornSheep.get(e);
-      if (t !== undefined && t <= this.clock) {
-        shornSheep.delete(e);
-        this.setFleece(e, true);
-      }
     }
   }
 
@@ -1873,7 +1842,7 @@ export class Player {
     } else {
       this.regenT = 0;
     }
-    this.regrowWool();
+
 
     if (this.hunger <= 0) {
       this.starveT += dts;

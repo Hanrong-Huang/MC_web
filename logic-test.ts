@@ -2,7 +2,7 @@
 import { rleEncode, rleDecode } from './src/engine/Persistence.ts';
 import { matchRecipe, FurnaceState, ChestState, Slot, smeltResult, furnaceSlotFor } from './src/engine/Inventory.ts';
 import {
-  B, I, breakTime, canHarvest, attackCooldown, attackStrength, foodSaturation, pickItemFor, def,
+  B, B2, I, breakTime, canHarvest, attackCooldown, attackStrength, foodSaturation, pickItemFor, def,
 } from './src/engine/Blocks.ts';
 
 let failures = 0;
@@ -136,6 +136,20 @@ check('golden carrot saturation 14.4', Math.abs(foodSaturation(I.GOLDEN_CARROT) 
 check('steak saturation 12.8', Math.abs(foodSaturation(I.COOKED_BEEF) - 12.8) < 1e-9);
 check('golden apples always edible', !!def(I.GOLDEN_APPLE).alwaysEdible && !!def(I.MILK_BUCKET).alwaysEdible);
 check('bread is not always edible', !def(I.BREAD).alwaysEdible);
+
+// --- decorative/storage blocks, paper + books ---
+const CO = I.COAL, WH = I.WHEAT, EM = I.EMERALD, SC = B.SUGAR_CANE, PA = I.PAPER, BK = I.BOOK;
+check('coal block', matchRecipe(g9([CO, CO, CO, CO, CO, CO, CO, CO, CO]), 3)?.id === B.COAL_BLOCK);
+check('coal block -> 9 coal', matchRecipe(g4(B.COAL_BLOCK, 0, 0, 0), 2)?.count === 9);
+check('hay bale', matchRecipe(g9([WH, WH, WH, WH, WH, WH, WH, WH, WH]), 3)?.id === B.HAY_BALE);
+check('emerald block', matchRecipe(g9([EM, EM, EM, EM, EM, EM, EM, EM, EM]), 3)?.id === B2.EMERALD_BLOCK);
+check('quartz block', matchRecipe(g4(I.QUARTZ, I.QUARTZ, I.QUARTZ, I.QUARTZ), 2)?.id === B.QUARTZ_BLOCK);
+check('paper from cane', matchRecipe(g9([SC, SC, SC, 0, 0, 0, 0, 0, 0]), 3)?.count === 3);
+check('book', matchRecipe(g4(PA, PA, PA, I.LEATHER), 2)?.id === BK);
+check('bookshelf', matchRecipe(g9([P, P, P, BK, BK, BK, P, P, P]), 3)?.id === B.BOOKSHELF);
+check('bread still 3 wheat', matchRecipe(g9([WH, WH, WH, 0, 0, 0, 0, 0, 0]), 3)?.id === I.BREAD);
+check('stone -> smooth stone', smeltResult(B.STONE) === B.SMOOTH_STONE);
+check('bookshelf drops 3 books', def(B.BOOKSHELF).drop?.id === BK && def(B.BOOKSHELF).drop?.min === 3);
 
 // --- shift-click routing into a furnace ---
 check('ore shift-clicks to furnace input', furnaceSlotFor(B.IRON_ORE) === 'input');
