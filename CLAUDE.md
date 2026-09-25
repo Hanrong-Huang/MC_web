@@ -65,6 +65,10 @@ See the table in `README.md` for the full per-file breakdown. The big/hot files:
 - **Dev URL hooks**: `#night` starts just after sundown; `#debugmobs` spawns tameable/rideable mobs at spawn, stocks a tool kit, builds a torch pillar + a full 2-block bed; `#debugcatch` stocks catchers/amethyst and lines up throwable targets (zombie, creeper, skeleton, spider + a cow for the bounce case). Note `#debugmobs` places the bed directly in front of the player, which occludes forward screenshots — pan or reposition when capturing mobs. Both hooks expose `window.__game` / `window.__B`.
 - **`GameUIState.sleeping`** is frame-driven from `main.updateSleep(dt)`: 0–1.2 s lying awake, 1.2–1.9 s fade to black, night skips at 1.9 s, 1.9–2.7 s fade in, wake at 2.7 s. `leaveBed()` can cancel at any point (Leave Bed button / Esc), which is why the fade is an opacity the loop sets rather than a chain of `setTimeout`s.
 
+- **Fire** (`Fire.ts`, `main.fire`): only fires lit through `fire.ignite()` are tracked (spread, burn-out, rain) and saved as `SaveState.fires`; a raw `setBlock(B.FIRE)` is a flame that never burns out. `B.FIRE` is a glower (`Chunk.isGlower`) and a `CROSS_BLOCKS` billboard.
+- **Status effects / saturation** live on `Player` (`effects`, `absorb`, `saturation`, `fireT`) and persist through the optional `PlayerSave` fields; `StatusHUD.ts` draws golden hearts, effect badges, the attack-recharge meter, the spyglass vignette and the burning overlay by attaching to `#stats`/the root, so `HUD.ts` doesn't need to know about them.
+- **Combat** is 1.9-style: damage scales with `Player.attackCharge()` (per-item `attackCooldown()` in `Blocks.ts`), and repeat player hits on one mob within 0.5 s only land the excess (`Player.lastHits`).
+
 ## Testing
 
 Headless harnesses (`node <name>.mjs`) boot the game in Edge/SwiftShader and fail on any console error:

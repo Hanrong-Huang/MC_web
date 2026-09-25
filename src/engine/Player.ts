@@ -882,7 +882,11 @@ export class Player {
     }
 
     if (withDrops && this.mode === 'survival') {
-      if (def(id).hardness > 0) this.damageHeldTool(true);
+      if (def(id).hardness > 0) {
+        // vanilla wear: a sword used as a pick loses two points per block
+        this.damageHeldTool(true);
+        if (this.inventory.getSelected() && def(this.heldId()).toolInfo?.kind === 'sword') this.damageHeldTool(true);
+      }
       if (!canHarvest(id, this.heldId())) return; // wrong tool tier: no drops
       // special drop tables
       if (id === B.GRAVEL) {
@@ -1739,7 +1743,10 @@ export class Player {
         this.sweep(target, d.x / kb, d.z / kb);
       }
       this.addExhaustion(0.1);
+      // weapons wear one point per hit; tools swung as weapons wear two
+      const kind = heldId && hasDef(heldId) ? def(heldId).toolInfo?.kind : undefined;
       this.damageHeldTool();
+      if (kind && kind !== 'sword' && this.heldId() === heldId) this.damageHeldTool();
     } else if (!this.target && (!hit || hit.entity === this.riding)) {
       // swung at empty air (nothing to break, nothing to hit) — a soft swish
       this.deps.audio.play('whoosh');
