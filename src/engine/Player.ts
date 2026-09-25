@@ -451,6 +451,7 @@ export class Player {
       if (this.vel.y < -TERMINAL) this.vel.y = -TERMINAL;
       if (space && this.onGround) {
         this.vel.y = JUMP_VELOCITY;
+        this.deps.audio.play('jump');
         this.onGround = false;
         this.addExhaustion(this.sprinting ? 0.2 : 0.05);
         // sprint-jump: a forward shove along the facing direction (vanilla +0.2 b/tick)
@@ -500,7 +501,7 @@ export class Player {
           if (below !== B.AIR && hasDef(below)) {
             this.deps.entities.spawnBlockParticles(
               Math.floor(this.pos.x), Math.floor(this.pos.y), Math.floor(this.pos.z), below, 6);
-            this.deps.audio.step(def(below).sound, below);
+            this.deps.audio.land(def(below).sound, below, this.fallDist);
           }
         }
         let dmg = Math.floor(this.fallDist - 3);
@@ -523,7 +524,7 @@ export class Player {
       if (this.stepDist > 2.1) {
         this.stepDist = 0;
         const below = world.getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y - 0.5), Math.floor(this.pos.z));
-        if (below !== B.AIR && hasDef(below)) this.deps.audio.step(def(below).sound, below);
+        if (below !== B.AIR && hasDef(below)) this.deps.audio.step(def(below).sound, below, this.sprinting ? 'sprint' : this.sneaking ? 'sneak' : 'walk');
       }
       // vanilla: walking is free, sprinting costs 0.1 exhaustion per metre
       if (this.sprinting) this.addExhaustion(Math.hypot(this.vel.x, this.vel.z) * dt * 0.1);
@@ -1324,7 +1325,7 @@ export class Player {
       this.eatT += dt;
       this.eating = true;
       this.chewT -= dt;
-      if (this.chewT <= 0) { this.chewT = 0.25; audio.play(heldDef.id === I.MILK_BUCKET ? 'splash' : 'eat'); }
+      if (this.chewT <= 0) { this.chewT = 0.25; audio.play(heldDef.id === I.MILK_BUCKET ? 'drink' : 'eat'); }
       if (this.eatT >= 1.6) {
         const eaten = heldDef.id;
         if (heldDef.food) {
@@ -1469,7 +1470,7 @@ export class Player {
         return;
       }
       if (this.deps.ignite?.(t.x + t.nx, t.y + t.ny, t.z + t.nz)) {
-        audio.play('fuse');
+        audio.play('ignite');
         this.damageHeldTool();
       } else {
         audio.play('fail');
@@ -1912,6 +1913,7 @@ export class Player {
     document.getElementById('vignette')?.classList.add('flash');
     if (this.hp <= 0) {
       this.dead = true;
+      this.deps.audio.play('death');
       this.cancelBreaking();
       this.deps.onDeath();
     }
