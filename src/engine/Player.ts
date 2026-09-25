@@ -7,6 +7,7 @@ import { Input } from './Input';
 import { Renderer } from './Renderer';
 import { AudioEngine } from './Audio';
 import { moveEntity, hasSupport, inWater, eyeInWater, boxIntersectsBlock, Vec3 } from './Physics';
+import { waterFX } from './WaterFX';
 import {
   B, I, def, hasDef, breakTime, attackDamage, isSolid, canHarvest, FLOOR_BLOCKS, SELF_STACKING, mobLabel,
   attackCooldown, attackStrength, foodSaturation, pickItemFor, LEAF_BLOCKS,
@@ -154,6 +155,12 @@ export class Player {
   private cactusT = 0;
   private lavaT = 0;
   private swimSoundT = 0;
+  /** feet were in water last frame (splash on entry, drip on exit) */
+  private feetWet = false;
+  /** seconds the body has been in water (a quick dip doesn't count as climbing out) */
+  private soakT = 0;
+  private dripT = 0;
+  private rippleT = 0;
 
   portalTimer = 0;
   portalCooldown = 0;
@@ -464,18 +471,12 @@ export class Player {
 
     // integrate with collision
     const wasOnGround = this.onGround;
+    const preVy = this.vel.y; // impact speed for a splash (collision zeroes it)
     const res = moveEntity(world, this.pos, this.vel, dt, BOX, this.sneaking, wasOnGround);
     const inWaterNow = inWater(world, this.pos, BOX);
     // touching water cancels accumulated fall distance (no fall damage into water)
     if (inWaterNow) this.fallDist = 0;
-    this.swimSoundT = Math.max(0, this.swimSoundT - dt);
-    if (!wasInWater && inWaterNow) {
-      this.deps.audio.play('splash');
-      this.swimSoundT = 0.45;
-    } else if (inWaterNow && this.swimSoundT <= 0 && Math.hypot(this.vel.x, this.vel.z) > 0.7) {
-      this.deps.audio.play('splash');
-      this.swimSoundT = 0.85;
-    }
+    this.updateWaterFx(dt, inWaterNow, preVy);
     // climb out of water: swimming into a 1-block ledge hops you up onto it (so you
     // don't get stuck bobbing), and holding jump against any wall pushes upward.
     if (wasInWater && (res.hitX || res.hitZ)) {
@@ -749,6 +750,48 @@ export class Player {
 
   underwaterEye(): boolean {
     return eyeInWater(this.deps.world, this.pos, this.eyeHeight());
+  }
+
+  /** Water feedback: an impact splash sized by fall speed when the feet break
+   *  the surface, strokes + a ripple wake while wading/swimming, breath
+   *  bubbles under water, and a dripping exit after a proper soak. */
+  private updateWaterFx(dt: number, bodyWet: boolean, vy: number): void {
+    const world = this.deps.world, audio = this.deps.audio, p = this.pos;
+    const feet = world.getBlock(Math.floor(p.x), Math.floor(p.y + 0.05), Math.floor(p.z)) === B.WATER;
+    const under = this.underwaterEye();
+    this.swimSoundT = Math.max(0, this.swimSoundT - dt);
+    this.rippleT -= dt;
+    if (feet && !this.feetWet) {
+      // a hop in is a plop, a long drop a crash (running in adds a little)
+      const k = Math.max(Math.min(1, Math.max(0, (-vy - 2) / 16)), Math.min(0.3, Math.hypot(this.vel.x, this.vel.z) * 0.05));
+      audio.waterSplash(k);
+      waterFX.splash(p.x, p.y + 0.3, p.z, k);
+      this.swimSoundT = 0.5;
+    }
+    if (bodyWet) this.soakT += dt;
+    if (this.feetWet && !feet && !this.flying && this.soakT > 0.5) {
+      audio.waterExit();
+      this.dripT = 1.5;
+    }
+    if (!feet) this.soakT = 0;
+    this.feetWet = feet;
+
+    const sp = Math.hypot(this.vel.x, this.vel.z);
+    if ((feet || bodyWet) && !this.flying && sp > 0.7 && this.swimSoundT <= 0) {
+      audio.swimStroke(under, bodyWet ? 1 : 0.6);
+      this.swimSoundT = this.sprinting ? 0.45 : 0.62;
+      if (under) waterFX.bubbles(p.x, p.y + this.eyeHeight() - 0.3, p.z, 2);
+    }
+    if (feet && !under && this.rippleT <= 0) {
+      // wake while moving, a slow lazy ring while treading water
+      waterFX.ripple(p.x, p.y + 0.5, p.z, sp > 0.4 ? 0.5 : 0.35);
+      this.rippleT = sp > 0.4 ? 0.3 : 1.3;
+    }
+    if (under && Math.random() < dt * 0.6) waterFX.bubbles(p.x, p.y + this.eyeHeight() - 0.15, p.z, 2 + ((Math.random() * 3) | 0));
+    if (this.dripT > 0) {
+      this.dripT -= dt;
+      if (Math.random() < dt * 16) waterFX.drips(p.x, p.y, p.z, 1.6, 1);
+    }
   }
 
   // --- targeting / breaking --------------------------------------------------

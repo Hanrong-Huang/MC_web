@@ -454,14 +454,17 @@ export class World {
   private tickFluid(fluid: number, maxOps: number): void {
     const queue = fluid === B.LAVA ? this.lavaQueue : this.waterQueue;
     const queued = fluid === B.LAVA ? this.lavaQueued : this.waterQueued;
-    let ops = 0;
-    while (queue.length && ops < maxOps) {
-      const key = queue.shift()!;
+    // walk a snapshot of the queue by index (Array.shift is O(n) per pop, which
+    // crawled once a big flood queued thousands of cells); cells scheduled
+    // meanwhile append behind it and carry over to the next tick
+    const n = Math.min(queue.length, maxOps);
+    for (let i = 0; i < n; i++) {
+      const key = queue[i];
       queued.delete(key);
       const c = key.split(',');
       this.updateFluidCell(fluid, +c[0], +c[1], +c[2]);
-      ops++;
     }
+    queue.splice(0, n);
   }
 
   /**
@@ -530,10 +533,16 @@ export class World {
     // Minecraft-like flow priority: fall straight down first. Otherwise, if any
     // horizontal direction reaches a drop within the search range, feed only the
     // shortest downhill direction(s) instead of fanning across flat ground.
-    if (this.getBlock(x, y - 1, z) === B.AIR) {
+    const below = this.getBlock(x, y - 1, z);
+    if (below === B.AIR) {
       this.scheduleFluid(fluid, x, y - 1, z);
       return;
     }
+    // flowing fluid resting on more of itself (a waterfall column, or a fall
+    // landing in a lake) merges downward instead of fanning out sideways —
+    // otherwise every cell of a falling column spawned its own spreading
+    // sheet and a single waterfall grew into a runaway cone of water
+    if (!permanent && below === fluid) return;
     if (target < maxLevel) {
       const preferred = this.preferredFlowDirs(fluid, x, y, z);
       if (preferred) {
@@ -572,8 +581,10 @@ export class World {
 
   private canFeedFrom(fluid: number, fromX: number, y: number, fromZ: number, toX: number, toZ: number,
     levels: Map<string, number>): boolean {
-    // A falling non-source column feeds downward only.
-    if (this.getBlock(fromX, y - 1, fromZ) === B.AIR && levels.has(`${fromX},${y},${fromZ}`)) return false;
+    // A falling non-source column (or one pouring into more of itself) feeds
+    // downward only.
+    const under = this.getBlock(fromX, y - 1, fromZ);
+    if ((under === B.AIR || under === fluid) && levels.has(`${fromX},${y},${fromZ}`)) return false;
 
     const preferred = this.preferredFlowDirs(fluid, fromX, y, fromZ);
     if (preferred) return preferred.some(([dx, dz]) => fromX + dx === toX && fromZ + dz === toZ);

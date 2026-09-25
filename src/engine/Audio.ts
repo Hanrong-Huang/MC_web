@@ -1638,6 +1638,121 @@ export class AudioEngine {
     }
   }
 
+  // --------------------------------------------------------------------------
+  // water: body splashes, swim strokes, dripping exits, nearby flowing water
+  // --------------------------------------------------------------------------
+
+  /** Something hits the water. `force` 0..1 (from impact speed) scales it from
+   *  a light plop to a heavy crash with spray, falling droplets and bubbles. */
+  waterSplash(force: number, vol = 1, pan = 0): void {
+    this.ensure();
+    if (!this.ctx || !this.gate('wsplash', 0.07)) return;
+    const k = clamp(force, 0, 1);
+    const e = this.open('sfx', (0.45 + 0.85 * k) * clamp(vol, 0, 1.5), { pan });
+    if (!e) return;
+    const p = rand(0.9, 1.12);
+    // the slap of the surface breaking + the hollow gulp of the cavity closing
+    this.tn(e, { dur: 0.1 + k * 0.08, f: 230 * p, f1: 70, vol: 0.12 + 0.22 * k, attack: 0.002 });
+    this.tn(e, { at: 0.06 + k * 0.05, dur: 0.12, f: 140 * p, f1: 420 * p, glide: 0.1, vol: 0.05 + 0.08 * k });
+    // crash of water thrown up, a spray hiss, a low body whump on big hits
+    this.nz(e, { dur: 0.3 + 0.55 * k, vol: 0.3 + 0.3 * k, type: 'bandpass', f: 2100 * p, f1: 650, q: 0.55, attack: 0.006 });
+    this.nz(e, { dur: 0.35 + 0.6 * k, vol: 0.12 + 0.2 * k, type: 'highpass', f: 3800, curve: this.grains(10 + 24 * k, 0.85, 1.3) });
+    if (k > 0.25) this.nz(e, { dur: 0.45, vol: 0.4 * k, color: 'brown', type: 'lowpass', f: 480, f1: 110, attack: 0.01 });
+    // spray raining back onto the surface
+    const drops = 3 + Math.round(9 * k);
+    for (let i = 0; i < drops; i++) {
+      const f = rand(900, 2400);
+      this.tn(e, { at: rand(0.18, 0.5 + 0.6 * k), dur: rand(0.03, 0.06), f, f1: f * rand(1.3, 1.8), glide: 0.02, vol: rand(0.015, 0.04), attack: 0.002 });
+    }
+    this.bubbles(e, 2 + Math.round(5 * k), 0.4 + 0.4 * k, 0.045);
+    if (k > 0.55) this.duck(0.18 * k, 0.25, 1.2);
+    this.seal(e);
+  }
+
+  /** Climbing out of water: a slosh as the body clears, then streaming drips. */
+  waterExit(vol = 1): void {
+    this.ensure();
+    if (!this.ctx || !this.gate('wexit', 0.5)) return;
+    const e = this.open('sfx', 0.8 * clamp(vol, 0, 1.5));
+    if (!e) return;
+    this.nz(e, { dur: 0.34, vol: 0.22, type: 'bandpass', f: 800, f1: 1700, q: 0.8, attack: 0.04 });
+    this.nz(e, { at: 0.05, dur: 1.1, vol: 0.1, color: 'pink', type: 'bandpass', f: 2600, q: 1.2, curve: this.grains(20, 0.92, 1.1, 0.02) });
+    for (let i = 0; i < 7; i++) {
+      const f = rand(1100, 2700);
+      this.tn(e, { at: 0.1 + Math.pow(Math.random(), 1.4) * 1.1, dur: rand(0.03, 0.05), f, f1: f * rand(1.4, 1.9), glide: 0.018, vol: rand(0.02, 0.045), attack: 0.002 });
+    }
+    this.seal(e);
+  }
+
+  /** One swim stroke: a paddling swish at the surface, muffled with bubbles
+   *  when the head is under. */
+  swimStroke(under: boolean, vol = 1): void {
+    this.ensure();
+    if (!this.ctx || !this.gate('wstroke', 0.2)) return;
+    const e = this.open('sfx', 0.55 * clamp(vol, 0, 1.5));
+    if (!e) return;
+    const p = rand(0.85, 1.15);
+    if (under) {
+      this.nz(e, { dur: 0.4, vol: 0.2, color: 'brown', type: 'lowpass', f: 380 * p, f1: 700 * p, attack: 0.08 });
+      this.bubbles(e, 2, 0.3, 0.03);
+    } else {
+      this.nz(e, { dur: 0.32, vol: 0.2, type: 'bandpass', f: 520 * p, f1: 1250 * p, q: 0.9, attack: 0.07 });
+      this.nz(e, { at: 0.12, dur: 0.24, vol: 0.07, type: 'highpass', f: 2800, curve: this.grains(6, 0.75) });
+    }
+    this.seal(e);
+  }
+
+  private flowBed: { g: GainNode; roar: GainNode; srcs: AudioScheduledSourceNode[] } | null = null;
+
+  /** Loop bed for nearby moving water: `level` 0..1 (how much flowing water /
+   *  waterfall is close by), `fall` 0..1 how much of it is falling (adds a
+   *  deeper roar). Call every so often; it glides between settings. */
+  setWaterFlow(level: number, fall = 0): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.amb) return;
+    const k = clamp(level, 0, 1);
+    if (k < 0.01) {
+      if (this.flowBed) {
+        const b = this.flowBed;
+        this.flowBed = null;
+        this.glide(b.g.gain, 0, 0.8);
+        for (const s of b.srcs) s.stop(ctx.currentTime + 0.9);
+      }
+      return;
+    }
+    if (!this.flowBed) {
+      // babble: pink noise through a wobbling bandpass; roar: brown noise
+      const babble = ctx.createBufferSource();
+      babble.buffer = this.pink; babble.loop = true;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass'; bp.frequency.value = 1100; bp.Q.value = 0.7;
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 0.37;
+      const lg = ctx.createGain();
+      lg.gain.value = 380;
+      lfo.connect(lg).connect(bp.frequency);
+      const roar = ctx.createBufferSource();
+      roar.buffer = this.brown; roar.loop = true; roar.playbackRate.value = 0.8;
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass'; lp.frequency.value = 500;
+      const rg = ctx.createGain();
+      rg.gain.value = 0;
+      const g = ctx.createGain();
+      g.gain.value = 0;
+      babble.connect(bp).connect(g);
+      roar.connect(lp).connect(rg).connect(g);
+      g.connect(this.amb);
+      const all: AudioNode[] = [babble, roar, lfo, bp, lg, lp, rg, g];
+      babble.onended = () => { for (const n of all) n.disconnect(); };
+      babble.start(ctx.currentTime, Math.random() * 1.5);
+      roar.start(ctx.currentTime, Math.random() * 1.5);
+      lfo.start();
+      this.flowBed = { g, roar: rg, srcs: [babble, roar, lfo] };
+    }
+    this.glide(this.flowBed.g.gain, 0.09 * k, 0.9);
+    this.glide(this.flowBed.roar.gain, 0.9 * clamp(fall, 0, 1), 0.9);
+  }
+
   /** A short weather gesture; callers retrigger it every ~1-2 seconds.
    *  (listen() drives weather by itself; this remains for older callers.) */
   weatherLoop(kind: 'rain' | 'thunder' | 'snow', intensity: number, isNight = false, sheltered = false): void {
@@ -1884,7 +1999,7 @@ export class AudioEngine {
     if (this.ctx) this.nextPieceAt = this.ctx.currentTime + (on ? 1.2 : rand(10, 22));
     if (!on) this.fragT = rand(50, 90);
     if (on) {
-      this.setRain('off'); this.setSnow(0); this.setUnderwater(false); this.stopNetherBed();
+      this.setRain('off'); this.setSnow(0); this.setUnderwater(false); this.stopNetherBed(); this.setWaterFlow(0);
       for (const k of [...this.beds.keys()]) this.bedStop(k, 1.2);
       this.threat = 0;
       this.scape = null;

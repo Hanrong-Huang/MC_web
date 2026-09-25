@@ -568,14 +568,34 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
   },
   leaves: (c, x, y) => leavesPx(pal(['#1d4a12', '#265c18', '#306e1f', '#3a7f26', '#458f2e', '#52a038']), 206, 46, 0.55).put(c, x, y),
   water: (c, x, y) => {
-    // still water: soft horizontal swells with a few bright ripple glints
-    const ramp = pal(['#2a4ea6', '#2f55b0', '#345cba', '#3a64c4', '#416dcd', '#4a78d6']);
-    const f = fbm(107, [[4, 0.6, 8], [8, 0.4, 16]], 1.8);
-    const p = rampFill(new Px(), ramp, f, 108, 0.25);
-    const r = mulberry32(2107);
-    for (let i = 0; i < 6; i++) {
-      const gx = (r() * 16) | 0, gy = (r() * 16) | 0, len = 2 + ((r() * 3) | 0);
-      for (let k = 0; k < len; k++) p.set(gx + k, gy, k === 0 || k === len - 1 ? '#5c86de' : '#7ea0ea');
+    // still water: soft swells crossed by a wobbly web of lighter wave crests
+    // (tileable; the water shader drifts two copies of it against each other)
+    const ramp = pal(['#284a9e', '#2d52aa', '#325ab5', '#3862bf', '#3f6bc9', '#4775d2']);
+    const f = fbm(107, [[4, 0.6, 4], [8, 0.4, 8]], 1.6);
+    const p = rampFill(new Px(), ramp, f, 108, 0.18);
+    const cells = voronoi(2107, 6, 1);
+    for (let py = 0; py < 16; py++) {
+      for (let px = 0; px < 16; px++) {
+        const k = cellAt(cells, px, py);
+        const edge = k !== cellAt(cells, px + 1, py) || k !== cellAt(cells, px, py + 1);
+        if (!edge) continue;
+        const bright = f(px, py) > 0.5;
+        p.set(px, py, bright ? '#86a8ee' : '#5f86dc');
+      }
+    }
+    for (let i = 3; i < p.d.length; i += 4) p.d[i] = 200;
+    p.put(c, x, y);
+  },
+  water_flow: (c, x, y) => {
+    // flowing water: streaks stretched along the tile's v axis, which the
+    // shader turns to face downstream / downhill
+    const ramp = pal(['#26479a', '#2c50a8', '#3259b4', '#3a63c0', '#436fcb', '#4f7bd5']);
+    const f = fbm(1107, [[8, 0.6, 2], [16, 0.4, 4]], 1.9);
+    const p = rampFill(new Px(), ramp, f, 1108, 0.12);
+    const r = mulberry32(3107);
+    for (let i = 0; i < 9; i++) {
+      const gx = (r() * 16) | 0, gy = (r() * 16) | 0, len = 3 + ((r() * 5) | 0);
+      for (let k = 0; k < len; k++) p.set(gx, gy + k, k === 0 || k === len - 1 ? '#6a8fe0' : '#93b1f0');
     }
     for (let i = 3; i < p.d.length; i += 4) p.d[i] = 200;
     p.put(c, x, y);
@@ -2199,6 +2219,7 @@ const PACK_MAP: Record<string, PackEntry> = {
   leaves: { paths: ['block/oak_leaves', 'block/leaves_oak'], tint: '#59ae30', kind: 'tile' },
   glass: { paths: ['block/glass'], kind: 'tile' },
   water: { paths: ['block/water_still'], tint: '#3f76e4', kind: 'tile' },
+  water_flow: { paths: ['block/water_flow'], tint: '#3f76e4', kind: 'tile' },
   lava: { paths: ['block/lava_still', 'block/lava'], kind: 'tile' },
   obsidian: { paths: ['block/obsidian'], kind: 'tile' },
   table_top: { paths: ['block/crafting_table_top'], kind: 'tile' },
@@ -2675,7 +2696,7 @@ export class Atlas {
           const [x, y] = this.slotXY(idx);
           this.ctx.clearRect(x, y, TILE, TILE);
           this.ctx.drawImage(tmp, x, y);
-          if (name === 'water') {
+          if (name === 'water' || name === 'water_flow') {
             // ensure water stays translucent
             const img2 = this.ctx.getImageData(x, y, TILE, TILE);
             for (let i = 3; i < img2.data.length; i += 4) {

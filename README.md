@@ -40,6 +40,7 @@ Your worlds are saved in your browser automatically (every 60 s, and when you ch
 - **Farm and tame**: grow wheat, carrots and potatoes; breed animals; tame wolves and cats; ride horses; shear sheep.
 - **Catch mobs** with the Mob Catcher, a thrown orb that traps hostile mobs so you can release them as loyal pets that fight beside you.
 - **Build** with a huge block palette, doors, ladders, torches, redstone levers and lamps, pistons and TNT.
+- **Swim** in living water: it streams downhill and down waterfalls, reflects the sky and clouds, foams at the shore and glitters in the sun. Dive in for a splash, caustic light and muffled sound under the surface.
 - **Venture to the Nether** through an obsidian portal.
 - **Relax** to generative music and ambient sound that change with the biome, the weather and the time of day.
 
