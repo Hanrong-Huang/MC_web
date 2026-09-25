@@ -762,7 +762,16 @@ export class WorldGenerator {
   private plantAt(chunk: Chunk, wx: number, wz: number, r: number): void {
     const i = this.slot(wx, wz);
     const b = this.cB[i], h = this.cH[i];
-    if (b === DESERT) return;
+    if (b === DESERT) {
+      // oasis palms on low sand beside water
+      if (r < 0.06 && h >= SEA_LEVEL && h <= SEA_LEVEL + 3 &&
+        (this.heightAt(wx + 3, wz) < SEA_LEVEL || this.heightAt(wx - 3, wz) < SEA_LEVEL ||
+          this.heightAt(wx, wz + 3) < SEA_LEVEL || this.heightAt(wx, wz - 3) < SEA_LEVEL) &&
+        !this.inVillage(wx, wz, 4)) {
+        this.placePalm(chunk, wx, h + 1, wz, hash2(this.seed ^ 0x9a1f, wx, wz));
+      }
+      return;
+    }
     if (h < (b === SWAMP ? SEA_LEVEL - 1 : SEA_LEVEL) || h > 118) return;
     // groves and clearings: density swings across a forest instead of a uniform fuzz
     const dens = smoothstep(-0.55, 0.55, this.flora.noise(wx * 0.011, wz * 0.011));
@@ -878,6 +887,29 @@ export class WorldGenerator {
       if (hash2(this.seed ^ 0xb1a4, wx + dx, wz + dz) < 0.3 && this.heightAt(wx + dx, wz + dz) === wy - 1) {
         this.put(chunk, wx + dx, wy, wz + dz, B.LOG);
       }
+    }
+  }
+
+  /** Oasis palm: a leaning jungle-log trunk under a drooping star of fronds. */
+  private placePalm(chunk: Chunk, wx: number, wy: number, wz: number, v: number): void {
+    const H = 5 + Math.floor(v * 3);
+    const d = Math.floor(v * 4000) & 3; // lean direction
+    let x = wx, z = wz;
+    for (let k = 0; k < H; k++) {
+      if (k === (H >> 1) || k === H - 1) { x += DIR_X[d]; z += DIR_Z[d]; }
+      this.put(chunk, x, wy + k, z, B.JUNGLE_LOG);
+    }
+    const ty = wy + H;
+    this.putIfAir(chunk, x, ty, z, B.JUNGLE_LEAVES);
+    for (let dir = 0; dir < 4; dir++) {
+      const ux = DIR_X[dir], uz = DIR_Z[dir];
+      this.putIfAir(chunk, x + ux, ty, z + uz, B.JUNGLE_LEAVES);
+      this.putIfAir(chunk, x + ux * 2, ty, z + uz * 2, B.JUNGLE_LEAVES);
+      this.putIfAir(chunk, x + ux * 3, ty - 1, z + uz * 3, B.JUNGLE_LEAVES); // drooping tip
+      // diagonal fronds
+      const vx = DIR_X[(dir + 1) & 3];
+      const vz = DIR_Z[(dir + 1) & 3];
+      this.putIfAir(chunk, x + ux + vx, ty - 1, z + uz + vz, B.JUNGLE_LEAVES);
     }
   }
 
