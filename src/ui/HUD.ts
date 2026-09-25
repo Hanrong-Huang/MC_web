@@ -402,7 +402,11 @@ export class HUD {
     const logoWrap = el('div', 'menu-logo-wrap', inner);
     let stone: HTMLCanvasElement | null = null;
     try { stone = this.atlas.tileCanvas('stone'); } catch { /* resource pack without stone */ }
-    logoWrap.appendChild(drawLogo('Voxelcraft', stone, 8));
+    // integer block size keeps the logo's pixels even: bigger on big screens
+    const big = window.innerWidth >= 1600 && window.innerHeight >= 950;
+    const logo = drawLogo('Voxelcraft', stone, big ? 12 : 8);
+    logo.style.width = `${logo.width}px`;
+    logoWrap.appendChild(logo);
     const title = el('h1', 'menu-title sr-only', logoWrap);
     title.textContent = 'VOXELCRAFT';
     this.splashEl = el('div', 'menu-splash', logoWrap);
@@ -1026,7 +1030,7 @@ export class HUD {
   // Loading screen
   // =========================================================================
 
-  showLoading(text: string): void {
+  showLoading(text: string, progress = true): void {
     this.loadingEl.classList.remove('hidden');
     this.loadingEl.innerHTML = '';
     try {
@@ -1038,6 +1042,14 @@ export class HUD {
     const head = el('div', 'load-title', box);
     head.appendChild(scaled(pixelText(text.replace(/\.+$/, ''), '#ffffff'), 3));
     head.setAttribute('aria-label', text);
+    if (!progress) {
+      // indeterminate (e.g. saving on quit): a sweeping bar instead of the chunk grid
+      const bar = el('div', 'load-bar indeterminate', box);
+      el('div', 'fill', bar);
+      this.loadFill = null; this.loadPct = null; this.loadCells = [];
+      if (this.loadTipTimer) { clearInterval(this.loadTipTimer); this.loadTipTimer = null; }
+      return;
+    }
     // 5x5 chunk map that lights up as spawn chunks finish (vanilla's loading grid)
     const map = el('div', 'load-map', box);
     this.loadCells = [];
@@ -1152,6 +1164,7 @@ export class HUD {
     const quit = this.pauseButton(col, 'Save and Quit to Title', () => {
       quit.textContent = 'Saving...';
       quit.disabled = true;
+      this.showLoading('Saving world', false);
       this.pauseH?.onSaveQuit();
     }, 'wide quit-btn');
 
@@ -1247,7 +1260,7 @@ export class HUD {
     r.onclick = () => { this.audio.play('click'); onRespawn(); };
     const q = el('button', 'mc-btn wide', col) as HTMLButtonElement;
     q.textContent = 'Title Screen';
-    q.onclick = () => { this.audio.play('click'); onTitle(); };
+    q.onclick = () => { this.audio.play('click'); this.showLoading('Saving world', false); onTitle(); };
     // like vanilla, the buttons wake up after a beat so a panicked click
     // doesn't respawn you before you've read the screen
     r.disabled = true; q.disabled = true;
