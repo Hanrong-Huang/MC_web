@@ -1162,8 +1162,9 @@ export class AudioEngine {
   }
 
   /** Drive the continuous rain bed. Call with kind='off' to stop. The bed is a
-   *  looping pre-rendered rain texture that fades in/out smoothly. */
-  setRain(kind: 'off' | 'rain' | 'thunder', intensity = 0.6): void {
+   *  looping pre-rendered rain texture that fades in/out smoothly; under a
+   *  roof (sheltered) it turns into a muffled drumming. */
+  setRain(kind: 'off' | 'rain' | 'thunder', intensity = 0.6, sheltered = false): void {
     this.ensure();
     const ctx = this.ctx;
     if (!ctx || !this.amb) return;
@@ -1215,9 +1216,9 @@ export class AudioEngine {
     }
     this.rainState = kind;
     const r = this.rain;
-    this.glide(r.g.gain, (kind === 'thunder' ? 0.25 : 0.18) * (0.35 + 0.65 * k), 1.2);
-    this.glide(r.roar.gain, kind === 'thunder' ? 0.25 * k : 0.1 * k, 1.2);
-    this.glide(r.lp.frequency, kind === 'thunder' ? 7500 : 5200 + 1800 * k, 1.2);
+    this.glide(r.g.gain, (kind === 'thunder' ? 0.25 : 0.18) * (0.35 + 0.65 * k) * (sheltered ? 0.7 : 1), 1.2);
+    this.glide(r.roar.gain, (kind === 'thunder' ? 0.25 * k : 0.1 * k) * (sheltered ? 1.6 : 1), 1.2);
+    this.glide(r.lp.frequency, sheltered ? 900 : kind === 'thunder' ? 7500 : 5200 + 1800 * k, 1.2);
   }
 
   /** Muffle the whole mix and run a soft bubble bed while the head is submerged. */
@@ -1267,7 +1268,7 @@ export class AudioEngine {
       if (chance(0.45)) this.windGust(rand(2.5, 4), 0.07 * k, isNight);
       return;
     }
-    this.setRain(kind, k * (sheltered ? 0.5 : 1));
+    this.setRain(kind, k, sheltered);
   }
 
   private windGust(dur: number, vol: number, dark: boolean): void {

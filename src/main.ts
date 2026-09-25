@@ -1216,7 +1216,7 @@ class Game {
         this.rainSoundT -= dt;
         if (this.rainSoundT <= 0) {
           this.rainSoundT = 2.0;
-          this.audio.setRain(w.kind === 'thunder' ? 'thunder' : 'rain', w.intensity);
+          this.audio.setRain(w.kind === 'thunder' ? 'thunder' : 'rain', w.intensity, this.world.skyLight(Math.floor(pp.x), Math.floor(pp.y + 1.6), Math.floor(pp.z)) < 1);
         }
       } else {
         // clear or snow: ensure the rain bed is off
