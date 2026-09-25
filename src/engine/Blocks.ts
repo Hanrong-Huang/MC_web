@@ -89,6 +89,12 @@ export enum B {
   AMETHYST_ORE = 83,
   /** open flame from flint & steel / lightning; spreads over flammable blocks */
   FIRE = 99,
+  BOOKSHELF = 98,
+  /** cushions falls (80% less damage) */
+  HAY_BALE = 97,
+  COAL_BLOCK = 96,
+  QUARTZ_BLOCK = 95,
+  SMOOTH_STONE = 94,
 }
 
 export enum I {
@@ -190,6 +196,8 @@ export enum I {
   MILK_BUCKET = 195,
   SHIELD = 196,
   SPYGLASS = 197,
+  PAPER = 198,
+  BOOK = 199,
 }
 
 /** Wearable-armor slot index: 0 head, 1 chest, 2 legs, 3 feet. */
@@ -403,6 +411,32 @@ blockDef({
   opaque: false, occludes: false,
   drop: null, // breaking either half drops a single bed item (handled in Player)
   faces: { top: 'bed_head_top', bottom: 'planks', sides: 'bed_side' },
+});
+// decorative / storage blocks
+blockDef({
+  id: B.BOOKSHELF, name: 'bookshelf', label: 'Bookshelf', hardness: 1.5, tool: 'axe', sound: 'wood', fuel: 15,
+  faces: { top: 'planks', bottom: 'planks', sides: 'bookshelf' },
+  drop: { id: I.BOOK, min: 3, max: 3 },
+});
+blockDef({
+  id: B.HAY_BALE, name: 'hay_block', label: 'Hay Bale', hardness: 0.5, tool: 'hoe', sound: 'grass',
+  faces: { top: 'hay_top', bottom: 'hay_top', sides: 'hay_side' },
+});
+blockDef({
+  id: B.COAL_BLOCK, name: 'coal_block', label: 'Block of Coal', hardness: 5, tool: 'pickaxe', minTier: 2, sound: 'stone', fuel: 800,
+  faces: { top: 'coal_block', bottom: 'coal_block', sides: 'coal_block' },
+});
+blockDef({
+  id: B.QUARTZ_BLOCK, name: 'quartz_block', label: 'Block of Quartz', hardness: 0.8, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  faces: { top: 'quartz_block', bottom: 'quartz_block', sides: 'quartz_block' },
+});
+blockDef({
+  id: B.SMOOTH_STONE, name: 'smooth_stone', label: 'Smooth Stone', hardness: 2, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  faces: { top: 'smooth_stone', bottom: 'smooth_stone', sides: 'smooth_stone' },
+});
+blockDef({
+  id: B2.EMERALD_BLOCK, name: 'emerald_block', label: 'Block of Emerald', hardness: 5, tool: 'pickaxe', minTier: 6, sound: 'stone',
+  faces: { top: 'emerald_block', bottom: 'emerald_block', sides: 'emerald_block' },
 });
 blockDef({
   // a light-emitting crossed-flame billboard; burns out unless it sits on netherrack
@@ -643,6 +677,8 @@ itemDef({
 itemDef({ id: I.SHIELD, name: 'shield', label: 'Shield', sprite: 'shield', stack: 1, durability: 336, fuel: 15 });
 // spyglass: hold right-click to zoom
 itemDef({ id: I.SPYGLASS, name: 'spyglass', label: 'Spyglass', sprite: 'spyglass', stack: 1 });
+itemDef({ id: I.PAPER, name: 'paper', label: 'Paper', sprite: 'paper' });
+itemDef({ id: I.BOOK, name: 'book', label: 'Book', sprite: 'book' });
 
 itemDef({ id: I.PORKCHOP, name: 'porkchop', label: 'Raw Porkchop', sprite: 'porkchop', food: 3, sat: 1.8 });
 itemDef({ id: I.COOKED_PORKCHOP, name: 'cooked_porkchop', label: 'Cooked Porkchop', sprite: 'cooked_porkchop', food: 8, sat: 12.8 });
@@ -879,6 +915,8 @@ export const FLAMMABLE = new Map<number, { burn: number; catch: number }>([
   [B.TNT, { burn: 100, catch: 15 }],
   [B.TALL_GRASS, { burn: 100, catch: 60 }], [B.POPPY, { burn: 100, catch: 60 }],
   [B.DANDELION, { burn: 100, catch: 60 }], [B.SAPLING, { burn: 100, catch: 60 }],
+  [B.BOOKSHELF, { burn: 30, catch: 20 }], [B.HAY_BALE, { burn: 60, catch: 20 }],
+  [B.COAL_BLOCK, { burn: 5, catch: 5 }],
 ]);
 
 /** Blocks that pop off when the block under them is removed.
@@ -1002,6 +1040,7 @@ export const PLACEABLE: number[] = [
   B.MAGMA, B.NETHER_BRICKS,
   B.REDSTONE_WIRE, B.REDSTONE_LAMP, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
   B.PISTON, B.STICKY_PISTON, B.PRESSURE_PLATE,
+  B.BOOKSHELF, B.HAY_BALE, B.COAL_BLOCK, B.QUARTZ_BLOCK, B.SMOOTH_STONE, B2.EMERALD_BLOCK,
 ];
 
 export const CREATIVE_ITEMS: number[] = [
@@ -1028,5 +1067,5 @@ export const CREATIVE_ITEMS: number[] = [
   I.GOLD_PICK, I.GOLD_AXE, I.GOLD_SHOVEL, I.GOLD_SWORD,
   I.GOLD_HELMET, I.GOLD_CHEST, I.GOLD_LEGS, I.GOLD_BOOTS,
   I.SHEARS, I.SHIELD, I.SPYGLASS, I.MILK_BUCKET,
-  I.GOLDEN_APPLE, I.ENCHANTED_GOLDEN_APPLE,
+  I.GOLDEN_APPLE, I.ENCHANTED_GOLDEN_APPLE, I.PAPER, I.BOOK,
 ];

@@ -2868,3 +2868,174 @@ Object.assign(TILE_PAINTERS, { fire: paintFire });
 Object.assign(PACK_MAP, {
   fire: { paths: ['block/fire_0', 'block/fire_layer_0'], kind: 'tile' },
 } satisfies Record<string, PackEntry>);
+
+// --- decorative / storage block tiles (bookshelf, hay, coal/quartz/emerald
+// blocks, smooth stone) and the paper + book sprites ------------------------
+
+/** Fill a tile from a per-pixel colour function. */
+function tileFrom(ctx: Ctx, x0: number, y0: number, px: (x: number, y: number) => string | null): void {
+  for (let y = 0; y < TILE; y++) {
+    for (let x = 0; x < TILE; x++) {
+      const col = px(x, y);
+      if (!col) continue;
+      ctx.fillStyle = col;
+      ctx.fillRect(x0 + x, y0 + y, 1, 1);
+    }
+  }
+}
+
+function shadeHex(hex: string, k: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  const f = (v: number): number => Math.max(0, Math.min(255, Math.round(v * k)));
+  return `rgb(${f((n >> 16) & 255)},${f((n >> 8) & 255)},${f(n & 255)})`;
+}
+
+function paintBookshelf(ctx: Ctx, x0: number, y0: number): void {
+  const rnd = mulberry32(4411);
+  const spines = ['#8e2b24', '#2f4f8a', '#3f6e2f', '#7a5a1c', '#6a2e6e', '#a8742a', '#2d6a6a', '#b23c2c'];
+  // per shelf row: a run of book spines of random widths/heights
+  const books: { col: string; top: number }[][] = [[], []];
+  for (let r = 0; r < 2; r++) {
+    let x = 1;
+    while (x < 15) {
+      const w = 1 + ((rnd() * 2.4) | 0);
+      const col = spines[(rnd() * spines.length) | 0];
+      const top = (rnd() * 2.2) | 0;
+      for (let i = 0; i < w && x < 15; i++, x++) books[r][x] = { col, top };
+      if (x < 15 && rnd() < 0.18) { books[r][x] = { col: '', top: 9 }; x++; } // a gap
+    }
+  }
+  tileFrom(ctx, x0, y0, (x, y) => {
+    const wood = (k: number): string => shadeHex('#9c7a48', k + (rnd() - 0.5) * 0.08);
+    if (y === 0 || y === 15) return wood(0.78);
+    if (y === 1 || y === 7 || y === 8) return wood(y === 8 ? 0.72 : 1);
+    if (x === 0 || x === 15) return wood(0.85);
+    const r = y < 7 ? 0 : 1;
+    const rowTop = r === 0 ? 2 : 9;
+    const b = books[r][x];
+    if (!b || !b.col || y < rowTop + b.top) return '#2a1c10'; // shadowed shelf back
+    const edge = x > 1 && books[r][x - 1]?.col !== b.col ? 1.18 : 1;
+    const band = y === rowTop + b.top + 1 || y === rowTop + 4 ? 0.7 : 1; // spine bands
+    return shadeHex(b.col, edge * band * (1 - (y - rowTop) * 0.03));
+  });
+}
+
+function paintHaySide(ctx: Ctx, x0: number, y0: number): void {
+  const rnd = mulberry32(7823);
+  tileFrom(ctx, x0, y0, (x, y) => {
+    if (y === 3 || y === 4 || y === 11 || y === 12) {
+      return shadeHex('#8a3e1c', y === 4 || y === 12 ? 0.8 : 1.05 + (rnd() - 0.5) * 0.1); // binding twine
+    }
+    const strand = ((x * 7 + (y >> 2) * 3) % 5) === 0 ? 0.8 : 1;
+    return shadeHex('#c9a62c', strand * (0.9 + rnd() * 0.22));
+  });
+}
+
+function paintHayTop(ctx: Ctx, x0: number, y0: number): void {
+  const rnd = mulberry32(9127);
+  tileFrom(ctx, x0, y0, (x, y) => {
+    const d = Math.max(Math.abs(x - 7.5), Math.abs(y - 7.5));
+    const ring = (Math.floor(d) % 3 === 0) ? 0.82 : 1;
+    return shadeHex('#c4a02c', ring * (0.88 + rnd() * 0.24));
+  });
+}
+
+function paintCoalBlock(ctx: Ctx, x0: number, y0: number): void {
+  const rnd = mulberry32(3301);
+  tileFrom(ctx, x0, y0, (x, y) => {
+    const facet = ((x + y * 3) % 7 === 0 || (x * 5 + y) % 11 === 0) ? 1.9 : 1;
+    const edge = x === 0 || y === 0 ? 1.3 : x === 15 || y === 15 ? 0.7 : 1;
+    return shadeHex('#1e1e22', facet * edge * (0.85 + rnd() * 0.35));
+  });
+}
+
+function paintQuartzBlock(ctx: Ctx, x0: number, y0: number): void {
+  const rnd = mulberry32(5519);
+  tileFrom(ctx, x0, y0, (x, y) => {
+    const edge = x === 0 || y === 0 ? 1.03 : x === 15 || y === 15 ? 0.9 : 1;
+    const vein = ((x + y) % 9 === 0 && rnd() < 0.5) ? 0.94 : 1;
+    return shadeHex('#ece6dc', edge * vein * (0.97 + rnd() * 0.05));
+  });
+}
+
+function paintEmeraldBlock(ctx: Ctx, x0: number, y0: number): void {
+  const rnd = mulberry32(6143);
+  tileFrom(ctx, x0, y0, (x, y) => {
+    if (x === 0 || y === 0) return '#7df0a6';
+    if (x === 15 || y === 15) return '#0f7a3c';
+    // a cut-gem lattice of diamond facets
+    const u = (x + y) % 8, v = (x - y + 16) % 8;
+    const k = u === 0 || v === 0 ? 0.72 : (u < 4) === (v < 4) ? 1.12 : 0.95;
+    return shadeHex('#2fc865', k * (0.95 + rnd() * 0.1));
+  });
+}
+
+function paintSmoothStone(ctx: Ctx, x0: number, y0: number): void {
+  const rnd = mulberry32(2203);
+  tileFrom(ctx, x0, y0, (x, y) => {
+    if (x === 0 || x === 15 || y === 0 || y === 15) return shadeHex('#8e8e8e', 0.92 + rnd() * 0.06);
+    return shadeHex('#a9a9a9', 0.96 + rnd() * 0.07);
+  });
+}
+
+Object.assign(TILE_PAINTERS, {
+  bookshelf: paintBookshelf,
+  hay_side: paintHaySide,
+  hay_top: paintHayTop,
+  coal_block: paintCoalBlock,
+  quartz_block: paintQuartzBlock,
+  emerald_block: paintEmeraldBlock,
+  smooth_stone: paintSmoothStone,
+});
+
+const PAPER_MAP = [
+  '................',
+  '................',
+  '...OOOOOOOOO....',
+  '...OWWWWWWWWO...',
+  '...OWwwwwwWWO...',
+  '..OWWWWWWWWWO...',
+  '..OWwwwwwwWWO...',
+  '..OWWWWWWWWO....',
+  '..OWwwwwwWWO....',
+  '.OWWWWWWWWWO....',
+  '.OWwwwwwwWWO....',
+  '.OWWWWWWWWO.....',
+  '.OOOOOOOOOO.....',
+  '................',
+  '................',
+  '................',
+];
+const BOOK_MAP = [
+  '................',
+  '................',
+  '....OOOOOOOOO...',
+  '...OLLLLLLLLPO..',
+  '...OLGGGGGLLPO..',
+  '..OLLLLLLLLPPO..',
+  '..OLLLLLLLLPO...',
+  '..OLLLLLLLPPO...',
+  '.OLLLLLLLLPO....',
+  '.OLLLLLLLPPO....',
+  '.ODLLLLLLPO.....',
+  '.ODDDDDDDPO.....',
+  '..OOOOOOOOO.....',
+  '................',
+  '................',
+  '................',
+];
+Object.assign(ITEM_PAINTERS, {
+  paper: (c: Ctx) => pixmap(c, 0, 0, PAPER_MAP, { O: '#6f6a5c', W: '#f4f1e6', w: '#cfcab8' }),
+  book: (c: Ctx) => pixmap(c, 0, 0, BOOK_MAP, { O: '#2a1408', L: '#7a3c1c', D: '#4c220e', G: '#d8b24a', P: '#efe9d6' }),
+});
+Object.assign(PACK_MAP, {
+  bookshelf: { paths: ['block/bookshelf'], kind: 'tile' },
+  hay_side: { paths: ['block/hay_block_side'], kind: 'tile' },
+  hay_top: { paths: ['block/hay_block_top'], kind: 'tile' },
+  coal_block: { paths: ['block/coal_block'], kind: 'tile' },
+  quartz_block: { paths: ['block/quartz_block_side'], kind: 'tile' },
+  emerald_block: { paths: ['block/emerald_block'], kind: 'tile' },
+  smooth_stone: { paths: ['block/smooth_stone'], kind: 'tile' },
+  paper: { paths: ['item/paper'], kind: 'item' },
+  book: { paths: ['item/book'], kind: 'item' },
+} satisfies Record<string, PackEntry>);

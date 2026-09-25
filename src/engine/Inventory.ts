@@ -1,7 +1,7 @@
 // Inventory slots, shaped crafting recipes (2x2 and 3x3), furnace smelting,
 // and chest storage.
 
-import { B, I, def, hasDef } from './Blocks';
+import { B, B2, I, def, hasDef } from './Blocks';
 import { MaybeSlot, FurnaceSave, ChestSave } from './Persistence';
 
 export type Slot = MaybeSlot;
@@ -257,6 +257,18 @@ const RECIPES: Recipe[] = [
   { shape: [[B.IRON_BLOCK]], out: I.IRON_INGOT, n: 9 },
   { shape: [[B.GOLD_BLOCK]], out: I.GOLD_INGOT, n: 9 },
   { shape: [[B.DIAMOND_BLOCK]], out: I.DIAMOND, n: 9 },
+  // storage + decorative blocks
+  { shape: [[I.COAL, I.COAL, I.COAL], [I.COAL, I.COAL, I.COAL], [I.COAL, I.COAL, I.COAL]], out: B.COAL_BLOCK, n: 1 },
+  { shape: [[B.COAL_BLOCK]], out: I.COAL, n: 9 },
+  { shape: [[I.EMERALD, I.EMERALD, I.EMERALD], [I.EMERALD, I.EMERALD, I.EMERALD], [I.EMERALD, I.EMERALD, I.EMERALD]], out: B2.EMERALD_BLOCK, n: 1 },
+  { shape: [[B2.EMERALD_BLOCK]], out: I.EMERALD, n: 9 },
+  { shape: [[I.WHEAT, I.WHEAT, I.WHEAT], [I.WHEAT, I.WHEAT, I.WHEAT], [I.WHEAT, I.WHEAT, I.WHEAT]], out: B.HAY_BALE, n: 1 },
+  { shape: [[B.HAY_BALE]], out: I.WHEAT, n: 9 },
+  { shape: [[I.QUARTZ, I.QUARTZ], [I.QUARTZ, I.QUARTZ]], out: B.QUARTZ_BLOCK, n: 1 },
+  // paper from cane, books from paper + leather, shelves from books
+  { shape: [[B.SUGAR_CANE, B.SUGAR_CANE, B.SUGAR_CANE]], out: I.PAPER, n: 3 },
+  { shape: [[I.PAPER, I.PAPER], [I.PAPER, LE]], out: I.BOOK, n: 1 },
+  { shape: [[P, P, P], [I.BOOK, I.BOOK, I.BOOK], [P, P, P]], out: B.BOOKSHELF, n: 1 },
 ];
 
 function mirror(shape: number[][]): number[][] {
@@ -333,6 +345,7 @@ const SMELT = new Map<number, number>([
   [I.RAW_FISH, I.COOKED_FISH],
   [I.POTATO, I.BAKED_POTATO],
   [B.NETHERRACK, I.NETHER_BRICK],
+  [B.STONE, B.SMOOTH_STONE],
 ]);
 
 export function smeltResult(id: number): number | undefined { return SMELT.get(id); }
