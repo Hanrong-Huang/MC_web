@@ -127,8 +127,10 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
   let style: Style;
   let mode: string;
   if (env === 'menu') {
-    style = title ? 'title' : weighted<Style>(r, [['title', 3], ['ambient', 2], ['lullaby', 2], ['hymn', 2], ['pastoral', 1]]);
-    mode = title ? 'lydian' : weighted(r, [['ionian', 3], ['lydian', 2], ['dorian', 1], ['aeolian', 1]]);
+    // the title screen should feel like coming home: warm, unhurried major-key
+    // pieces low on the keyboard — no floaty lydian, no minor, no sparkle
+    style = title ? 'title' : weighted<Style>(r, [['title', 3], ['lullaby', 2], ['hymn', 2]]);
+    mode = title ? 'ionian' : weighted(r, [['ionian', 5], ['lydian', 1]]);
   } else if (env === 'nether') {
     style = 'nether';
     mode = weighted(r, [['phrygian', 2], ['phrygianDom', 2], ['aeolian', 1]]);
@@ -219,6 +221,11 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
     if (mode === 'lydian' || mode === 'mixolydian') mode = r() < 0.5 ? 'dorian' : 'ionian';
     tempoMul *= 0.9; bells = 0.08; lead = r() < 0.7 ? 'piano' : 'epiano'; padInst = 'pad'; arp = 'piano';
   }
+  if (env === 'menu') {
+    tempoMul = title ? 1 : 0.86; // companions stay as unhurried as the theme
+    bells = title ? 0.05 : 0.1; bellInst = 'celesta'; padInst = 'pad'; arp = 'piano'; counter = 'cello';
+    lead = style === 'lullaby' ? 'epiano' : 'piano';
+  }
   if (style === 'lullaby' && lead === 'piano') lead = r() < 0.6 ? 'celesta' : 'epiano';
   if (style === 'waltz' && (lead === 'piano' || lead === 'epiano')) lead = pick(r, ['musicbox', 'flute', 'harp']);
   if (style === 'elegy') { counter = 'cello'; padInst = 'strings'; if (lead !== 'piano' && lead !== 'cello') lead = 'piano'; }
@@ -228,7 +235,7 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
     : (style === 'hymn' || style === 'flow' || style === 'pastoral' || style === 'tide') && r() < 0.3 ? 3 : 4;
   const baseBpm: Record<Style, [number, number]> = {
     hymn: [56, 68], flow: [64, 78], lullaby: [74, 88], ambient: [48, 58],
-    title: [58, 62], cave: [44, 54], nether: [40, 50], pastoral: [62, 76], waltz: [84, 100],
+    title: [50, 56], cave: [44, 54], nether: [40, 50], pastoral: [62, 76], waltz: [84, 100],
     elegy: [50, 60], tide: [58, 70], deep: [42, 50],
   };
   const [lo, hi] = baseBpm[style];
@@ -237,7 +244,7 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
   const bar = beat * meter;
 
   const sc = MODES[mode];
-  const tonic = title ? 53 : 50 + ((r() * 8) | 0); // D3..A3 (title: F3)
+  const tonic = title ? 51 : env === 'menu' ? 48 + ((r() * 5) | 0) : 50 + ((r() * 8) | 0); // D3..A3 (menu lower and warmer: C3..E3, title Eb3)
   /** scale degree → MIDI (degree 0 = tonic in octave 3; 7 = an octave up) */
   const dm = (d: number): number => tonic + sc[((d % 7) + 7) % 7] + 12 * Math.floor(d / 7);
   const isChordTone = (d: number, root: number): boolean => {
@@ -278,7 +285,9 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
     const n = 16 + (((r() * 3) | 0) * 4);
     form = new Array(n).fill('X');
   } else if (style === 'title') {
-    form = ['I', 'I', ...Array(4).fill('A'), ...Array(4).fill('A2'), ...Array(4).fill('B'), ...Array(4).fill('A'), 'O', 'O'];
+    // statement, gentle restatement, a warmer middle, and the theme coming home
+    // over a cello line
+    form = ['I', 'I', ...Array(4).fill('A'), ...Array(4).fill('A2'), ...Array(4).fill('B'), ...Array(4).fill('A3'), 'O', 'O'];
   } else {
     // long arc: statement, varied restatement, contrast, (development), recapitulation
     const withB = r() < 0.85;
@@ -324,7 +333,7 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
       if (onDown) d = snap(d, chordOf[barIdx]);
       const last = k === mot.rh.length - 1 || (k === mot.rh.length - 2 && mot.rh[k + 1] < 0);
       if (last && resolve) d = snap(d, chordOf[barIdx]);
-      d = Math.max(7, Math.min(18, d));
+      d = Math.max(7, Math.min(env === 'menu' ? 14 : 18, d)); // menu melodies stay in the mellow middle
       add(t, inst, dm(d) + 12 * octave, v, legato ? len * beat * 0.98 + (last ? 0.6 : 0) : len * beat * 1.7 + (last ? 1.5 : 0));
       if (bells > 0 && r() < bells * 0.35) add(t + 0.01, bellInst, dm(d) + 12 * (octave + 1), v * 0.28, 2);
       t += len * beat;
@@ -402,7 +411,23 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
         add(tb + bar * 0.5, 'cello', bassM(root + (r() < 0.5 ? 4 : 2)), 0.4 * e, bar * 0.48);
         break;
       }
-      case 'title':
+      case 'title': {
+        // a slow hand on a felt piano: pedalled broken chords in the warm middle
+        // of the keyboard, a soft pad bed and a round bass every two bars
+        const pat = meter === 4 ? [-7, 0, 2, 4, 7, 4] : [-7, 0, 4, 7, 4, 2];
+        const step = bar / pat.length;
+        pat.forEach((o, k) => {
+          let m = dm(root + o);
+          while (m < 40) m += 12;
+          add(tb + k * step, 'piano', m, (k === 0 ? 0.32 : 0.19) * e, bar - k * step + 0.8, (k / pat.length - 0.5) * 0.4);
+        });
+        if (b % 2 === 0) {
+          for (const m of voice(root, 3, 55)) add(tb, 'pad', m, 0.4, bar * 2.1);
+          add(tb, 'bass', bassM(root), 0.3, bar * 2);
+        }
+        if (r() < bells) add(tb + beat * (meter - 1), 'celesta', dm(root + 9) + 12, 0.1, 3);
+        break;
+      }
       case 'ambient': {
         if (b % 2 === 0) {
           for (const m of voice(root, 4, 57)) add(tb, padInst, m, 0.55 * padLift * (padInst === 'strings' ? 0.8 : 1), bar * 2.15);
@@ -410,7 +435,7 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
         }
         // sparse chord-tone notes, like stones dropped into still water
         for (let bt = 0; bt < meter; bt++) {
-          if (r() > (style === 'title' ? 0.2 : 0.28)) continue;
+          if (r() > 0.28) continue;
           const d = root + pick(r, [7, 9, 11, 14]);
           const inst: Inst = rain ? 'piano' : r() < 0.7 ? 'piano' : r() < 0.5 ? 'celesta' : 'harp';
           add(tb + bt * beat, inst, dm(d), 0.3 + r() * 0.15, rain ? 6 : 3.5, (r() - 0.5) * 0.6);
@@ -472,8 +497,8 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
     // ---- melody on top ----
     const melodic = !slow;
     if (melodic && b % 2 === 0 && b + 1 < nBars) {
-      const mv = (style === 'title' ? 0.5 : 0.55) * e * (lead === 'flute' || lead === 'ocarina' ? 0.9 : 1);
-      const skipA = (style === 'flow' || style === 'tide') && sec === 'A' && b < 8; // let the arpeggio breathe first
+      const mv = (env === 'menu' ? 0.42 : 0.55) * e * (lead === 'flute' || lead === 'ocarina' ? 0.9 : 1);
+      const skipA = (style === 'flow' || style === 'tide' || style === 'title') && sec === 'A' && b < 8; // let the arpeggio breathe first
       const j = (b - secStartOf[b]) >> 1;
       if (sec === 'A' && !skipA) phrase(b, motA, lead, mv, b >= 12, (b % 4) === 2, leadOct);
       else if (sec === 'A2') phrase(b, motA, lead, mv, true, (b % 4) === 2, leadOct);
@@ -506,7 +531,7 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
     const endInst: Inst = arp === 'harp' ? 'harp' : 'piano';
     add(tEnd, endInst, dm(0) - 12, 0.42, 7);
     voice(0, 3, 62).forEach((m, k) => add(tEnd + 0.05 + k * (endInst === 'harp' ? 0.09 : 0.06), endInst, m, 0.26, 7));
-    if (r() < 0.6) add(tEnd + beat * 1.5, lead === 'celesta' || lead === 'musicbox' ? lead : bellInst, dm(9) + 12, 0.2, 5);
+    if (r() < 0.6 && env !== 'menu') add(tEnd + beat * 1.5, lead === 'celesta' || lead === 'musicbox' ? lead : bellInst, dm(9) + 12, 0.2, 5);
   }
 
   notes.sort((a, b) => a.t - b.t);

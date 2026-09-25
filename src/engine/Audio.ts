@@ -2166,7 +2166,16 @@ export class AudioEngine {
     const c = compose(env, menu ? undefined : this.musicBiome(), s, { rain: this.rainState !== 'off' });
     const out = ctx.createGain();
     out.gain.value = 1;
-    out.connect(this.musicBus);
+    if (menu) {
+      // title screen warmth: a little low-mid body, the top end rolled off
+      const body = ctx.createBiquadFilter();
+      body.type = 'lowshelf'; body.frequency.value = 260; body.gain.value = 3;
+      const soft = ctx.createBiquadFilter();
+      soft.type = 'lowpass'; soft.frequency.value = 3200; soft.Q.value = 0.5;
+      out.connect(body).connect(soft).connect(this.musicBus);
+    } else {
+      out.connect(this.musicBus);
+    }
     if (this.delay) this.delay.delayTime.setTargetAtTime(clamp(c.beat * 0.75, 0.25, 1.2), now, 0.3);
     this.piece = {
       notes: c.notes, i: 0, t0: now + 0.2, end: now + 0.2 + c.len + 9, out,
