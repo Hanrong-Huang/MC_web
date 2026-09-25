@@ -155,6 +155,7 @@ export class World {
       chunk.modified = true;
     } else {
       this.generator.generate(chunk);
+      this.generator.drainStates(this);
     }
     this.chunks.set(key, chunk);
     this.dirtySet.add(key);
@@ -663,6 +664,7 @@ export class World {
           chunk.modified = true;
         } else {
           this.generator.generate(chunk);
+          this.generator.drainStates(this);
         }
         this.chunks.set(key, chunk);
         this.dirtySet.add(key);

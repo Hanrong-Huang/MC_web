@@ -40,6 +40,10 @@ const GRAD2: ReadonlyArray<readonly [number, number]> = [
 
 export class Simplex2 {
   private perm = new Uint8Array(512);
+  /** seed-derived domain offset: keeps the lattice origin (where the noise
+   *  collapses toward 0 along straight lines) away from world spawn */
+  private ox: number;
+  private oy: number;
 
   constructor(seed: number) {
     const rand = mulberry32(seed);
@@ -52,11 +56,15 @@ export class Simplex2 {
       p[j] = t;
     }
     for (let i = 0; i < 512; i++) this.perm[i] = p[i & 255];
+    this.ox = 1000 + rand() * 9000;
+    this.oy = 1000 + rand() * 9000;
   }
 
   /** Returns noise in [-1, 1]. */
   noise(xin: number, yin: number): number {
     const perm = this.perm;
+    xin += this.ox;
+    yin += this.oy;
     const s = (xin + yin) * F2;
     const i = Math.floor(xin + s);
     const j = Math.floor(yin + s);
@@ -107,6 +115,25 @@ export class Simplex2 {
   }
 }
 
+/** Hermite smoothstep of x over [e0, e1] (works for e0 > e1 too). */
+export function smoothstep(e0: number, e1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+}
+
+/** Piecewise-linear spline through sorted [x, y] knots (clamped at the ends). */
+export function spline(knots: ReadonlyArray<readonly [number, number]>, x: number): number {
+  if (x <= knots[0][0]) return knots[0][1];
+  for (let i = 1; i < knots.length; i++) {
+    const [x1, y1] = knots[i];
+    if (x <= x1) {
+      const [x0, y0] = knots[i - 1];
+      return y0 + (y1 - y0) * ((x - x0) / (x1 - x0));
+    }
+  }
+  return knots[knots.length - 1][1];
+}
+
 const F3 = 1 / 3;
 const G3 = 1 / 6;
 
@@ -118,6 +145,8 @@ const GRAD3: ReadonlyArray<readonly [number, number, number]> = [
 
 export class Simplex3 {
   private perm = new Uint8Array(512);
+  private ox: number;
+  private oz: number;
 
   constructor(seed: number) {
     const rand = mulberry32(seed);
@@ -130,11 +159,15 @@ export class Simplex3 {
       p[j] = t;
     }
     for (let i = 0; i < 512; i++) this.perm[i] = p[i & 255];
+    this.ox = 1000 + rand() * 9000;
+    this.oz = 1000 + rand() * 9000;
   }
 
   /** Returns noise in [-1, 1]. */
   noise(xin: number, yin: number, zin: number): number {
     const perm = this.perm;
+    xin += this.ox;
+    zin += this.oz;
     const s = (xin + yin + zin) * F3;
     const i = Math.floor(xin + s), j = Math.floor(yin + s), k = Math.floor(zin + s);
     const t = (i + j + k) * G3;
