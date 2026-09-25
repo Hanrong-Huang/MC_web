@@ -353,9 +353,9 @@ class Game {
     this.hud.onTrade = () => { this.adv.unlock('trade'); this.adv.unlock('village'); };
 
     this.wireInput();
-    this.hud.onDropLeftover = (id, count) => {
+    this.hud.onDropLeftover = (id, count, dur, mob) => {
       const p = this.player.pos;
-      this.entities.spawnDrop(p.x, p.y + 1, p.z, id, count);
+      this.entities.spawnDrop(p.x, p.y + 1, p.z, id, count, dur, mob);
     };
 
     void this.pregenerate();
@@ -369,19 +369,17 @@ class Game {
     for (let i = 0; i < 400 && !this.disposed; i++) {
       this.world.update(px, pz, 14);
       this.processMeshing(14);
-      let ready = true;
       const pcx = Math.floor(px / CX), pcz = Math.floor(pz / CZ);
-      outer:
+      const cells: boolean[] = [];
       for (let dz = -2; dz <= 2; dz++) {
         for (let dx = -2; dx <= 2; dx++) {
           const c = this.world.getChunk(pcx + dx, pcz + dz);
-          if (!c || !c.ready || this.world.dirtySet.has(chunkKey(pcx + dx, pcz + dz))) {
-            ready = false;
-            break outer;
-          }
+          cells.push(!!c && c.ready && !this.world.dirtySet.has(chunkKey(pcx + dx, pcz + dz)));
         }
       }
-      if (ready) break;
+      const done = cells.filter(Boolean).length;
+      this.hud.setLoadingProgress(done / cells.length, cells);
+      if (done === cells.length) break;
       await new Promise((r) => requestAnimationFrame(r));
     }
     if (this.disposed) return;
@@ -1369,7 +1367,7 @@ class Game {
     const cam = this.renderer.camera;
     const hSpeed = Math.hypot(this.player.vel.x, this.player.vel.z);
     let bobY = 0;
-    if (this.player.onGround && !this.player.flying && hSpeed > 0.5) {
+    if (this.hud.settings.bob && this.player.onGround && !this.player.flying && hSpeed > 0.5) {
       this.camBob += hSpeed * dt * 1.7;
       bobY = Math.sin(this.camBob * 2) * 0.045 * Math.min(1, hSpeed / 4.3);
     }
@@ -1390,7 +1388,8 @@ class Game {
       cam.position.y += (Math.random() - 0.5) * m;
       cam.position.z += (Math.random() - 0.5) * m;
     }
-    let targetFov = this.player.sprinting ? 80.5 : 70;
+    const baseFov = this.hud.settings.fov;
+    let targetFov = this.player.sprinting ? baseFov + 10.5 : baseFov;
     targetFov -= 12 * Math.min(1, this.player.bowCharge / 0.9); // bow-draw zoom
     // spyglass: a hard 10x-ish zoom with the hand tucked away
     const scoping = this.player.scoping && this.state === 'playing';
@@ -1421,7 +1420,10 @@ class Game {
     if (this.state === 'playing') {
       const br = this.player.breaking;
       const t = this.player.target;
+      const ld = this.player.lookDir();
+      const mh = this.entities.raycastMobs(this.player.pos.x, this.player.pos.y + this.player.eyeHeight(), this.player.pos.z, ld.x, ld.y, ld.z, 3.5);
       if (br) this.hud.updateCrosshair('breaking', br.progress);
+      else if (mh && mh.dist < (t?.dist ?? 4.5)) this.hud.updateCrosshair('mob');
       else if (t && t.id !== B.AIR && def(t.id).hardness >= 0) this.hud.updateCrosshair('target');
       else this.hud.updateCrosshair('idle');
     }

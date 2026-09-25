@@ -156,6 +156,7 @@ export class StatusHUD {
   private firePhase = 0;
   private fireRedrawAt = 0;
   private lastAbsorbKey = '';
+  private absorbFrames = 0;
   private lastEffectsKey = '';
   private iconCache = new Map<string, HTMLCanvasElement>();
 
@@ -222,10 +223,27 @@ export class StatusHUD {
     if (stats && this.absorbEl.parentElement !== stats) stats.appendChild(this.absorbEl);
     const absorb = show && v.survival ? Math.ceil(v.absorb) : 0;
     const aKey = `${absorb}|${v.armor > 0}`;
+    // re-anchor now and then too: the HUD bars can shift after they first draw
+    if (absorb > 0 && ++this.absorbFrames % 30 === 0) this.lastAbsorbKey = '';
     if (aKey !== this.lastAbsorbKey) {
       this.lastAbsorbKey = aKey;
       this.absorbEl.innerHTML = '';
-      this.absorbEl.style.top = v.armor > 0 ? '-38px' : '-19px';
+      // sit one row above the topmost bar on the left (armor if worn, else hearts)
+      const hearts = document.getElementById('hearts');
+      const armorBar = document.getElementById('armor-bar');
+      const anchor = v.armor > 0 && armorBar && armorBar.offsetHeight > 0 ? armorBar : hearts;
+      if (stats && anchor) {
+        // measure the icons themselves: the bar containers may carry padding
+        const icon = (anchor.firstElementChild ?? anchor) as HTMLElement;
+        // offsets are relative to whichever ancestor actually positions us
+        const base = (this.absorbEl.offsetParent as HTMLElement | null) ?? stats;
+        const sr = base.getBoundingClientRect(), ar = icon.getBoundingClientRect();
+        const rowH = (hearts?.firstElementChild as HTMLElement | null)?.getBoundingClientRect().height || 16;
+        this.absorbEl.style.top = `${Math.round(ar.top - sr.top - rowH - 3)}px`;
+        this.absorbEl.style.left = `${Math.round(ar.left - sr.left)}px`;
+      } else {
+        this.absorbEl.style.top = v.armor > 0 ? '-38px' : '-19px';
+      }
       for (let i = 0; i < Math.ceil(absorb / 2); i++) {
         const h = goldHeart(absorb - i * 2 === 1);
         h.className = 'stat-icon';
