@@ -91,7 +91,10 @@ async function shot(name, { x, y, z, yaw, pitch, day }) {
   }, { A, x, y, z, yaw, pitch, day });
   await page.waitForTimeout(1600);
   await page.screenshot({ path: path.join(OUT, `water-${name}.png`) });
-  console.log('shot', name);
+  console.log('shot', name, await page.evaluate((A) => {
+    const g = window.__game, p = g.player.pos;
+    return `pos ${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)} lake=${g.world.getBlock(A.ox + 11, A.yW, A.oz + 12)} state=${g.state}`;
+  }, A));
 }
 
 const E = -Math.PI / 2, W = Math.PI / 2, N = 0, S = Math.PI;

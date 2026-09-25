@@ -23,7 +23,7 @@ async function captureScene(hash, readyKey, file) {
   });
   page.on('pageerror', (err) => errors.push(`${hash}: PAGEERROR: ${err.message}`));
 
-  await page.goto(`http://127.0.0.1:${PORT}/#${hash}`, { timeout: 180000 });
+  await page.goto(`http://localhost:${PORT}/#${hash}`, { timeout: 180000 });
   await page.locator('.mode-pick button', { hasText: 'Creative' }).click();
   await page.locator('.create-btn').click();
   await page.waitForFunction((key) => document.body.dataset[key] === 'ready', readyKey, { timeout: 60000 });
