@@ -27,6 +27,13 @@ export class TitleBackdrop {
   private raf = 0;
   private start = 0;
   private reduced = false;
+  /** pointer position -1..1, eased, for a gentle look-around parallax */
+  private look = { x: 0, y: 0, tx: 0, ty: 0 };
+  private onPointer = (e: PointerEvent): void => {
+    this.look.tx = (e.clientX / Math.max(1, window.innerWidth)) * 2 - 1;
+    this.look.ty = (e.clientY / Math.max(1, window.innerHeight)) * 2 - 1;
+  };
+  private motes: { x: number; y: number; s: number; p: number }[] = [];
 
   constructor(atlas: Atlas) {
     this.atlas = atlas;
@@ -165,6 +172,11 @@ export class TitleBackdrop {
     if (!this.near) { this.near = this.buildNear(); this.far = this.buildFar(); this.clouds = this.buildClouds(); }
     parent.prepend(this.canvas);
     this.start = performance.now();
+    window.addEventListener('pointermove', this.onPointer);
+    if (!this.motes.length) {
+      const r = rng(99);
+      for (let i = 0; i < 26; i++) this.motes.push({ x: r(), y: r(), s: 0.4 + r() * 0.8, p: r() * 6.28 });
+    }
     cancelAnimationFrame(this.raf);
     const frame = (now: number): void => {
       this.draw((now - this.start) / 1000);
@@ -174,6 +186,7 @@ export class TitleBackdrop {
   }
 
   unmount(): void {
+    window.removeEventListener('pointermove', this.onPointer);
     cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.canvas.remove();
@@ -205,24 +218,42 @@ export class TitleBackdrop {
     ctx.fillStyle = '#fffdf0';
     ctx.fillRect(sx + sun * 0.2, sy + sun * 0.2, sun * 0.6, sun * 0.6);
     // clouds
+    const L = this.look;
+    L.x += (L.tx - L.x) * 0.05; L.y += (L.ty - L.y) * 0.05;
+    // depth: 0 = sky, 1 = nearest strip; nearer layers slide further with the pointer
+    let depth = 0;
     const drawStrip = (img: HTMLCanvasElement, speed: number, y: number, h: number, alpha = 1): void => {
       const s = h / img.height;
       const w = img.width * s;
-      const off = ((t * speed) % w + w) % w;
+      const off = ((t * speed + L.x * depth * 26) % w + w) % w;
+      y += L.y * depth * -10;
       ctx.globalAlpha = alpha;
       for (let x = -off; x < W; x += w) ctx.drawImage(img, Math.floor(x), Math.floor(y), Math.ceil(w) + 1, Math.ceil(h));
       ctx.globalAlpha = 1;
     };
+    depth = 0.2;
     if (this.clouds) drawStrip(this.clouds, 7, H * 0.06, Math.max(48, H * 0.2), 0.85);
+    depth = 0.45;
     if (this.far) {
       const fh = H * 0.78;
       drawStrip(this.far, 5, H - fh, fh);
     }
+    depth = 1;
     if (this.near) {
       const nh = H * 0.9;
       drawStrip(this.near, 16, H - nh + H * 0.08, nh);
     }
-    // readability: darken edges + bottom, keep the middle calm
+    // drifting pollen motes catching the light
+    for (const m of this.motes) {
+      const mx = ((m.x * W + t * 9 * m.s + L.x * 18 * m.s) % W + W) % W;
+      const my = m.y * H * 0.8 + Math.sin(t * 0.7 + m.p) * 14;
+      ctx.globalAlpha = 0.35 + 0.35 * Math.sin(t * 1.3 + m.p);
+      ctx.fillStyle = '#fff6c8';
+      const sz = Math.round(2 + m.s * 2);
+      ctx.fillRect(Math.round(mx), Math.round(my), sz, sz);
+    }
+    ctx.globalAlpha = 1;
+        // readability: darken edges + bottom, keep the middle calm
     const v = ctx.createRadialGradient(W / 2, H * 0.45, Math.min(W, H) * 0.25, W / 2, H * 0.5, Math.max(W, H) * 0.75);
     v.addColorStop(0, 'rgba(0,0,0,0.18)');
     v.addColorStop(1, 'rgba(0,0,0,0.55)');

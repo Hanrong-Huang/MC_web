@@ -144,6 +144,43 @@ function timeAgo(ms: number): string {
   return new Date(ms).toLocaleDateString();
 }
 
+/** Title-card extras per world (thumbnail, play time, where you are), kept in
+ *  localStorage beside the IndexedDB save so the save format stays untouched. */
+export interface WorldMeta { thumb?: string; playSec?: number; dim?: string; day?: number }
+const META_KEY = 'voxelcraft.worldmeta';
+
+function readWorldMetas(): Record<string, WorldMeta> {
+  try { return JSON.parse(localStorage.getItem(META_KEY) ?? '{}') as Record<string, WorldMeta>; } catch { return {}; }
+}
+
+/** Merge fields into a world's card metadata (best effort; storage may be full). */
+export function recordWorldMeta(slot: string, meta: WorldMeta): void {
+  const all = readWorldMetas();
+  all[slot] = { ...all[slot], ...meta };
+  try { localStorage.setItem(META_KEY, JSON.stringify(all)); } catch {
+    // quota: drop thumbnails of other worlds and retry once
+    for (const k of Object.keys(all)) if (k !== slot) delete all[k].thumb;
+    try { localStorage.setItem(META_KEY, JSON.stringify(all)); } catch { /* give up quietly */ }
+  }
+}
+
+export function readWorldMeta(slot: string): WorldMeta {
+  return readWorldMetas()[slot] ?? {};
+}
+
+function forgetWorldMeta(slot: string): void {
+  const all = readWorldMetas();
+  delete all[slot];
+  try { localStorage.setItem(META_KEY, JSON.stringify(all)); } catch { /* ignore */ }
+}
+
+function playTime(sec: number): string {
+  if (sec < 60) return '<1 min played';
+  const m = Math.round(sec / 60);
+  if (m < 60) return `${m} min played`;
+  return `${(m / 60).toFixed(m < 600 ? 1 : 0)} h played`;
+}
+
 /** Hovered player slot, for 1-9 hotbar swaps and Q drops. */
 interface HoverSlot { arr: Slot[]; i: number }
 
@@ -183,6 +220,12 @@ export class HUD {
   private cursorEl: HTMLElement;
   private tooltipEl!: HTMLElement;
   private vignette: HTMLElement;
+  private healGlowEl!: HTMLElement;
+  /** always-on soft corner shading while playing (vanilla's vignette) */
+  private shadeEl!: HTMLElement;
+  private flashEl!: HTMLElement;
+  private controlsEl: HTMLElement | null = null;
+  private hudHidden = false;
   private lowhpEl!: HTMLElement;
   private crosshairEl!: HTMLElement;
   private hitmarkerEl!: HTMLElement;
@@ -207,6 +250,9 @@ export class HUD {
   private lastHp = -1;
   private hurtUntil = 0;
   private lastHotbarSel = -1;
+  /** the white selection frame that slides along the hotbar */
+  private hotbarSelEl: HTMLElement = el('div', 'hotbar-sel');
+  private healUntil = 0;
   private hoverSlot: HoverSlot | null = null;
   private recipeFilter: RecipeFilter = 'all';
   private recipeSearchQuery = '';
@@ -277,6 +323,9 @@ export class HUD {
 
     this.lowhpEl = el('div', '', root); this.lowhpEl.id = 'lowhp';
     this.vignette = el('div', '', root); this.vignette.id = 'vignette';
+    this.healGlowEl = el('div', '', root); this.healGlowEl.id = 'heal-glow';
+    this.shadeEl = el('div', 'hidden', root); this.shadeEl.id = 'screen-shade';
+    this.flashEl = el('div', '', root); this.flashEl.id = 'shot-flash';
     this.sleepEl = el('div', '', root); this.sleepEl.id = 'sleep-fade';
     this.sleepPromptEl = el('div', 'hidden', root); this.sleepPromptEl.id = 'sleep-prompt';
     this.petsEl = el('div', 'hidden', root); this.petsEl.id = 'pet-strip';
@@ -421,7 +470,7 @@ export class HUD {
 
     // attach UI sounds: a soft tick on hover, a click on press
     const wire = <T extends HTMLElement>(b: T): T => {
-      b.addEventListener('mouseenter', () => this.audio.play('select'));
+      b.addEventListener('mouseenter', () => this.audio.ui('hover'));
       b.addEventListener('mousedown', () => { this.audio.ensure(); this.audio.play('click'); });
       return b;
     };
@@ -444,16 +493,25 @@ export class HUD {
       empty.appendChild(c);
       el('div', '', empty).textContent = 'No worlds yet - create your first one!';
     }
-    for (const info of sorted) {
+    const metas = readWorldMetas();
+    sorted.forEach((info, idx) => {
       const row = el('div', 'world-row', list);
+      row.style.setProperty('--i', String(idx));
       row.tabIndex = 0;
       row.setAttribute('role', 'listitem');
       const creative = info.gameMode === 'creative';
-      const icon = el('div', `wicon${creative ? ' creative' : ''}`, row);
-      const ic = document.createElement('canvas');
-      ic.width = 32; ic.height = 32; ic.className = 'pix';
-      ic.getContext('2d')!.drawImage(this.atlas.icon(creative ? B.DIAMOND_BLOCK : B.GRASS), 0, 0);
-      icon.appendChild(ic);
+      const wm = metas[info.slot] ?? {};
+      const icon = el('div', `wicon${creative ? ' creative' : ''}${wm.thumb ? ' thumb' : ''}`, row);
+      if (wm.thumb) {
+        // last view of the world, captured when it was saved
+        const img = el('img', '', icon) as HTMLImageElement;
+        img.src = wm.thumb; img.alt = '';
+      } else {
+        const ic = document.createElement('canvas');
+        ic.width = 32; ic.height = 32; ic.className = 'pix';
+        ic.getContext('2d')!.drawImage(this.atlas.icon(creative ? B.DIAMOND_BLOCK : B.GRASS), 0, 0);
+        icon.appendChild(ic);
+      }
       const name = el('div', 'wname', row);
       name.textContent = info.slot;
       const meta = el('span', 'wmeta', name);
@@ -461,7 +519,13 @@ export class HUD {
       modeTag.textContent = creative ? 'Creative' : 'Survival';
       meta.append(` · ${timeAgo(info.lastPlayed)}`);
       const seedLine = el('span', 'wmeta wseed', name);
-      seedLine.textContent = `Seed ${info.seed}`;
+      const extra: string[] = [];
+      if (wm.dim === 'nether') extra.push('In the Nether');
+      if (wm.day !== undefined) extra.push(`Day ${wm.day}`);
+      if (wm.playSec) extra.push(playTime(wm.playSec));
+      seedLine.textContent = [...extra, `Seed ${info.seed}`].join(' · ');
+      name.title = `${info.slot} — ${creative ? 'Creative' : 'Survival'}, ${timeAgo(info.lastPlayed)}
+${seedLine.textContent}`;
       const btns = el('div', 'wbtns', row);
       const play = wire(el('button', 'mc-btn small play-btn', btns));
       play.textContent = 'Play';
@@ -475,7 +539,7 @@ export class HUD {
       const askDelete = (): void => {
         this.showConfirm(
           `Are you sure you want to delete "${info.slot}"?`,
-          () => handlers.onDelete(info.slot),
+          () => { forgetWorldMeta(info.slot); handlers.onDelete(info.slot); },
           { title: 'Delete World', yes: 'Delete', detail: 'It will be lost forever! (A long time!)' },
         );
       };
@@ -492,7 +556,7 @@ export class HUD {
         else if (e.key === 'ArrowDown') { e.preventDefault(); (row.nextElementSibling as HTMLElement | null)?.focus(); }
         else if (e.key === 'ArrowUp') { e.preventDefault(); (row.previousElementSibling as HTMLElement | null)?.focus(); }
       });
-    }
+    });
 
     // --- create a new world ---------------------------------------------------
     let mode: GameMode = 'survival';
@@ -545,6 +609,7 @@ export class HUD {
       if (!raw) seed = (Math.random() * 0x7fffffff) | 0;
       else if (/^-?\d+$/.test(raw)) seed = parseInt(raw, 10) | 0;
       else { seed = 0; for (const ch of raw) seed = (Math.imul(seed, 31) + ch.charCodeAt(0)) | 0; }
+      this.audio.ui('created');
       handlers.onPlay(name, { seed, mode });
     };
     for (const inp of [nameInput, seedInput]) {
@@ -560,6 +625,10 @@ export class HUD {
     importBtn.textContent = 'Import World (.json)…';
     importBtn.title = 'Load a world .json FILE exported with the Export button (here or from another machine)';
     importBtn.onclick = () => { this.importHandler = handlers.onImport; this.worldInput.click(); };
+    const ctlBtn = wire(el('button', 'mc-btn small', toolRow));
+    ctlBtn.textContent = 'Controls';
+    ctlBtn.title = 'Every key and gesture at a glance (H in game)';
+    ctlBtn.onclick = () => this.toggleControls();
 
     // concise control hints (full details live in F3 / tooltips)
     const help = el('div', 'menu-help', inner);
@@ -570,7 +639,7 @@ export class HUD {
     } else {
       help.innerHTML =
         '<b>WASD</b> move · <b>Space</b> jump · <b>Shift</b> sprint · <b>F</b> fly · <b>E</b> inventory<br>' +
-        '<b>LMB</b> break · <b>RMB</b> place / use · <b>1–9</b> + scroll hotbar · <b>Esc</b> pause';
+        '<b>LMB</b> break · <b>RMB</b> place / use · <b>1–9</b> + scroll hotbar · <b>Esc</b> pause · <b>H</b> all controls';
     }
 
     const foot = el('div', 'menu-foot', this.menu);
@@ -591,15 +660,105 @@ export class HUD {
   // In-game HUD
   // =========================================================================
 
-  showGameUI(): void { this.hud.classList.remove('hidden'); }
+  showGameUI(): void {
+    this.hud.classList.remove('hidden');
+    this.shadeEl.classList.remove('hidden');
+    this.placeHotbarSel(); // layout exists only once the HUD is displayed
+  }
   hideGameUI(): void {
     this.hud.classList.add('hidden');
+    this.shadeEl.classList.add('hidden');
+    this.setHudHidden(false);
+    this.hideControls();
     this.pauseEl.classList.add('hidden');
     this.deathEl.classList.add('hidden');
     this.containerEl.classList.add('hidden');
     this.cursorEl.classList.add('hidden');
     this.hideTooltip();
     this.hideAdvancements();
+  }
+
+  /** F1: hide every HUD element for clean screenshots (vanilla's hide-GUI). */
+  setHudHidden(v: boolean): void {
+    this.hudHidden = v;
+    this.root.classList.toggle('hud-off', v);
+  }
+  isHudHidden(): boolean { return this.hudHidden; }
+
+  /** F2 feedback: a white camera flash, shutter sound and a toast. */
+  screenshotFlash(name: string): void {
+    this.flashEl.classList.remove('flash');
+    void this.flashEl.offsetWidth;
+    this.flashEl.classList.add('flash');
+    this.audio.ui('shutter');
+    this.toast(`Saved screenshot as ${name}`);
+  }
+
+  // --- controls reference ---------------------------------------------------
+
+  isControlsOpen(): boolean { return this.controlsEl !== null; }
+
+  private controlsKey: ((e: KeyboardEvent) => void) | null = null;
+
+  hideControls(): void {
+    if (this.controlsKey) { document.removeEventListener('keydown', this.controlsKey, true); this.controlsKey = null; }
+    if (!this.controlsEl) return;
+    this.controlsEl.remove();
+    this.controlsEl = null;
+  }
+
+  /** Full keybind reference (desktop) / gesture guide (touch). Esc, H or ✕ close. */
+  toggleControls(onClose?: () => void): void {
+    if (this.controlsEl) { this.hideControls(); this.audio.ui('close'); return; }
+    this.audio.ui('open');
+    const ov = el('div', 'overlay', this.root);
+    ov.id = 'controls-overlay';
+    this.controlsEl = ov;
+    const panel = el('div', 'mc-panel controls-panel', ov);
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-label', 'Controls');
+    const head = el('div', 'ctr-header', panel);
+    const t = el('div', 'ctr-label', head);
+    t.appendChild(scaled(pixelText('Controls', '#404040', false), 2));
+    const close = el('button', 'ctr-close', head) as HTMLButtonElement;
+    close.type = 'button'; close.textContent = '✕'; close.title = 'Close'; close.setAttribute('aria-label', 'Close');
+    const done = (): void => { this.hideControls(); this.audio.ui('close'); onClose?.(); };
+    close.onclick = done;
+    // Esc / H close it wherever it was opened from (title, pause or in game)
+    this.controlsKey = (e: KeyboardEvent): void => {
+      if (e.code !== 'Escape' && e.code !== 'KeyH') return;
+      e.preventDefault(); e.stopPropagation();
+      done();
+    };
+    document.addEventListener('keydown', this.controlsKey, true);
+    ov.addEventListener('pointerdown', (e) => { if (e.target === ov) done(); });
+    const touch = isTouchDevice();
+    const groups: [string, [string, string][]][] = touch ? [
+      ['Moving', [['Left stick', 'Walk (push far to sprint)'], ['▲', 'Jump / swim up'], ['▼', 'Sneak, dismount'], ['Fly', 'Toggle flight']]],
+      ['Looking & acting', [['Drag right side', 'Look around'], ['Dig', 'Hold to break blocks / attack'], ['Place', 'Place blocks, use items, interact']]],
+      ['Menus', [['Hotbar', 'Tap a slot to select it'], ['Items', 'Inventory + crafting'], ['Menu', 'Options, save, quit']]],
+    ] : [
+      ['Movement', [['W A S D', 'Walk'], ['Space', 'Jump · double-tap to fly (creative)'], ['Shift', 'Sprint'], ['Ctrl', 'Sneak · dismount'], ['W W', 'Double-tap to sprint'], ['F', 'Toggle flight']]],
+      ['Actions', [['Left click', 'Break / attack'], ['Right click', 'Place · use · eat · interact'], ['Middle click', 'Pick block'], ['Q', 'Drop item (Ctrl+Q: stack)'], ['1 – 9 / wheel', 'Choose hotbar slot']]],
+      ['Screens', [['E', 'Inventory & crafting'], ['L', 'Advancements'], ['Esc', 'Pause · close menus'], ['H', 'This controls page']]],
+      ['Display', [['F1', 'Hide the HUD'], ['F2', 'Save a screenshot'], ['F3', 'Debug info & coordinates']]],
+      ['In menus', [['Shift + click', 'Quick-move a stack'], ['Right click', 'Split a stack / place one'], ['1 – 9 over slot', 'Swap with hotbar'], ['Q over slot', 'Drop it']]],
+    ];
+    const grid = el('div', 'controls-grid', panel);
+    for (const [name, rows] of groups) {
+      const g = el('div', 'controls-group', grid);
+      el('div', 'controls-head', g).textContent = name;
+      for (const [k, v] of rows) {
+        const r = el('div', 'controls-row', g);
+        const keys = el('span', 'controls-keys', r);
+        for (const part of k.split(' / ')) {
+          el('kbd', '', keys).textContent = part;
+        }
+        el('span', 'controls-desc', r).textContent = v;
+      }
+    }
+    el('div', 'adv-hint', panel).textContent = touch ? 'Tap ✕ to close' : 'Press H, Esc or ✕ to close';
+    setTimeout(() => close.focus({ preventScroll: true }), 0);
   }
 
   /** Tapping a hotbar slot selects it (mobile-friendly; harmless on desktop). */
@@ -610,7 +769,8 @@ export class HUD {
   refreshHotbar(inv: Inventory, mode: GameMode): void {
     const selChanged = inv.selected !== this.lastHotbarSel;
     this.lastHotbarSel = inv.selected;
-    this.hotbarEl.innerHTML = '';
+    // slots are rebuilt, the selection frame persists so it can glide between them
+    for (const c of [...this.hotbarEl.children]) if (c !== this.hotbarSelEl) c.remove();
     for (let i = 0; i < 9; i++) {
       const picked = selChanged && i === inv.selected;
       const s = el('div', `hotbar-slot${i === inv.selected ? ' selected' : ''}${picked ? ' picked' : ''}`, this.hotbarEl);
@@ -620,6 +780,17 @@ export class HUD {
         if (item.count > 1 && mode !== 'creative') this.countEl(s, item.count);
       }
       s.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onHotbarSelect(i); });
+    }
+    this.hotbarEl.appendChild(this.hotbarSelEl);
+    this.placeHotbarSel();
+  }
+
+  private placeHotbarSel(): void {
+    const slot = this.hotbarEl.children[Math.max(0, this.lastHotbarSel)] as HTMLElement | undefined;
+    if (slot && slot !== this.hotbarSelEl) {
+      this.hotbarSelEl.style.transform = `translate(${slot.offsetLeft}px, ${slot.offsetTop}px)`;
+      this.hotbarSelEl.style.width = `${slot.offsetWidth}px`;
+      this.hotbarSelEl.style.height = `${slot.offsetHeight}px`;
     }
   }
 
@@ -649,6 +820,21 @@ export class HUD {
       this.vignette.classList.remove('flash');
       void this.vignette.offsetWidth;
       this.vignette.classList.add('flash');
+    }
+    if (this.lastHp >= 0 && hp > this.lastHp) {
+      // healing: hearts swell with a warm glow, a soft golden edge breathes in
+      this.healUntil = now + 700;
+      this.heartsEl.classList.remove('heal');
+      void this.heartsEl.offsetWidth;
+      this.heartsEl.classList.add('heal');
+      this.healGlowEl.classList.remove('flash');
+      void this.healGlowEl.offsetWidth;
+      this.healGlowEl.classList.add('flash');
+    }
+    if (this.lastHp >= 0 && hp < this.lastHp) {
+      this.heartsEl.classList.remove('hurt');
+      void this.heartsEl.offsetWidth;
+      this.heartsEl.classList.add('hurt');
     }
     this.lastHp = hp;
     const blink = now < this.hurtUntil && Math.floor((this.hurtUntil - now) / 120) % 2 === 0;
@@ -1162,7 +1348,7 @@ export class HUD {
   private pauseButton(parent: HTMLElement, label: string, onClick: () => void, cls = ''): HTMLButtonElement {
     const b = el('button', `mc-btn${cls ? ` ${cls}` : ''}`, parent) as HTMLButtonElement;
     b.textContent = label;
-    b.addEventListener('mouseenter', () => this.audio.play('select'));
+    b.addEventListener('mouseenter', () => this.audio.ui('hover'));
     b.onclick = () => { this.audio.play('click'); onClick(); };
     return b;
   }
@@ -1203,10 +1389,12 @@ export class HUD {
     const opts = this.pauseButton(col, 'Options…', () => {
       main.classList.add('hidden');
       this.pauseOptsEl?.classList.remove('hidden');
+      this.audio.ui('swipe');
       this.syncPauseUi();
       setTimeout(() => (this.pauseOptsEl?.querySelector('button, input') as HTMLElement | null)?.focus({ preventScroll: true }), 0);
     }, 'wide');
     void opts;
+    this.pauseButton(col, 'Controls…', () => this.toggleControls(), 'wide');
     const save = this.pauseButton(col, 'Save Game', () => {
       save.textContent = 'Saving...';
       save.disabled = true;
@@ -1246,11 +1434,11 @@ export class HUD {
     });
     this.pauseSyncers.push(() => { guiBtn.textContent = `GUI Scale: ${GUI_NAMES[this.settings.gui]}`; });
     const bobBtn = this.pauseButton(grid, '', () => {
-      this.settings.bob = !this.settings.bob; this.saveSettings(); this.syncPauseUi();
+      this.settings.bob = !this.settings.bob; this.audio.ui(this.settings.bob ? 'toggleOn' : 'toggleOff'); this.saveSettings(); this.syncPauseUi();
     });
     this.pauseSyncers.push(() => { bobBtn.textContent = `View Bobbing: ${this.settings.bob ? 'ON' : 'OFF'}`; });
     const fpsBtn = this.pauseButton(grid, '', () => {
-      this.settings.fps = !this.settings.fps; this.fpsT0 = performance.now(); this.fpsFrames = 0;
+      this.settings.fps = !this.settings.fps; this.audio.ui(this.settings.fps ? 'toggleOn' : 'toggleOff'); this.fpsT0 = performance.now(); this.fpsFrames = 0;
       this.saveSettings(); this.syncPauseUi();
     });
     this.pauseSyncers.push(() => { fpsBtn.textContent = `Show FPS: ${this.settings.fps ? 'ON' : 'OFF'}`; });
@@ -1271,7 +1459,7 @@ export class HUD {
     const soundBtn = this.pauseButton(grid, '', () => this.pauseH?.onToggleSound());
     this.pauseSyncers.push(() => { soundBtn.textContent = `Sounds: ${this.pauseH?.soundOn() ? 'ON' : 'OFF'}`; });
     const subsBtn = this.pauseButton(grid, '', () => {
-      this.settings.subs = !this.settings.subs; this.saveSettings(); this.syncPauseUi();
+      this.settings.subs = !this.settings.subs; this.audio.ui(this.settings.subs ? 'toggleOn' : 'toggleOff'); this.saveSettings(); this.syncPauseUi();
     }, 'span2');
     this.pauseSyncers.push(() => { subsBtn.textContent = `Show Subtitles: ${this.settings.subs ? 'ON' : 'OFF'}`; });
 
@@ -1283,10 +1471,41 @@ export class HUD {
       (v) => `Touch Look: ${v}%`,
       (v) => this.pauseH?.onTouchLook(v / 100));
 
+    // vanilla-style tooltips: a description line for whatever is hovered/focused
+    const HINTS = [
+      'How wide your view is. Higher shows more at the edges; sprinting widens it a little.',
+      'How many chunks are drawn around you. Lower it if the game stutters.',
+      'Size of the HUD and menus. Auto fits your screen.',
+      'Gently bobs the camera while you walk.',
+      'Shows frames per second in the corner.',
+      'Load an unzipped Minecraft Java texture-pack folder.',
+      'Overall loudness of everything.',
+      'Loudness of the generative soundtrack.',
+      'Turn the music on or off.',
+      'Loudness of effects, footsteps, mobs and ambience.',
+      'Turn sound effects on or off.',
+      'Captions for sounds, with arrows showing where they come from.',
+      'How fast the camera turns with the mouse.',
+      'How fast the camera turns when dragging on a touch screen.',
+    ];
+    const hint = el('div', 'opt-hint', optsEl);
+    const idle = 'Hover an option to see what it does.';
+    hint.textContent = idle;
+    [...grid.children].filter((c) => !c.classList.contains('opt-section')).forEach((w, i) => {
+      const text = HINTS[i];
+      if (!text) return;
+      const show = (): void => { hint.textContent = text; hint.classList.add('on'); };
+      const hide = (): void => { hint.textContent = idle; hint.classList.remove('on'); };
+      w.addEventListener('mouseenter', show);
+      w.addEventListener('focusin', show);
+      w.addEventListener('mouseleave', hide);
+      w.addEventListener('focusout', hide);
+    });
     const done = el('div', 'menu-col pause-col', optsEl);
     this.pauseButton(done, 'Done', () => {
       optsEl.classList.add('hidden');
       main.classList.remove('hidden');
+      this.audio.ui('swipe');
       (main.querySelectorAll('button')[1] as HTMLButtonElement | undefined)?.focus({ preventScroll: true });
     }, 'wide');
 
@@ -1374,13 +1593,21 @@ export class HUD {
     this.view = view;
     this.inv = inv;
     this.viewMode = mode;
+    const opening = this.containerEl.classList.contains('hidden');
     this.containerEl.classList.remove('hidden');
+    if (opening) {
+      if (view.kind !== 'chest') this.audio.ui('open'); // chests creak on their own
+      this.containerEl.classList.remove('pop');
+      void this.containerEl.offsetWidth;
+      this.containerEl.classList.add('pop');
+    }
     this.renderContainer(mode);
   }
 
   /** Close, returning craft-grid + cursor contents to the inventory. */
   closeContainer(): void {
     if (!this.view || !this.inv) { this.view = null; return; }
+    if (this.view.kind !== 'chest') this.audio.ui('close');
     for (let i = 0; i < this.view.craftGrid.length; i++) {
       const s = this.view.craftGrid[i];
       if (s) {
@@ -1634,10 +1861,23 @@ export class HUD {
     if (moved) inv.onChange();
   }
 
-  /** Generic slot click with cursor-stack semantics. */
+  /** Generic slot click with cursor-stack semantics; the sound says what
+   *  happened (lift a stack, set it down, or swap). */
   private clickSlot(arr: Slot[], i: number, button: number, takeOnly = false): void {
+    const before = this.cursor ? `${this.cursor.id}:${this.cursor.count}` : '';
+    const slotBefore = arr[i] ? `${arr[i]!.id}:${arr[i]!.count}` : '';
+    this.clickSlotInner(arr, i, button, takeOnly);
+    const after = this.cursor ? `${this.cursor.id}:${this.cursor.count}` : '';
+    const slotAfter = arr[i] ? `${arr[i]!.id}:${arr[i]!.count}` : '';
+    if (before === after && slotBefore === slotAfter) return;
+    if (!before && after) this.audio.ui('pickup');
+    else if (before && !after) this.audio.ui('place');
+    else if (before && after && before.split(':')[0] !== after.split(':')[0]) this.audio.play('click');
+    else this.audio.ui((this.cursor?.count ?? 0) > +before.split(':')[1] ? 'pickup' : 'place');
+  }
+
+  private clickSlotInner(arr: Slot[], i: number, button: number, takeOnly: boolean): void {
     const s = arr[i];
-    this.audio.play('click');
     if (takeOnly) {
       if (!s) return;
       if (!this.cursor) { arr[i] = null; this.cursor = s; }
@@ -1966,7 +2206,7 @@ export class HUD {
       b.setAttribute('aria-selected', String(this.recipeFilter === f.id));
       b.onclick = () => {
         this.recipeFilter = f.id;
-        this.audio.play('select');
+        this.audio.ui('tab');
         rerender();
       };
     }
@@ -2305,7 +2545,7 @@ export class HUD {
         b.setAttribute('aria-selected', String(this.creativeFilter === t.id));
         b.appendChild(this.iconCanvas({ id: t.icon, count: 1 }));
         b.onclick = () => {
-          this.audio.play('click');
+          this.audio.ui('tab');
           this.creativeFilter = t.id;
           rerender();
         };

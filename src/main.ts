@@ -14,7 +14,7 @@ import { EntityManager } from './engine/EntityManager';
 import { AudioEngine } from './engine/Audio';
 import type { AmbientEnv } from './engine/Audio';
 import { TouchControls, isTouchDevice } from './ui/TouchControls';
-import { HUD, ContainerView } from './ui/HUD';
+import { HUD, ContainerView, recordWorldMeta, readWorldMeta } from './ui/HUD';
 import { StatusHUD } from './ui/StatusHUD';
 import type { LoadColumn } from './ui/LoadingScreen';
 import { SaveDB, SaveState, ChestSave, FurnaceSave, exportWorld, importWorld } from './engine/Persistence';
@@ -111,6 +111,10 @@ class Game {
   private mobBurnAcc = 0;
   /** seconds into the post-loading camera sweep (>= INTRO_TIME: done) */
   private introT = 99;
+  /** play time banked in earlier sessions (title-card stat) */
+  private playSecBase = 0;
+  /** whole days elapsed, counted as dayTime wraps (title-card stat) */
+  private worldDays = 0;
 
   constructor(app: App, slot: string, save: SaveState | null, fresh: { seed: number; mode: GameMode } | null) {
     this.app = app;
@@ -340,6 +344,11 @@ class Game {
         for (let i = 0; i < starter.length; i++) this.player.inventory.slots[i] = { id: starter[i], count: 64 };
       }
     }
+
+    // title-card stats carry over between sessions
+    const meta = readWorldMeta(slot);
+    this.playSecBase = save ? meta.playSec ?? 0 : 0;
+    this.worldDays = save ? Math.max(0, (meta.day ?? 1) - 1) : 0;
 
     // dev helper: open the page with #night to start after sundown
     if (location.hash.includes('night')) this.dayTime = 0.62;
@@ -584,6 +593,7 @@ class Game {
           this.input.requestLock();
           return;
         }
+        if (this.hud.isControlsOpen()) return; // the controls page freed the mouse
         if (this.state === 'playing') this.openPause();
       }
     };
@@ -640,9 +650,28 @@ class Game {
         case 'F3':
           this.hud.setDebugVisible(!this.hud.isDebugVisible());
           break;
+        case 'F1':
+          // hide the whole HUD (and the hand) for clean views
+          if (this.state === 'playing' || this.state === 'paused') {
+            const off = !this.hud.isHudHidden();
+            this.hud.setHudHidden(off);
+            this.renderer.setHeldVisible(!off);
+          }
+          break;
+        case 'F2':
+          if (this.state !== 'loading') this.takeScreenshot();
+          break;
+        case 'KeyH':
+          if (this.hud.isControlsOpen()) this.closeControls();
+          else if (this.state === 'playing') {
+            this.input.exitLock();
+            this.hud.toggleControls(() => { if (this.state === 'playing') this.input.requestLock(); });
+          }
+          break;
         case 'Escape':
           // with pointer lock active the browser eats Esc; this handles menus
-          if (this.state === 'container') this.closeContainer();
+          if (this.hud.isControlsOpen()) this.closeControls();
+          else if (this.state === 'container') this.closeContainer();
           else if (this.hud.isAdvancementsOpen()) this.hud.hideAdvancements();
           else if (this.state === 'sleeping') this.leaveBed();
           else if (this.state === 'paused') this.resume();
@@ -677,6 +706,59 @@ class Game {
   }
 
   // --- UI state machine ---------------------------------------------------------------
+
+  private closeControls(): void {
+    this.hud.toggleControls(); // closes it
+    if (this.state === 'playing') this.input.requestLock();
+  }
+
+  /** Render one frame and hand the canvas to `use` in the same task (the
+   *  WebGL buffer is only readable right after it was drawn). */
+  private withFreshFrame<T>(use: (c: HTMLCanvasElement) => T): T | null {
+    try {
+      const eye = this.renderer.camera.position;
+      const inLava = this.world.getBlock(Math.floor(eye.x), Math.floor(eye.y), Math.floor(eye.z)) === B.LAVA;
+      this.renderer.render(this.player.underwaterEye() ? 'water' : inLava ? 'lava' : 'air');
+      return use(this.renderer.canvas);
+    } catch {
+      return null;
+    }
+  }
+
+  /** F2: save the current view as a PNG download. */
+  private takeScreenshot(): void {
+    const url = this.withFreshFrame((c) => c.toDataURL('image/png'));
+    if (!url) { this.hud.toast('Screenshot failed'); return; }
+    const d = new Date();
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    const name = `voxelcraft_${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}.${pad(d.getMinutes())}.${pad(d.getSeconds())}.png`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    this.hud.screenshotFlash(name);
+  }
+
+  /** Title-card extras: a small thumbnail of the current view, play time, dimension. */
+  private recordWorldCard(): void {
+    // a card-sized JPEG of the current view (small enough for localStorage)
+    const thumb = this.withFreshFrame((src) => {
+      const c = document.createElement('canvas');
+      c.width = 128; c.height = 72;
+      const ar = src.width / src.height, tr = 128 / 72;
+      const sw = ar > tr ? src.height * tr : src.width, sh = ar > tr ? src.height : src.width / tr;
+      c.getContext('2d')!.drawImage(src, (src.width - sw) / 2, (src.height - sh) / 2, sw, sh, 0, 0, 128, 72);
+      return c.toDataURL('image/jpeg', 0.72);
+    });
+    if (thumb) recordWorldMeta(this.slot, { thumb });
+    recordWorldMeta(this.slot, {
+      playSec: (this.playSecBase ?? 0) + this.elapsed,
+      dim: this.world.dimension,
+      day: Math.floor(this.worldDays) + 1,
+    });
+  }
 
   private openPause(): void {
     if (this.state !== 'playing') return;
@@ -1308,6 +1390,7 @@ class Game {
   async saveGame(): Promise<boolean> {
     if (this.saving) return true;
     this.saving = true;
+    if (this.state !== 'loading') this.recordWorldCard();
     try {
       await this.app.db.save(this.slot, this.buildSave());
       return true;
@@ -1349,7 +1432,9 @@ class Game {
 
     const paused = this.state === 'paused';
     if (!paused) {
+      const prevDay = this.dayTime;
       this.dayTime = (this.dayTime + dt / DAY_LENGTH) % 1;
+      if (this.dayTime < prevDay) this.worldDays++;
 
       if (this.state === 'sleeping') this.updateSleep(dt);
       this.player.update(dt);

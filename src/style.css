@@ -285,11 +285,16 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   position: relative;
 }
 .hotbar-slot.selected { z-index: 1; background: rgba(160,160,160,0.28); }
-.hotbar-slot.selected::before {
+/* the selection frame is one element that glides between slots on scroll */
+.hotbar-sel {
+  position: absolute; left: 0; top: 0; height: 40px; width: 40px; z-index: 2;
+  pointer-events: none;
+  transition: transform 0.09s cubic-bezier(.3,.7,.4,1);
+}
+.hotbar-sel::before {
   content: ''; position: absolute; inset: -7px;
   border: 4px solid #f2f2f2;
   box-shadow: 0 0 0 2px #000, inset 0 0 0 2px #000;
-  pointer-events: none;
 }
 .hotbar-slot.picked > canvas { animation: hotbar-pick 0.22s ease-out; }
 @keyframes hotbar-pick {
@@ -766,6 +771,9 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   background: #1a1a1a; border: 2px solid #000; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.15);
 }
 .world-row .wicon canvas { width: 32px; height: 32px; }
+.world-row .wicon.thumb { width: 72px; height: 40px; padding: 0; overflow: hidden; }
+.world-row .wicon.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; image-rendering: auto; }
+.world-row:has(.wicon.thumb) { grid-template-columns: 72px minmax(0, 1fr) auto; }
 .world-row .wname { font-size: 14px; text-shadow: var(--text-shadow); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .world-row .wmeta { color: #909090; font-size: 11px; display: block; margin-top: 3px; text-shadow: 1px 1px #000; overflow: hidden; text-overflow: ellipsis; }
 .world-row .wmode { padding: 0 4px; display: inline-block; }
@@ -1272,4 +1280,105 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 
 @media (prefers-reduced-motion: reduce) {
   .menu-splash, .player-preview canvas, #hearts.low .stat-icon, #low-health.pulse, .load-cell.on { animation: none !important; }
+}
+
+/* ======================= UI polish pass ================================== */
+
+/* title screen entrance: the logo drops in, cards and rows rise in sequence */
+.menu-logo-wrap { animation: logodrop 0.8s cubic-bezier(.25,1.5,.5,1) both; }
+@keyframes logodrop { from { opacity: 0; transform: translateY(-70px) scale(0.9); } to { opacity: 1; transform: none; } }
+.menu-splash { animation: splashin 0.5s 0.7s cubic-bezier(.3,1.8,.5,1) both, splash 0.55s 1.2s ease-in-out infinite alternate; }
+@keyframes splashin { from { transform: rotate(-18deg) scale(0); } to { transform: rotate(-18deg) scale(1); } }
+.menu-sub { animation: fadeup 0.5s 0.35s ease both; }
+.menu-card { animation: fadeup 0.5s ease both; }
+.menu-card.worlds-card { animation-delay: 0.3s; }
+.menu-card.create-card { animation-delay: 0.42s; }
+.menu-tools, .menu-help { animation: fadeup 0.5s 0.55s ease both; }
+.world-row { animation: fadeup 0.35s calc(0.4s + var(--i, 0) * 0.05s) ease both; }
+@keyframes fadeup { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+
+/* overlays and pages ease in instead of popping */
+#pause-overlay:not(.hidden) { animation: fadein 0.18s ease both; }
+.pause-screen:not(.hidden) { animation: pagein 0.22s ease both; }
+@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pagein { from { opacity: 0; transform: translateY(8px) scale(0.985); } to { opacity: 1; transform: none; } }
+#container-screen.pop > .mc-panel, #container-screen.pop > * > .mc-panel { animation: panelpop 0.16s cubic-bezier(.2,1.3,.5,1) both; }
+@keyframes panelpop { from { opacity: 0.4; transform: scale(0.95); } to { opacity: 1; transform: none; } }
+#container-screen.pop { animation: fadein 0.14s ease both; }
+#death-overlay:not(.hidden) { animation: fadein 0.6s ease both; }
+
+/* options tooltip line */
+.opt-hint {
+  width: min(640px, 94vw); min-height: 36px; margin: -6px 0 12px; padding: 6px 10px;
+  font-size: 12px; line-height: 1.45; color: #a0a0a0; text-align: center;
+  background: rgba(0,0,0,0.45); border: 2px solid rgba(0,0,0,0.6);
+  text-shadow: 1px 1px #000; transition: color 0.15s;
+}
+.opt-hint.on { color: #fff; }
+
+/* hearts: a jolt when hurt, a warm swell when healed */
+#hearts.hurt { animation: hearthurt 0.3s ease; }
+@keyframes hearthurt { 0%, 100% { transform: none; } 25% { transform: translate(-2px, 1px); } 50% { transform: translate(2px, -1px); } 75% { transform: translate(-1px, 0); } }
+#hearts.heal .stat-icon { animation: heartheal 0.6s ease; }
+#hearts.heal .stat-icon:nth-child(2n) { animation-delay: 0.04s; }
+#hearts.heal .stat-icon:nth-child(3n) { animation-delay: 0.08s; }
+@keyframes heartheal {
+  0% { transform: none; filter: none; }
+  35% { transform: translateY(-3px) scale(1.18); filter: brightness(1.6) drop-shadow(0 0 3px rgba(255,210,120,0.9)); }
+  100% { transform: none; filter: none; }
+}
+#heal-glow {
+  position: absolute; inset: 0; pointer-events: none; z-index: 11; opacity: 0;
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(255,200,90,0.28) 100%);
+}
+#heal-glow.flash { animation: dmgflash 0.9s ease-out; }
+
+/* subtle always-on vignette while in game (vanilla darkens the corners) */
+#screen-shade {
+  position: absolute; inset: 0; pointer-events: none; z-index: 4;
+  background: radial-gradient(ellipse at center, transparent 58%, rgba(0,0,0,0.26) 100%);
+}
+
+/* F2 camera flash */
+#shot-flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; z-index: 120; }
+#shot-flash.flash { animation: shotflash 0.45s ease-out; }
+@keyframes shotflash { 0% { opacity: 0.85; } 100% { opacity: 0; } }
+
+/* F1: hide the HUD (keeps menus working) */
+#app.hud-off #hud, #app.hud-off #screen-shade, #app.hud-off #pet-strip, #app.hud-off #toast,
+#app.hud-off #subtitles, #app.hud-off .adv-toast, #app.hud-off #effect-list,
+#app.hud-off #attack-meter { opacity: 0 !important; transition: none; }
+
+/* controls reference */
+#controls-overlay { z-index: 58; background: rgba(10,10,14,0.7); animation: fadein 0.16s ease both; padding: 12px; }
+.controls-panel { width: min(760px, 96vw); animation: pagein 0.2s ease both; }
+.controls-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(236px, 1fr)); gap: 12px 20px; margin: 4px 0 10px; }
+.controls-group { display: flex; flex-direction: column; gap: 4px; }
+.controls-head { font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: #5a5a5a; border-bottom: 2px solid #9a9a9a; padding-bottom: 2px; margin-bottom: 2px; }
+.controls-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #3f3f3f; }
+.controls-keys { flex: none; min-width: 112px; display: flex; gap: 3px; flex-wrap: wrap; }
+.controls-keys kbd {
+  font-family: inherit; font-size: 11px; color: #fff; padding: 2px 6px; white-space: nowrap;
+  background: #6f6f6f; border: 2px solid #000;
+  box-shadow: inset 2px 2px 0 rgba(255,255,255,0.3), inset -2px -2px 0 rgba(0,0,0,0.35);
+  text-shadow: 1px 1px #333;
+}
+.controls-desc { line-height: 1.3; }
+
+/* advancement toast: a shine sweeps across and the icon pops */
+.adv-toast { overflow: hidden; }
+.adv-toast.show .adv-icon { animation: advpop 0.5s 0.25s cubic-bezier(.3,1.8,.5,1) both; }
+@keyframes advpop { from { transform: scale(0.3) rotate(-20deg); } to { transform: none; } }
+.adv-toast.show::after {
+  content: ''; position: absolute; top: 0; bottom: 0; width: 60px; left: -80px;
+  background: linear-gradient(90deg, transparent, rgba(255,255,160,0.22), transparent);
+  animation: advshine 0.9s 0.35s ease-out both;
+}
+@keyframes advshine { from { left: -80px; } to { left: 110%; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .menu-logo-wrap, .menu-card, .world-row, .menu-sub, .menu-tools, .menu-help, .pause-screen,
+  #pause-overlay, .load-box, .load-step canvas, .load-tip.in, #loading::after, .adv-toast::after { animation: none !important; }
+  .load-tip { opacity: 1; }
+  .hotbar-sel { transition: none; }
 }
