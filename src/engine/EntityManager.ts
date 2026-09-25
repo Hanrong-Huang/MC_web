@@ -250,8 +250,8 @@ export class EntityManager {
     this.scene.add(mesh);
   }
 
-  spawnMob(kind: MobKind, x: number, y: number, z: number): Entity {
-    const variant = rollVariant(kind);
+  /** Spawn a mob. `variant` picks a coat/outfit (random when omitted). */
+  spawnMob(kind: MobKind, x: number, y: number, z: number, variant = rollVariant(kind)): Entity {
     const { mesh, limbs, mats } = this.models.build(kind, variant);
     // yaw first, then local pitch/roll: knockback tilt + the death topple ride
     // on the mob's own axes
@@ -1491,8 +1491,11 @@ export class EntityManager {
       let drop = 0;
       if (e.grazeT > 0) {
         // munching: nose down in the turf, jaw working
-        tx = -1.05 + Math.sin(e.age * 16) * 0.1; ty = 0;
-        drop = 0.34;
+        tx = (e.kind === 'horse' ? -1.7 : -1.05) + Math.sin(e.age * 16) * 0.08; ty = 0;
+        drop = e.kind === 'sheep' ? 0.34 : 0;
+      } else if (e.kind === 'chicken' && !watch && hSpeed < 0.3 && e.lookYaw === 0) {
+        // a chicken with nothing to look at pecks at the ground
+        tx = -(Math.max(0, Math.sin(e.age * 7)) ** 3) * 1.1;
       }
       const k = Math.min(1, (watch ? 6 : 3) * dt);
       head.rotation.x += (tx - head.rotation.x) * k;
@@ -1563,6 +1566,7 @@ export class EntityManager {
       if (e.tamed && m.tamed) { baby.tamed = true; baby.ownerName = 'player'; }
       this.spawnHearts(bx, by + 0.4, bz);
       this.audio.play('pop');
+      this.audio.mobSound(e.kind as string, 0.8);
       return;
     }
   }
@@ -1940,17 +1944,27 @@ export class EntityManager {
         }
       }
 
-      // sheep graze: head down in the turf for two seconds, then the grass is
-      // eaten (grass block -> dirt, or a tuft cleared) and a shorn fleece regrows
-      if (e.kind === 'sheep' && !e.tamed) {
+      // grazing: sheep put their head down in the turf for two seconds, then the
+      // grass is eaten (grass block -> dirt, or a tuft cleared) and a shorn fleece
+      // regrows; idle horses crop the grass too, just for show
+      if ((e.kind === 'sheep' || e.kind === 'horse') && !e.tamed && !e.ridden) {
         if (e.grazeT > 0) {
           const before = e.grazeT;
           e.grazeT = Math.max(0, e.grazeT - 0.05);
-          if (before > 0.7 && e.grazeT <= 0.7) this.eatGrass(e);
-        } else if (e.state === 'idle' && e.onGround
-          && Math.random() < (e.sheared || e.baby ? 1 / 120 : 1 / 500) && this.grassUnder(e)) {
-          e.grazeT = 2;
-          e.stateTime = Math.max(e.stateTime, 2);
+          if (e.kind === 'sheep' && before > 0.7 && e.grazeT <= 0.7) this.eatGrass(e);
+        } else if (e.state === 'idle' && e.onGround && this.grassUnder(e) && Math.random()
+          < (e.kind === 'horse' ? 1 / 300 : e.sheared || e.baby ? 1 / 120 : 1 / 500)) {
+          e.grazeT = e.kind === 'horse' ? 3 : 2;
+          e.stateTime = Math.max(e.stateTime, e.grazeT);
+        }
+      }
+      // a baby trots after the nearest grown-up of its kind
+      if (e.baby && !e.tamed && e.state !== 'flee' && e.stateTime <= 0) {
+        const parent = this.nearestAdult(e);
+        if (parent && Math.hypot(parent.pos.x - e.pos.x, parent.pos.z - e.pos.z) > 3) {
+          e.state = 'wander';
+          e.yaw = Math.atan2(-(parent.pos.x - e.pos.x), -(parent.pos.z - e.pos.z));
+          e.stateTime = 1 + Math.random();
         }
       }
 
@@ -1996,6 +2010,16 @@ export class EntityManager {
     if (!n) return null;
     const cx = sx / n, cz = sz / n;
     return Math.hypot(cx - e.pos.x, cz - e.pos.z) > 5 ? { x: cx, z: cz } : null;
+  }
+
+  private nearestAdult(e: Entity): Entity | null {
+    let best: Entity | null = null, bestD = 16 * 16;
+    for (const o of this.entities) {
+      if (o === e || o.kind !== e.kind || o.baby || o.dead) continue;
+      const d = (o.pos.x - e.pos.x) ** 2 + (o.pos.z - e.pos.z) ** 2;
+      if (d < bestD) { bestD = d; best = o; }
+    }
+    return best;
   }
 
   /** Is there grass (a tuft at the feet, or a grass block below) for a sheep to eat? */
