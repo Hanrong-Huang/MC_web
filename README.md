@@ -4,7 +4,7 @@ A Minecraft-style sandbox that runs in your browser. Explore, mine, craft, build
 
 ### ▶ [Play now: hanrong-huang.github.io/MC_web](https://hanrong-huang.github.io/MC_web/)
 
-Works in any modern desktop browser. Phones and tablets get touch controls. Every texture, mob, sound and music track is generated in code, with no downloaded assets.
+Works in any modern desktop browser. Phones and tablets get touch controls. Textures, mobs, sounds and music are generated in code.
 
 ## Getting started
 

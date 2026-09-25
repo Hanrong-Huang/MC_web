@@ -4,10 +4,9 @@ Working notes for AI agents in this repo. Player-facing feature docs live in `RE
 
 ## What this is
 
-A Minecraft clone in **TypeScript + Three.js + Vite**. Three.js is the WebGL wrapper; chunking, meshing, lighting, physics, mob AI, crafting, persistence and audio (raw Web Audio) are hand-written so far.
+A Minecraft clone in **TypeScript + Three.js + Vite**. Three.js is the WebGL wrapper; chunking, meshing, lighting, physics, mob AI, crafting and persistence are hand-written, and most textures/sounds are generated procedurally in code.
 
-- **Third-party libraries are allowed** (npm packages) when they clearly beat a hand-rolled version — e.g. Tone.js for audio. Weigh bundle size (the build is already ~1.3 MB) and keep them to what's actually used.
-- **No asset files** (images, audio samples, models, fonts): every texture, mob, sound and music track is still generated procedurally in code. If you need a new texture/sprite/sound, generate it — don't add a binary.
+**No restrictions on dependencies or assets.** Use whatever makes the game better: npm libraries (e.g. Tone.js), third-party asset files (audio samples, images, fonts, models) or procedural generation — pick per case. Practical notes: large assets go in `public/` and should load lazily with a procedural/silent fallback so the game still starts fast; record the source and license of any third-party asset in `CREDITS.md`.
 
 Solo project. Commits go straight to `main`.
 
@@ -119,7 +118,7 @@ Backlog ideas, roughly highest-value first — confirm scope with the user befor
 - **More mob fidelity**: idle head-tracking for passive mobs, baby-animal proportions/sounds, mob sounds on breed, drowning/falling mob reactions.
 - **World depth**: villages with villager trading UI, mineshafts/ravines, more biomes (jungle, mesa, swamp), structures with loot tables.
 - **Redstone-lite**: levers/buttons/doors wiring, pressure plates (doors already exist).
-- **Decoration**: item frames, paintings, signs, banners — all paintable with the existing procedural pipeline.
+- **Decoration**: item frames, paintings, signs, banners — paintable with the procedural pipeline or drawn from assets.
 - **Combat/progression**: enchanting-lite, hunger-tuned regen, more hostile variety (player armor now exists).
 - **Lava + buckets**: a lava fluid reusing the water automaton, lava bucket, water+lava → stone/obsidian.
 - **UX**: crafting recipe book/search, achievements UI polish (`Advancements.ts` exists), controller/touch input.
