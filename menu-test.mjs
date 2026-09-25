@@ -37,6 +37,8 @@ console.log('named world listed:', listed > 0 ? 'OK' : 'FAIL');
 
 // delete it
 await page.locator('.world-row', { hasText: 'My Base' }).locator('button', { hasText: 'Delete' }).click();
+// deletion goes through the in-game confirm dialog (not a native prompt)
+await page.locator('#confirm-overlay button', { hasText: 'Delete' }).click();
 await page.waitForTimeout(1200);
 const afterDelete = await page.locator('.world-row .wname', { hasText: 'My Base' }).count();
 console.log('world removed after delete:', afterDelete === 0 ? 'OK' : 'FAIL');

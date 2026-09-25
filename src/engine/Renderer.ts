@@ -424,6 +424,8 @@ export class Renderer {
   private eatAmt = 0;     // 0..1 eased eating raise
   private eatTarget = 0;  // target set each frame by setEating
   private eatPhase = 0;   // chew oscillator
+  private blockAmt = 0;    // 0..1 eased shield raise (setBlocking)
+  private blockTarget = 0;
   private bobT = 0;
   private atlas: Atlas;
   private heldLight: THREE.HemisphereLight;
@@ -1171,6 +1173,11 @@ export class Renderer {
     this.bowCharge = Math.max(0, Math.min(1, charge));
   }
 
+  /** Raise the held shield into a blocking guard (target 1) or lower it. */
+  setBlocking(on: boolean): void {
+    this.blockTarget = on ? 1 : 0;
+  }
+
   /** Drive the eating animation: target 1 while chewing, 0 otherwise. */
   setEating(on: boolean): void {
     this.eatTarget = on ? 1 : 0;
@@ -1241,6 +1248,19 @@ export class Renderer {
       return;
     }
 
+    // shield guard: swing the shield in toward the centre, face-on to the view
+    this.blockAmt += (this.blockTarget - this.blockAmt) * Math.min(1, dt * 14);
+    if (this.blockAmt > 0.01) {
+      const b = this.blockAmt;
+      this.heldGroup.position.set(0.42 - b * 0.4, -0.36 + bob - lower - b * 0.04, -0.62 - b * 0.3);
+      this.heldGroup.rotation.set(0, 0.25 + b * 0.15, 0);
+      if (this.heldMesh) {
+        const k = 1 - b;
+        this.heldMesh.rotation.set(this.heldIdleRot.x * k, this.heldIdleRot.y * k + b * 0.2, this.heldIdleRot.z * k);
+      }
+      return;
+    }
+
     // rest pose: lower-right of the view, like Minecraft's right hand
     this.heldGroup.position.set(
       0.45 - sw * 0.22 + bobX,
@@ -1267,7 +1287,9 @@ export class Renderer {
    *  horizontal and diagonal sprites all sit the same way in the fist. */
   private buildExtrudedItem(sprite: HTMLCanvasElement, size: number, roundSize = size): { mesh: THREE.Mesh; zc: number } {
     const name = this.heldId !== 0 && hasDef(this.heldId) ? def(this.heldId).name : '';
-    const isMetallic = name.includes('iron') || name.includes('gold') || name.includes('diamond');
+    // golden apples/carrots are food, not metal
+    const isMetallic = !(hasDef(this.heldId) && def(this.heldId).food) &&
+      (name.includes('iron') || name.includes('gold') || name.includes('diamond'));
     // Lambert/Phong with vertex colors: lit by the overlay lights (a metallic
     // PBR material rendered black here — there is no environment to reflect)
     const mat = isMetallic

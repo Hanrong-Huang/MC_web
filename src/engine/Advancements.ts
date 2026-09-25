@@ -35,6 +35,16 @@ export const ADVANCEMENTS: AdvancementDef[] = [
   { id: 'catch', label: 'Monster Wrangler', desc: 'Capture a hostile mob with a mob catcher', icon: '🔮', requires: ['root'] },
   { id: 'trade', label: 'What a Deal!', desc: 'Trade with a villager', icon: '💱', requires: ['root'] },
   { id: 'village', label: 'Civilization', desc: 'Discover a village', icon: '🏘️', requires: ['root'] },
+  { id: 'iron_pick', label: "Isn't It Iron Pick", desc: 'Craft an iron pickaxe', icon: '⛏️', requires: ['iron_age'] },
+  { id: 'suit_up', label: 'Suit Up', desc: 'Put on a piece of armor', icon: '🛡️', requires: ['root'] },
+  { id: 'diamond_armor', label: 'Cover Me with Diamonds', desc: 'Wear a piece of diamond armor', icon: '💠', requires: ['suit_up'] },
+  { id: 'shield_block', label: 'Not Today, Thank You', desc: 'Deflect a blow with a shield', icon: '🛡️', requires: ['root'] },
+  { id: 'hot_stuff', label: 'Hot Stuff', desc: 'Fill a bucket with lava', icon: '🪣', requires: ['iron_age'] },
+  { id: 'milk', label: 'Moo Juice', desc: 'Milk a cow with a bucket', icon: '🥛', requires: ['root'] },
+  { id: 'shear', label: 'Snip Snip', desc: 'Shear a sheep for its wool', icon: '✂️', requires: ['root'] },
+  { id: 'golden_apple', label: 'Apple of My Eye', desc: 'Eat a golden apple', icon: '🍎', requires: ['root'] },
+  { id: 'spyglass', label: 'Is It a Bird?', desc: 'Look through a spyglass', icon: '🔭', requires: ['root'] },
+  { id: 'critical', label: 'Critical Hit', desc: 'Land a critical hit on a mob', icon: '✨', requires: ['root'] },
 ];
 
 export class AdvancementTracker {

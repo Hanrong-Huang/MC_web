@@ -25,7 +25,9 @@ npm run dev        # open the printed localhost URL
 | Space | Jump (1.25 blocks) — ascend while flying |
 | F, or double-Space in creative | Toggle flight (2.5x speed) |
 | Left click | Break blocks (hold; per-block times + crack overlay) / attack mobs |
-| Right click | Place block · open table/furnace/chest · use bed · ignite TNT · hold to eat or draw the bow |
+| Right click | Place block · open table/furnace/chest · use bed · ignite TNT · hold to eat or draw the bow · hold to raise a shield or look through a spyglass |
+| Middle click | Pick block (selects it in the hotbar; creative conjures a stack) |
+| Q / Ctrl+Q | Toss one held item / the whole stack |
 | E | Inventory (2x2 crafting) / creative block panel |
 | 1–9, scroll | Hotbar selection |
 | F3 | Debug overlay (FPS, XYZ, facing, chunk, biome) |
@@ -65,9 +67,26 @@ npm run dev        # open the printed localhost URL
   sky-exposed; **spiders** (fast, neutral in daylight); **creepers** (hiss,
   flash, explode — craters included). Hostiles also spawn in dark caves at any
   hour. All mobs are hierarchical box models with sine-wave walk cycles.
-- **Combat**: melee with knockback + sword damage by tier, and a **bow** —
-  hold right-click to draw (FOV zoom), release to loose an arrow; arrows can
-  be picked back up.
+- **Combat**: 1.9-style melee — each swing recharges over the weapon's attack
+  speed (fists fast, swords brisk, axes slow but heavy; a meter under the
+  crosshair shows it) and deals damage scaled by the charge. Charged hits
+  while falling **crit**, a charged sword **sweeps** mobs crowding your
+  target, a sprinting hit knocks back harder, and mobs have vanilla's brief
+  hurt immunity so click-spam doesn't pay. A **shield** (hold right-click)
+  turns aside melee from the front, arrows, fireballs and blasts. The
+  **bow** — hold right-click to draw (FOV zoom), release to loose an arrow;
+  arrows can be picked back up.
+- **Gear & items**: **golden** tools (mine faster than diamond, harvest like
+  wood, wear out fast) and armor; **shears** (shear sheep — the fleece grows
+  back — and clip leaves/grass whole); a **spyglass** (hold to zoom);
+  **milk** a cow with a bucket and drink it to clear status effects;
+  **golden apples** (Regeneration II + Absorption) and the enchanted kind
+  (plus Resistance and Fire Resistance). Active effects show as badges with
+  countdowns and Absorption as golden hearts.
+- **Fire**: flint & steel (or lightning) lights fires that creep across
+  leaves, wool and wood, eat them, set off TNT, burn out after a while
+  (forever on netherrack) and are doused by rain. Standing in fire or lava
+  sets you alight until water puts you out.
 - **Explosives**: creepers and craftable **TNT** (right-click to ignite,
   chain reactions, container contents spill, sand/gravel above craters fall).
 - **Physics extras**: falling **sand and gravel** (turn into falling-block
@@ -76,7 +95,9 @@ npm run dev        # open the printed localhost URL
   table, furnace, chest, bed, TNT, bow, arrows, sandstone, stone bricks, wool,
   resource blocks (iron/gold/diamond, both directions), and 16 tools across
   4 tiers. Furnace smelts ores → ingots, sand → glass, cobble → stone,
-  log → charcoal, and cooks 4 meats.
+  any log → charcoal, and cooks 4 meats; a lava bucket burns for 1000 s and
+  hands back the bucket. Shift-click routes smeltables/fuel into the furnace
+  and armor onto your body.
 - **Pets**: craft a **mob catcher** from 8 amethyst (hollow frame — amethyst ore
   is about as common as iron below y=62) and **throw it** with right-click. Any
   hostile it brushes past (zombie, skeleton, spider, creeper, cinderling,
@@ -98,7 +119,9 @@ npm run dev        # open the printed localhost URL
   used outside the Overworld **explodes**. While asleep the view lies on the
   pillow with a *Zzz…* banner and a **Leave Bed** button (Esc also works); the
   night skips to dawn and clears the weather.
-- **Survival**: 10 hearts + 10 hunger shanks, exhaustion, regen, starvation,
+- **Survival**: 10 hearts + 10 hunger shanks, vanilla **saturation** (a
+  hidden buffer each food refills by its own amount; a full, well-fed bar
+  heals quickly), exhaustion, regen, starvation,
   **drowning with an air-bubble meter**, cactus contact damage, 7 foods
   (incl. apples from oak leaves and rotten flesh from zombies), death/respawn
   at your bed.

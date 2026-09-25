@@ -1,7 +1,7 @@
 // Inventory slots, shaped crafting recipes (2x2 and 3x3), furnace smelting,
 // and chest storage.
 
-import { B, I, def, hasDef } from './Blocks';
+import { B, B2, I, def, hasDef } from './Blocks';
 import { MaybeSlot, FurnaceSave, ChestSave } from './Persistence';
 
 export type Slot = MaybeSlot;
@@ -190,6 +190,17 @@ const RECIPES: Recipe[] = [
   ...armorRecipes(LE, I.LEATHER_HELMET, I.LEATHER_CHEST, I.LEATHER_LEGS, I.LEATHER_BOOTS),
   ...armorRecipes(FE, I.IRON_HELMET, I.IRON_CHEST, I.IRON_LEGS, I.IRON_BOOTS),
   ...armorRecipes(DI, I.DIAMOND_HELMET, I.DIAMOND_CHEST, I.DIAMOND_LEGS, I.DIAMOND_BOOTS),
+  ...toolRecipes(AU, I.GOLD_PICK, I.GOLD_AXE, I.GOLD_SHOVEL, I.GOLD_SWORD),
+  ...armorRecipes(AU, I.GOLD_HELMET, I.GOLD_CHEST, I.GOLD_LEGS, I.GOLD_BOOTS),
+  // shears: two ingots on a diagonal
+  { shape: [[0, FE], [FE, 0]], out: I.SHEARS, n: 1 },
+  // shield: a plank board with an iron boss
+  { shape: [[P, FE, P], [P, P, P], [0, P, 0]], out: I.SHIELD, n: 1 },
+  // spyglass: an amethyst lens on an iron tube
+  { shape: [[AM], [FE], [FE]], out: I.SPYGLASS, n: 1 },
+  // golden apples: an apple wrapped in gold (ingots, or whole blocks for the enchanted one)
+  { shape: [[AU, AU, AU], [AU, I.APPLE, AU], [AU, AU, AU]], out: I.GOLDEN_APPLE, n: 1 },
+  { shape: [[B.GOLD_BLOCK, B.GOLD_BLOCK, B.GOLD_BLOCK], [B.GOLD_BLOCK, I.APPLE, B.GOLD_BLOCK], [B.GOLD_BLOCK, B.GOLD_BLOCK, B.GOLD_BLOCK]], out: I.ENCHANTED_GOLDEN_APPLE, n: 1 },
   // redstone + nether utility
   { shape: [[FE, 0], [0, I.FLINT]], out: I.FLINT_AND_STEEL, n: 1 },
   { shape: [[P, P]], out: B.PRESSURE_PLATE, n: 1 },
@@ -246,6 +257,18 @@ const RECIPES: Recipe[] = [
   { shape: [[B.IRON_BLOCK]], out: I.IRON_INGOT, n: 9 },
   { shape: [[B.GOLD_BLOCK]], out: I.GOLD_INGOT, n: 9 },
   { shape: [[B.DIAMOND_BLOCK]], out: I.DIAMOND, n: 9 },
+  // storage + decorative blocks
+  { shape: [[I.COAL, I.COAL, I.COAL], [I.COAL, I.COAL, I.COAL], [I.COAL, I.COAL, I.COAL]], out: B.COAL_BLOCK, n: 1 },
+  { shape: [[B.COAL_BLOCK]], out: I.COAL, n: 9 },
+  { shape: [[I.EMERALD, I.EMERALD, I.EMERALD], [I.EMERALD, I.EMERALD, I.EMERALD], [I.EMERALD, I.EMERALD, I.EMERALD]], out: B2.EMERALD_BLOCK, n: 1 },
+  { shape: [[B2.EMERALD_BLOCK]], out: I.EMERALD, n: 9 },
+  { shape: [[I.WHEAT, I.WHEAT, I.WHEAT], [I.WHEAT, I.WHEAT, I.WHEAT], [I.WHEAT, I.WHEAT, I.WHEAT]], out: B.HAY_BALE, n: 1 },
+  { shape: [[B.HAY_BALE]], out: I.WHEAT, n: 9 },
+  { shape: [[I.QUARTZ, I.QUARTZ], [I.QUARTZ, I.QUARTZ]], out: B.QUARTZ_BLOCK, n: 1 },
+  // paper from cane, books from paper + leather, shelves from books
+  { shape: [[B.SUGAR_CANE, B.SUGAR_CANE, B.SUGAR_CANE]], out: I.PAPER, n: 3 },
+  { shape: [[I.PAPER, I.PAPER], [I.PAPER, LE]], out: I.BOOK, n: 1 },
+  { shape: [[P, P, P], [I.BOOK, I.BOOK, I.BOOK], [P, P, P]], out: B.BOOKSHELF, n: 1 },
 ];
 
 function mirror(shape: number[][]): number[][] {
@@ -305,6 +328,14 @@ const SMELT = new Map<number, number>([
   [B.SAND, B.GLASS],
   [B.COBBLE, B.STONE],
   [B.LOG, I.COAL],
+  [B.BIRCH_LOG, I.COAL],
+  [B.SPRUCE_LOG, I.COAL],
+  [B.JUNGLE_LOG, I.COAL],
+  // ores smelt straight to their gem (a silk-touch-free shortcut, as in vanilla)
+  [B.COAL_ORE, I.COAL],
+  [B.DIAMOND_ORE, I.DIAMOND],
+  [B.AMETHYST_ORE, I.AMETHYST],
+  [B.QUARTZ_ORE, I.QUARTZ],
   [B.IRON_ORE, I.IRON_INGOT],
   [B.GOLD_ORE, I.GOLD_INGOT],
   [I.PORKCHOP, I.COOKED_PORKCHOP],
@@ -314,12 +345,21 @@ const SMELT = new Map<number, number>([
   [I.RAW_FISH, I.COOKED_FISH],
   [I.POTATO, I.BAKED_POTATO],
   [B.NETHERRACK, I.NETHER_BRICK],
+  [B.STONE, B.SMOOTH_STONE],
 ]);
 
 export function smeltResult(id: number): number | undefined { return SMELT.get(id); }
 
 export function fuelSeconds(id: number): number {
   return hasDef(id) ? (def(id).fuel ?? 0) : 0;
+}
+
+/** Shift-click routing into a furnace: smeltables go to the input slot,
+ *  pure fuels to the fuel slot (logs smelt first, like vanilla), else null. */
+export function furnaceSlotFor(id: number): 'input' | 'fuel' | null {
+  if (smeltResult(id) !== undefined) return 'input';
+  if (fuelSeconds(id) > 0) return 'fuel';
+  return null;
 }
 
 export const SMELT_TIME = 10; // seconds per item, per the spec
@@ -347,8 +387,12 @@ export class FurnaceState {
       if (f > 0) {
         this.burn = f;
         this.burnTotal = f;
-        this.fuel.count--;
-        if (this.fuel.count <= 0) this.fuel = null;
+        // a lava bucket burns its lava and hands back the empty bucket
+        if (this.fuel.id === I.LAVA_BUCKET) this.fuel = { id: I.BUCKET, count: 1 };
+        else {
+          this.fuel.count--;
+          if (this.fuel.count <= 0) this.fuel = null;
+        }
       }
     }
 
