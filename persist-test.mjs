@@ -3,7 +3,7 @@
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
 
-const server = await createServer({ root: process.cwd(), server: { port: 5195 } });
+const server = await createServer({ root: process.cwd(), server: { port: 5195, watch: { ignored: ['**/.claude/**'] } } });
 await server.listen();
 const browser = await chromium.launch({
   channel: 'msedge', headless: true,
@@ -48,9 +48,10 @@ console.log('saved world rows with Play:', hasPlay);
 await page.locator('.world-row button', { hasText: 'Play' }).first().click();
 await page.waitForSelector('#loading.hidden', { timeout: 60000, state: 'attached' });
 await page.waitForTimeout(2000);
-// debug overlay visibility persists across sessions; it is already on
-const posAfter = await page.evaluate(() => document.getElementById('debug')?.innerText.split('\n')[1]);
+// the overlay may be hidden after reload, but it still updates; read its text directly
+const posAfter = await page.evaluate(() => document.getElementById('debug')?.textContent.match(/XYZ: [-\d.]+ \/ [-\d.]+ \/ [-\d.]+/)?.[0]);
 console.log('pos after load: ', posAfter);
+if (posAfter !== posBefore) errors.push(`position not restored: ${posBefore} -> ${posAfter}`);
 
 console.log('--- console errors ---');
 console.log(errors.length ? errors.slice(0, 10).join('\n') : 'NONE');
