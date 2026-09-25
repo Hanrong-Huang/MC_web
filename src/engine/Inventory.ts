@@ -190,6 +190,17 @@ const RECIPES: Recipe[] = [
   ...armorRecipes(LE, I.LEATHER_HELMET, I.LEATHER_CHEST, I.LEATHER_LEGS, I.LEATHER_BOOTS),
   ...armorRecipes(FE, I.IRON_HELMET, I.IRON_CHEST, I.IRON_LEGS, I.IRON_BOOTS),
   ...armorRecipes(DI, I.DIAMOND_HELMET, I.DIAMOND_CHEST, I.DIAMOND_LEGS, I.DIAMOND_BOOTS),
+  ...toolRecipes(AU, I.GOLD_PICK, I.GOLD_AXE, I.GOLD_SHOVEL, I.GOLD_SWORD),
+  ...armorRecipes(AU, I.GOLD_HELMET, I.GOLD_CHEST, I.GOLD_LEGS, I.GOLD_BOOTS),
+  // shears: two ingots on a diagonal
+  { shape: [[0, FE], [FE, 0]], out: I.SHEARS, n: 1 },
+  // shield: a plank board with an iron boss
+  { shape: [[P, FE, P], [P, P, P], [0, P, 0]], out: I.SHIELD, n: 1 },
+  // spyglass: an amethyst lens on an iron tube
+  { shape: [[AM], [FE], [FE]], out: I.SPYGLASS, n: 1 },
+  // golden apples: an apple wrapped in gold (ingots, or whole blocks for the enchanted one)
+  { shape: [[AU, AU, AU], [AU, I.APPLE, AU], [AU, AU, AU]], out: I.GOLDEN_APPLE, n: 1 },
+  { shape: [[B.GOLD_BLOCK, B.GOLD_BLOCK, B.GOLD_BLOCK], [B.GOLD_BLOCK, I.APPLE, B.GOLD_BLOCK], [B.GOLD_BLOCK, B.GOLD_BLOCK, B.GOLD_BLOCK]], out: I.ENCHANTED_GOLDEN_APPLE, n: 1 },
   // redstone + nether utility
   { shape: [[FE, 0], [0, I.FLINT]], out: I.FLINT_AND_STEEL, n: 1 },
   { shape: [[P, P]], out: B.PRESSURE_PLATE, n: 1 },
@@ -305,6 +316,14 @@ const SMELT = new Map<number, number>([
   [B.SAND, B.GLASS],
   [B.COBBLE, B.STONE],
   [B.LOG, I.COAL],
+  [B.BIRCH_LOG, I.COAL],
+  [B.SPRUCE_LOG, I.COAL],
+  [B.JUNGLE_LOG, I.COAL],
+  // ores smelt straight to their gem (a silk-touch-free shortcut, as in vanilla)
+  [B.COAL_ORE, I.COAL],
+  [B.DIAMOND_ORE, I.DIAMOND],
+  [B.AMETHYST_ORE, I.AMETHYST],
+  [B.QUARTZ_ORE, I.QUARTZ],
   [B.IRON_ORE, I.IRON_INGOT],
   [B.GOLD_ORE, I.GOLD_INGOT],
   [I.PORKCHOP, I.COOKED_PORKCHOP],
@@ -347,8 +366,12 @@ export class FurnaceState {
       if (f > 0) {
         this.burn = f;
         this.burnTotal = f;
-        this.fuel.count--;
-        if (this.fuel.count <= 0) this.fuel = null;
+        // a lava bucket burns its lava and hands back the empty bucket
+        if (this.fuel.id === I.LAVA_BUCKET) this.fuel = { id: I.BUCKET, count: 1 };
+        else {
+          this.fuel.count--;
+          if (this.fuel.count <= 0) this.fuel = null;
+        }
       }
     }
 

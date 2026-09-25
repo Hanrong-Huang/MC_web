@@ -238,7 +238,7 @@ export class EntityManager {
 
   // --- spawning ---------------------------------------------------------------
 
-  spawnDrop(x: number, y: number, z: number, itemId: number, count: number, dur?: number, mob?: string): void {
+  spawnDrop(x: number, y: number, z: number, itemId: number, count: number, dur?: number, mob?: string): Entity {
     const mesh = this.buildDropMesh(itemId, mob);
     const e = new Entity('drop', { x, y, z }, { w: 0.25, h: 0.25 }, mesh);
     e.itemId = itemId;
@@ -248,6 +248,7 @@ export class EntityManager {
     e.vel = { x: (Math.random() - 0.5) * 2.4, y: 3.2, z: (Math.random() - 0.5) * 2.4 };
     this.entities.push(e);
     this.scene.add(mesh);
+    return e;
   }
 
   spawnMob(kind: MobKind, x: number, y: number, z: number): Entity {
@@ -2488,6 +2489,7 @@ export class EntityManager {
       const headWool = this.boxMesh(0.44, 0.15, 0.4, woolM);
       headWool.position.set(0, 0.16, 0.02);
       head.add(headWool);
+      bodyWool.name = headWool.name = 'wool'; // hidden while shorn (Player.shear)
       const legs = [
         this.leg(0.16, 0.5, skinM, -0.2, 0.5, -0.32),
         this.leg(0.16, 0.5, skinM, 0.2, 0.5, -0.32),

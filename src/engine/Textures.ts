@@ -2190,3 +2190,187 @@ function loadImage(file: File): Promise<HTMLImageElement> {
     img.src = url;
   });
 }
+
+// =============================================================================
+// Gameplay-track item sprites (gold gear, golden apples, milk, shears, shield,
+// spyglass). Self-contained: variants are recoloured from the base painters
+// at atlas build time, so they follow any rework of the iron/apple/bucket art.
+// =============================================================================
+
+/** Paint `base` into a fresh 16x16 canvas and remap each pixel's colour. */
+function recolorSprite(ctx: Ctx, base: string, map: (r: number, g: number, b: number) => [number, number, number] | null): void {
+  const paint = ITEM_PAINTERS[base];
+  if (!paint) return;
+  const [tmp, tctx] = makeCanvas(TILE, TILE);
+  paint(tctx);
+  const img = tctx.getImageData(0, 0, TILE, TILE);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] === 0) continue;
+    const out = map(d[i], d[i + 1], d[i + 2]);
+    if (out) { d[i] = out[0]; d[i + 1] = out[1]; d[i + 2] = out[2]; }
+  }
+  tctx.putImageData(img, 0, 0);
+  ctx.drawImage(tmp, 0, 0);
+}
+
+/** Luminance -> warm gold ramp (dark bronze outline up to a pale glint). */
+function goldRamp(l: number): [number, number, number] {
+  const stops: [number, [number, number, number]][] = [
+    [0, [58, 36, 6]], [0.3, [150, 98, 14]], [0.6, [232, 180, 34]], [0.82, [252, 226, 92]], [1, [255, 250, 206]],
+  ];
+  for (let i = 1; i < stops.length; i++) {
+    const [t1, c1] = stops[i];
+    const [t0, c0] = stops[i - 1];
+    if (l <= t1) {
+      const k = (l - t0) / (t1 - t0);
+      return [c0[0] + (c1[0] - c0[0]) * k, c0[1] + (c1[1] - c0[1]) * k, c0[2] + (c1[2] - c0[2]) * k].map(Math.round) as [number, number, number];
+    }
+  }
+  return stops[stops.length - 1][1];
+}
+
+/** Grey (metal) pixels -> gold; warm wood/leather pixels are left alone. */
+const toGold = (r: number, g: number, b: number): [number, number, number] | null => {
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+  if (mx - mn > 28) return null; // saturated: a wooden handle, keep it
+  return goldRamp(Math.min(1, (0.3 * r + 0.59 * g + 0.11 * b) / 245));
+};
+
+/** Red apple flesh -> gold; the green leaf + stem stay. */
+const appleToGold = (r: number, g: number, b: number): [number, number, number] | null => {
+  if (r > g + 40 && r > b + 40) return goldRamp(Math.min(1, (r * 0.55 + g * 0.45) / 230 + 0.12));
+  return null;
+};
+
+const SHIELD_MAP = [
+  '................',
+  '..OOOOOOOOOOOO..',
+  '..OIIIIIIIIIIO..',
+  '..OIPPpPPpPPIO..',
+  '..OIPPpPPpPPIO..',
+  '..OIPPpIIpPPIO..',
+  '..OIPPIiiIPPIO..',
+  '..OIPPIiiIPPIO..',
+  '..OIPPpIIpPPIO..',
+  '..OIPPpPPpPPIO..',
+  '...OIPpPPpPIO...',
+  '...OIPpPPpPIO...',
+  '....OIPPPPIO....',
+  '.....OIIIIO.....',
+  '......OOOO......',
+  '................',
+];
+const SPYGLASS_MAP = [
+  '................',
+  '...........OOO..',
+  '..........OAAaO.',
+  '.........OGAAAO.',
+  '........OGGaAO..',
+  '.......OGgGOO...',
+  '......OGgGO.....',
+  '.....ODdDO......',
+  '....ODdDO.......',
+  '...OGgGO........',
+  '..OGgGO.........',
+  '.OGgGO..........',
+  '.OggO...........',
+  '..OO............',
+  '................',
+  '................',
+];
+
+const GAMEPLAY_ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
+  gold_pickaxe: (c) => recolorSprite(c, 'iron_pickaxe', toGold),
+  gold_axe: (c) => recolorSprite(c, 'iron_axe', toGold),
+  gold_shovel: (c) => recolorSprite(c, 'iron_shovel', toGold),
+  gold_sword: (c) => recolorSprite(c, 'iron_sword', toGold),
+  gold_helmet: (c) => recolorSprite(c, 'iron_helmet', toGold),
+  gold_chest: (c) => recolorSprite(c, 'iron_chest', toGold),
+  gold_legs: (c) => recolorSprite(c, 'iron_legs', toGold),
+  gold_boots: (c) => recolorSprite(c, 'iron_boots', toGold),
+  golden_apple: (c) => recolorSprite(c, 'apple', appleToGold),
+  enchanted_golden_apple: (c) => {
+    recolorSprite(c, 'apple', appleToGold);
+    // a baked-in enchantment glint: violet diagonal streaks over the gold
+    const img = c.getImageData(0, 0, TILE, TILE);
+    const d = img.data;
+    for (let y = 0; y < TILE; y++) {
+      for (let x = 0; x < TILE; x++) {
+        const o = (y * TILE + x) * 4;
+        if (d[o + 3] === 0) continue;
+        const band = (x + y) % 6;
+        const k = band === 0 ? 0.6 : band === 1 ? 0.38 : 0.16;
+        d[o] = Math.round(d[o] * (1 - k) + 178 * k);
+        d[o + 1] = Math.round(d[o + 1] * (1 - k) + 96 * k);
+        d[o + 2] = Math.round(d[o + 2] * (1 - k) + 255 * k);
+      }
+    }
+    c.putImageData(img, 0, 0);
+  },
+  // the water bucket with its water turned to milk
+  milk_bucket: (c) => recolorSprite(c, 'water_bucket', (r, g, b) =>
+    b > r + 50 ? (b > 220 || g > 90 ? [246, 246, 240] : [214, 214, 204]) : null),
+  shears: (c) => {
+    // two parallel blades opening toward the top-right, a pivot rivet, and a
+    // pair of red finger loops; the outline is traced around whatever is drawn
+    const px = new Map<number, string>();
+    const put = (x: number, y: number, col: string): void => { px.set(y * TILE + x, col); };
+    for (let i = 0; i < 6; i++) {
+      put(6 + i, 8 - i, '#f4f4f4'); put(7 + i, 8 - i, '#c4c4c4');          // upper blade
+    }
+    for (let i = 0; i < 7; i++) {
+      const y = 9 - Math.floor((i + 1) / 2);                               // lower blade, shallower
+      put(8 + i, y, '#d4d4d4'); put(8 + i, y + 1, '#8e8e8e');
+    }
+    put(7, 9, '#6e6e6e'); put(6, 9, '#8a8a8a'); put(7, 10, '#8a8a8a');      // pivot
+    const ring = (cx: number, cy: number): void => {
+      for (const [dx, dy] of [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) {
+        put(cx + dx, cy + dy, dy < 0 || dx < 0 ? '#d24a3a' : '#96281c');
+      }
+    };
+    put(5, 10, '#b8b8b8'); put(6, 11, '#b8b8b8');                             // shanks
+    ring(3, 12); ring(6, 13);
+    const outline = '#1e1e1e';
+    for (let y = 0; y < TILE; y++) {
+      for (let x = 0; x < TILE; x++) {
+        if (px.has(y * TILE + x)) continue;
+        let edge = false;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = x + dx, ny = y + dy;
+          if (nx >= 0 && ny >= 0 && nx < TILE && ny < TILE && px.has(ny * TILE + nx)) {
+            const col = px.get(ny * TILE + nx)!;
+            if (col !== outline) edge = true;
+          }
+        }
+        if (edge && !(x === 3 && y === 12) && !(x === 6 && y === 13)) {
+          c.fillStyle = outline;
+          c.fillRect(x, y, 1, 1);
+        }
+      }
+    }
+    for (const [k, col] of px) { c.fillStyle = col; c.fillRect(k % TILE, Math.floor(k / TILE), 1, 1); }
+  },
+  shield: (c) => pixmap(c, 0, 0, SHIELD_MAP, {
+    O: '#241b10', I: '#b9b9b9', i: '#7c7c7c', P: '#a8834e', p: '#7d5f35',
+  }),
+  spyglass: (c) => pixmap(c, 0, 0, SPYGLASS_MAP, {
+    O: '#2a1c0a', G: '#d9a441', g: '#9c6a1e', D: '#6a4520', d: '#3f2912', A: '#c7a2ff', a: '#8a5ad8',
+  }),
+};
+Object.assign(ITEM_PAINTERS, GAMEPLAY_ITEM_PAINTERS);
+Object.assign(PACK_MAP, {
+  gold_pickaxe: { paths: ['item/golden_pickaxe'], kind: 'item' },
+  gold_axe: { paths: ['item/golden_axe'], kind: 'item' },
+  gold_shovel: { paths: ['item/golden_shovel'], kind: 'item' },
+  gold_sword: { paths: ['item/golden_sword'], kind: 'item' },
+  gold_helmet: { paths: ['item/golden_helmet'], kind: 'item' },
+  gold_chest: { paths: ['item/golden_chestplate'], kind: 'item' },
+  gold_legs: { paths: ['item/golden_leggings'], kind: 'item' },
+  gold_boots: { paths: ['item/golden_boots'], kind: 'item' },
+  golden_apple: { paths: ['item/golden_apple'], kind: 'item' },
+  enchanted_golden_apple: { paths: ['item/enchanted_golden_apple', 'item/golden_apple'], kind: 'item' },
+  milk_bucket: { paths: ['item/milk_bucket'], kind: 'item' },
+  shears: { paths: ['item/shears'], kind: 'item' },
+  spyglass: { paths: ['item/spyglass'], kind: 'item' },
+} satisfies Record<string, PackEntry>);

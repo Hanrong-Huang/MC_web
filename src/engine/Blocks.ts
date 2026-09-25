@@ -174,6 +174,20 @@ export enum I {
   AMETHYST = 181,
   MOB_CATCHER = 182,
   MOB_CATCHER_FILLED = 183,
+  SHEARS = 184,
+  GOLD_PICK = 185,
+  GOLD_AXE = 186,
+  GOLD_SHOVEL = 187,
+  GOLD_SWORD = 188,
+  GOLD_HELMET = 189,
+  GOLD_CHEST = 190,
+  GOLD_LEGS = 191,
+  GOLD_BOOTS = 192,
+  GOLDEN_APPLE = 193,
+  ENCHANTED_GOLDEN_APPLE = 194,
+  MILK_BUCKET = 195,
+  SHIELD = 196,
+  SPYGLASS = 197,
 }
 
 /** Wearable-armor slot index: 0 head, 1 chest, 2 legs, 3 feet. */
@@ -185,7 +199,7 @@ export enum B2 {
 }
 
 export type SoundClass = 'stone' | 'wood' | 'grass' | 'sand' | 'glass' | 'none';
-export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword' | 'hoe';
+export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword' | 'hoe' | 'shears';
 
 export interface Def {
   id: number;
@@ -197,19 +211,25 @@ export interface Def {
   liquid: boolean;
   occludes: boolean;     // contributes to ambient occlusion
   hardness: number;      // seconds-ish base; -1 = unbreakable
-  tool?: Exclude<ToolKind, 'sword'>; // effective tool class
+  tool?: Exclude<ToolKind, 'sword' | 'shears'>; // effective tool class
   /** minimum tool tier (2=wood, 4=stone, 6=iron, 8=diamond) required for drops */
   minTier?: number;
   sound: SoundClass;
   faces?: { top: string; bottom: string; sides: string; front?: string };
   /** undefined = drops itself; null = drops nothing */
   drop?: { id: number; min: number; max: number } | null;
-  toolInfo?: { kind: ToolKind; tier: number; damage: number };
+  /** tier = harvest level (2 wood … 8 diamond); speed = mining multiplier
+   *  (defaults to tier; gold mines fastest but only harvests like wood) */
+  toolInfo?: { kind: ToolKind; tier: number; damage: number; speed?: number };
   durability?: number;   // for tools and bows
   bow?: boolean;
   /** wearable armor: slot index (0 head … 3 feet) + defense points (2 = one armor icon) */
   armor?: { slot: number; points: number };
   food?: number;         // hunger points restored
+  /** saturation restored on eating (MC values); defaults to food * 0.6 */
+  sat?: number;
+  /** edible even on a full hunger bar (golden apples) */
+  alwaysEdible?: boolean;
   fuel?: number;         // burn seconds in a furnace
   stack: number;
   sprite?: string;       // 16x16 item sprite name (non-block items)
@@ -571,54 +591,80 @@ itemDef({ id: I.GUNPOWDER, name: 'gunpowder', label: 'Gunpowder', sprite: 'gunpo
 itemDef({ id: I.ARROW, name: 'arrow', label: 'Arrow', sprite: 'arrow' });
 itemDef({ id: I.BOW, name: 'bow', label: 'Bow', sprite: 'bow', stack: 1, bow: true, durability: 385 });
 
-const TIERS = { wood: { tier: 2, dur: 60 }, stone: { tier: 4, dur: 132 }, iron: { tier: 6, dur: 251 }, diamond: { tier: 8, dur: 1562 } } as const;
+// gold: harvests like wood but mines faster than diamond, and wears out fast
+const TIERS = {
+  wood: { tier: 2, dur: 60, speed: 2 }, stone: { tier: 4, dur: 132, speed: 4 },
+  iron: { tier: 6, dur: 251, speed: 6 }, diamond: { tier: 8, dur: 1562, speed: 8 },
+  gold: { tier: 2, dur: 33, speed: 12 },
+} as const;
 function toolDef(id: number, mat: keyof typeof TIERS, kind: ToolKind, damage: number): void {
-  const label = `${mat[0].toUpperCase()}${mat.slice(1)} ${kind[0].toUpperCase()}${kind.slice(1)}`;
-  const matName = mat === 'wood' ? 'wooden' : mat;
+  const matLabel = mat === 'gold' ? 'Golden' : `${mat[0].toUpperCase()}${mat.slice(1)}`;
+  const label = `${matLabel} ${kind[0].toUpperCase()}${kind.slice(1)}`;
+  const matName = mat === 'wood' ? 'wooden' : mat === 'gold' ? 'golden' : mat;
   itemDef({
     id, name: `${matName}_${kind}`, label, sprite: `${mat}_${kind}`, stack: 1,
-    toolInfo: { kind, tier: TIERS[mat].tier, damage }, durability: TIERS[mat].dur,
+    toolInfo: { kind, tier: TIERS[mat].tier, damage, speed: TIERS[mat].speed }, durability: TIERS[mat].dur,
   });
 }
 toolDef(I.WOOD_PICK, 'wood', 'pickaxe', 2);
-toolDef(I.WOOD_AXE, 'wood', 'axe', 3);
+toolDef(I.WOOD_AXE, 'wood', 'axe', 5);
 toolDef(I.WOOD_SHOVEL, 'wood', 'shovel', 2);
 toolDef(I.WOOD_SWORD, 'wood', 'sword', 4);
 toolDef(I.STONE_PICK, 'stone', 'pickaxe', 3);
-toolDef(I.STONE_AXE, 'stone', 'axe', 4);
+toolDef(I.STONE_AXE, 'stone', 'axe', 6);
 toolDef(I.STONE_SHOVEL, 'stone', 'shovel', 3);
 toolDef(I.STONE_SWORD, 'stone', 'sword', 5);
 toolDef(I.IRON_PICK, 'iron', 'pickaxe', 4);
-toolDef(I.IRON_AXE, 'iron', 'axe', 5);
+toolDef(I.IRON_AXE, 'iron', 'axe', 7);
 toolDef(I.IRON_SHOVEL, 'iron', 'shovel', 4);
 toolDef(I.IRON_SWORD, 'iron', 'sword', 6);
 toolDef(I.DIAMOND_PICK, 'diamond', 'pickaxe', 5);
-toolDef(I.DIAMOND_AXE, 'diamond', 'axe', 6);
+toolDef(I.DIAMOND_AXE, 'diamond', 'axe', 8);
 toolDef(I.DIAMOND_SHOVEL, 'diamond', 'shovel', 5);
 toolDef(I.DIAMOND_SWORD, 'diamond', 'sword', 7);
+toolDef(I.GOLD_PICK, 'gold', 'pickaxe', 2);
+toolDef(I.GOLD_AXE, 'gold', 'axe', 5);
+toolDef(I.GOLD_SHOVEL, 'gold', 'shovel', 2);
+toolDef(I.GOLD_SWORD, 'gold', 'sword', 4);
+itemDef({
+  id: I.SHEARS, name: 'shears', label: 'Shears', sprite: 'shears', stack: 1,
+  toolInfo: { kind: 'shears', tier: 2, damage: 1 }, durability: 238,
+});
+// shield: hold right-click to raise it and turn aside blows from the front
+itemDef({ id: I.SHIELD, name: 'shield', label: 'Shield', sprite: 'shield', stack: 1, durability: 336, fuel: 15 });
+// spyglass: hold right-click to zoom
+itemDef({ id: I.SPYGLASS, name: 'spyglass', label: 'Spyglass', sprite: 'spyglass', stack: 1 });
 
-itemDef({ id: I.PORKCHOP, name: 'porkchop', label: 'Raw Porkchop', sprite: 'porkchop', food: 3 });
-itemDef({ id: I.COOKED_PORKCHOP, name: 'cooked_porkchop', label: 'Cooked Porkchop', sprite: 'cooked_porkchop', food: 8 });
-itemDef({ id: I.CHICKEN, name: 'chicken', label: 'Raw Chicken', sprite: 'chicken', food: 2 });
-itemDef({ id: I.COOKED_CHICKEN, name: 'cooked_chicken', label: 'Cooked Chicken', sprite: 'cooked_chicken', food: 6 });
-itemDef({ id: I.MUTTON, name: 'mutton', label: 'Raw Mutton', sprite: 'mutton', food: 2 });
-itemDef({ id: I.COOKED_MUTTON, name: 'cooked_mutton', label: 'Cooked Mutton', sprite: 'cooked_mutton', food: 6 });
-itemDef({ id: I.BEEF, name: 'beef', label: 'Raw Beef', sprite: 'beef', food: 3 });
-itemDef({ id: I.COOKED_BEEF, name: 'cooked_beef', label: 'Steak', sprite: 'cooked_beef', food: 8 });
-itemDef({ id: I.ROTTEN_FLESH, name: 'rotten_flesh', label: 'Rotten Flesh', sprite: 'rotten_flesh', food: 2 });
-itemDef({ id: I.APPLE, name: 'apple', label: 'Apple', sprite: 'apple', food: 4 });
+itemDef({ id: I.PORKCHOP, name: 'porkchop', label: 'Raw Porkchop', sprite: 'porkchop', food: 3, sat: 1.8 });
+itemDef({ id: I.COOKED_PORKCHOP, name: 'cooked_porkchop', label: 'Cooked Porkchop', sprite: 'cooked_porkchop', food: 8, sat: 12.8 });
+itemDef({ id: I.CHICKEN, name: 'chicken', label: 'Raw Chicken', sprite: 'chicken', food: 2, sat: 1.2 });
+itemDef({ id: I.COOKED_CHICKEN, name: 'cooked_chicken', label: 'Cooked Chicken', sprite: 'cooked_chicken', food: 6, sat: 7.2 });
+itemDef({ id: I.MUTTON, name: 'mutton', label: 'Raw Mutton', sprite: 'mutton', food: 2, sat: 1.2 });
+itemDef({ id: I.COOKED_MUTTON, name: 'cooked_mutton', label: 'Cooked Mutton', sprite: 'cooked_mutton', food: 6, sat: 9.6 });
+itemDef({ id: I.BEEF, name: 'beef', label: 'Raw Beef', sprite: 'beef', food: 3, sat: 1.8 });
+itemDef({ id: I.COOKED_BEEF, name: 'cooked_beef', label: 'Steak', sprite: 'cooked_beef', food: 8, sat: 12.8 });
+itemDef({ id: I.ROTTEN_FLESH, name: 'rotten_flesh', label: 'Rotten Flesh', sprite: 'rotten_flesh', food: 2, sat: 0.4 });
+itemDef({ id: I.APPLE, name: 'apple', label: 'Apple', sprite: 'apple', food: 4, sat: 2.4 });
 itemDef({ id: I.SEEDS, name: 'wheat_seeds', label: 'Seeds', sprite: 'seeds' });
 itemDef({ id: I.WHEAT, name: 'wheat', label: 'Wheat', sprite: 'wheat' });
-itemDef({ id: I.BREAD, name: 'bread', label: 'Bread', sprite: 'bread', food: 5 });
-itemDef({ id: I.CARROT, name: 'carrot', label: 'Carrot', sprite: 'carrot', food: 3 });
-itemDef({ id: I.POTATO, name: 'potato', label: 'Potato', sprite: 'potato', food: 1 });
-itemDef({ id: I.BAKED_POTATO, name: 'baked_potato', label: 'Baked Potato', sprite: 'baked_potato', food: 5 });
-itemDef({ id: I.BEETROOT, name: 'beetroot', label: 'Beetroot', sprite: 'beetroot', food: 1 });
+itemDef({ id: I.BREAD, name: 'bread', label: 'Bread', sprite: 'bread', food: 5, sat: 6 });
+itemDef({ id: I.CARROT, name: 'carrot', label: 'Carrot', sprite: 'carrot', food: 3, sat: 3.6 });
+itemDef({ id: I.POTATO, name: 'potato', label: 'Potato', sprite: 'potato', food: 1, sat: 0.6 });
+itemDef({ id: I.BAKED_POTATO, name: 'baked_potato', label: 'Baked Potato', sprite: 'baked_potato', food: 5, sat: 6 });
+itemDef({ id: I.BEETROOT, name: 'beetroot', label: 'Beetroot', sprite: 'beetroot', food: 1, sat: 1.2 });
 itemDef({ id: I.BEETROOT_SEEDS, name: 'beetroot_seeds', label: 'Beetroot Seeds', sprite: 'beetroot_seeds' });
 itemDef({ id: I.BOWL, name: 'bowl', label: 'Bowl', sprite: 'bowl', stack: 16, fuel: 2 });
-itemDef({ id: I.BEETROOT_SOUP, name: 'beetroot_soup', label: 'Beetroot Soup', sprite: 'beetroot_soup', food: 6, stack: 1 });
-itemDef({ id: I.VEGETABLE_STEW, name: 'vegetable_stew', label: 'Vegetable Stew', sprite: 'vegetable_stew', food: 8, stack: 1 });
-itemDef({ id: I.GOLDEN_CARROT, name: 'golden_carrot', label: 'Golden Carrot', sprite: 'golden_carrot', food: 6 });
+itemDef({ id: I.BEETROOT_SOUP, name: 'beetroot_soup', label: 'Beetroot Soup', sprite: 'beetroot_soup', food: 6, sat: 7.2, stack: 1 });
+itemDef({ id: I.VEGETABLE_STEW, name: 'vegetable_stew', label: 'Vegetable Stew', sprite: 'vegetable_stew', food: 8, sat: 9.6, stack: 1 });
+itemDef({ id: I.GOLDEN_CARROT, name: 'golden_carrot', label: 'Golden Carrot', sprite: 'golden_carrot', food: 6, sat: 14.4 });
+itemDef({
+  id: I.GOLDEN_APPLE, name: 'golden_apple', label: 'Golden Apple', sprite: 'golden_apple',
+  food: 4, sat: 9.6, alwaysEdible: true,
+});
+itemDef({
+  id: I.ENCHANTED_GOLDEN_APPLE, name: 'enchanted_golden_apple', label: 'Enchanted Golden Apple',
+  sprite: 'enchanted_golden_apple', food: 4, sat: 9.6, alwaysEdible: true,
+});
 itemDef({
   id: I.HOE, name: 'wooden_hoe', label: 'Hoe', sprite: 'hoe', stack: 1,
   toolInfo: { kind: 'hoe', tier: 2, damage: 1 }, durability: 120,
@@ -636,8 +682,8 @@ itemDef({
   id: I.FISHING_ROD, name: 'fishing_rod', label: 'Fishing Rod', sprite: 'fishing_rod', stack: 1,
   durability: 64,
 });
-itemDef({ id: I.RAW_FISH, name: 'cod', label: 'Raw Fish', sprite: 'raw_fish', food: 2 });
-itemDef({ id: I.COOKED_FISH, name: 'cooked_cod', label: 'Cooked Fish', sprite: 'cooked_fish', food: 5 });
+itemDef({ id: I.RAW_FISH, name: 'cod', label: 'Raw Fish', sprite: 'raw_fish', food: 2, sat: 0.4 });
+itemDef({ id: I.COOKED_FISH, name: 'cooked_cod', label: 'Cooked Fish', sprite: 'cooked_fish', food: 5, sat: 6 });
 itemDef({ id: I.COMPASS, name: 'compass', label: 'Compass', sprite: 'compass', stack: 1 });
 itemDef({ id: I.CLOCK, name: 'clock', label: 'Clock', sprite: 'clock', stack: 1 });
 
@@ -657,10 +703,16 @@ armorDef(I.DIAMOND_HELMET, 'diamond_helmet', 'Diamond Helmet', 'diamond_helmet',
 armorDef(I.DIAMOND_CHEST, 'diamond_chestplate', 'Diamond Chestplate', 'diamond_chest', ARMOR_CHEST, 8, 528);
 armorDef(I.DIAMOND_LEGS, 'diamond_leggings', 'Diamond Leggings', 'diamond_legs', ARMOR_LEGS, 6, 495);
 armorDef(I.DIAMOND_BOOTS, 'diamond_boots', 'Diamond Boots', 'diamond_boots', ARMOR_FEET, 3, 429);
+armorDef(I.GOLD_HELMET, 'golden_helmet', 'Golden Helmet', 'gold_helmet', ARMOR_HEAD, 2, 77);
+armorDef(I.GOLD_CHEST, 'golden_chestplate', 'Golden Chestplate', 'gold_chest', ARMOR_CHEST, 5, 112);
+armorDef(I.GOLD_LEGS, 'golden_leggings', 'Golden Leggings', 'gold_legs', ARMOR_LEGS, 3, 105);
+armorDef(I.GOLD_BOOTS, 'golden_boots', 'Golden Boots', 'gold_boots', ARMOR_FEET, 1, 91);
 
 itemDef({ id: I.BUCKET, name: 'bucket', label: 'Bucket', sprite: 'bucket', stack: 16 });
 itemDef({ id: I.WATER_BUCKET, name: 'water_bucket', label: 'Water Bucket', sprite: 'water_bucket', stack: 1 });
-itemDef({ id: I.LAVA_BUCKET, name: 'lava_bucket', label: 'Lava Bucket', sprite: 'lava_bucket', stack: 1 });
+itemDef({ id: I.LAVA_BUCKET, name: 'lava_bucket', label: 'Lava Bucket', sprite: 'lava_bucket', stack: 1, fuel: 1000 });
+// milk: drink to clear every status effect (fill a bucket from a cow)
+itemDef({ id: I.MILK_BUCKET, name: 'milk_bucket', label: 'Milk Bucket', sprite: 'milk_bucket', stack: 1, alwaysEdible: true });
 
 blockDef({
   id: B.PORTAL, name: 'portal', label: 'Nether Portal', hardness: -1, sound: 'glass',
@@ -832,17 +884,28 @@ export function canHarvest(blockId: number, heldId: number): boolean {
   return false;
 }
 
+/** Every leaf block: shears and swords cut through these quickly. */
+export const LEAF_BLOCKS = new Set<number>([B.LEAVES, B.BIRCH_LEAVES, B.SPRUCE_LEAVES, B.JUNGLE_LEAVES]);
+
+/** Mining-speed multiplier a held item applies to a block (1 = bare hand). */
+export function toolSpeed(blockId: number, heldId: number): number {
+  if (!heldId || !hasDef(heldId)) return 1;
+  const ti = def(heldId).toolInfo;
+  if (!ti) return 1;
+  // shears: leaves in a snap, wool quickly (vanilla 15x / 5x)
+  if (ti.kind === 'shears') return LEAF_BLOCKS.has(blockId) ? 15 : blockId === B.WOOL ? 5 : 1;
+  // a sword hacks through foliage a little faster than a fist
+  if (ti.kind === 'sword') return LEAF_BLOCKS.has(blockId) ? 1.5 : 1;
+  const bd = def(blockId);
+  return bd.tool && ti.kind === bd.tool ? ti.speed ?? ti.tier : 1;
+}
+
 /** Seconds to break `blockId` while holding `heldId` (0 = empty hand). */
 export function breakTime(blockId: number, heldId: number): number {
   const bd = def(blockId);
   if (bd.hardness < 0) return Infinity;
   if (!canHarvest(blockId, heldId)) return bd.hardness * 5; // wrong tool tier
-  let mult = 1;
-  if (heldId && hasDef(heldId)) {
-    const ti = def(heldId).toolInfo;
-    if (ti && bd.tool && ti.kind === bd.tool) mult = ti.tier;
-  }
-  return (bd.hardness * 1.5) / mult;
+  return (bd.hardness * 1.5) / toolSpeed(blockId, heldId);
 }
 
 export function attackDamage(heldId: number): number {
@@ -851,6 +914,52 @@ export function attackDamage(heldId: number): number {
     if (ti) return ti.damage;
   }
   return 1;
+}
+
+/** Seconds for a swing to recharge to full strength (vanilla 1.9 attack speed):
+ *  fists are quick, swords brisk, axes slow and heavy. */
+export function attackCooldown(heldId: number): number {
+  if (!heldId || !hasDef(heldId)) return 0.25;
+  const ti = def(heldId).toolInfo;
+  if (!ti) return 0.25;
+  switch (ti.kind) {
+    case 'sword': return 0.625;
+    case 'axe': return ti.tier >= 8 ? 1.0 : ti.tier >= 6 ? 1.1 : 1.25;
+    case 'pickaxe': return 0.83;
+    case 'shovel': return 1.0;
+    case 'hoe': return 1.0;
+    default: return 0.25;
+  }
+}
+
+/** Swing strength multiplier for a swing charged to `charge` (0..1). */
+export function attackStrength(charge: number): number {
+  const c = Math.max(0, Math.min(1, charge));
+  return 0.2 + c * c * 0.8;
+}
+
+/** Saturation a food restores (vanilla values; defaults to food * 0.6). */
+export function foodSaturation(id: number): number {
+  const d = def(id);
+  return d.sat ?? (d.food ?? 0) * 0.6;
+}
+
+/** The item a "pick block" (middle click) on this block should grab, or 0. */
+export function pickItemFor(blockId: number): number {
+  switch (blockId) {
+    case B.AIR: case B.WATER: case B.LAVA: case B.PORTAL: case B.PISTON_HEAD: return 0;
+    case B.FURNACE_LIT: return B.FURNACE;
+    case B.CHEST_LOOT: return B.CHEST;
+    case B.DOOR_LOWER: case B.DOOR_UPPER: return I.WOOD_DOOR;
+    case B.BED_HEAD: return B.BED;
+    case B.REDSTONE_WIRE: return I.REDSTONE;
+    case B.REDSTONE_LAMP_LIT: return B.REDSTONE_LAMP;
+    case B.WHEAT_0: case B.WHEAT_1: case B.WHEAT_2: return I.SEEDS;
+    case B.CARROT_0: case B.CARROT_1: case B.CARROT_2: return I.CARROT;
+    case B.POTATO_0: case B.POTATO_1: case B.POTATO_2: return I.POTATO;
+    case B.BEETROOT_0: case B.BEETROOT_1: case B.BEETROOT_2: return I.BEETROOT_SEEDS;
+    default: return hasDef(blockId) ? blockId : 0;
+  }
 }
 
 /** Blocks the player can place / that show in the creative panel. */
@@ -890,4 +999,8 @@ export const CREATIVE_ITEMS: number[] = [
   I.BUCKET, I.WATER_BUCKET, I.LAVA_BUCKET,
   I.FLINT_AND_STEEL, I.QUARTZ, I.REDSTONE, I.NETHER_BRICK,
   I.AMETHYST, I.MOB_CATCHER,
+  I.GOLD_PICK, I.GOLD_AXE, I.GOLD_SHOVEL, I.GOLD_SWORD,
+  I.GOLD_HELMET, I.GOLD_CHEST, I.GOLD_LEGS, I.GOLD_BOOTS,
+  I.SHEARS, I.SHIELD, I.SPYGLASS, I.MILK_BUCKET,
+  I.GOLDEN_APPLE, I.ENCHANTED_GOLDEN_APPLE,
 ];

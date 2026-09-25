@@ -1,7 +1,9 @@
 // Node-side logic tests (no DOM): RLE codec, crafting matcher, furnace, break times.
 import { rleEncode, rleDecode } from './src/engine/Persistence.ts';
 import { matchRecipe, FurnaceState, ChestState, Slot, smeltResult } from './src/engine/Inventory.ts';
-import { B, I, breakTime, canHarvest } from './src/engine/Blocks.ts';
+import {
+  B, I, breakTime, canHarvest, attackCooldown, attackStrength, foodSaturation, pickItemFor, def,
+} from './src/engine/Blocks.ts';
 
 let failures = 0;
 function check(name: string, cond: boolean): void {
@@ -88,6 +90,60 @@ check('stone pick cannot harvest diamond', !canHarvest(B.DIAMOND_ORE, I.STONE_PI
 check('iron pick harvests diamond', canHarvest(B.DIAMOND_ORE, I.IRON_PICK));
 check('dirt needs no tool', canHarvest(B.DIRT, 0));
 check('bedrock unbreakable', breakTime(B.BEDROCK, I.DIAMOND_PICK) === Infinity);
+
+// --- gameplay-track items: gold gear, shears, shield, spyglass, golden apples ---
+const AU = I.GOLD_INGOT, GB = B.GOLD_BLOCK, AP = I.APPLE, AM = I.AMETHYST;
+check('golden pickaxe', matchRecipe(g9([AU, AU, AU, 0, S, 0, 0, S, 0]), 3)?.id === I.GOLD_PICK);
+check('golden sword', matchRecipe(g9([0, AU, 0, 0, AU, 0, 0, S, 0]), 3)?.id === I.GOLD_SWORD);
+check('golden helmet', matchRecipe(g9([AU, AU, AU, AU, 0, AU, 0, 0, 0]), 3)?.id === I.GOLD_HELMET);
+check('golden chestplate', matchRecipe(g9([AU, 0, AU, AU, AU, AU, AU, AU, AU]), 3)?.id === I.GOLD_CHEST);
+check('golden boots', matchRecipe(g9([0, 0, 0, AU, 0, AU, AU, 0, AU]), 3)?.id === I.GOLD_BOOTS);
+check('shears (2x2)', matchRecipe(g4(0, FE, FE, 0), 2)?.id === I.SHEARS);
+check('shears mirrored', matchRecipe(g4(FE, 0, 0, FE), 2)?.id === I.SHEARS);
+check('shield', matchRecipe(g9([P, FE, P, P, P, P, 0, P, 0]), 3)?.id === I.SHIELD);
+check('spyglass', matchRecipe(g9([0, AM, 0, 0, FE, 0, 0, FE, 0]), 3)?.id === I.SPYGLASS);
+check('golden apple', matchRecipe(g9([AU, AU, AU, AU, AP, AU, AU, AU, AU]), 3)?.id === I.GOLDEN_APPLE);
+check('enchanted golden apple', matchRecipe(g9([GB, GB, GB, GB, AP, GB, GB, GB, GB]), 3)?.id === I.ENCHANTED_GOLDEN_APPLE);
+check('gold ring w/o apple is not an apple', matchRecipe(g9([AU, AU, AU, AU, 0, AU, AU, AU, AU]), 3)?.id !== I.GOLDEN_APPLE);
+check('clock still matches', matchRecipe(g9([0, AU, 0, AU, FE, AU, 0, AU, 0]), 3)?.id === I.CLOCK);
+
+// --- extra smelting + lava-bucket fuel ---
+check('birch log -> charcoal', smeltResult(B.BIRCH_LOG) === I.COAL);
+check('jungle log -> charcoal', smeltResult(B.JUNGLE_LOG) === I.COAL);
+check('diamond ore -> diamond', smeltResult(B.DIAMOND_ORE) === I.DIAMOND);
+const lf = new FurnaceState();
+lf.input = { id: B.COBBLE, count: 64 };
+lf.fuel = { id: I.LAVA_BUCKET, count: 1 };
+lf.tick(0.05);
+check('lava bucket burns and leaves the bucket', lf.fuel?.id === I.BUCKET && lf.burn > 900);
+
+// --- tool speeds: gold is fastest but harvests like wood; shears + swords on leaves ---
+check('gold pick beats diamond on stone', breakTime(B.STONE, I.GOLD_PICK) < breakTime(B.STONE, I.DIAMOND_PICK));
+check('gold pick harvests stone', canHarvest(B.STONE, I.GOLD_PICK));
+check('gold pick cannot harvest iron', !canHarvest(B.IRON_ORE, I.GOLD_PICK));
+check('shears shred leaves 15x', Math.abs(breakTime(B.LEAVES, I.SHEARS) - breakTime(B.LEAVES, 0) / 15) < 1e-9);
+check('shears cut wool 5x', Math.abs(breakTime(B.WOOL, I.SHEARS) - breakTime(B.WOOL, 0) / 5) < 1e-9);
+check('sword on leaves 1.5x', Math.abs(breakTime(B.JUNGLE_LEAVES, I.IRON_SWORD) - breakTime(B.JUNGLE_LEAVES, 0) / 1.5) < 1e-9);
+check('shears no help on dirt', breakTime(B.DIRT, I.SHEARS) === breakTime(B.DIRT, 0));
+
+// --- combat + food helpers ---
+check('fist recharges in 0.25s', attackCooldown(0) === 0.25);
+check('sword recharges in 0.625s', attackCooldown(I.DIAMOND_SWORD) === 0.625);
+check('axes swing slower than swords', attackCooldown(I.WOOD_AXE) > attackCooldown(I.WOOD_SWORD));
+check('uncharged swing = 20%', Math.abs(attackStrength(0) - 0.2) < 1e-9);
+check('full swing = 100%', attackStrength(1) === 1 && attackStrength(5) === 1);
+check('golden carrot saturation 14.4', Math.abs(foodSaturation(I.GOLDEN_CARROT) - 14.4) < 1e-9);
+check('steak saturation 12.8', Math.abs(foodSaturation(I.COOKED_BEEF) - 12.8) < 1e-9);
+check('golden apples always edible', !!def(I.GOLDEN_APPLE).alwaysEdible && !!def(I.MILK_BUCKET).alwaysEdible);
+check('bread is not always edible', !def(I.BREAD).alwaysEdible);
+
+// --- pick block ---
+check('pick lit furnace -> furnace', pickItemFor(B.FURNACE_LIT) === B.FURNACE);
+check('pick door half -> door item', pickItemFor(B.DOOR_UPPER) === I.WOOD_DOOR);
+check('pick wheat -> seeds', pickItemFor(B.WHEAT_2) === I.SEEDS);
+check('pick redstone wire -> dust', pickItemFor(B.REDSTONE_WIRE) === I.REDSTONE);
+check('pick water -> nothing', pickItemFor(B.WATER) === 0);
+check('pick stone -> stone', pickItemFor(B.STONE) === B.STONE);
 
 console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');
 process.exit(failures ? 1 : 0);

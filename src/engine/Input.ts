@@ -41,7 +41,8 @@ export class Input {
 
   private keydown = (e: KeyboardEvent): void => {
     if (this.disposed) return;
-    if (e.code === 'Tab' || (e.code === 'KeyW' && e.ctrlKey)) e.preventDefault();
+    // Ctrl is sneak, so keep Ctrl+W / Ctrl+Q (toss stack) from reaching the browser
+    if (e.code === 'Tab' || (e.ctrlKey && (e.code === 'KeyW' || e.code === 'KeyQ'))) e.preventDefault();
     if (e.repeat) return;
     const now = performance.now();
     const last = this.lastTap.get(e.code) ?? -1e9;
@@ -62,6 +63,7 @@ export class Input {
   };
 
   private mousedown = (e: MouseEvent): void => {
+    if (e.button === 1 && this.pointerLocked) e.preventDefault(); // no autoscroll on pick-block
     if (e.button === 0) this.leftDown = true;
     if (e.button === 2) { this.rightDown = true; this.rightClickQueued = true; }
     this.onMouseDown(e.button);
