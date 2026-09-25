@@ -352,6 +352,26 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 #fps.slow { color: #ffb05a; }
 #debug:not(.hidden) ~ #fps { display: none; }
 
+/* sound captions (Options → Show Subtitles), bottom-right like vanilla */
+#subtitles {
+  position: absolute;
+  right: calc(8px + env(safe-area-inset-right, 0px));
+  bottom: calc(76px * var(--gui) + env(safe-area-inset-bottom, 0px));
+  display: flex; flex-direction: column; align-items: stretch; gap: 1px;
+  min-width: 190px;
+  pointer-events: none;
+}
+.sub-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  background: rgba(0,0,0,0.72);
+  padding: 2px 6px;
+  color: #fff; font-size: 12px; text-shadow: 1px 1px #000;
+  transition: opacity 0.2s;
+}
+.sub-dir { width: 8px; flex: none; text-align: center; color: #ffff55; }
+.sub-text { flex: 1; text-align: center; white-space: nowrap; }
+@media (pointer: coarse) { #subtitles { bottom: auto; top: calc(80px + env(safe-area-inset-top, 0px)); } }
+
 #vignette {
   position: absolute; inset: 0; pointer-events: none;
   background: radial-gradient(ellipse at center, transparent 50%, rgba(200,0,0,0.5) 100%);

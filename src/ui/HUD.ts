@@ -8,7 +8,7 @@ import { Atlas } from '../engine/Textures';
 import { Inventory, Slot, matchRecipe, FurnaceState, ChestState, SMELT_TIME, allRecipes, RecipeView } from '../engine/Inventory';
 import { def, CREATIVE_ITEMS, I, B, spriteNameFor, mobLabel } from '../engine/Blocks';
 import { SaveSummary, SlotData } from '../engine/Persistence';
-import { AudioEngine } from '../engine/Audio';
+import { AudioEngine, SfxName, MobVoice } from '../engine/Audio';
 import type { GameMode } from '../engine/Player';
 import { isTouchDevice } from './TouchControls';
 import {
@@ -74,10 +74,12 @@ export interface UiSettings {
   fps: boolean;
   /** recipe book panel open next to crafting grids */
   book: boolean;
+  /** captions for sounds, bottom-right (accessibility) */
+  subs: boolean;
 }
 
 const UI_KEY = 'voxelcraft.ui';
-const UI_DEFAULTS: UiSettings = { fov: 70, gui: 0, bob: true, fps: false, book: true };
+const UI_DEFAULTS: UiSettings = { fov: 70, gui: 0, bob: true, fps: false, book: true, subs: false };
 const GUI_NAMES = ['Auto', 'Small', 'Normal', 'Large'];
 
 function loadUiSettings(): UiSettings {
@@ -91,6 +93,7 @@ function loadUiSettings(): UiSettings {
         bob: typeof p.bob === 'boolean' ? p.bob : UI_DEFAULTS.bob,
         fps: typeof p.fps === 'boolean' ? p.fps : UI_DEFAULTS.fps,
         book: typeof p.book === 'boolean' ? p.book : UI_DEFAULTS.book,
+        subs: typeof p.subs === 'boolean' ? p.subs : UI_DEFAULTS.subs,
       };
     }
   } catch { /* private mode / corrupt value: fall back to defaults */ }
@@ -124,6 +127,20 @@ const TIPS = [
   'Build a 4x5 obsidian frame and light it to reach the Nether.',
   'Press L to see your advancements.',
 ];
+
+/** Subtitle captions per sound effect (UI clicks are deliberately silent). */
+const SFX_CAPTIONS: Partial<Record<SfxName, string>> = {
+  pop: 'Item picked up', hurt: 'Player hurts', hit: 'Something hit', eat: 'Eating', burp: 'Burp',
+  doorOpen: 'Door creaks', doorClose: 'Door closes', plateOn: 'Pressure plate clicks', plateOff: 'Pressure plate clicks',
+  explode: 'Explosion', bow: 'Bow fires', snap: 'Item breaks', fuse: 'Fuse hisses', arrowHit: 'Arrow hits',
+  whoosh: 'Whoosh', lowdur: 'Tool is wearing out', thunder: 'Thunder roars', splash: 'Splash', hoof: 'Hooves clop',
+  mount: 'Saddle equips', submerge: 'Splash', emerge: 'Splash', chestOpen: 'Chest opens', chestClose: 'Chest closes',
+  advancement: 'Advancement made', equip: 'Gear equips', lavaPop: 'Lava pops', bubble: 'Bubbles',
+};
+const MOB_VERBS: Record<string, string> = {
+  zombie: 'groans', skeleton: 'rattles', spider: 'hisses', creeper: 'hisses', cow: 'moos', pig: 'oinks',
+  sheep: 'baas', chicken: 'clucks', wolf: 'pants', cat: 'meows', horse: 'neighs', villager: 'mumbles',
+};
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, parent?: HTMLElement): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -225,6 +242,8 @@ export class HUD {
   private pauseOptsEl: HTMLElement | null = null;
   private pauseSyncers: Array<() => void> = [];
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
+  private subsEl: HTMLElement;
+  private subRows = new Map<string, { el: HTMLElement; t: number }>();
   private fpsFrames = 0;
   private fpsT0 = 0;
   private deathTimer: ReturnType<typeof setTimeout> | null = null;
@@ -262,6 +281,8 @@ export class HUD {
     this.hotbarEl = el('div', '', this.bottomEl); this.hotbarEl.id = 'hotbar';
     this.debugEl = el('div', 'hidden', this.hud); this.debugEl.id = 'debug';
     this.fpsEl = el('div', 'hidden', this.hud); this.fpsEl.id = 'fps';
+    this.subsEl = el('div', '', this.hud); this.subsEl.id = 'subtitles';
+    this.subsEl.setAttribute('aria-live', 'polite');
 
     // minimap: small canvas top-right showing nearby terrain + facing arrow
     this.minimapEl = el('div', 'minimap', this.hud);
@@ -331,6 +352,8 @@ export class HUD {
     // container hotkeys: 1-9 swaps the hovered slot with that hotbar slot, Q
     // drops one (Ctrl+Q the stack) — both straight out of vanilla
     document.addEventListener('keydown', (e) => this.containerKey(e));
+
+    this.hookSubtitles();
 
     // procedural button grain (a faint stone noise) shared by every .mc-btn
     document.documentElement.style.setProperty('--btn-noise', `url(${this.noiseTile()})`);
@@ -626,6 +649,7 @@ export class HUD {
 
   updateStats(hp: number, hunger: number, air: number, mode: GameMode, armor = 0): void {
     this.tickFps();
+    this.tickSubtitles();
     this.hud.classList.toggle('creative', mode === 'creative');
     if (mode === 'creative') {
       this.statsEl.style.visibility = 'hidden';
@@ -684,6 +708,57 @@ export class HUD {
       this.fpsEl.classList.remove('hidden');
       this.fpsFrames = 0;
       this.fpsT0 = now;
+    }
+  }
+
+  /** Wrap the audio engine's one-shot entry points so every audible effect can
+   *  raise a caption (vanilla's Show Subtitles). The sound itself is untouched. */
+  private hookSubtitles(): void {
+    const a = this.audio;
+    const play = a.play.bind(a);
+    a.play = (name: SfxName, vol = 1): void => {
+      play(name, vol);
+      const cap = SFX_CAPTIONS[name];
+      if (cap && this.settings.subs && a.soundOn) this.subtitle(cap, 0);
+    };
+    const mob = a.mobSound.bind(a);
+    a.mobSound = (kind: string, vol: number, variant: MobVoice = 'idle', pan = 0): void => {
+      mob(kind, vol, variant, pan);
+      if (!this.settings.subs || !a.soundOn || vol <= 0.05) return;
+      const verb = variant === 'hurt' ? 'hurts' : variant === 'death' ? 'dies' : (MOB_VERBS[kind] ?? 'makes a noise');
+      const who = mobLabel(kind);
+      this.subtitle(`${who.charAt(0).toUpperCase()}${who.slice(1)} ${verb}`, pan);
+    };
+  }
+
+  /** Add or refresh a caption row; pan < 0 = left of you, > 0 = right. */
+  private subtitle(text: string, pan: number): void {
+    let row = this.subRows.get(text);
+    if (!row) {
+      if (this.subRows.size >= 6) {
+        const oldest = [...this.subRows.entries()].sort((x, y) => x[1].t - y[1].t)[0];
+        oldest[1].el.remove(); this.subRows.delete(oldest[0]);
+      }
+      const e = el('div', 'sub-row', this.subsEl);
+      row = { el: e, t: 0 };
+      this.subRows.set(text, row);
+    }
+    row.el.innerHTML = '';
+    el('span', 'sub-dir', row.el).textContent = pan < -0.25 ? '<' : '';
+    el('span', 'sub-text', row.el).textContent = text;
+    el('span', 'sub-dir', row.el).textContent = pan > 0.25 ? '>' : '';
+    row.t = performance.now();
+    row.el.style.opacity = '1';
+  }
+
+  /** Age captions: fade over ~3 s, then drop them. */
+  private tickSubtitles(): void {
+    if (this.subRows.size === 0) return;
+    const now = performance.now();
+    for (const [k, r] of this.subRows) {
+      const age = (now - r.t) / 1000;
+      if (age > 3 || !this.settings.subs) { r.el.remove(); this.subRows.delete(k); continue; }
+      r.el.style.opacity = String(age < 1.5 ? 1 : 1 - (age - 1.5) / 1.5 * 0.75);
     }
   }
 
@@ -1214,6 +1289,10 @@ export class HUD {
       pct('Sounds Volume'), (v) => this.audio.setSoundVolume(v / 100));
     const soundBtn = this.pauseButton(grid, '', () => this.pauseH?.onToggleSound());
     this.pauseSyncers.push(() => { soundBtn.textContent = `Sounds: ${this.pauseH?.soundOn() ? 'ON' : 'OFF'}`; });
+    const subsBtn = this.pauseButton(grid, '', () => {
+      this.settings.subs = !this.settings.subs; this.saveSettings(); this.syncPauseUi();
+    }, 'span2');
+    this.pauseSyncers.push(() => { subsBtn.textContent = `Show Subtitles: ${this.settings.subs ? 'ON' : 'OFF'}`; });
 
     section('Controls');
     this.mcSlider(grid, 50, 200, 5, () => Math.round((this.pauseH?.mouseSens() ?? 1) * 100),
