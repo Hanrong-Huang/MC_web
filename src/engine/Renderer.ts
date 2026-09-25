@@ -7,13 +7,15 @@ import * as THREE from 'three';
 import { Atlas, extrudeSpriteGeometry } from './Textures';
 import type { ChunkMeshData, GeoArrays } from './Mesher';
 import { B, def, hasDef, spriteNameFor, I, CROSS_BLOCKS } from './Blocks';
+import { buildOrbRig, disposeOrb, fitFigurine, ORB_GLOW, ORB_IDLE_GLOW, OrbRig } from './CatcherOrb';
+import { MobModels } from './MobModels';
+import type { MobKind } from './EntityManager';
 
-/** Inner-core glow colors for the held filled-catcher orb, keyed by mob kind. */
-const MOB_ORB_COLORS: Record<string, number> = {
-  zombie: 0x5d9b54, skeleton: 0xe6e6dc, spider: 0x6a5560,
-  creeper: 0x6bcf57, cinderling: 0xf07a2a, ashstalker: 0xe06a2a,
-  emberghast: 0xf0e6dc, phantom: 0x6fb6c8,
-};
+/** Held-orb throw timeline (fractions of ORB_THROW_TIME): the wind-up ends and
+ *  the orb leaves the hand at ORB_RELEASE (EntityManager.CATCHER_WINDUP s). */
+const ORB_THROW_TIME = 0.55;
+const ORB_WIND = 0.2;
+const ORB_RELEASE = 0.22;
 
 export interface ChunkGeometry {
   solid: THREE.BufferGeometry | null;
@@ -626,6 +628,13 @@ export class Renderer {
   /** the held item is a capture orb, which gets a slow idle spin */
   private heldIsOrb = false;
   private orbSpin = 0;
+  /** the held orb's parts (button glow, dome, figurine) for its idle/throw animation */
+  private orbRig: OrbRig | null = null;
+  /** 0..1 progress of the wind-up / throw / follow-through (1 = idle) */
+  private orbThrowT = 1;
+  private orbT = 0;
+  /** builds the little captive figurine shown inside a held filled orb */
+  private orbModels: MobModels | null = null;
   private swingT = 1; // 0..1, 1 = idle
   private raiseT = 1; // 0..1, drives the raise-up when the held item changes
   private bowCharge = 0;
@@ -1317,6 +1326,13 @@ export class Renderer {
     this.heldId = id;
     this.heldMob = mob;
     this.heldIsOrb = false;
+    if (this.heldMesh && this.orbRig) {
+      // the orb (and a captive figurine's multi-material boxes) frees itself
+      this.heldGroup.remove(this.heldMesh);
+      disposeOrb(this.heldMesh);
+      this.heldMesh = null;
+    }
+    this.orbRig = null;
     this.raiseT = 0; // animate the new item up into view
     if (this.heldMesh) {
       this.heldGroup.remove(this.heldMesh);
@@ -1389,10 +1405,10 @@ export class Renderer {
       mesh.rotation.copy(this.heldIdleRot);
       this.heldMesh = mesh;
     } else if (id === I.MOB_CATCHER || id === I.MOB_CATCHER_FILLED) {
-      // the capture orb is a real little 3D sphere (glass shell + metal band),
-      // not a flat extruded card — it reads as a ball that gently spins in hand
+      // the capture orb is a real little 3D ball (layered glass dome, metal
+      // band, glowing button; a filled one shows its captive inside), not a
+      // flat extruded card — it bobs and turns gently in the hand
       const orb = this.buildCatcherOrb(id === I.MOB_CATCHER_FILLED ? this.heldMob : undefined);
-      orb.rotation.copy(this.heldIdleRot);
       this.heldMesh = orb;
       this.heldIsOrb = true;
     } else if (id !== 0 && hasDef(id) && (def(id).sprite || spriteNameFor(id, this.heldMob))) {
@@ -1568,13 +1584,64 @@ export class Renderer {
       sw2 * 0.35,
       sw * 0.3,
     );
-    // the capture orb floats and slowly spins on its own axis in the hand
-    if (this.heldIsOrb && this.heldMesh) {
-      this.orbSpin += dt * 1.3;
-      this.heldMesh.rotation.set(0.12, this.orbSpin, 0);
-      // lift + pull the orb in so the whole ball sits in view, gently floating
-      this.heldMesh.position.set(-0.06, 0.06 + Math.sin(this.bobT * 0.6) * 0.012, 0.04);
+    if (this.heldIsOrb && this.heldMesh && this.orbRig) this.animateHeldOrb(dt);
+  }
+
+  /** Play the held orb's wind-up -> throw -> follow-through (the thrown orb
+   *  leaves the hand at ORB_RELEASE, matching EntityManager's launch delay). */
+  triggerOrbThrow(): void {
+    this.orbThrowT = 0;
+  }
+
+  /** Held orb: floats and sways in the palm with a breathing button glow; on a
+   *  throw it cocks back (spinning up), snaps forward and vanishes from the
+   *  hand, then the next orb rises back into the palm. */
+  private animateHeldOrb(dt: number): void {
+    const rig = this.orbRig!, mesh = this.heldMesh!;
+    this.orbT += dt;
+    if (this.orbThrowT < 1) this.orbThrowT = Math.min(1, this.orbThrowT + dt / ORB_THROW_TIME);
+    const u = this.orbThrowT;
+    const ease = (k: number): number => k * k * (3 - 2 * k);
+    // idle: lifted + pulled in so the whole ball shows, floating and swaying
+    let px = -0.1, py = 0.18 + Math.sin(this.orbT * 1.7) * 0.01, pz = 0.02;
+    let rx = 0.2 + Math.sin(this.orbT * 1.1) * 0.05, rz = Math.sin(this.orbT * 0.8) * 0.06;
+    let scale = 1, spinRate = 0, flare = 0;
+    if (u < ORB_WIND) {
+      // wind-up: draw back, up and out to the right, tipping back, spinning up
+      const k = ease(u / ORB_WIND);
+      px += 0.07 * k; py += 0.08 * k; pz += 0.12 * k; rx -= 0.8 * k; rz -= 0.3 * k;
+      spinRate = 16 * k; flare = k;
+    } else if (u < ORB_RELEASE + 0.1) {
+      // the throw: whip forward and down toward the crosshair; the orb leaves
+      const j = (u - ORB_WIND) / (ORB_RELEASE + 0.1 - ORB_WIND);
+      const k = ease(Math.min(1, j * 1.4));
+      px += 0.07 - 0.2 * k; py += 0.08 - 0.13 * k; pz += 0.12 - 0.5 * k; rx += -0.8 + 1.6 * k; rz += -0.3 + 0.3 * k;
+      spinRate = 16; flare = 1 - k;
+      if (u >= ORB_RELEASE) scale = 0;
+    } else if (u < 1) {
+      // follow-through: the empty hand settles, then the next orb rises in
+      const f = (u - ORB_RELEASE - 0.1) / (1 - ORB_RELEASE - 0.1);
+      const back = 1 - ease(Math.min(1, f * 1.6));
+      px -= 0.13 * back; py -= 0.05 * back; pz -= 0.38 * back; rx += 0.8 * back;
+      scale = f < 0.4 ? 0 : ease((f - 0.4) / 0.6);
+      py -= (1 - scale) * 0.12;
     }
+    const full = this.heldId === I.MOB_CATCHER_FILLED;
+    if (spinRate > 0) this.orbSpin += dt * spinRate;
+    else if (!full) this.orbSpin += dt * 0.9;       // an empty orb turns lazily
+    else {
+      // a full one turns back so its captive faces you
+      this.orbSpin = Math.atan2(Math.sin(this.orbSpin), Math.cos(this.orbSpin));
+      this.orbSpin *= 1 - Math.min(1, dt * 3);
+    }
+    rig.spin.rotation.y = full && spinRate === 0 ? this.orbSpin + Math.sin(this.orbT * 0.7) * 0.5 : this.orbSpin;
+    mesh.position.set(px, py, pz);
+    mesh.rotation.set(rx, 0, rz);
+    mesh.scale.setScalar(Math.max(0.001, scale));
+    // the button breathes (quicker when something is inside) and flares on a wind-up
+    const pulse = 0.5 + 0.5 * Math.sin(this.orbT * (full ? 4.2 : 2.2));
+    (rig.halo.material as THREE.SpriteMaterial).opacity = Math.min(1, 0.35 + pulse * 0.4 + flare * 0.5);
+    rig.halo.scale.setScalar(rig.R * (1 + pulse * 0.25 + flare * 0.8));
   }
 
   /** Extruded pixel item with its pivot moved to the grip (the low end of the
@@ -1600,46 +1667,35 @@ export class Renderer {
     return { mesh: new THREE.Mesh(geo, mat), zc: Math.PI / 4 - ax.angle };
   }
 
-  /** A held capture orb: glassy amethyst shell, dark metal equatorial band with
-   *  a glowing button, and (when filled) a glowing inner core in the mob color. */
+  /** A held capture orb (see CatcherOrb): a filled one carries a little
+   *  figurine of its captive standing under the glass, lit in its colour. */
   private buildCatcherOrb(mob?: string): THREE.Group {
-    const g = new THREE.Group();
-    // the held rig sits 0.58 from the eye, so a 0.44-wide ball filled half the
-    // screen; 0.28 across reads as a ball in the fist without blocking the view
-    const R = 0.14;
-    const shell = new THREE.Mesh(
-      new THREE.SphereGeometry(R, 22, 18),
-      new THREE.MeshStandardMaterial({
-        color: 0x9a6fd6, roughness: 0.12, metalness: 0.1,
-        transparent: true, opacity: mob ? 0.6 : 0.74, depthWrite: false,
-        emissive: 0x3a2a5a, emissiveIntensity: 0.45,
-      }),
-    );
+    // the held rig sits ~0.6 from the eye: 0.24 across reads as a ball in the
+    // palm without blocking the view
+    const R = 0.12;
+    let fig: THREE.Object3D | undefined;
     if (mob) {
-      // captured creature glowing inside the glass (drawn first, glass over it)
-      const col = MOB_ORB_COLORS[mob] ?? 0xffffff;
-      const core = new THREE.Mesh(
-        new THREE.SphereGeometry(R * 0.56, 14, 12),
-        new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.9, roughness: 0.5 }),
-      );
-      g.add(core);
+      this.orbModels ??= new MobModels();
+      try {
+        fig = fitFigurine(this.orbModels.build(mob as MobKind).mesh, R);
+      } catch {
+        fig = undefined; // unknown kind: an empty-looking but lit orb
+      }
     }
-    shell.renderOrder = 2; // glass last so the core + band show through it
-    g.add(shell);
-    const band = new THREE.Mesh(
-      new THREE.TorusGeometry(R * 1.0, R * 0.11, 8, 26),
-      new THREE.MeshStandardMaterial({ color: 0x2a2038, roughness: 0.4, metalness: 0.65 }),
-    );
-    band.rotation.x = Math.PI / 2;
-    g.add(band);
-    const button = new THREE.Mesh(
-      new THREE.SphereGeometry(R * 0.17, 10, 8),
-      new THREE.MeshStandardMaterial({ color: 0xe0c9ff, emissive: 0x9a6fd6, emissiveIntensity: 0.6 }),
-    );
-    button.position.set(0, 0, R * 1.04);
-    g.add(button);
-    g.scale.setScalar(1.05);
-    return g;
+    const rig = buildOrbRig(R, mob ? (ORB_GLOW[mob] ?? ORB_IDLE_GLOW) : ORB_IDLE_GLOW, fig);
+    if (mob) {
+      // the captive's colour glows up from the floor of the orb
+      const c = new THREE.Color(ORB_GLOW[mob] ?? ORB_IDLE_GLOW);
+      rig.floor.color.copy(c).multiplyScalar(0.35);
+      // (tinted emissive rather than a point light: adding a light would
+      // recompile every overlay shader mid-game)
+      fig?.traverse((o) => {
+        const m = (o as THREE.Mesh).material as THREE.MeshLambertMaterial | undefined;
+        if (m && 'emissive' in m) m.emissive.copy(c).multiplyScalar(0.12);
+      });
+    }
+    this.orbRig = rig;
+    return rig.root;
   }
 
   // --- frame ----------------------------------------------------------------
