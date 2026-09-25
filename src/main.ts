@@ -2081,7 +2081,9 @@ class Game {
   /** Experience a slain mob leaves behind (vanilla: 5 for monsters, 1-3 animals). */
   private killXp(kind: string): number {
     if (kind === 'emberghast') return 10;
-    if (['zombie', 'skeleton', 'spider', 'creeper', 'cinderling', 'ashstalker', 'phantom'].includes(kind)) return 5;
+    if (kind === 'blaze') return 10;
+    if (['zombie', 'skeleton', 'spider', 'creeper', 'cinderling', 'ashstalker', 'phantom',
+      'piglin', 'zombified_piglin', 'hoglin', 'wither_skeleton', 'magma_cube'].includes(kind)) return 5;
     return 1 + Math.floor(Math.random() * 3);
   }
 

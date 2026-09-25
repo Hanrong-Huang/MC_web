@@ -2059,8 +2059,126 @@ export class AudioEngine {
         this.nz(e, { dur: 0.6, vol: 0.06, type: 'bandpass', f: 2200, q: 1.2, attack: 0.1 });
         break;
       }
+      default: this.netherVoice(e, kind, hurt, death, p, dl);
     }
     this.seal(e);
+  }
+
+  /** Nether denizens: piglin grunts (and an admiring "hmm?"), zombified
+   *  groan-snorts, hoglin growls, the strider's warbling trill, the blaze's
+   *  crackling breath and fire-charge whoosh, the wither skeleton's heavy
+   *  rattle and the magma cube's wet squelch. */
+  private netherVoice(e: Ev, kind: string, hurt: boolean, death: boolean, p: number, dl: number): void {
+    switch (kind) {
+      case 'piglin':
+      case 'zombified_piglin': {
+        const z = kind === 'zombified_piglin';
+        if (hurt || death) {
+          // an indignant squeal (a rasping one when rotten)
+          this.vox(e, {
+            dur: 0.32 * dl, vol: 0.3, pitch: death ? [340 * p, 300 * p, 140 * p] : [300 * p, 420 * p, 280 * p], attack: 0.01,
+            formants: [[[750, 600], 4, 1], [[1700], 6, 0.5], [[2800], 8, 0.15]], rough: z ? [45, 120] : [35, 60], breath: z ? 0.35 : 0.12,
+          });
+        } else {
+          // gruff snorting grunts: "hrrmph ... hmph"
+          const n = 1 + ((Math.random() * 3) | 0);
+          for (let i = 0; i < n; i++) {
+            const f = (z ? 92 : 124) * p * rand(0.92, 1.08);
+            this.vox(e, {
+              at: i * rand(0.2, 0.3), dur: rand(0.14, 0.24), vol: 0.32, pitch: [f, f * 1.15, f * 0.85], attack: 0.012, release: 0.06,
+              formants: [[[520, 440], 4, 1], [[1250, 1100], 6, 0.5], [[2500], 8, 0.15]],
+              rough: z ? [40, 120] : [30, 70], breath: z ? 0.32 : 0.18, direct: 0.3,
+            });
+          }
+          if (z && chance(0.5)) this.nz(e, { at: n * 0.24, dur: 0.3, vol: 0.12, color: 'pink', type: 'bandpass', f: 700, q: 1.2, attack: 0.03 });
+        }
+        break;
+      }
+      case 'piglin_admire': {
+        // a pleased, curious rising "hmm-hm?" with a snort
+        this.vox(e, {
+          dur: 0.55, vol: 0.3, pitch: [120 * p, 128 * p, 165 * p, 190 * p], attack: 0.03,
+          formants: [[[420, 480], 4, 1], [[1050], 6, 0.45], [[2400], 8, 0.15]], vib: [6, 10], rough: [30, 40], breath: 0.12, direct: 0.35,
+        });
+        this.nz(e, { at: 0.6, dur: 0.14, vol: 0.18, color: 'pink', type: 'bandpass', f: 900, q: 1.1, attack: 0.01 });
+        break;
+      }
+      case 'hoglin': {
+        if (hurt || death) {
+          this.vox(e, {
+            dur: 0.4 * dl, vol: 0.34, pitch: death ? [210 * p, 180 * p, 70 * p] : [170 * p, 230 * p, 140 * p], attack: 0.015,
+            formants: [[[600, 520], 4, 1], [[1400], 6, 0.5]], rough: [30, 140], breath: 0.3, direct: 0.35,
+          });
+        } else {
+          // a deep, wet growl and a snort through the snout
+          this.vox(e, {
+            dur: rand(0.5, 0.8), vol: 0.36, pitch: [68 * p, 82 * p, 60 * p], attack: 0.05,
+            formants: [[[380, 320], 5, 1], [[780], 6, 0.5], [[2000], 8, 0.12]], rough: [24, 140], breath: 0.3, direct: 0.45,
+          });
+          this.nz(e, { at: rand(0.4, 0.7), dur: 0.22, vol: 0.3, color: 'pink', type: 'bandpass', f: 650, f1: 420, q: 1.3, curve: this.grains(8, 0.5, 1, 0.4) });
+        }
+        break;
+      }
+      case 'strider': {
+        // a warbling, bird-like trill (a sharp squeak when hurt)
+        if (hurt || death) {
+          this.vox(e, { dur: 0.25 * dl, vol: 0.24, pitch: [900 * p, 1300 * p, death ? 500 * p : 800 * p], type: 'triangle',
+            formants: [[[1200], 4, 1], [[2600], 6, 0.4]], rough: [40, 40], breath: 0.1 });
+        } else {
+          const n = 1 + ((Math.random() * 2) | 0);
+          for (let i = 0; i < n; i++) {
+            this.vox(e, { at: i * 0.32, dur: rand(0.22, 0.34), vol: 0.2, pitch: [560 * p, 760 * p, 620 * p], type: 'triangle',
+              attack: 0.02, formants: [[[900, 1250], 4, 1], [[2400], 6, 0.35]], vib: [24, 110] });
+          }
+        }
+        break;
+      }
+      case 'blaze': {
+        if (hurt || death) {
+          // a hollow metallic clank over a gasp of flame
+          this.tn(e, { dur: 0.3 * dl, f: 880 * p, f1: 560 * p, vol: 0.12, type: 'triangle' });
+          this.tn(e, { dur: 0.25 * dl, f: 1320 * p, f1: 900 * p, vol: 0.05, type: 'square', lp: 2400 });
+          this.nz(e, { dur: 0.4 * dl, vol: 0.22, type: 'bandpass', f: 1400, f1: 500, q: 0.8, attack: 0.01 });
+        } else {
+          // crackling, rasping breath: in ... and out
+          for (const [at, f0, f1] of [[0, 520, 900], [0.55, 950, 420]] as [number, number, number][]) {
+            this.nz(e, { at, dur: 0.5, vol: 0.2, color: 'pink', type: 'bandpass', f: f0 * p, f1: f1 * p, q: 1.4, attack: 0.18 });
+          }
+          this.nz(e, { dur: 1.1, vol: 0.12, type: 'highpass', f: 2600, curve: this.grains(18, 0.9, 1, 0.1) });
+          this.tn(e, { dur: 1, f: 150 * p, f1: 120 * p, vol: 0.03, type: 'sawtooth', lp: 500, attack: 0.2 });
+        }
+        break;
+      }
+      case 'blaze_shoot': {
+        // a fire charge leaving: a roaring whoosh with a low thump
+        this.nz(e, { dur: 0.4, vol: 0.34, type: 'bandpass', f: 1600 * p, f1: 380, q: 0.7, attack: 0.008 });
+        this.nz(e, { dur: 0.3, vol: 0.12, type: 'highpass', f: 3000, curve: this.grains(10, 0.85, 1.2) });
+        this.tn(e, { dur: 0.16, f: 140 * p, f1: 60, vol: 0.14 });
+        break;
+      }
+      case 'wither_skeleton': {
+        // a heavier, lower rattle than the plain skeleton's
+        const n = death ? 12 : hurt ? 6 : 5 + ((Math.random() * 4) | 0);
+        let at = 0;
+        for (let i = 0; i < n; i++) {
+          const f = rand(650, 1300) * p * (death ? 1 - i / (n * 2) : 1);
+          this.nz(e, { at, dur: 0.04, vol: 0.38, type: 'bandpass', f, q: 7 });
+          this.tn(e, { at, dur: 0.05, f: f * 0.4, f1: f * 0.35, vol: 0.06, type: 'triangle' });
+          at += rand(0.05, 0.09) * (death ? 1.3 : 1);
+        }
+        this.vox(e, { dur: 0.5 * dl, vol: 0.08, pitch: [70 * p, 64 * p], formants: [[[400], 4, 1]], rough: [30, 90], breath: 0.3 });
+        break;
+      }
+      case 'magma_cube': {
+        // a wet, molten squelch (bigger when hurt) with a few popping bubbles
+        const k = hurt || death ? 1.3 : 1;
+        this.nz(e, { dur: 0.2 * dl, vol: 0.32 * k, color: 'brown', type: 'lowpass', f: 700 * p, f1: 180, attack: 0.004 });
+        this.nz(e, { dur: 0.16, vol: 0.12, type: 'bandpass', f: 1300 * p, f1: 600, q: 2, attack: 0.004 });
+        this.tn(e, { dur: 0.14, f: 110 * p * k, f1: 55, vol: 0.12 });
+        this.bubbles(e, death ? 5 : 2, 0.3, 0.04);
+        break;
+      }
+    }
   }
 
   // ==========================================================================

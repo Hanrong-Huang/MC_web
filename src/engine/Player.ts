@@ -889,7 +889,7 @@ export class Player {
   private updateRiding(dt: number): void {
     const { input, entities, renderer } = this.deps;
     const horse = this.riding!;
-    if (horse.dead || horse.kind !== 'horse' || !horse.ridden) { this.dismount(false); return; }
+    if (horse.dead || !entities.isMount(horse) || !horse.ridden) { this.dismount(false); return; }
     this.target = null;
     renderer.setOutline(null);
     this.cancelBreaking();
@@ -913,7 +913,7 @@ export class Player {
     // seat the player on the horse's back so the camera rides along
     this.pos.x = horse.pos.x;
     this.pos.z = horse.pos.z;
-    this.pos.y = horse.pos.y + 0.9;
+    this.pos.y = horse.pos.y + entities.mountSeat(horse);
     this.vel.x = horse.vel.x; this.vel.y = horse.vel.y; this.vel.z = horse.vel.z;
     this.onGround = horse.onGround;
     this.sprinting = false;

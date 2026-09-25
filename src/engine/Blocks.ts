@@ -302,6 +302,13 @@ export enum I {
   GLISTERING_MELON = 333,
   /** drink for a burst of experience */
   EXPERIENCE_BOTTLE = 334,
+  // nether mob drops (350-364)
+  BLAZE_ROD = 350,
+  BLAZE_POWDER = 351,
+  MAGMA_CREAM = 352,
+  GOLD_NUGGET = 353,
+  GHAST_TEAR = 354,
+  WITHER_SKULL = 355,
 }
 
 /** Wearable-armor slot index: 0 head, 1 chest, 2 legs, 3 feet. */
@@ -1163,6 +1170,14 @@ itemDef({
 itemDef({ id: I.FIREWORK_ROCKET, name: 'firework_rocket', label: 'Firework Rocket', sprite: 'firework_rocket' });
 itemDef({ id: I.WARP_PEARL, name: 'warp_pearl', label: 'Warp Pearl', sprite: 'warp_pearl', stack: 16 });
 
+// nether mob drops
+itemDef({ id: I.BLAZE_ROD, name: 'blaze_rod', label: 'Blaze Rod', sprite: 'blaze_rod', fuel: 120 });
+itemDef({ id: I.BLAZE_POWDER, name: 'blaze_powder', label: 'Blaze Powder', sprite: 'blaze_powder' });
+itemDef({ id: I.MAGMA_CREAM, name: 'magma_cream', label: 'Magma Cream', sprite: 'magma_cream' });
+itemDef({ id: I.GOLD_NUGGET, name: 'gold_nugget', label: 'Gold Nugget', sprite: 'gold_nugget' });
+itemDef({ id: I.GHAST_TEAR, name: 'ghast_tear', label: 'Ghast Tear', sprite: 'ghast_tear' });
+itemDef({ id: I.WITHER_SKULL, name: 'wither_skeleton_skull', label: 'Wither Skeleton Skull', sprite: 'wither_skull' });
+
 // --- block metadata + shapes ---------------------------------------------------
 // Shaped blocks keep a small per-block value in world.bedFacings (the generic
 // "facing/meta" map that is already persisted per dimension and shipped to the
@@ -1267,6 +1282,7 @@ export function allDefs(): Def[] { return [...DEFS.values()]; }
 export const CAPTURABLE = new Set<string>([
   'zombie', 'skeleton', 'spider', 'creeper',
   'cinderling', 'ashstalker', 'emberghast', 'phantom',
+  'piglin', 'zombified_piglin', 'hoglin', 'blaze', 'wither_skeleton', 'magma_cube',
 ]);
 
 /** Friendly label for a captured mob kind. */
@@ -1275,6 +1291,8 @@ export function mobLabel(kind: string): string {
     zombie: 'Zombie', skeleton: 'Skeleton', spider: 'Spider', creeper: 'Creeper',
     cinderling: 'Cinderling', ashstalker: 'Ashstalker',
     emberghast: 'Emberghast', phantom: 'Phantom',
+    piglin: 'Piglin', zombified_piglin: 'Zombified Piglin', hoglin: 'Hoglin', strider: 'Strider',
+    blaze: 'Blaze', wither_skeleton: 'Wither Skeleton', magma_cube: 'Magma Cube',
   };
   return m[kind] ?? kind;
 }
@@ -1556,3 +1574,5 @@ export const CREATIVE_ITEMS: number[] = [
   I.POTION_FIRE_RESISTANCE, I.POTION_STRENGTH, I.POTION_LEAPING, I.POTION_REGENERATION,
   I.EXPERIENCE_BOTTLE, I.MAP, I.RECOVERY_COMPASS, I.GLIDER, I.FIREWORK_ROCKET, I.WARP_PEARL,
 ];
+// nether mob drops
+CREATIVE_ITEMS.push(I.BLAZE_ROD, I.BLAZE_POWDER, I.MAGMA_CREAM, I.GOLD_NUGGET, I.GHAST_TEAR, I.WITHER_SKULL);

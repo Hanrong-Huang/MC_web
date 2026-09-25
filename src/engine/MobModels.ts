@@ -40,7 +40,22 @@ export interface LimbSet {
   legLen: number;
   /** skeleton bow (drawn while aiming) */
   bow?: THREE.Object3D;
+  /** weapon gripped in the right hand (piglin sword / crossbow, wither sword) */
+  weapon?: THREE.Object3D;
+  /** a gold ingot in the left hand, shown while a piglin admires it */
+  offhand?: THREE.Object3D;
+  /** blaze rod rings, top to bottom (each spins its own way) */
+  rods?: THREE.Object3D[];
+  /** magma cube slices, bottom to top (spread apart mid-jump) */
+  slices?: THREE.Object3D[];
+  /** strider bristles (waggle as it walks, droop when cold) */
+  hair?: THREE.Object3D[];
+  /** strider warm/cold skin pairs: it turns purple and shivers off the lava */
+  chill?: { mat: THREE.MeshLambertMaterial; warm: THREE.Texture; cold: THREE.Texture }[];
 }
+
+/** Magma cube size (model scale, hitbox multiple) per variant. */
+export const MAGMA_SIZES = [1, 2, 4];
 
 /** Horse coat palettes: [body, speckle, mane/tail]. */
 export const HORSE_COATS: [string, string, string][] = [
@@ -94,6 +109,9 @@ export function rollVariant(kind: MobKind): number {
   if (kind === 'cat') return (Math.random() * CAT_COATS.length) | 0;
   if (kind === 'villager') return (Math.random() * VILLAGER_OUTFITS.length) | 0;
   if (kind === 'rabbit') return (Math.random() * RABBIT_COATS.length) | 0;
+  // piglins: bit 0 = crossbow (else golden sword), bit 1 = golden helmet
+  if (kind === 'piglin') return (Math.random() < 0.5 ? 1 : 0) | (Math.random() < 0.2 ? 2 : 0);
+  if (kind === 'magma_cube') { const r = Math.random(); return r < 0.4 ? 0 : r < 0.75 ? 1 : 2; }
   if (kind === 'sheep') {
     const total = SHEEP_COATS.reduce((s, c) => s + c[2], 0);
     let r = Math.random() * total;
@@ -236,6 +254,13 @@ export class MobModels {
       case 'cinderling': return this.cinderling(g, mats, done);
       case 'ashstalker': return this.ashstalker(g, mats, done);
       case 'emberghast': return this.emberghast(g, mats, done);
+      case 'piglin': return this.piglin(g, mats, limbs, done, variant, false);
+      case 'zombified_piglin': return this.piglin(g, mats, limbs, done, 0, true);
+      case 'hoglin': return this.hoglin(g, mats, limbs, done);
+      case 'strider': return this.strider(g, mats, limbs, done);
+      case 'blaze': return this.blaze(g, mats, limbs, done);
+      case 'wither_skeleton': return this.witherSkeleton(g, mats, done);
+      case 'magma_cube': return this.magmaCube(g, mats, limbs, done, variant);
       default: return this.phantom(g, mats, done);
     }
   }
@@ -920,6 +945,444 @@ export class MobModels {
       }
     }
     return done({ legs, legLen: 0.34 });
+  }
+
+  // --- nether denizens (vanilla-proportioned) ----------------------------------------
+
+  /** A golden (or stone) sword gripped in a fist: the blade juts forward and a
+   *  little up from the hand, like a held item in vanilla. */
+  private sword(key: string, blade: string, bladeS: string, mats: THREE.MeshLambertMaterial[], u = P): THREE.Group {
+    const s = new THREE.Group();
+    const bladeM = this.mat(this.skin(`${key}_blade`, blade, bladeS, (ctx) => px(ctx, '#ffffff', 0, 0, 8, 1), 0.2), mats);
+    const edgeM = this.mat(this.skin(`${key}_edge`, bladeS, blade), mats);
+    const gripM = this.mat(this.skin('sword_grip', '#5a3a1e', '#4a2e16'), mats);
+    s.add(this.box(1.2 * u, 1.2 * u, 3 * u, gripM, 0, 0, 0));
+    s.add(this.box(1 * u, 1.2 * u, 1 * u, edgeM, 0, 0, 2 * u));           // pommel
+    s.add(this.box(4.4 * u, 1.4 * u, 1.2 * u, edgeM, 0, 0, -2 * u));       // crossguard
+    s.add(this.box(0.8 * u, 1.8 * u, 9 * u, bladeM, 0, 0, -7 * u));        // blade
+    s.add(this.box(0.7 * u, 1 * u, 1.4 * u, bladeM, 0, 0, -12 * u));       // tip
+    s.position.set(0, -10 * u, -0.5 * u);
+    s.rotation.x = 0.3;
+    return s;
+  }
+
+  /** Piglin / zombified piglin: a wide 10×8×8 head with a snout, tusks and
+   *  floppy ears on the standard biped body. Piglins wear a leather belt +
+   *  loincloth and carry a golden sword or a crossbow (variant bit 0), some
+   *  in a golden helmet (bit 1); zombified ones rot green with a bared skull
+   *  and ribs. */
+  private piglin(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done,
+    variant: number, zombie: boolean): Built {
+    const Z = zombie ? 'z' : 'p';
+    const skinC = zombie ? '#e0a494' : '#e8a690', skinS = zombie ? '#cf8f80' : '#d8937e';
+    const rot = '#7ea45a', rotD = '#5f8442';
+    const bone = '#e8e2d0', boneS = '#cbc4b0';
+    const leather = '#6a4327', leatherS = '#58371f';
+    const gold = '#f7cf45', goldS = '#d9a82a';
+    const mottle = (ctx: Ctx): void => {
+      px(ctx, skinS, 1, 1); px(ctx, skinS, 6, 2); px(ctx, skinS, 3, 5); px(ctx, skinS, 5, 6);
+      if (zombie) { px(ctx, rot, 0, 3, 2, 2); px(ctx, rotD, 0, 4); px(ctx, rot, 5, 5, 2, 2); px(ctx, rot, 6, 0, 2, 1); }
+    };
+    const hideM = this.mat(this.skin(`piglin_hide_${Z}`, skinC, skinS, mottle), mats);
+    const topM = this.mat(this.skin(`piglin_top_${Z}`, skinC, skinS, (ctx) => {
+      px(ctx, '#a8604e', 2, 0, 1, 8); px(ctx, '#a8604e', 5, 0, 1, 8); // bristly ridges
+      if (zombie) px(ctx, rot, 3, 2, 3, 3);
+    }), mats);
+    const skullSideM = zombie ? this.mat(this.skin('zpiglin_skullside', bone, boneS, (ctx) => {
+      px(ctx, skinC, 0, 0, 3, 8); px(ctx, rot, 0, 5, 2, 2); // flesh clings at the back
+      px(ctx, '#2a2420', 5, 3, 2, 2);                       // cheek hole
+    }), mats) : hideM;
+    const faceM = this.face(`piglin_face_${Z}`, skinC, skinS, (ctx, closed) => {
+      px(ctx, '#7a4034', 1, 2, 2, 1); px(ctx, '#7a4034', 5, 2, 2, 1); // heavy brows
+      if (zombie) {
+        // the mob's right half is bare skull with an empty socket
+        px(ctx, bone, 0, 0, 4, 8); px(ctx, boneS, 0, 7, 4, 1);
+        px(ctx, '#1a1512', 1, 3, 2, 2);
+        px(ctx, rot, 4, 0, 2, 1);
+        if (closed) px(ctx, skinS, 5, 3, 2, 1);
+        else { px(ctx, '#f2ece2', 6, 3); px(ctx, '#1c1414', 5, 3); }
+        return;
+      }
+      if (closed) { px(ctx, skinS, 1, 3, 2, 1); px(ctx, skinS, 5, 3, 2, 1); return; }
+      px(ctx, '#f4eee4', 1, 3); px(ctx, '#1c1414', 2, 3);
+      px(ctx, '#1c1414', 5, 3); px(ctx, '#f4eee4', 6, 3);
+    }, mats, limbs);
+    const snoutC = zombie ? '#e8b0a0' : '#f2b8a4';
+    const snoutM = this.mat(this.skin(`piglin_snout_${Z}`, snoutC, skinS), mats);
+    const snoutF = this.mat(this.skin(`piglin_snout_f_${Z}`, snoutC, skinS, (ctx) => {
+      px(ctx, '#7a3434', 1, 2, 2, 4); px(ctx, '#7a3434', 5, 2, 2, 4); // nostrils
+      px(ctx, '#ffd2c2', 0, 0, 8, 1);
+    }, 0), mats);
+    const tuskM = this.mat(this.skin('piglin_tusk', '#f2ead0', '#ddd3b4'), mats);
+    const earM = this.mat(this.skin(`piglin_ear_${Z}`, skinC, skinS, (ctx) => {
+      px(ctx, '#c8786a', 2, 1, 4, 6);
+      if (zombie) px(ctx, rot, 0, 5, 3, 3);
+    }), mats);
+    const torsoM = this.mat(this.skin(`piglin_torso_${Z}`, skinC, skinS, (ctx) => {
+      mottle(ctx);
+      if (zombie) {
+        // torn flesh over the ribs on one side
+        px(ctx, '#3a2a24', 0, 1, 3, 4);
+        for (let y = 1; y < 5; y += 2) px(ctx, bone, 0, y, 3, 1);
+      } else {
+        for (let i = 0; i < 6; i++) px(ctx, leather, 1 + i, i); // shoulder strap
+      }
+      px(ctx, leather, 0, 6, 8, 2);             // belt
+      px(ctx, gold, 3, 6, 2, 2); px(ctx, goldS, 4, 7); // buckle
+    }), mats);
+    const armM = this.mat(this.skin(`piglin_arm_${Z}`, skinC, skinS, (ctx) => {
+      if (!zombie) { px(ctx, gold, 0, 5, 8, 1); px(ctx, goldS, 0, 6, 8, 1); } // bracer
+      else { px(ctx, rot, 2, 2, 3, 2); px(ctx, bone, 0, 6, 2, 2); }
+    }), mats);
+    const legM = this.mat(this.skin(`piglin_leg_${Z}`, leather, leatherS, (ctx) => {
+      px(ctx, '#3e2616', 0, 6, 8, 2); // boots
+      if (zombie) { px(ctx, skinC, 1, 3, 2, 2); px(ctx, rot, 5, 1, 2, 2); } // torn trousers
+    }), mats);
+    const clothM = this.mat(this.skin(`piglin_cloth_${Z}`, leather, leatherS, (ctx) => px(ctx, '#8a5a34', 0, 0, 8, 1)), mats);
+
+    // 8×12×4 torso, belt + loincloth flap
+    g.add(this.box(8 * P, 12 * P, 4 * P, torsoM, 0, 18 * P, 0));
+    g.add(this.box(5 * P, 5 * P, 0.6 * P, clothM, 0, 10.5 * P, -2.3 * P));
+    g.add(this.box(5 * P, 5 * P, 0.6 * P, clothM, 0, 10.5 * P, 2.3 * P));
+    const head = new THREE.Group();
+    head.position.set(0, 24 * P, 0);
+    head.add(this.box(10 * P, 8 * P, 8 * P, [skullSideM, hideM, topM, hideM, hideM, faceM], 0, 4 * P, 0));
+    head.add(this.box(4 * P, 4 * P, 1 * P, this.front(snoutM, snoutF), 0, 2 * P, -4.5 * P));
+    for (const sx of [-1, 1]) {
+      head.add(this.box(1 * P, 2 * P, 1 * P, tuskM, sx * 2.5 * P, 1 * P, -4.5 * P));
+      head.add(this.box(1 * P, 1 * P, 1 * P, tuskM, sx * 2.5 * P, 2.5 * P, -4.3 * P)); // tusk tip curls up
+    }
+    const ears: THREE.Object3D[] = [];
+    for (const sx of [-1, 1]) {
+      const ear = new THREE.Group();
+      ear.position.set(sx * 5 * P, 6.5 * P, 0);
+      ear.add(this.box(1 * P, 5 * P, 4 * P, earM, sx * 0.5 * P, -2.5 * P, 0));
+      ear.rotation.z = sx * 0.55; // flop outward
+      head.add(ear);
+      ears.push(ear);
+    }
+    if (variant & 2 && !zombie) {
+      const helmM = this.mat(this.skin('piglin_helm', gold, goldS, (ctx) => px(ctx, '#fff0a0', 0, 0, 8, 1)), mats);
+      head.add(this.box(10.8 * P, 3.4 * P, 8.8 * P, helmM, 0, 7.6 * P, 0));
+      head.add(this.box(10.8 * P, 2 * P, 1 * P, helmM, 0, 6.2 * P, -4.1 * P)); // brow guard
+    }
+    g.add(head);
+    const legs = [
+      this.leg(4 * P, 12 * P, legM, -2 * P, 12 * P, 0),
+      this.leg(4 * P, 12 * P, legM, 2 * P, 12 * P, 0),
+    ];
+    const arms: THREE.Group[] = [];
+    for (const sx of [-1, 1]) {
+      const a = new THREE.Group();
+      a.position.set(sx * 6 * P, 22 * P, 0);
+      a.add(this.box(4 * P, 12 * P, 4 * P, armM, 0, -4 * P, 0));
+      arms.push(a);
+    }
+    // right hand: golden sword or a crossbow; left hand: the admired ingot
+    let weapon: THREE.Object3D;
+    if (variant & 1 && !zombie) {
+      const wood = this.mat(this.skin('xbow_stock', '#6e4a2a', '#5e3e22'), mats);
+      const iron = this.mat(this.skin('xbow_limb', '#6a6a70', '#58585e', (ctx) => px(ctx, '#9a9aa2', 0, 0, 8, 1)), mats);
+      const str = this.mat(this.skin('xbow_string', '#e6e2d8', '#d0ccc0'), mats);
+      const xb = new THREE.Group();
+      xb.position.set(0, -10 * P, -0.5 * P);
+      xb.add(this.box(1.6 * P, 11 * P, 1.6 * P, wood, 0, -3 * P, 0));
+      for (const sx of [-1, 1]) {
+        const limb = this.box(6 * P, 1.2 * P, 1.4 * P, iron, sx * 3 * P, 0, 0);
+        const lg = new THREE.Group();
+        lg.position.set(0, -7.5 * P, 0);
+        lg.rotation.z = -sx * 0.28; // tips sweep back toward the shooter
+        lg.add(limb);
+        xb.add(lg);
+      }
+      const string = this.box(10 * P, 0.4 * P, 0.4 * P, str, 0, -5.2 * P, 0);
+      string.name = 'string';
+      xb.add(string);
+      const bolt = this.box(0.6 * P, 8 * P, 0.6 * P, this.mat(this.skin('xbow_bolt', '#8a6a44', '#7a5c38', (ctx) => px(ctx, '#d8d8d8', 0, 7, 8, 1)), mats), 0, -7 * P, -0.9 * P);
+      bolt.name = 'bolt';
+      xb.add(bolt);
+      weapon = xb;
+    } else {
+      weapon = this.sword('gold_sword', gold, goldS, mats);
+    }
+    arms[1].add(weapon);
+    const ingot = this.box(2.4 * P, 1.6 * P, 4 * P, this.mat(this.skin('piglin_ingot', gold, goldS, (ctx) => px(ctx, '#fff4b0', 0, 0, 8, 2)), mats), 0, -10.5 * P, -1.5 * P);
+    ingot.visible = false;
+    arms[0].add(ingot);
+    g.add(...legs, ...arms);
+    return done({ legs, arms, head, ears, weapon, offhand: ingot, legLen: 12 * P });
+  }
+
+  /** Hoglin: a hulking 16×14×26 boar with a bristly dorsal mane, a long flat
+   *  head carried low (tilted 50° like vanilla), upturned tusks and flat ears.
+   *  Front legs stand taller than the hind ones. */
+  private hoglin(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done): Built {
+    const hide = '#c98c6e', hideS = '#b47659';
+    const hair = '#5e3d29', hairS = '#4c3120';
+    const bodyM = this.mat(this.skin('hoglin', hide, hideS, (ctx) => {
+      px(ctx, hair, 0, 0, 8, 2); px(ctx, hairS, 1, 2, 2, 1); px(ctx, hairS, 5, 2, 2, 1); // bristly back
+      px(ctx, '#d9a080', 0, 7, 8, 1);                                                  // pale belly
+    }, 0.16), mats);
+    const maneM = this.mat(this.skin('hoglin_mane', hair, hairS, (ctx) => {
+      for (let x = 0; x < 8; x += 2) px(ctx, '#7a5236', x, 0, 1, 3); // ragged tips
+    }, 0.3), mats);
+    const headM = this.mat(this.skin('hoglin_head', hide, hideS, (ctx) => px(ctx, hair, 0, 7, 8, 1)), mats);
+    // the head rides pitched down, so its top face is what faces forward: the
+    // small dark eyes sit on it near the brow
+    const browM = this.face('hoglin_brow', hide, hideS, (ctx, closed) => {
+      px(ctx, hair, 0, 0, 8, 1);
+      if (closed) { px(ctx, hideS, 1, 1, 2, 1); px(ctx, hideS, 5, 1, 2, 1); return; }
+      px(ctx, '#f0e6d8', 1, 1); px(ctx, '#1a1010', 2, 1);
+      px(ctx, '#1a1010', 5, 1); px(ctx, '#f0e6d8', 6, 1);
+    }, mats, limbs);
+    const snoutF = this.mat(this.skin('hoglin_snout', '#e2aa8e', '#d69c80', (ctx) => {
+      px(ctx, '#f0c2a8', 0, 0, 8, 2);
+      px(ctx, '#4a2020', 1, 3, 2, 3); px(ctx, '#4a2020', 5, 3, 2, 3); // nostrils
+    }, 0), mats);
+    const tuskM = this.mat(this.skin('hoglin_tusk', '#efe7cc', '#dcd2b2', (ctx) => px(ctx, '#fffaf0', 0, 0, 8, 2)), mats);
+    const earM = this.mat(this.skin('hoglin_ear', hide, hideS, (ctx) => px(ctx, '#e0a0a0', 2, 2, 4, 4)), mats);
+    const legM = this.mat(this.skin('hoglin_leg', hide, hideS, (ctx) => {
+      px(ctx, hair, 0, 0, 8, 2);
+      px(ctx, '#3a2418', 0, 7, 8, 1); // hooves
+    }), mats);
+
+    const trunk = new THREE.Group();
+    trunk.add(this.box(16 * P, 14 * P, 26 * P, bodyM, 0, 17 * P, 1 * P));
+    trunk.add(this.box(2 * P, 7 * P, 19 * P, maneM, 0, 27 * P, 0));       // dorsal mane
+    trunk.add(this.box(1.2 * P, 4 * P, 6 * P, maneM, 0, 23 * P, -13 * P)); // neck ruff
+    g.add(trunk);
+    const head = new THREE.Group();
+    head.position.set(0, 20 * P, -12 * P);
+    const skull = new THREE.Group();
+    skull.rotation.x = -0.87;
+    skull.add(this.box(14 * P, 6 * P, 19 * P, [headM, headM, browM, headM, headM, snoutF], 0, 0, -9.5 * P));
+    for (const sx of [-1, 1]) {
+      const tusk = new THREE.Group();
+      tusk.position.set(sx * 7.6 * P, 1 * P, -15 * P);
+      tusk.rotation.x = 0.55;       // swept back toward the eyes
+      tusk.rotation.z = -sx * 0.18; // and splayed a touch
+      tusk.add(this.box(2 * P, 9 * P, 2 * P, tuskM, 0, 4 * P, 0));
+      skull.add(tusk);
+      const ear = new THREE.Group();
+      ear.position.set(sx * 7 * P, 2 * P, -3 * P);
+      ear.rotation.z = sx * 0.6;
+      ear.add(this.box(6 * P, 1 * P, 4 * P, earM, sx * 3 * P, 0, 0));
+      skull.add(ear);
+    }
+    head.add(skull);
+    g.add(head);
+    const legs = [
+      this.leg(6 * P, 14 * P, legM, -4.5 * P, 14 * P, -8 * P),
+      this.leg(6 * P, 14 * P, legM, 4.5 * P, 14 * P, -8 * P),
+      this.leg(5 * P, 11 * P, legM, 5 * P, 11 * P, 10 * P),
+      this.leg(5 * P, 11 * P, legM, -5 * P, 11 * P, 10 * P),
+    ];
+    g.add(...legs);
+    return done({ legs, head, body: trunk, legLen: 13 * P });
+  }
+
+  /** Strider: a boxy 16×14×16 body on two stilt legs, with three rows of
+   *  bristles down each side. Red and warm on lava; purple and shivering off it. */
+  private strider(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done): Built {
+    const chill: NonNullable<LimbSet['chill']> = [];
+    const pair = (key: string, paint?: (ctx: Ctx) => void): THREE.MeshLambertMaterial => {
+      const warm = this.skin(`strider_${key}`, '#9e3b34', '#8a302b', paint);
+      const cold = this.skin(`strider_${key}_cold`, '#77608a', '#66517a', paint);
+      const m = this.mat(warm, mats);
+      chill.push({ mat: m, warm, cold });
+      return m;
+    };
+    const bodyM = pair('body', (ctx) => {
+      px(ctx, '#b8524a', 0, 0, 8, 1); // lighter crown
+      px(ctx, '#6e2420', 1, 4); px(ctx, '#6e2420', 5, 2); px(ctx, '#6e2420', 3, 6);
+    });
+    const faceM = pair('face', (ctx) => {
+      px(ctx, '#b8524a', 0, 0, 8, 1);
+      px(ctx, '#f4efe4', 1, 2, 2, 2); px(ctx, '#f4efe4', 5, 2, 2, 2); // big round eyes
+      px(ctx, '#1e1418', 2, 3); px(ctx, '#1e1418', 5, 3);
+      px(ctx, '#3a1214', 1, 5, 6, 1);                                // wide mouth
+      px(ctx, '#d88a80', 2, 6, 4, 1);                                // lower lip
+    });
+    const legM = pair('leg', (ctx) => px(ctx, '#5a1c1a', 0, 6, 8, 2));
+    const hairM = pair('hair', (ctx) => {
+      for (let x = 0; x < 8; x += 2) px(ctx, '#c86a58', x, 0, 1, 8); // strands
+    });
+    limbs.chill = chill;
+
+    const body = new THREE.Group();
+    body.add(this.box(16 * P, 14 * P, 16 * P, this.front(bodyM, faceM), 0, 23 * P, 0));
+    const hair: THREE.Object3D[] = [];
+    for (const sx of [-1, 1]) {
+      for (let i = 0; i < 3; i++) {
+        const h = new THREE.Group();
+        h.position.set(sx * 8 * P, (29 - i * 4.5) * P, 0);
+        h.add(this.box(11 * P, 0.8 * P, 15 * P, hairM, sx * 5.5 * P, 0, 0));
+        h.rotation.z = sx * (0.75 - i * 0.45); // top row fans up, the bottom one hangs
+        h.userData.baseZ = h.rotation.z;
+        h.userData.side = sx;
+        body.add(h);
+        hair.push(h);
+      }
+    }
+    // a short tuft on the crown
+    for (const sz of [-1, 1]) {
+      const h = new THREE.Group();
+      h.position.set(0, 30 * P, sz * 4 * P);
+      h.add(this.box(12 * P, 5 * P, 0.8 * P, hairM, 0, 2.5 * P, 0));
+      h.rotation.x = sz * 0.35;
+      h.userData.baseZ = 0;
+      h.userData.side = sz;
+      body.add(h);
+    }
+    g.add(body);
+    const legs = [
+      this.leg(4 * P, 16 * P, legM, -4 * P, 16 * P, 0),
+      this.leg(4 * P, 16 * P, legM, 4 * P, 16 * P, 0),
+    ];
+    g.add(...legs);
+    return done({ legs, body, hair, legLen: 16 * P });
+  }
+
+  /** Blaze: a glowing 8×8×8 head over three rings of four rods that spin
+   *  around an empty, smoking core. */
+  private blaze(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done): Built {
+    const yel = '#f4c434', yelS = '#e3a622';
+    const headM = this.mat(this.skin('blaze_head', yel, yelS, (ctx) => px(ctx, '#c47a14', 0, 7, 8, 1)), mats);
+    const faceM = this.face('blaze_face', yel, yelS, (ctx, closed) => {
+      px(ctx, '#c47a14', 0, 7, 8, 1);
+      px(ctx, '#b86a10', 1, 2, 2, 1); px(ctx, '#b86a10', 5, 2, 2, 1); // brow ridges
+      if (closed) { px(ctx, '#b86a10', 1, 3, 2, 1); px(ctx, '#b86a10', 5, 3, 2, 1); }
+      else { px(ctx, '#2a1204', 1, 3, 2, 2); px(ctx, '#2a1204', 5, 3, 2, 2); px(ctx, '#fff2b0', 1, 3); px(ctx, '#fff2b0', 6, 3); }
+      px(ctx, '#6a3208', 2, 6, 4, 1); // grim mouth
+    }, mats, limbs);
+    for (const m of [headM, faceM]) m.userData.ember = true;
+    const rodM = this.mat(this.skin('blaze_rod', '#f09a1c', '#ffcf48', (ctx) => {
+      px(ctx, '#ffe890', 0, 0, 8, 1); px(ctx, '#c86a10', 0, 7, 8, 1);
+    }, 0.2), mats);
+    rodM.userData.ember = true;
+    const head = new THREE.Group();
+    head.position.set(0, 21 * P, 0);
+    head.add(this.box(8 * P, 8 * P, 8 * P, this.front(headM, faceM), 0, 4 * P, 0));
+    g.add(head);
+    const rods: THREE.Object3D[] = [];
+    const rings: [number, number, number][] = [[16, 9, 0], [9, 7, Math.PI / 4], [2, 5, 0]]; // y, radius, phase
+    for (const [y, r, ph] of rings) {
+      const ring = new THREE.Group();
+      ring.position.y = y * P + 4 * P;
+      for (let i = 0; i < 4; i++) {
+        const a = ph + (i / 4) * Math.PI * 2;
+        const rod = this.box(2 * P, 8 * P, 2 * P, rodM, Math.cos(a) * r * P, 0, Math.sin(a) * r * P);
+        rod.userData.phase = i;
+        ring.add(rod);
+      }
+      g.add(ring);
+      rods.push(ring);
+    }
+    return done({ legs: [], head, rods, legLen: 8 * P });
+  }
+
+  /** Wither skeleton: the skeleton frame at 1.2× (2.4 blocks tall), soot-black
+   *  bones and a stone sword. */
+  private witherSkeleton(g: THREE.Group, mats: THREE.MeshLambertMaterial[], done: Done): Built {
+    const Q = P * 1.2;
+    const bone = '#343434', boneS = '#2a2a2a';
+    const boneM = this.mat(this.skin('wskel', bone, boneS, (ctx) => px(ctx, '#474747', 0, 0, 8, 1)), mats);
+    const darkM = this.mat(this.skin('wskel_dark', '#1c1c1c', '#161616'), mats);
+    const faceM = this.mat(this.skin('wskel_face', bone, boneS, (ctx) => {
+      px(ctx, '#0a0a0a', 1, 3, 2, 2); px(ctx, '#0a0a0a', 5, 3, 2, 2); // deep sockets
+      px(ctx, '#5a5a5a', 1, 3); px(ctx, '#5a5a5a', 6, 3);           // a dull glint
+      px(ctx, '#141414', 3, 5, 2, 1);
+      px(ctx, '#101010', 1, 6, 6, 1);
+      px(ctx, '#4a4a4a', 2, 6); px(ctx, '#4a4a4a', 4, 6); px(ctx, '#4a4a4a', 6, 6);
+    }), mats);
+    g.add(this.box(2 * Q, 12 * Q, 2 * Q, darkM, 0, 18 * Q, 1 * Q));
+    g.add(this.box(8 * Q, 1.5 * Q, 3 * Q, boneM, 0, 23 * Q, 0));
+    for (let i = 0; i < 3; i++) g.add(this.box(7 * Q, 1 * Q, 3.4 * Q, boneM, 0, (20.5 - i * 2.2) * Q, 0));
+    g.add(this.box(6 * Q, 2 * Q, 3 * Q, boneM, 0, 12.5 * Q, 0));
+    const head = new THREE.Group();
+    head.position.set(0, 24 * Q, 0);
+    head.add(this.box(8 * Q, 8 * Q, 8 * Q, this.front(boneM, faceM), 0, 4 * Q, 0));
+    g.add(head);
+    const legs = [
+      this.leg(2 * Q, 12 * Q, boneM, -2 * Q, 12 * Q, 0),
+      this.leg(2 * Q, 12 * Q, boneM, 2 * Q, 12 * Q, 0),
+    ];
+    const arms: THREE.Group[] = [];
+    for (const sx of [-1, 1]) {
+      const a = new THREE.Group();
+      a.position.set(sx * 5 * Q, 22 * Q, 0);
+      a.add(this.box(2 * Q, 12 * Q, 2 * Q, boneM, 0, -5 * Q, 0));
+      arms.push(a);
+    }
+    const weapon = this.sword('stone_sword', '#8c8c8c', '#707070', mats, Q);
+    weapon.position.set(0, -10.5 * Q, -0.5 * Q);
+    arms[1].add(weapon);
+    g.add(...legs, ...arms);
+    return done({ legs, arms, head, weapon, legLen: 12 * Q });
+  }
+
+  /** One 8×8 texture whose rows all repeat row `row` of `grid` — a magma cube
+   *  slice is one pixel tall, so its side faces must be vertically uniform. */
+  private rowSkin(key: string, grid: string[][], row: number): THREE.Texture {
+    return this.overlay(key, (ctx) => {
+      for (let x = 0; x < 8; x++) px(ctx, grid[row][x], x, 0, 1, 8);
+    });
+  }
+
+  /** Magma cube: eight stacked 8×8×1 slices of cracked crust around a molten
+   *  core. The slices spring apart as it leaps (vanilla's accordion hop), so
+   *  the core shows between them. Size 1/2/4 by variant. */
+  private magmaCube(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done, variant: number): Built {
+    const s = MAGMA_SIZES[variant] ?? 1;
+    const u = s / 16;
+    const crust = ['#3a1a10', '#4a2214', '#301208'];
+    const crack = ['#ff7a1a', '#ffb23a', '#d84a0c'];
+    // deterministic crack pattern: a few bright veins over the dark crust
+    const vein = (x: number, y: number, k: number): string => {
+      const h = Math.sin(x * 12.9898 + y * 78.233 + k * 37.719) * 43758.5453;
+      const r = h - Math.floor(h);
+      if (r > 0.8) return crack[(r * 97 | 0) % 3];
+      return crust[(r * 31 | 0) % 3];
+    };
+    const side: string[][] = [], front: string[][] = [], top: string[][] = [];
+    for (let y = 0; y < 8; y++) {
+      side.push([]); front.push([]); top.push([]);
+      for (let x = 0; x < 8; x++) {
+        side[y].push(vein(x, y, 1));
+        front[y].push(vein(x, y, 2));
+        top[y].push(vein(x, y, 3));
+      }
+    }
+    // the face: burning eyes two rows below the crown
+    for (const x0 of [1, 5]) {
+      front[2][x0] = '#ff4a12'; front[2][x0 + 1] = '#ff4a12';
+      front[3][x0] = '#ff4a12'; front[3][x0 + 1] = '#ff4a12';
+    }
+    front[3][2] = '#ffe066'; front[3][5] = '#ffe066';
+    const topTex = this.overlay('magma_top', (ctx) => {
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) px(ctx, top[y][x], x, y);
+    });
+    const topM = this.mat(topTex, mats);
+    const bottomM = this.mat(this.skin('magma_bottom', '#2a1008', '#3a1a10'), mats);
+    topM.userData.ember = true;
+    const body = new THREE.Group();
+    const slices: THREE.Object3D[] = [];
+    for (let i = 0; i < 8; i++) {
+      const row = 7 - i; // slice 0 is the bottom row of the pattern
+      const sideM = this.mat(this.rowSkin(`magma_side_${row}`, side, row), mats);
+      const frontM = this.mat(this.rowSkin(`magma_front_${row}`, front, row), mats);
+      sideM.userData.ember = true; frontM.userData.ember = true;
+      const sl = this.box(8 * u, 1 * u, 8 * u, [sideM, sideM, topM, bottomM, sideM, frontM], 0, (i + 0.5) * u, 0);
+      sl.userData.baseY = sl.position.y;
+      body.add(sl);
+      slices.push(sl);
+    }
+    const coreM = this.mat(this.skin('magma_core', '#ff9a24', '#ffd24a'), mats);
+    coreM.userData.ember = true;
+    coreM.userData.core = true;
+    body.add(this.box(4 * u, 4 * u, 4 * u, coreM, 0, 4 * u, 0));
+    g.add(body);
+    return done({ legs: [], body, slices, legLen: 4 * u });
   }
 
   // --- ambient critters -----------------------------------------------------------

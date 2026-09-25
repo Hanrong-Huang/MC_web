@@ -57,7 +57,8 @@ export interface Scape {
   hpFrac: number;
 }
 
-const HOSTILE = new Set(['zombie', 'skeleton', 'spider', 'creeper', 'phantom', 'cinderling', 'ashstalker', 'emberghast']);
+const HOSTILE = new Set(['zombie', 'skeleton', 'spider', 'creeper', 'phantom', 'cinderling', 'ashstalker', 'emberghast',
+  'piglin', 'zombified_piglin', 'hoglin', 'blaze', 'wither_skeleton', 'magma_cube']);
 const COLD = new Set(['snow', 'taiga']);
 // 18 probe directions: 6 axes + 12 edge diagonals (normalised)
 const RAYS: [number, number, number][] = [];
