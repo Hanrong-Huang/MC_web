@@ -7,13 +7,17 @@ import { Input } from './Input';
 import { Renderer } from './Renderer';
 import { AudioEngine } from './Audio';
 import { moveEntity, hasSupport, inWater, eyeInWater, boxIntersectsBlock, Vec3 } from './Physics';
-import { B, I, def, hasDef, breakTime, attackDamage, isSolid, canHarvest, FLOOR_BLOCKS, SELF_STACKING, mobLabel } from './Blocks';
+import {
+  B, I, def, hasDef, breakTime, attackDamage, isSolid, canHarvest, FLOOR_BLOCKS, SELF_STACKING, mobLabel,
+  attackCooldown, attackStrength, foodSaturation, pickItemFor, LEAF_BLOCKS,
+} from './Blocks';
 import { DoorFacing } from './World';
 import { Inventory } from './Inventory';
 import type { EntityManager } from './EntityManager';
 import type { Entity } from './EntityManager';
 import type { RayHit } from './World';
 import { mouseLookSens } from './ControlsSettings';
+import type { PlayerSave } from './Persistence';
 
 export type GameMode = 'survival' | 'creative';
 
@@ -30,6 +34,20 @@ const EYE_HEIGHT = 1.62;
 const EYE_SNEAK = 1.54;
 const REACH = 4.5;
 const BOX = { w: 0.6, h: 1.8 };
+/** a raised shield takes this long to come up before it starts blocking */
+const SHIELD_RAISE = 0.25;
+/** vanilla hurt-immunity window: repeat hits inside it only land the excess */
+const MOB_IFRAMES = 0.5;
+/** survival pause between finishing one block and starting to dig the next */
+const BREAK_DELAY = 0.25;
+
+/** Timed status effects (golden apples, spoiled food, milk clears them). */
+export type EffectId = 'regeneration' | 'absorption' | 'resistance' | 'fire_resistance' | 'hunger';
+export interface ActiveEffect { amp: number; t: number; total: number }
+export const EFFECT_LABELS: Record<EffectId, string> = {
+  regeneration: 'Regeneration', absorption: 'Absorption', resistance: 'Resistance',
+  fire_resistance: 'Fire Resistance', hunger: 'Hunger',
+};
 
 export interface PlayerDeps {
   world: World;
@@ -55,6 +73,10 @@ export interface PlayerDeps {
   onRedstoneUpdate: (x: number, y: number, z: number) => void;
   /** brief on-screen message (tool warnings, etc.) */
   toast: (msg: string) => void;
+  /** a gameplay milestone happened (advancement id) */
+  onAdvance?: (id: string) => void;
+  /** light a fire in an air cell (flint & steel); false if it can't burn there */
+  ignite?: (x: number, y: number, z: number) => boolean;
 }
 
 export class Player {
@@ -72,7 +94,19 @@ export class Player {
   onLadder = false;
   hp = 20;
   hunger = 20;
+  /** hidden hunger buffer drained before the hunger bar (vanilla saturation) */
+  saturation = 5;
   exhaustion = 0;
+  /** extra golden hearts from Absorption, soaked up before real health */
+  absorb = 0;
+  effects = new Map<EffectId, ActiveEffect>();
+  /** shield raised (right mouse held with a shield); blocking once fully up */
+  blocking = false;
+  /** looking through a spyglass (right mouse held) */
+  scoping = false;
+  /** seconds left on fire (set by fire/lava, put out by water or rain) */
+  fireT = 0;
+  private burnTickT = 0;
   /** remaining air bubbles (x2 half-bubbles like hearts), 20 = full */
   air = 20;
   dead = false;
@@ -90,8 +124,16 @@ export class Player {
 
   private deps!: PlayerDeps;
   private fallDist = 0;
-  private attackCooldown = 0;
+  /** seconds since the last swing: attack strength recharges over attackCooldown() */
+  private attackTimer = 10;
   private placeCooldown = 0;
+  private breakDelay = 0;
+  private blockT = 0;
+  private shieldKnockT = 0;
+  private regenEffT = 0;
+  /** running clock for per-mob hurt immunity */
+  private clock = 0;
+  private lastHits = new WeakMap<Entity, { t: number; dmg: number }>();
   private eatT = 0;
   private chewT = 0;
   /** true while actively consuming food — drives the held-item eating animation */
@@ -158,9 +200,121 @@ export class Player {
 
   selectSlot(i: number): void {
     const next = ((i % 9) + 9) % 9;
-    if (next !== this.inventory.selected) this.deps.audio.play('select');
+    if (next !== this.inventory.selected) {
+      this.deps.audio.play('select');
+      this.attackTimer = 0; // switching weapons resets the swing charge (vanilla)
+    }
     this.inventory.selected = next;
     this.inventory.onChange();
+  }
+
+  /** Swing strength 0..1 — how recharged the next attack is. */
+  attackCharge(): number {
+    return Math.min(1, this.attackTimer / attackCooldown(this.heldId()));
+  }
+
+  /** Shield fully raised and able to turn aside a blow. */
+  isBlocking(): boolean {
+    return this.blocking && this.blockT >= SHIELD_RAISE;
+  }
+
+  // --- status effects ---------------------------------------------------------
+
+  /** Apply (or strengthen/extend) a status effect, vanilla-style: a stronger
+   *  level replaces a weaker one; an equal level only ever extends. */
+  addEffect(id: EffectId, seconds: number, amp = 0): void {
+    const cur = this.effects.get(id);
+    if (cur && (cur.amp > amp || (cur.amp === amp && cur.t >= seconds))) return;
+    this.effects.set(id, { amp, t: seconds, total: seconds });
+    if (id === 'absorption') this.absorb = Math.max(this.absorb, 4 * (amp + 1));
+  }
+
+  clearEffects(): void {
+    this.effects.clear();
+    this.absorb = 0;
+    this.regenEffT = 0;
+  }
+
+  /** Active effects, longest-lived first, for the HUD. */
+  effectList(): { id: EffectId; amp: number; t: number; total: number }[] {
+    return [...this.effects].map(([id, e]) => ({ id, ...e })).sort((a, b) => b.t - a.t);
+  }
+
+  /** After-effects of finishing a food item. */
+  private applyFoodEffects(id: number): void {
+    if (id === I.GOLDEN_APPLE) {
+      this.addEffect('regeneration', 5, 1);
+      this.addEffect('absorption', 120, 0);
+    } else if (id === I.ENCHANTED_GOLDEN_APPLE) {
+      this.addEffect('regeneration', 20, 1);
+      this.addEffect('absorption', 120, 3);
+      this.addEffect('resistance', 300, 0);
+      this.addEffect('fire_resistance', 300, 0);
+    } else if (id === I.ROTTEN_FLESH && Math.random() < 0.8) {
+      this.addEffect('hunger', 30, 0);
+    } else if (id === I.CHICKEN && Math.random() < 0.3) {
+      this.addEffect('hunger', 30, 0);
+    } else if (id === I.MILK_BUCKET) {
+      this.clearEffects();
+    }
+  }
+
+  // --- item tossing + pick block ---------------------------------------------
+
+  /** Q: toss one of the held item (or the whole stack) in the look direction. */
+  dropSelected(all: boolean): void {
+    if (this.dead) return;
+    const inv = this.inventory;
+    const s = inv.slots[inv.selected];
+    if (!s) return;
+    const n = all ? s.count : 1;
+    const d = this.lookDir();
+    const ey = this.pos.y + this.eyeHeight() - 0.3;
+    const e = this.deps.entities.spawnDrop(
+      this.pos.x + d.x * 0.3, ey, this.pos.z + d.z * 0.3, s.id, n, s.dur, s.mob,
+    );
+    // thrown clear of the player, with a pickup delay so it isn't slurped straight back
+    e.vel = { x: d.x * 7.5, y: d.y * 7.5 + 2.2, z: d.z * 7.5 };
+    e.age = -1.4;
+    s.count -= n;
+    if (s.count <= 0) inv.slots[inv.selected] = null;
+    this.deps.renderer.triggerSwing();
+    this.deps.audio.play('whoosh');
+    inv.onChange();
+  }
+
+  /** Middle click: select the targeted block's item in the hotbar. Creative
+   *  conjures a stack; survival pulls it out of the backpack if it's there. */
+  pickBlock(): void {
+    if (this.dead || !this.target) return;
+    const id = pickItemFor(this.target.id);
+    if (!id) return;
+    const inv = this.inventory;
+    for (let i = 0; i < 9; i++) {
+      if (inv.slots[i]?.id === id) { this.selectSlot(i); return; }
+    }
+    // hotbar destination: the selected slot if free, else the first free one,
+    // else swap out whatever is selected
+    let dst = inv.selected;
+    if (inv.slots[dst]) {
+      for (let i = 0; i < 9; i++) if (!inv.slots[i]) { dst = i; break; }
+    }
+    if (this.mode === 'creative') {
+      if (inv.slots[dst]) {
+        // keep the displaced stack by moving it into the backpack when there's room
+        const free = inv.slots.findIndex((sl, i) => i >= 9 && !sl);
+        if (free >= 0) inv.slots[free] = inv.slots[dst];
+      }
+      inv.slots[dst] = { id, count: def(id).stack };
+    } else {
+      const src = inv.slots.findIndex((sl, i) => i >= 9 && sl?.id === id);
+      if (src < 0) return;
+      const tmp = inv.slots[dst];
+      inv.slots[dst] = inv.slots[src];
+      inv.slots[src] = tmp;
+    }
+    this.selectSlot(dst);
+    inv.onChange();
   }
 
   // -------------------------------------------------------------------------
@@ -181,9 +335,18 @@ export class Player {
       input.consumeMouse();
     }
 
-    this.attackCooldown = Math.max(0, this.attackCooldown - dt);
+    this.attackTimer += dt;
+    this.clock += dt;
     this.placeCooldown = Math.max(0, this.placeCooldown - dt);
     this.hurtCooldown = Math.max(0, this.hurtCooldown - dt);
+    this.shieldKnockT = Math.max(0, this.shieldKnockT - dt);
+
+    // held-use items: raise a shield / peer through a spyglass while right is held
+    const useHeld = !uiOpen && input.active && input.rightDown && !this.riding;
+    const heldNow = this.heldId();
+    this.blocking = useHeld && heldNow === I.SHIELD;
+    this.blockT = this.blocking ? this.blockT + dt : 0;
+    this.scoping = useHeld && heldNow === I.SPYGLASS;
 
     // riding a horse: the horse is driven instead of the player's own body
     if (this.riding) { this.updateRiding(dt); return; }
@@ -201,13 +364,14 @@ export class Player {
       this.sneaking = (input.down('ControlLeft') || input.down('ControlRight')) && !this.flying;
     }
 
-    // sprint upkeep
+    // sprint upkeep (a raised shield or spyglass slows you to a shuffle)
     if (this.sprinting) {
-      const canSprint = fwd > 0 && !this.sneaking && (this.mode === 'creative' || this.hunger > 6);
+      const canSprint = fwd > 0 && !this.sneaking && !this.blocking && !this.scoping &&
+        (this.mode === 'creative' || this.hunger > 6);
       if (!canSprint) this.sprinting = false;
     }
     if ((input.down('ShiftLeft') || input.down('ShiftRight')) && fwd > 0 && !this.sneaking &&
-      (this.mode === 'creative' || this.hunger > 6)) {
+      !this.blocking && !this.scoping && (this.mode === 'creative' || this.hunger > 6)) {
       this.sprinting = true;
     }
 
@@ -241,6 +405,7 @@ export class Player {
     else if (this.sprinting) speed = SPRINT_SPEED;
     else speed = WALK_SPEED;
     if (wasInWater && !this.flying) speed *= 0.5;
+    if ((this.blocking || this.scoping) && !this.flying) speed *= 0.3;
 
     const underFeet = world.getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y - 0.1), Math.floor(this.pos.z));
     if (underFeet === B.SOUL_SAND && !this.flying) {
@@ -256,8 +421,9 @@ export class Player {
         Math.floor(this.pos.x), Math.floor(this.pos.y), Math.floor(this.pos.z), B.MAGMA, 2);
     }
 
-    // snappy acceleration with slight air control
-    const accelK = this.flying ? 9 : this.onGround ? 16 : wasInWater ? 7 : 4.2;
+    // snappy acceleration with slight air control; a sprint-jumper keeps most of
+    // the take-off boost through the air (that's what makes sprint-jumping fast)
+    const accelK = this.flying ? 9 : this.onGround ? 16 : wasInWater ? 7 : this.sprinting ? 1.8 : 4.2;
     const blend = Math.min(1, accelK * dt);
     this.vel.x += (wx * speed - this.vel.x) * blend;
     this.vel.z += (wz * speed - this.vel.z) * blend;
@@ -287,6 +453,11 @@ export class Player {
         this.vel.y = JUMP_VELOCITY;
         this.onGround = false;
         this.addExhaustion(this.sprinting ? 0.2 : 0.05);
+        // sprint-jump: a forward shove along the facing direction (vanilla +0.2 b/tick)
+        if (this.sprinting) {
+          this.vel.x += -Math.sin(this.yaw) * 2.2;
+          this.vel.z += -Math.cos(this.yaw) * 2.2;
+        }
       }
     }
 
@@ -329,10 +500,13 @@ export class Player {
           if (below !== B.AIR && hasDef(below)) {
             this.deps.entities.spawnBlockParticles(
               Math.floor(this.pos.x), Math.floor(this.pos.y), Math.floor(this.pos.z), below, 6);
-            this.deps.audio.step(def(below).sound);
+            this.deps.audio.step(def(below).sound, below);
           }
         }
-        const dmg = Math.floor(this.fallDist - 3);
+        let dmg = Math.floor(this.fallDist - 3);
+        // a hay bale breaks the fall (80% less damage, like vanilla)
+        const landedOn = world.getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y - 0.5), Math.floor(this.pos.z));
+        if (landedOn === B.HAY_BALE) dmg = Math.floor(dmg * 0.2);
         if (dmg > 0 && this.mode === 'survival') {
           this.damage(dmg, undefined, 'Fell from a high place');
           this.addExhaustion(0.3);
@@ -349,9 +523,12 @@ export class Player {
       if (this.stepDist > 2.1) {
         this.stepDist = 0;
         const below = world.getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y - 0.5), Math.floor(this.pos.z));
-        if (below !== B.AIR && hasDef(below)) this.deps.audio.step(def(below).sound);
+        if (below !== B.AIR && hasDef(below)) this.deps.audio.step(def(below).sound, below);
       }
-      this.addExhaustion(Math.hypot(this.vel.x, this.vel.z) * dt * (this.sprinting ? 0.02 : 0.002));
+      // vanilla: walking is free, sprinting costs 0.1 exhaustion per metre
+      if (this.sprinting) this.addExhaustion(Math.hypot(this.vel.x, this.vel.z) * dt * 0.1);
+    } else if (inWaterNow && !this.flying) {
+      this.addExhaustion(Math.hypot(this.vel.x, this.vel.z) * dt * 0.01); // swimming
     }
 
     // cactus contact damage
@@ -382,16 +559,25 @@ export class Player {
       const x0 = Math.floor(this.pos.x - hw), x1 = Math.floor(this.pos.x + hw);
       const y0 = Math.floor(this.pos.y), y1 = Math.floor(this.pos.y + BOX.h);
       const z0 = Math.floor(this.pos.z - hw), z1 = Math.floor(this.pos.z + hw);
-      let inLava = false;
+      let inLava = false, inFire = false;
       for (let by = y0; by <= y1 && !inLava; by++) {
         for (let bz = z0; bz <= z1 && !inLava; bz++) {
           for (let bx = x0; bx <= x1 && !inLava; bx++) {
-            if (world.getBlock(bx, by, bz) === B.LAVA) inLava = true;
+            const id = world.getBlock(bx, by, bz);
+            if (id === B.LAVA) inLava = true;
+            else if (id === B.FIRE) inFire = true;
           }
         }
       }
+      const fireProof = this.effects.has('fire_resistance');
+      if (inFire && !inLava) {
+        this.lavaT = 0.5;
+        if (!fireProof) this.fireT = Math.max(this.fireT, 8);
+        this.damage(1, undefined, 'Went up in flames');
+      }
       if (inLava) {
         this.lavaT = 0.5;
+        if (!fireProof) this.fireT = Math.max(this.fireT, 15);
         this.damage(3, undefined, 'Tried to swim in lava');
         // rising embers around the player
         const px = this.pos.x, py = this.pos.y + 0.5, pz = this.pos.z;
@@ -401,6 +587,19 @@ export class Player {
           );
         }
       }
+    }
+
+    // on fire: a point of damage a second until it burns out or water douses it
+    if (inWaterNow || this.mode === 'creative') this.fireT = 0;
+    if (this.fireT > 0) {
+      this.fireT = Math.max(0, this.fireT - dt);
+      this.burnTickT += dt;
+      if (this.burnTickT >= 1) {
+        this.burnTickT = 0;
+        if (!this.effects.has('fire_resistance')) this.damage(1, undefined, 'Burned to death');
+      }
+    } else {
+      this.burnTickT = 0;
     }
 
     // portal detection
@@ -577,11 +776,20 @@ export class Player {
       return;
     }
 
-    const total = breakTime(t.id, this.heldId());
+    // a short beat between finished blocks, like vanilla's 5-tick dig delay
+    if (this.breakDelay > 0) {
+      this.breakDelay -= dt;
+      return;
+    }
+    let total = breakTime(t.id, this.heldId());
     if (!isFinite(total)) {
       this.cancelBreaking();
       return;
     }
+    // vanilla penalties: digging with your head underwater or while airborne
+    // (jumping, swimming, clinging to a ladder) is five times slower
+    if (this.underwaterEye()) total *= 5;
+    if (!this.onGround && !this.flying) total *= 5;
     if (!this.breaking || this.breaking.x !== t.x || this.breaking.y !== t.y || this.breaking.z !== t.z) {
       this.breaking = { x: t.x, y: t.y, z: t.z, progress: 0, time: total };
     }
@@ -591,7 +799,7 @@ export class Player {
     if (this.swingRepeat <= 0) {
       this.swingRepeat = 0.26;
       renderer.triggerSwing();
-      audio.dig(def(t.id).sound, 0.25);
+      audio.dig(def(t.id).sound, 0.25, 1, t.id);
       this.deps.entities.spawnHitParticles(t.x, t.y, t.z, t.nx, t.ny, t.nz, t.id);
     }
 
@@ -599,7 +807,8 @@ export class Player {
       this.breakBlock(t.x, t.y, t.z, true);
       this.breaking = null;
       renderer.setCrack(null, -1);
-      this.addExhaustion(0.03);
+      this.addExhaustion(0.005);
+      if (total > 0.05) this.breakDelay = BREAK_DELAY;
     } else {
       renderer.setCrack(this.breaking, Math.floor(this.breaking.progress * 10));
     }
@@ -659,7 +868,7 @@ export class Player {
     }
 
     world.setBlock(x, y, z, B.AIR);
-    audio.dig(def(id).sound, 1);
+    audio.dig(def(id).sound, 1, 1, id);
     entities.spawnBlockParticles(x, y, z, id, 12);
     this.deps.onBreak(id);
 
@@ -673,14 +882,24 @@ export class Player {
     }
 
     if (withDrops && this.mode === 'survival') {
-      if (def(id).hardness > 0) this.damageHeldTool(true);
+      if (def(id).hardness > 0) {
+        // vanilla wear: a sword used as a pick loses two points per block
+        this.damageHeldTool(true);
+        if (this.inventory.getSelected() && def(this.heldId()).toolInfo?.kind === 'sword') this.damageHeldTool(true);
+      }
       if (!canHarvest(id, this.heldId())) return; // wrong tool tier: no drops
       // special drop tables
       if (id === B.GRAVEL) {
         entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, Math.random() < 0.25 ? I.FLINT : B.GRAVEL, 1);
         return;
       }
-      if (id === B.LEAVES || id === B.BIRCH_LEAVES || id === B.SPRUCE_LEAVES) {
+      // shears clip leaves and grass tufts off whole instead of shredding them
+      const shears = this.heldId() === I.SHEARS;
+      if (shears && (LEAF_BLOCKS.has(id) || id === B.TALL_GRASS)) {
+        entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, id, 1);
+        return;
+      }
+      if (LEAF_BLOCKS.has(id)) {
         const r = Math.random();
         if (r < 0.06) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, B.SAPLING, 1);
         else if (id === B.LEAVES && r < 0.1) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.APPLE, 1);
@@ -771,7 +990,7 @@ export class Player {
     if (this.mode !== 'creative') this.inventory.slots[sel] = prev ?? null;
     this.placeCooldown = 0.35;
     this.deps.renderer.triggerSwing();
-    this.deps.audio.play('level');
+    this.deps.audio.play('equip');
     this.inventory.onChange();
   }
 
@@ -864,6 +1083,7 @@ export class Player {
         world.setBlock(bx, by, bz, B.AIR);
         world.lavaLevels.delete(`${bx},${by},${bz}`);
         this.swapHeldBucket(I.LAVA_BUCKET);
+        this.deps.onAdvance?.('hot_stuff');
         this.placeCooldown = 0.3;
         this.deps.renderer.triggerSwing();
         this.deps.audio.play('splash');
@@ -959,6 +1179,9 @@ export class Player {
     const held = this.inventory.getSelected();
     const heldDef = held ? def(held.id) : null;
 
+    // shield / spyglass are "hold to use" items driven from update()
+    if (held?.id === I.SHIELD || held?.id === I.SPYGLASS) return;
+
     // drawing a bow takes priority while held
     if (heldDef?.bow) {
       const hasAmmo = this.mode === 'creative' || this.inventory.count(I.ARROW) > 0;
@@ -1021,6 +1244,24 @@ export class Player {
       return;
     }
 
+    // bucket on a cow -> milk (shearing lives in EntityManager.interactMob)
+    if (held?.id === I.BUCKET && this.placeCooldown <= 0) {
+      const d = this.lookDir();
+      const hit = this.deps.entities.raycastMobs(
+        this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z, d.x, d.y, d.z, 3.5,
+      );
+      if (hit && hit.dist < (this.target?.dist ?? 4.5) && !hit.entity.baby) {
+        if (hit.entity.kind === 'cow') {
+          this.swapHeldBucket(I.MILK_BUCKET);
+          this.deps.onAdvance?.('milk');
+          this.placeCooldown = 0.4;
+          this.deps.renderer.triggerSwing();
+          audio.play('splash');
+          return;
+        }
+      }
+    }
+
     // mob interaction: tame wolves / open villager trades (before generic use)
     if (!this.sneaking && this.placeCooldown <= 0) {
       const hit = this.deps.entities.raycastMobs(
@@ -1028,7 +1269,16 @@ export class Player {
         this.lookDir().x, this.lookDir().y, this.lookDir().z, 3.5,
       );
       if (hit && hit.dist < (this.target?.dist ?? 4.5)) {
+        const woolly = hit.entity.kind === 'sheep' && !hit.entity.sheared;
         const res = this.deps.entities.interactMob(hit.entity, held?.id ?? 0);
+        // shears clipped the fleece: wear the shears and count the milestone
+        if (woolly && hit.entity.sheared) {
+          this.placeCooldown = 0.4;
+          this.deps.renderer.triggerSwing();
+          this.damageHeldTool();
+          this.deps.onAdvance?.('shear');
+          return;
+        }
         if (res === 'tamed') {
           this.placeCooldown = 0.4;
           if (this.mode === 'survival') this.inventory.consumeSelected(); // consume the bone
@@ -1068,20 +1318,31 @@ export class Player {
       return;
     }
 
-    // eating
-    if (this.mode === 'survival' && heldDef?.food && this.hunger < 20) {
+    // eating / drinking (golden apples and milk go down even on a full stomach)
+    if (this.mode === 'survival' && heldDef && (heldDef.food || heldDef.alwaysEdible) &&
+      (this.hunger < 20 || heldDef.alwaysEdible)) {
       this.eatT += dt;
       this.eating = true;
       this.chewT -= dt;
-      if (this.chewT <= 0) { this.chewT = 0.25; audio.play('eat'); }
+      if (this.chewT <= 0) { this.chewT = 0.25; audio.play(heldDef.id === I.MILK_BUCKET ? 'splash' : 'eat'); }
       if (this.eatT >= 1.6) {
         const eaten = heldDef.id;
-        this.hunger = Math.min(20, this.hunger + heldDef.food);
-        this.inventory.consumeSelected();
+        if (heldDef.food) {
+          this.hunger = Math.min(20, this.hunger + heldDef.food);
+          this.saturation = Math.min(this.hunger, this.saturation + foodSaturation(eaten));
+        }
+        if (eaten === I.MILK_BUCKET) {
+          this.inventory.slots[this.inventory.selected] = { id: I.BUCKET, count: 1 };
+          this.inventory.onChange();
+        } else {
+          this.inventory.consumeSelected();
+        }
         if (eaten === I.BEETROOT_SOUP || eaten === I.VEGETABLE_STEW) {
           const left = this.inventory.add(I.BOWL, 1);
           if (left > 0) this.deps.entities.spawnDrop(this.pos.x, this.pos.y + 1, this.pos.z, I.BOWL, left);
         }
+        this.applyFoodEffects(eaten);
+        if (eaten === I.GOLDEN_APPLE || eaten === I.ENCHANTED_GOLDEN_APPLE) this.deps.onAdvance?.('golden_apple');
         this.eatT = 0;
         audio.play('burp');
       }
@@ -1196,6 +1457,18 @@ export class Player {
       this.deps.renderer.triggerSwing();
       const t = this.target;
       if (this.tryIgnitePortal(t.x + t.nx, t.y + t.ny, t.z + t.nz)) {
+        audio.play('fuse');
+        this.damageHeldTool();
+        return;
+      }
+      // otherwise strike a flame: TNT is lit directly, anything else catches
+      // fire on the clicked face
+      if (t.id === B.TNT) {
+        this.deps.igniteTnt(t.x, t.y, t.z);
+        this.damageHeldTool();
+        return;
+      }
+      if (this.deps.ignite?.(t.x + t.nx, t.y + t.ny, t.z + t.nz)) {
         audio.play('fuse');
         this.damageHeldTool();
       } else {
@@ -1390,7 +1663,7 @@ export class Player {
       }
       this.placeCooldown = 0.22;
       this.deps.renderer.triggerSwing();
-      audio.dig(heldDef.sound, 0.8);
+      audio.dig(heldDef.sound, 0.8, 1, placeId);
       if (this.mode === 'survival') this.inventory.consumeSelected();
       else this.inventory.onChange();
     }
@@ -1422,32 +1695,78 @@ export class Player {
     return 0;
   }
 
-  /** Left mouse press: try attacking an entity first; swing regardless. */
+  /** Left mouse press: try attacking an entity first; swing regardless.
+   *  Vanilla 1.9 combat: a swing's strength recharges over the held item's
+   *  attack cooldown, crits need a charged swing, a charged sword sweeps
+   *  nearby mobs, and a sprinting hit knocks harder. */
   onLeftClick(): void {
     if (this.deps.isUIOpen() || this.dead || !this.deps.input.active) return;
     this.deps.renderer.triggerSwing();
-    if (this.attackCooldown > 0) return;
+    const charge = this.attackCharge();
+    this.attackTimer = 0;
     const d = this.lookDir();
     const ey = this.pos.y + this.eyeHeight();
     const blockDist = this.target?.dist ?? Infinity;
-    const hit = this.deps.entities.raycastMobs(this.pos.x, ey, this.pos.z, d.x, d.y, d.z, 3.5);
+    const ent = this.deps.entities;
+    const hit = ent.raycastMobs(this.pos.x, ey, this.pos.z, d.x, d.y, d.z, 3.5);
     if (hit && hit.entity !== this.riding && hit.dist < blockDist) {
-      this.attackCooldown = 0.5;
-      let dmg = attackDamage(this.heldId());
-      // critical hit: striking while falling (mid-air, descending) deals +50%
-      const crit = !this.onGround && this.vel.y < -0.15 && !this.flying && !this.onLadder;
-      if (crit) {
-        dmg = Math.ceil(dmg * 1.5);
-        const en = hit.entity;
-        this.deps.entities.spawnCritParticles(en.pos.x, en.pos.y + en.box.h * 0.6, en.pos.z);
+      const target = hit.entity;
+      const heldId = this.heldId();
+      let dmg = attackDamage(heldId) * attackStrength(charge);
+      // critical hit: a charged swing while falling (mid-air, descending) deals +50%
+      const crit = charge > 0.9 && !this.onGround && this.vel.y < -0.15 && !this.flying &&
+        !this.onLadder && !this.swimming;
+      if (crit) dmg *= 1.5;
+      dmg = Math.max(1, Math.round(dmg));
+      // hurt immunity: a repeat hit inside the window only deals what it exceeds
+      const last = this.lastHits.get(target);
+      if (last && this.clock - last.t < MOB_IFRAMES) {
+        if (dmg <= last.dmg) { this.deps.audio.play('whoosh'); return; }
+        const extra = dmg - last.dmg;
+        last.dmg = dmg;
+        dmg = extra;
+      } else {
+        this.lastHits.set(target, { t: this.clock, dmg });
       }
-      this.deps.entities.hurt(hit.entity, dmg, d.x, d.z, this, crit);
+      if (crit) {
+        ent.spawnCritParticles(target.pos.x, target.pos.y + target.box.h * 0.6, target.pos.z);
+        this.deps.onAdvance?.('critical');
+      }
+      ent.hurt(target, dmg, d.x, d.z, this, crit);
+      // sprint-hit: extra knockback, and the sprint ends (vanilla)
+      const kb = Math.hypot(d.x, d.z) || 1;
+      if (this.sprinting && charge > 0.9) {
+        target.vel.x += (d.x / kb) * 5;
+        target.vel.z += (d.z / kb) * 5;
+        this.sprinting = false;
+      } else if (charge > 0.9 && !crit && this.onGround && heldId !== 0 && hasDef(heldId) && def(heldId).toolInfo?.kind === 'sword') {
+        this.sweep(target, d.x / kb, d.z / kb);
+      }
       this.addExhaustion(0.1);
+      // weapons wear one point per hit; tools swung as weapons wear two
+      const kind = heldId && hasDef(heldId) ? def(heldId).toolInfo?.kind : undefined;
       this.damageHeldTool();
+      if (kind && kind !== 'sword' && this.heldId() === heldId) this.damageHeldTool();
     } else if (!this.target && (!hit || hit.entity === this.riding)) {
       // swung at empty air (nothing to break, nothing to hit) — a soft swish
       this.deps.audio.play('whoosh');
     }
+  }
+
+  /** Sword sweep: brush the mobs crowding the one you struck. Pets, tamed
+   *  animals and villagers are spared. */
+  private sweep(primary: Entity, dx: number, dz: number): void {
+    const ent = this.deps.entities;
+    let swept = false;
+    for (const m of ent.entities) {
+      if (m === primary || m.dead || !ent.isMob(m) || m.tamed || m.kind === 'villager' || m === this.riding) continue;
+      const ox = m.pos.x - primary.pos.x, oz = m.pos.z - primary.pos.z;
+      if (Math.hypot(ox, oz) > 1.6 || Math.abs(m.pos.y - primary.pos.y) > 1) continue;
+      if (Math.hypot(m.pos.x - this.pos.x, m.pos.z - this.pos.z) > 4) continue;
+      ent.hurt(m, 1, dx + ox * 0.5, dz + oz * 0.5, this);
+      swept = true;
+    }
+    if (swept) this.deps.audio.play('whoosh');
   }
 
   // --- health & hunger (20 Hz tick) -------------------------------------------
@@ -1482,21 +1801,55 @@ export class Player {
       this.drownT = 0;
     }
 
+    // status effects count down; Regeneration heals, Hunger burns exhaustion
+    for (const [id, ef] of this.effects) {
+      ef.t -= dts;
+      if (ef.t <= 0) {
+        this.effects.delete(id);
+        if (id === 'absorption') this.absorb = 0;
+      }
+    }
+    const regen = this.effects.get('regeneration');
+    if (regen) {
+      this.regenEffT += dts;
+      const period = 2.5 / (1 << Math.min(4, regen.amp)); // II heals twice as often
+      if (this.regenEffT >= period) {
+        this.regenEffT = 0;
+        if (this.hp < 20) this.hp = Math.min(20, this.hp + 1);
+      }
+    } else {
+      this.regenEffT = 0;
+    }
+    const hungerFx = this.effects.get('hunger');
+    if (hungerFx) this.addExhaustion(0.1 * (hungerFx.amp + 1) * dts);
+
+    // exhaustion drains the hidden saturation buffer before the hunger bar
     while (this.exhaustion >= 4) {
       this.exhaustion -= 4;
-      this.hunger = Math.max(0, this.hunger - 1);
+      if (this.saturation > 0) this.saturation = Math.max(0, this.saturation - 1);
+      else this.hunger = Math.max(0, this.hunger - 1);
     }
 
-    if (this.hunger >= 18 && this.hp < 20) {
+    // natural regeneration (vanilla 1.11+): a full, well-fed bar heals fast
+    // (every half second, paid from saturation); 18+ hunger heals slowly
+    if (this.hp < 20 && this.hunger >= 20 && this.saturation > 0) {
       this.regenT += dts;
-      if (this.regenT >= 2) {
+      if (this.regenT >= 0.5) {
         this.regenT = 0;
         this.hp = Math.min(20, this.hp + 1);
-        this.addExhaustion(1.5);
+        this.addExhaustion(Math.min(this.saturation, 6));
+      }
+    } else if (this.hp < 20 && this.hunger >= 18) {
+      this.regenT += dts;
+      if (this.regenT >= 4) {
+        this.regenT = 0;
+        this.hp = Math.min(20, this.hp + 1);
+        this.addExhaustion(6);
       }
     } else {
       this.regenT = 0;
     }
+
 
     if (this.hunger <= 0) {
       this.starveT += dts;
@@ -1516,6 +1869,18 @@ export class Player {
   damage(amount: number, source?: Entity, cause?: string): void {
     if (this.mode === 'creative' || this.dead) return;
     if (this.hurtCooldown > 0) return;
+    // Fire Resistance shrugs off lava, magma and fireballs entirely
+    if (this.effects.has('fire_resistance') && cause && /lava|magma|fireball|flames|burn/i.test(cause)) return;
+    // a raised shield turns aside melee from the front, projectiles and blasts
+    if (this.isBlocking() && this.shieldCovers(source, cause)) {
+      this.hurtCooldown = 0.5;
+      this.shieldKnockT = 0.15;
+      this.wearShield(amount);
+      this.deps.onAdvance?.('shield_block');
+      this.deps.audio.play('arrowHit');
+      if (source) this.deps.entities.onOwnerHurt(source);
+      return;
+    }
     this.hurtCooldown = 0.5;
     if (cause) this.lastDamageCause = cause;
     // pets retaliate against whatever just hurt their owner
@@ -1527,6 +1892,16 @@ export class Player {
       amount = Math.max(0, Math.round(amount * (1 - Math.min(20, ap) * 0.04)));
       this.damageArmor();
     }
+    // Resistance: 20% less per level
+    const res = this.effects.get('resistance');
+    if (res) amount = Math.max(0, Math.round(amount * (1 - Math.min(1, 0.2 * (res.amp + 1)))));
+    // Absorption hearts soak up damage before real health
+    if (this.absorb > 0 && amount > 0) {
+      const soak = Math.min(this.absorb, amount);
+      this.absorb -= soak;
+      amount -= soak;
+    }
+    this.addExhaustion(0.1);
     this.hp = Math.max(0, this.hp - amount);
     this.deps.audio.play('hurt');
     // screen shake scaled by the blow (capped so explosions don't nauseate)
@@ -1542,7 +1917,34 @@ export class Player {
     }
   }
 
+  /** Does the raised shield cover this hit? Melee must come from in front;
+   *  arrows, fireballs and explosions are met head-on and always blocked. */
+  private shieldCovers(source: Entity | undefined, cause: string | undefined): boolean {
+    if (source) {
+      const d = this.lookDir();
+      const tx = source.pos.x - this.pos.x, tz = source.pos.z - this.pos.z;
+      return d.x * tx + d.z * tz > 0;
+    }
+    return !!cause && /shot|fireball|blown|phantom/i.test(cause);
+  }
+
+  /** A blocked blow chips the shield: 1 + the damage it stopped. */
+  private wearShield(amount: number): void {
+    const sel = this.inventory.selected;
+    const s = this.inventory.slots[sel];
+    if (!s || s.id !== I.SHIELD) return;
+    const max = def(I.SHIELD).durability ?? 336;
+    s.dur = (s.dur ?? max) - (amount >= 3 ? 1 + Math.floor(amount) : 1);
+    if (s.dur <= 0) {
+      this.inventory.slots[sel] = null;
+      this.deps.audio.play('snap');
+      this.deps.toast('Your Shield broke!');
+    }
+    this.inventory.onChange();
+  }
+
   applyKnockback(dx: number, dz: number, power: number): void {
+    if (this.shieldKnockT > 0) power *= 0.3; // the shield took the brunt
     const len = Math.hypot(dx, dz) || 1;
     this.vel.x += (dx / len) * power;
     this.vel.z += (dz / len) * power;
@@ -1555,8 +1957,11 @@ export class Player {
     this.vel = { x: 0, y: 0, z: 0 };
     this.hp = 20;
     this.hunger = 20;
+    this.saturation = 5;
     this.air = 20;
     this.exhaustion = 0;
+    this.fireT = 0;
+    this.clearEffects();
     this.fallDist = 0;
     this.dead = false;
     this.flying = false;
@@ -1564,21 +1969,33 @@ export class Player {
     this.shakeT = 0;
   }
 
-  serialize() {
+  serialize(): PlayerSave {
     return {
       x: this.pos.x, y: this.pos.y, z: this.pos.z,
       pitch: this.pitch, yaw: this.yaw,
       health: this.hp, hunger: this.hunger,
       flying: this.flying,
+      saturation: this.saturation,
+      absorb: this.absorb,
+      effects: this.effectList().map(({ id, amp, t, total }) => ({ id, amp, t, total })),
     };
   }
 
-  load(p: { x: number; y: number; z: number; pitch: number; yaw: number; health: number; hunger: number; flying: boolean }): void {
+  load(p: PlayerSave): void {
     this.pos = { x: p.x, y: p.y, z: p.z };
     this.pitch = p.pitch;
     this.yaw = p.yaw;
     this.hp = p.health;
     this.hunger = p.hunger;
     this.flying = !!p.flying;
+    // older saves predate saturation/effects: start with vanilla's spawn buffer
+    this.saturation = Math.max(0, Math.min(this.hunger, p.saturation ?? 5));
+    this.effects.clear();
+    for (const e of p.effects ?? []) {
+      if (e.id in EFFECT_LABELS && e.t > 0) {
+        this.effects.set(e.id as EffectId, { amp: e.amp | 0, t: e.t, total: e.total || e.t });
+      }
+    }
+    this.absorb = this.effects.has('absorption') ? Math.max(0, p.absorb ?? 0) : 0;
   }
 }

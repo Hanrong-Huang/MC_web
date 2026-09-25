@@ -5,11 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="theme-color" content="#3a2a1d" />
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='10' fill='%2379553a'/><rect width='16' height='6' y='0' fill='%2365a843'/></svg>" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content="Voxelcraft — a from-scratch, fully procedural Minecraft-style sandbox in TypeScript + Three.js. Every texture, sound and world is generated in code." />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' shape-rendering='crispEdges'><rect width='16' height='16' fill='%2379553a'/><rect width='16' height='5' fill='%235d9b3d'/><rect x='2' y='5' width='2' height='2' fill='%235d9b3d'/><rect x='9' y='5' width='3' height='1' fill='%235d9b3d'/><rect x='5' y='9' width='2' height='2' fill='%23604030'/><rect x='11' y='11' width='2' height='2' fill='%23604030'/></svg>" />
     <title>Voxelcraft</title>
+    <style>
+      /* boot splash: visible before the bundle (and its CSS) has loaded */
+      #boot {
+        position: fixed; inset: 0; z-index: 1000; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 14px;
+        background: #2a1e15 repeating-conic-gradient(#33251a 0 25%, #2a1e15 0 50%) 0 0 / 16px 16px;
+        color: #e0e0e0; font: 14px 'Lucida Console', Monaco, 'DejaVu Sans Mono', monospace;
+        text-shadow: 2px 2px #000; transition: opacity 0.3s;
+      }
+      #boot .bar { width: 200px; height: 8px; border: 2px solid #fff; padding: 1px; background: #000; overflow: hidden; }
+      #boot .bar i { display: block; height: 100%; width: 40%; background: #7fcf5f; animation: boot 1.1s ease-in-out infinite alternate; }
+      @keyframes boot { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+    </style>
   </head>
   <body>
+    <div id="boot" role="status" aria-live="polite">
+      <div>Loading Voxelcraft…</div>
+      <div class="bar"><i></i></div>
+    </div>
+    <noscript><p style="color:#fff;font-family:monospace;padding:20px">Voxelcraft needs JavaScript and WebGL to run.</p></noscript>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

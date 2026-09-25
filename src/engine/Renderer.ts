@@ -166,6 +166,8 @@ export class Renderer {
   private eatAmt = 0;     // 0..1 eased eating raise
   private eatTarget = 0;  // target set each frame by setEating
   private eatPhase = 0;   // chew oscillator
+  private blockAmt = 0;    // 0..1 eased shield raise (setBlocking)
+  private blockTarget = 0;
   private bobT = 0;
   private atlas: Atlas;
   private heldLight: THREE.HemisphereLight;
@@ -605,6 +607,11 @@ export class Renderer {
     this.bowCharge = Math.max(0, Math.min(1, charge));
   }
 
+  /** Raise the held shield into a blocking guard (target 1) or lower it. */
+  setBlocking(on: boolean): void {
+    this.blockTarget = on ? 1 : 0;
+  }
+
   /** Drive the eating animation: target 1 while chewing, 0 otherwise. */
   setEating(on: boolean): void {
     this.eatTarget = on ? 1 : 0;
@@ -670,6 +677,19 @@ export class Renderer {
       return;
     }
 
+    // shield guard: swing the shield in toward the centre, face-on to the view
+    this.blockAmt += (this.blockTarget - this.blockAmt) * Math.min(1, dt * 14);
+    if (this.blockAmt > 0.01) {
+      const b = this.blockAmt;
+      this.heldGroup.position.set(0.42 - b * 0.4, -0.36 + bob - lower - b * 0.04, -0.62 - b * 0.3);
+      this.heldGroup.rotation.set(0, 0.25 + b * 0.15, 0);
+      if (this.heldMesh) {
+        const k = 1 - b;
+        this.heldMesh.rotation.set(this.heldIdleRot.x * k, this.heldIdleRot.y * k + b * 0.2, this.heldIdleRot.z * k);
+      }
+      return;
+    }
+
     this.heldGroup.position.set(
       0.42 - swingAngle * 0.18,
       -0.36 + bob - swingAngle * 0.10 - lower,
@@ -690,15 +710,17 @@ export class Renderer {
   }
 
   private buildExtrudedItem(sprite: HTMLCanvasElement): THREE.Mesh {
-    const isMetallic = this.heldId !== 0 && (
+    // golden apples/carrots are food, not metal; and without an environment
+    // map a high metalness renders the sprite near-black, so keep it a sheen
+    const isMetallic = this.heldId !== 0 && !def(this.heldId).food && (
       def(this.heldId).name.includes('iron') ||
       def(this.heldId).name.includes('gold') ||
       def(this.heldId).name.includes('diamond')
     );
     const mat = new THREE.MeshStandardMaterial({
       vertexColors: true,
-      roughness: isMetallic ? 0.22 : 0.8,
-      metalness: isMetallic ? 0.82 : 0.05,
+      roughness: isMetallic ? 0.4 : 0.8,
+      metalness: isMetallic ? 0.3 : 0.05,
     });
     return new THREE.Mesh(extrudeSpriteGeometry(sprite, 0.56), mat);
   }

@@ -17,16 +17,24 @@ export interface ChestSave {
 
 export type BlockEntitySave = FurnaceSave | ChestSave;
 
+export interface PlayerSave {
+  x: number; y: number; z: number;
+  pitch: number; yaw: number;
+  health: number; hunger: number;
+  flying: boolean;
+  /** hidden hunger buffer (absent in older saves) */
+  saturation?: number;
+  /** golden Absorption hearts left */
+  absorb?: number;
+  /** active status effects: id, level (0 = I), seconds left, full duration */
+  effects?: { id: string; amp: number; t: number; total: number }[];
+}
+
 export interface SaveState {
   version: number;
   seed: number;
   gameMode: 'survival' | 'creative';
-  player: {
-    x: number; y: number; z: number;
-    pitch: number; yaw: number;
-    health: number; hunger: number;
-    flying: boolean;
-  };
+  player: PlayerSave;
   inventory: { slots: MaybeSlot[]; selected: number; armor?: MaybeSlot[] };
   dimension?: 'overworld' | 'nether';
   /** chunk key "cx,cz" -> RLE bytes */
@@ -61,6 +69,8 @@ export interface SaveState {
   pets?: { kind: string; x: number; y: number; z: number; hp: number; sitting: boolean }[];
   /** unlocked advancement ids */
   advancements?: string[];
+  /** burning fires: "dimension|x,y,z" + seconds of burn left */
+  fires?: { k: string; t: number }[];
   lastPlayed: number;
 }
 

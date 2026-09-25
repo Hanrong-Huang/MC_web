@@ -15,6 +15,7 @@ import { AudioEngine } from './engine/Audio';
 import type { AmbientEnv } from './engine/Audio';
 import { TouchControls, isTouchDevice } from './ui/TouchControls';
 import { HUD, ContainerView } from './ui/HUD';
+import { StatusHUD } from './ui/StatusHUD';
 import { SaveDB, SaveState, ChestSave, FurnaceSave, exportWorld, importWorld } from './engine/Persistence';
 import type { BlockEntitySave } from './engine/Persistence';
 import { FurnaceState, ChestState } from './engine/Inventory';
@@ -29,6 +30,7 @@ import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef, isSolid
 import { Weather } from './engine/Weather';
 import { getControls, setControls } from './engine/ControlsSettings';
 import { AdvancementTracker } from './engine/Advancements';
+import { FireSystem } from './engine/Fire';
 import type { Entity } from './engine/EntityManager';
 
 const DAY_LENGTH = 1200; // 20 real minutes
@@ -98,6 +100,13 @@ class Game {
   private touch: TouchControls | null = null;
   private touchVisible = false;
   private ambientPT = 0;
+  /** golden hearts, effect badges, attack meter, spyglass vignette */
+  private status: StatusHUD;
+  private wasScoping = false;
+  /** spreading fires (flint & steel, lightning) */
+  private fire!: FireSystem;
+  private fireAcc = 0;
+  private mobBurnAcc = 0;
 
   constructor(app: App, slot: string, save: SaveState | null, fresh: { seed: number; mode: GameMode } | null) {
     this.app = app;
@@ -105,6 +114,7 @@ class Game {
     this.hud = app.hud;
     this.audio = app.audio;
     this.atlas = app.atlas;
+    this.status = new StatusHUD(app.root);
 
     const seed = save ? save.seed : fresh!.seed;
     this.world = new World(seed);
@@ -141,9 +151,13 @@ class Game {
         return biome === 'snow' || biome === 'taiga';
       },
     });
+    this.fire = new FireSystem(this.world, {
+      rainingAt: (x, y, z) => this.isRainingOn(x, y, z),
+      igniteTnt: (x, y, z) => this.entities.spawnTnt(x, y, z),
+    });
     this.adv.onChange = () => {
       let t: { id: string; label: string; icon: string } | null;
-      while ((t = this.adv.popToast())) this.hud.showAdvancementToast(t.icon, t.label);
+      while ((t = this.adv.popToast())) { this.hud.showAdvancementToast(t.icon, t.label); this.audio.play('advancement'); }
     };
 
     this.world.onChunkRemoved = (key) => this.renderer.removeChunk(key);
@@ -230,6 +244,8 @@ class Game {
       onDeath: () => this.onDeath(),
       onTeleport: () => this.teleportPlayerDimension(),
       toast: (msg) => this.hud.toast(msg),
+      onAdvance: (id) => this.adv.unlock(id),
+      ignite: (x, y, z) => this.fire.ignite(x, y, z),
     });
 
     if (save) {
@@ -239,6 +255,7 @@ class Game {
       this.dayTime = save.environment?.dayTime ?? 0.1;
       this.spawnPoint = save.spawn ?? null;
       if (save.advancements) this.adv.load(save.advancements);
+      this.fire.load(save.fires);
       
       const ow = this.world.dimData.overworld;
       for (const [k, v] of Object.entries(save.world ?? {})) ow.savedChunks.set(k, v);
@@ -329,15 +346,16 @@ class Game {
     this.hud.onCraft = (id) => {
       if (id === B.TABLE) this.adv.unlock('planks');
       if (id === I.STONE_PICK) this.adv.unlock('stone_age');
+      if (id === I.IRON_PICK) this.adv.unlock('iron_pick');
       if (id === I.BOW) this.adv.unlock('bow');
       if (id === I.BREAD) this.adv.unlock('bread');
     };
     this.hud.onTrade = () => { this.adv.unlock('trade'); this.adv.unlock('village'); };
 
     this.wireInput();
-    this.hud.onDropLeftover = (id, count) => {
+    this.hud.onDropLeftover = (id, count, dur, mob) => {
       const p = this.player.pos;
-      this.entities.spawnDrop(p.x, p.y + 1, p.z, id, count);
+      this.entities.spawnDrop(p.x, p.y + 1, p.z, id, count, dur, mob);
     };
 
     void this.pregenerate();
@@ -351,19 +369,17 @@ class Game {
     for (let i = 0; i < 400 && !this.disposed; i++) {
       this.world.update(px, pz, 14);
       this.processMeshing(14);
-      let ready = true;
       const pcx = Math.floor(px / CX), pcz = Math.floor(pz / CZ);
-      outer:
+      const cells: boolean[] = [];
       for (let dz = -2; dz <= 2; dz++) {
         for (let dx = -2; dx <= 2; dx++) {
           const c = this.world.getChunk(pcx + dx, pcz + dz);
-          if (!c || !c.ready || this.world.dirtySet.has(chunkKey(pcx + dx, pcz + dz))) {
-            ready = false;
-            break outer;
-          }
+          cells.push(!!c && c.ready && !this.world.dirtySet.has(chunkKey(pcx + dx, pcz + dz)));
         }
       }
-      if (ready) break;
+      const done = cells.filter(Boolean).length;
+      this.hud.setLoadingProgress(done / cells.length, cells);
+      if (done === cells.length) break;
       await new Promise((r) => requestAnimationFrame(r));
     }
     if (this.disposed) return;
@@ -506,6 +522,8 @@ class Game {
 
     this.input.onMouseDown = (button) => {
       if (button === 0) this.player.onLeftClick();
+      // middle click: pick block
+      if (button === 1 && this.state === 'playing' && this.input.active) this.player.pickBlock();
     };
 
     this.input.onWheel = (delta) => {
@@ -539,6 +557,12 @@ class Game {
           else if (this.state === 'playing' || this.hud.isAdvancementsOpen()) {
             this.input.exitLock();
             this.hud.toggleAdvancements(this.adv.list());
+          }
+          break;
+        case 'KeyQ':
+          // Q tosses one of the held item; Ctrl+Q (sneak+Q) tosses the stack
+          if (this.state === 'playing' && this.input.active) {
+            this.player.dropSelected(this.input.down('ControlLeft') || this.input.down('ControlRight'));
           }
           break;
         case 'KeyE':
@@ -679,6 +703,7 @@ class Game {
       this.containerPos = null;
     }
     this.state = 'container';
+    if (kind === 'chest') this.audio.play('chestOpen');
     this.input.exitLock();
     this.hud.openContainer(this.container, this.player.inventory, this.player.mode);
   }
@@ -763,14 +788,21 @@ class Game {
       this.hud.toast('The bed exploded!');
       return;
     }
-    this.spawnPoint = { x: x + 0.5, y: y + 1, z: z + 0.5 };
+    // using a bed claims it as the respawn point (announced once per bed)
+    const { foot: spawnFoot } = this.bedHalves(x, y, z);
+    const prev = this.spawnPoint;
+    const newSpawn = { x: spawnFoot.x + 0.5, y: y + 1, z: spawnFoot.z + 0.5 };
+    const spawnChanged = !prev || prev.x !== newSpawn.x || prev.y !== newSpawn.y || prev.z !== newSpawn.z;
+    this.spawnPoint = newSpawn;
     this.adv.unlock('bed');
     // sleep window: dusk (0.52) until just before dawn (0.98), or any time in a
     // thunderstorm — mirrors Minecraft's 12542..23459 tick window
     const storming = this.weather.kind === 'thunder' && this.weather.intensity > 0.2;
     const canSleep = (this.dayTime > 0.52 && this.dayTime < 0.98) || storming;
     if (!canSleep) {
-      this.hud.toast('You can only sleep at night or during a thunderstorm');
+      this.hud.toast(spawnChanged
+        ? 'Respawn point set - you can only sleep at night or during a thunderstorm'
+        : 'You can only sleep at night or during a thunderstorm');
       this.audio.play('fail');
       return;
     }
@@ -792,6 +824,7 @@ class Game {
     const dvx = facing === 1 ? -1 : facing === 3 ? 1 : 0;
     const dvz = facing === 0 ? -1 : facing === 2 ? 1 : 0;
     this.startSleep({ cx: head.x + 0.5, cz: head.z + 0.5, y, yaw: Math.atan2(dvx, dvz) });
+    if (spawnChanged) this.hud.toast('Respawn point set');
   }
 
   /** Get into bed: lie down, then fade out, skip to dawn and fade back in. The
@@ -855,10 +888,44 @@ class Game {
     this.hud.toast('Good morning');
   }
 
+  /** Is rain falling on this spot right now (Overworld, open sky, not snow)? */
+  private isRainingOn(x: number, y: number, z: number): boolean {
+    const w = this.weather;
+    if (this.world.dimension !== 'overworld' || w.kind === 'clear' || w.intensity < 0.3) return false;
+    const biome = this.world.generator.biomeAt(Math.floor(x), Math.floor(z));
+    if (biome === 'desert') return false;
+    return this.world.skyLight(Math.floor(x), Math.floor(y) + 1, Math.floor(z)) >= 0.99;
+  }
+
+  /** Fire upkeep at 20 Hz: flames spread/burn out, mobs standing in fire
+   *  scorch, and rain puts out a burning player. */
+  private tickFire(dt: number): void {
+    this.fireAcc += dt;
+    if (this.fireAcc >= 0.25) {
+      this.fire.tick(this.fireAcc);
+      this.fireAcc = 0;
+    }
+    const p = this.player;
+    if (p.fireT > 0 && this.isRainingOn(p.pos.x, p.pos.y + 1, p.pos.z)) p.fireT = 0;
+    this.mobBurnAcc += dt;
+    if (this.mobBurnAcc < 0.5 || this.fire.count === 0) return;
+    this.mobBurnAcc = 0;
+    for (const e of this.entities.entities) {
+      if (e.dead || !this.entities.isMob(e)) continue;
+      const bx = Math.floor(e.pos.x), bz = Math.floor(e.pos.z);
+      const by = Math.floor(e.pos.y);
+      if (this.world.getBlock(bx, by, bz) === B.FIRE || this.world.getBlock(bx, by + 1, bz) === B.FIRE) {
+        this.entities.hurt(e, 1, Math.random() - 0.5, Math.random() - 0.5);
+      }
+    }
+  }
+
   /** Lightning struck at (x,y,z): ignite TNT, scorch mobs, flash + thunder. */
   private onLightning(x: number, y: number, z: number): void {
-    this.audio.play('thunder');
+    this.audio.play('thunder', Math.max(0.35, 1 - Math.hypot(x - this.player.pos.x, z - this.player.pos.z) / 160));
     this.adv.unlock('thunder');
+    // the bolt can set the strike point alight
+    if (Math.random() < 0.6) this.fire.ignite(x, y, z);
     // ignite exposed TNT
     for (let dy = -1; dy <= 1; dy++) {
       for (let dz = -1; dz <= 1; dz++) {
@@ -880,6 +947,7 @@ class Game {
   private closeContainer(): void {
     if (this.state !== 'container') return;
     this.hud.closeContainer();
+    if (this.container?.kind === 'chest') this.audio.play('chestClose');
     this.container = null;
     this.containerPos = null;
     this.state = 'playing';
@@ -899,10 +967,25 @@ class Game {
           this.world.switchDimension('overworld');
           this.hud.setNetherTint(false);
         }
-        const spawn = this.spawnPoint ?? this.world.generator.findSpawn();
+        let spawn = this.spawnPoint ?? this.world.generator.findSpawn();
         // force-generate the landing chunks so the player doesn't free-fall
-        const scx = Math.floor(spawn.x / CX), scz = Math.floor(spawn.z / CZ);
-        for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) this.world.ensureChunk(scx + dx, scz + dz);
+        const ensureAround = (p: { x: number; z: number }): void => {
+          const scx = Math.floor(p.x / CX), scz = Math.floor(p.z / CZ);
+          for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) this.world.ensureChunk(scx + dx, scz + dz);
+        };
+        ensureAround(spawn);
+        // a bed spawn only holds while the bed survives and isn't walled in
+        if (this.spawnPoint) {
+          const bx = Math.floor(spawn.x), by = Math.floor(spawn.y), bz = Math.floor(spawn.z);
+          const bed = this.world.getBlock(bx, by - 1, bz);
+          const blocked = isSolid(this.world.getBlock(bx, by, bz)) || isSolid(this.world.getBlock(bx, by + 1, bz));
+          if ((bed !== B.BED && bed !== B.BED_HEAD) || blocked) {
+            this.spawnPoint = null;
+            spawn = this.world.generator.findSpawn();
+            ensureAround(spawn);
+            this.hud.toast('You have no home bed, or it was obstructed');
+          }
+        }
         this.player.respawn({ ...spawn });
         this.hud.hideDeath();
         this.state = 'playing';
@@ -1020,6 +1103,7 @@ class Game {
         s.id,
         s.count,
         s.dur,
+        s.mob,
       );
     };
     for (let i = 0; i < inv.slots.length; i++) {
@@ -1050,6 +1134,9 @@ class Game {
 
   private onInventoryChange(): void {
     this.hud.refreshHotbar(this.player.inventory, this.player.mode);
+    const worn = this.player.inventory.armor;
+    if (worn.some((a) => a)) this.adv.unlock('suit_up');
+    if (worn.some((a) => a && def(a.id).name.startsWith('diamond_'))) this.adv.unlock('diamond_armor');
     this.renderer.setHeldItem(this.player.heldId(), this.player.heldMob());
     // item-name popup when the hotbar selection (or its item) changes
     const sel = this.player.inventory.selected;
@@ -1063,6 +1150,11 @@ class Game {
           heldId === I.COMPASS ? 'Compass - carry it to show heading on the minimap' :
           heldId === I.CLOCK ? 'Clock - carry it to show world time' :
           heldId === I.HOE ? 'Hoe - right-click dirt or grass to make farmland' :
+          heldId === I.SHIELD ? 'Shield - hold right-click to block attacks from the front' :
+          heldId === I.SPYGLASS ? 'Spyglass - hold right-click to zoom in' :
+          heldId === I.SHEARS ? 'Shears - right-click a sheep for wool, or snip leaves whole' :
+          heldId === I.BUCKET ? 'Bucket - scoop water or lava, or milk a cow' :
+          heldId === I.MILK_BUCKET ? 'Milk Bucket - drink to clear all status effects' :
           heldId === I.SEEDS || heldId === I.CARROT || heldId === I.POTATO || heldId === I.BEETROOT_SEEDS
             ? `${def(heldId).label} - plant on farmland` :
             def(heldId).label;
@@ -1138,6 +1230,7 @@ class Game {
       villageSpawns: this.world.generator.villageSpawns.map((s) => ({ ...s })),
       pets: this.entities.savePets(),
       advancements: this.adv.serialize(),
+      ...(this.fire.count > 0 ? { fires: this.fire.serialize() } : {}),
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
       lastPlayed: Date.now(),
     };
@@ -1214,7 +1307,7 @@ class Game {
         this.rainSoundT -= dt;
         if (this.rainSoundT <= 0) {
           this.rainSoundT = 2.0;
-          this.audio.setRain(w.kind === 'thunder' ? 'thunder' : 'rain', w.intensity);
+          this.audio.setRain(w.kind === 'thunder' ? 'thunder' : 'rain', w.intensity, this.world.skyLight(Math.floor(pp.x), Math.floor(pp.y + 1.6), Math.floor(pp.z)) < 1);
         }
       } else {
         // clear or snow: ensure the rain bed is off
@@ -1274,7 +1367,7 @@ class Game {
     const cam = this.renderer.camera;
     const hSpeed = Math.hypot(this.player.vel.x, this.player.vel.z);
     let bobY = 0;
-    if (this.player.onGround && !this.player.flying && hSpeed > 0.5) {
+    if (this.hud.settings.bob && this.player.onGround && !this.player.flying && hSpeed > 0.5) {
       this.camBob += hSpeed * dt * 1.7;
       bobY = Math.sin(this.camBob * 2) * 0.045 * Math.min(1, hSpeed / 4.3);
     }
@@ -1295,10 +1388,19 @@ class Game {
       cam.position.y += (Math.random() - 0.5) * m;
       cam.position.z += (Math.random() - 0.5) * m;
     }
-    let targetFov = this.player.sprinting ? 80.5 : 70;
+    const baseFov = this.hud.settings.fov;
+    let targetFov = this.player.sprinting ? baseFov + 10.5 : baseFov;
     targetFov -= 12 * Math.min(1, this.player.bowCharge / 0.9); // bow-draw zoom
+    // spyglass: a hard 10x-ish zoom with the hand tucked away
+    const scoping = this.player.scoping && this.state === 'playing';
+    if (scoping) targetFov = 9;
+    if (scoping !== this.wasScoping) {
+      this.wasScoping = scoping;
+      this.renderer.setHeldVisible(!scoping);
+      if (scoping) { this.audio.play('click'); this.adv.unlock('spyglass'); }
+    }
     if (Math.abs(cam.fov - targetFov) > 0.1) {
-      cam.fov += (targetFov - cam.fov) * Math.min(1, 10 * dt);
+      cam.fov += (targetFov - cam.fov) * Math.min(1, (scoping ? 18 : 10) * dt);
       cam.updateProjectionMatrix();
     }
 
@@ -1312,16 +1414,30 @@ class Game {
     this.hud.setNetherTint(this.world.dimension === 'nether');
     this.renderer.setBowCharge(Math.min(1, this.player.bowCharge / 0.9));
     this.renderer.setEating(this.player.eating);
+    this.renderer.setBlocking(this.player.blocking && this.state === 'playing');
     this.renderer.updateChunkFades(dt);
     this.renderer.updateHeld(dt, this.player.isMoving());
     if (this.state === 'playing') {
       const br = this.player.breaking;
       const t = this.player.target;
+      const ld = this.player.lookDir();
+      const mh = this.entities.raycastMobs(this.player.pos.x, this.player.pos.y + this.player.eyeHeight(), this.player.pos.z, ld.x, ld.y, ld.z, 3.5);
       if (br) this.hud.updateCrosshair('breaking', br.progress);
+      else if (mh && mh.dist < (t?.dist ?? 4.5)) this.hud.updateCrosshair('mob');
       else if (t && t.id !== B.AIR && def(t.id).hardness >= 0) this.hud.updateCrosshair('target');
       else this.hud.updateCrosshair('idle');
     }
     this.hud.updateStats(this.player.hp, this.player.hunger, this.player.air, this.player.mode, this.player.inventory.armorPoints());
+    this.status.update({
+      visible: this.state === 'playing' || this.state === 'container' || this.state === 'paused',
+      survival: this.player.mode === 'survival',
+      absorb: this.player.absorb,
+      armor: this.player.inventory.armorPoints(),
+      effects: this.player.effectList(),
+      attackCharge: this.player.attackCharge(),
+      scoping,
+      onFire: this.player.fireT > 0 && this.player.mode === 'survival',
+    });
     this.hud.updatePets(this.entities.petStatus());
     if (this.state === 'container' && this.container?.kind === 'furnace') this.hud.updateFurnace();
     const showMinimap = this.player.inventory.count(I.COMPASS) > 0 || this.player.mode === 'creative';
@@ -1364,6 +1480,7 @@ class Game {
     }
     this.player.tick(0.05);
     this.entities.tick(isNight);
+    this.tickFire(0.05);
 
     // phantom spawns: 3+ nights without sleep, at night, survival mode
     if (isNight && this.player.mode === 'survival' && this.nightsAwake >= 3) {
@@ -2102,6 +2219,7 @@ class Game {
     this.audio.setRain('off');
     this.entities.clear();
     this.weather.dispose();
+    this.status.dispose();
     this.hud.hideGameUI();
     this.hud.hideLoading();
     this.renderer.dispose();
@@ -2134,6 +2252,7 @@ class App {
 
   async showMenu(): Promise<void> {
     this.game = null;
+    this.audio.setMenuMusic(true);
     let saves: Awaited<ReturnType<SaveDB['list']>> = [];
     try {
       saves = await this.db.list();
@@ -2216,6 +2335,7 @@ class App {
       if (!save) return;
     }
     this.hud.hideMenu();
+    this.audio.setMenuMusic(false);
     this.game = new Game(this, slot, save, fresh);
     void this.game;
   }

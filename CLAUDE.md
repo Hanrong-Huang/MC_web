@@ -31,7 +31,7 @@ Always run `npm run build` (or at least `npx tsc --noEmit`) before committing �
 
 - Commit message trailer (required): `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 - Match surrounding style: 2-space indent, single quotes, terse purpose-first comments.
-- Procedural art: mob skins via `EntityManager.skin()`, item/block pixel art via `Textures.ts` (`pixmap` + palettes), sounds/music via `Audio.ts`. New visuals follow these.
+- Procedural art: mob skins via `MobModels.skin()`, item/block pixel art via `Textures.ts` (`pixmap` + palettes), sounds/music via `Audio.ts`. New visuals follow these.
 - `.mjs` files in the repo root are headless test harnesses, not app code.
 
 ## Architecture map
@@ -41,7 +41,8 @@ See the table in `README.md` for the full per-file breakdown. The big/hot files:
 | File | Responsibility |
 |---|---|
 | `src/main.ts` | App + 20 Hz logic tick / rAF render loop, day cycle, autosave, `GameUIState` machine, dev hooks |
-| `src/engine/EntityManager.ts` | Drops + all mobs (box-limb models, `buildMobMesh`, `animateMob`, state-tree AI), arrows, TNT, particles, breeding |
+| `src/engine/EntityManager.ts` | Drops + all mobs (`animateMob`, state-tree AI, death topple), arrows, TNT, particles, breeding |
+| `src/engine/MobModels.ts` | Mob box-limb models sized from vanilla model boxes (`P = 1/16`), painted 8×8 skins, blink faces, coat/outfit variants |
 | `src/engine/Textures.ts` | Procedural 16×16 atlas, item sprites, isometric icons, `extrudeSpriteGeometry` (shared by held items + drops), resource-pack loader |
 | `src/engine/Renderer.ts` | Custom 2-channel-light chunk shader, sky/sun/moon/clouds/fog, chunk fade-in, held-item rig |
 | `src/engine/Mesher.ts` | Face culling, AO, skylight + BFS torch flood-fill, cross/torch/door models |
@@ -55,7 +56,7 @@ See the table in `README.md` for the full per-file breakdown. The big/hot files:
 - **GameUIState** (`main.ts`): `loading | playing | paused | container | dead | sleeping`. `isUIOpen()` is `state !== 'playing'`, which gates player input. Add new modal states here, not ad-hoc flags.
 - **Blocks/items registry is authoritative.** Add a block/item by extending the `B`/`I` enums + `itemDefs`/`CREATIVE_ITEMS` in `Blocks.ts`; everything (meshing, drops, icons, recipes) keys off `def(id)`.
 - **`extrudeSpriteGeometry`** in `Textures.ts` is shared between in-hand items and dropped items — change it once, both update.
-- **Mob skins**: `skin(key, base, speckle, face?)` paints an 8×8 canvas — clean flat base + gentle top-lit vertical shading + sparse speckle (intentionally *not* heavy noise; heavy noise made mobs unrecognizable). Face details are drawn after the base loop. Per-mob features (snouts, patches, markings) are added as extra boxes in `buildMobMesh`.
+- **Mob skins**: `skin(key, base, speckle, face?)` paints an 8×8 canvas — clean flat base + gentle top-lit vertical shading + sparse speckle (intentionally *not* heavy noise; heavy noise made mobs unrecognizable). Face details are drawn after the base loop (`face()` registers an open/closed pair for blinking). Per-mob features (snouts, horns, wool, markings) are extra boxes in `MobModels`. Skin textures must be `SRGBColorSpace` — read as linear they washed every mob out to grey.
 - **Wall torches**: a single `B.TORCH` id; orientation lives in `world.torchFacings` (Map keyed `"x,y,z"` → 0..3). Keep it in sync on place/break and in persistence.
 - **`emitBox` winding** (`Mesher.ts`): its six faces push corners *clockwise as seen from outside*, so the triangles are wound `0,2,1 / 0,3,2` via the local `quad()` helper. Winding them the other way renders every partial block (bed, pressure plate, lever, button, piston head) inside-out — the top face gets culled and you see the bottom plate through it, which reads as a hollow trough. The single-quad emitters (trapdoor panel, redstone wire, torch flame tip) are *not* routed through `quad()` and still use the plain `0,1,2 / 0,2,3` push.
 - **Pets are hostile *kinds*.** `isPet()` is `tamed && ownerName === 'player'` minus wolf/cat/horse, but a pet zombie still hits `MOB_STATS[kind].hostile`. Every "scan for a hostile to bite" loop must skip `m === self` and `m.tamed`, or pets bite themselves to death (3 dmg/0.7 s). `catch-throw-test.mjs` guards this.
@@ -63,6 +64,10 @@ See the table in `README.md` for the full per-file breakdown. The big/hot files:
 - **Persistence**: RLE chunk diffs + state in IndexedDB across 3 slots (`Persistence.ts`, `SaveState`). When you add persistent state, extend `SaveState` and both the save and load paths.
 - **Dev URL hooks**: `#night` starts just after sundown; `#debugmobs` spawns tameable/rideable mobs at spawn, stocks a tool kit, builds a torch pillar + a full 2-block bed; `#debugcatch` stocks catchers/amethyst and lines up throwable targets (zombie, creeper, skeleton, spider + a cow for the bounce case). Note `#debugmobs` places the bed directly in front of the player, which occludes forward screenshots — pan or reposition when capturing mobs. Both hooks expose `window.__game` / `window.__B`.
 - **`GameUIState.sleeping`** is frame-driven from `main.updateSleep(dt)`: 0–1.2 s lying awake, 1.2–1.9 s fade to black, night skips at 1.9 s, 1.9–2.7 s fade in, wake at 2.7 s. `leaveBed()` can cancel at any point (Leave Bed button / Esc), which is why the fade is an opacity the loop sets rather than a chain of `setTimeout`s.
+
+- **Fire** (`Fire.ts`, `main.fire`): only fires lit through `fire.ignite()` are tracked (spread, burn-out, rain) and saved as `SaveState.fires`; a raw `setBlock(B.FIRE)` is a flame that never burns out. `B.FIRE` is a glower (`Chunk.isGlower`) and a `CROSS_BLOCKS` billboard.
+- **Status effects / saturation** live on `Player` (`effects`, `absorb`, `saturation`, `fireT`) and persist through the optional `PlayerSave` fields; `StatusHUD.ts` draws golden hearts, effect badges, the attack-recharge meter, the spyglass vignette and the burning overlay by attaching to `#stats`/the root, so `HUD.ts` doesn't need to know about them.
+- **Combat** is 1.9-style: damage scales with `Player.attackCharge()` (per-item `attackCooldown()` in `Blocks.ts`), and repeat player hits on one mob within 0.5 s only land the excess (`Player.lastHits`).
 
 ## Testing
 
