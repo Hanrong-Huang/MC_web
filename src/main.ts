@@ -110,6 +110,7 @@ class Game {
     this.world = new World(seed);
     this.renderer = new Renderer(app.root, this.atlas);
     this.renderer.setViewDistance(this.world.viewDist);
+    this.renderer.blockAt = (x, y, z) => this.world.getBlock(x, y, z); // outline shape
     this.input = new Input(this.renderer.canvas);
     this.entities = new EntityManager(this.renderer.scene, this.world, this.atlas, this.audio);
     this.entities.setPlayer(this.player);
@@ -1347,7 +1348,9 @@ class Game {
     }
     if (this.hud.isDebugVisible()) this.updateDebug();
 
-    this.renderer.render(this.player.underwaterEye());
+    const eye = this.renderer.camera.position;
+    const inLava = this.world.getBlock(Math.floor(eye.x), Math.floor(eye.y), Math.floor(eye.z)) === B.LAVA;
+    this.renderer.render(this.player.underwaterEye() ? 'water' : inLava ? 'lava' : 'air');
   };
 
   private tick20(): void {
