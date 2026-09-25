@@ -279,7 +279,15 @@ const NETHERRACK_R = pal(['#3c0f0f', '#4d1414', '#5e1b1a', '#6e2321', '#7d2c29',
 // average biome tint applied to the untinted grass-side lip so it matches the tinted top
 const SIDE_TINT: RGB = [0.94, 1, 0.74];
 
+const stoneCache = new Map<number, Px>();
+/** Base stone (shared by every overworld ore so they sit flush with plain stone). */
 function stonePx(seed = 101): Px {
+  let p = stoneCache.get(seed);
+  if (!p) { p = paintStone(seed); stoneCache.set(seed, p); }
+  return p.copy();
+}
+
+function paintStone(seed: number): Px {
   const f = fbm(seed, [[4, 0.22], [8, 0.46], [16, 0.32]], 2.0);
   const p = rampFill(new Px(), STONE_R, f, seed + 1, 0.22);
   // vanilla stone's faint horizontal chisel strokes: dark dash, lit pixel above
@@ -1256,23 +1264,40 @@ function doorPx(upper: boolean): Px {
   return p;
 }
 
-// crack_0 .. crack_9 : growing random-walk fractures, transparent background
+// crack_0 .. crack_9: a fracture web spreading out from the centre, like the
+// vanilla destroy stages. Every stage replays the same branches and reveals
+// pixels in order of their distance along the crack, so cracks only grow.
+const CRACK_PTS: [number, number, number][] = (() => {
+  const rand = mulberry32(900);
+  const pts: [number, number, number][] = []; // x, y, reveal order (0..1)
+  const seen = new Set<number>();
+  const walk = (x: number, y: number, ang: number, len: number, t0: number, depth: number): void => {
+    for (let i = 0; i < len; i++) {
+      ang += (rand() - 0.5) * 0.6;
+      x += Math.cos(ang); y += Math.sin(ang);
+      const px = Math.round(x), py = Math.round(y);
+      if (px < 0 || py < 0 || px > 15 || py > 15) return;
+      const t = t0 + (i / len) * (1 - t0) * (depth ? 0.9 : 1);
+      if (!seen.has(py * 16 + px)) { seen.add(py * 16 + px); pts.push([px, py, t]); }
+      if (depth < 2 && rand() < 0.22) walk(x, y, ang + (rand() < 0.5 ? 1 : -1) * (0.7 + rand() * 0.6), 3 + ((rand() * 5) | 0), t, depth + 1);
+    }
+  };
+  const arms = 6;
+  for (let k = 0; k < arms; k++) {
+    const ang = (k / arms) * Math.PI * 2 + (rand() - 0.5) * 0.6;
+    walk(7.5, 7.5, ang, 10 + ((rand() * 4) | 0), 0, 0);
+  }
+  return pts;
+})();
 for (let stage = 0; stage < 10; stage++) {
   TILE_PAINTERS[`crack_${stage}`] = (c, x, y) => {
     c.clearRect(x, y, 16, 16);
-    const rand = mulberry32(900); // same walks every stage; reveal more per stage
-    const pts: [number, number][] = [];
-    for (let w = 0; w < 7; w++) {
-      let px = 3 + ((rand() * 10) | 0), py = 3 + ((rand() * 10) | 0);
-      for (let s = 0; s < 26; s++) {
-        pts.push([px, py]);
-        px = Math.max(0, Math.min(15, px + ((rand() * 3) | 0) - 1));
-        py = Math.max(0, Math.min(15, py + ((rand() * 3) | 0) - 1));
-      }
+    const reach = (stage + 1) / 10;
+    for (const [px, py, t] of CRACK_PTS) {
+      if (t > reach) continue;
+      c.fillStyle = t < reach - 0.25 ? 'rgba(12,10,8,0.8)' : 'rgba(12,10,8,0.55)';
+      c.fillRect(x + px, y + py, 1, 1);
     }
-    const n = Math.floor(pts.length * ((stage + 1) / 10));
-    c.fillStyle = 'rgba(10,10,10,0.75)';
-    for (let i = 0; i < n; i++) c.fillRect(x + pts[i][0], y + pts[i][1], 1, 1);
   };
 }
 
@@ -1756,30 +1781,27 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
   },
   raw_fish: (c) => fishPx(false).put(c, 0, 0),
   cooked_fish: (c) => fishPx(true).put(c, 0, 0),
-  compass: (c) => pixmap(c, 0, 0, [
-    '................', '................', '.....OOOOO......', '....OBBBBBO.....',
-    '...OBeBBBBeO....', '..OBBPPPPPBBO...', '..OBePPRRPPeO...', '..OBBPRRRRPBO...',
-    '..OBPPRRRPPBO...', '..OBePPRRPPeO...', '..OBBPPPPPBeO...', '...OBeBBBBeO....',
-    '....OBBBBBO.....', '.....OOOOO......', '................', '................',
-  ], { O: '#5d4222', B: '#d8c898', e: '#b8a878', P: '#f0e8c8', R: '#d83030' }),
-  clock: (c) => pixmap(c, 0, 0, [
-    '................', '................', '.....OOOOO......', '....OGGGGGO.....',
-    '...OGWWWWWGO....', '..OGWWWWWWWGO...', '..OGWWNNNWWGO...', '..OGWWNWNWWGO...',
-    '..OGWWNNNWWGO...', '..OGWWWWWWWGO...', '...OGWWWWWGO....', '....OGGGGGO.....',
-    '.....OOOOO......', '................', '................', '................',
-  ], { O: '#5d4222', G: '#d8c898', W: '#f0e8c8', N: '#1a1a1a' }),
-  porkchop: (c) => pixmap(c, 0, 0, [
-    '................', '................', '....OOOO........', '...OPPPPO.......',
-    '..OPPpppPO......', '..OPpppppPO.....', '..OPpppppPO.....', '...OPpppPPO.....',
-    '....OPPPPPO.....', '.....OPPPOO.....', '......OOOWO.....', '.........OWO....',
-    '..........OWO...', '...........O....', '................', '................',
-  ], { O: '#3d1f17', P: '#e2747c', p: '#f4a3a8', W: '#f2e3d5' }),
-  cooked_porkchop: (c) => pixmap(c, 0, 0, [
-    '................', '................', '....OOOO........', '...OPPPPO.......',
-    '..OPPpppPO......', '..OPpppppPO.....', '..OPpppppPO.....', '...OPpppPPO.....',
-    '....OPPPPPO.....', '.....OPPPOO.....', '......OOOWO.....', '.........OWO....',
-    '..........OWO...', '...........O....', '................', '................',
-  ], { O: '#3d1f17', P: '#9c6a3a', p: '#c98f54', W: '#f2e3d5' }),
+  compass: (c) => dialPx(pal(['#6e6e6e', '#a8a8a8', '#e0e0e0']), (p) => {
+    // red north needle up-right, pale tail down-left, on a dark glass face
+    for (const [x, y] of [[8, 7], [9, 6], [10, 5]]) p.set(x, y, '#e8322a');
+    p.set(10, 4, '#ff7a60');
+    for (const [x, y] of [[7, 8], [6, 9], [5, 10]]) p.set(x, y, '#d8d8d8');
+    p.set(7, 7, '#2a2a2a'); p.set(8, 8, '#1a1a1a');
+  }).put(c, 0, 0),
+  clock: (c) => dialPx(pal(['#9c7414', '#e8c02c', '#fff08a']), (p) => {
+    // day sky over the horizon, night below, sun + moon on the rotating dial
+    for (let y = 3; y <= 12; y++) {
+      for (let x = 3; x <= 12; x++) {
+        if (Math.hypot(x - 7.5, y - 7.5) > 4.7) continue;
+        p.set(x, y, y < 8 ? (y < 5 ? '#6aaaf0' : '#8cc4ff') : y < 10 ? '#26325a' : '#161e3a');
+      }
+    }
+    p.set(6, 4, '#fff27a'); p.set(7, 4, '#ffd23a'); p.set(6, 5, '#ffd23a'); p.set(7, 5, '#e8a820');
+    p.set(9, 10, '#f0f0f0'); p.set(10, 10, '#c8c8d8');
+    for (let x = 3; x <= 12; x++) if (Math.hypot(x - 7.5, 0.5) <= 4.7) p.set(x, 8, '#4a7a2a');
+  }).put(c, 0, 0),
+  porkchop: (c) => chopPx(false).put(c, 0, 0),
+  cooked_porkchop: (c) => chopPx(true).put(c, 0, 0),
   chicken: (c) => pixmap(c, 0, 0, [
     '................', '................', '.....OOOO.......', '....OPPPPO......',
     '...OPpppPPO.....', '...OPpppppO.....', '...OPpppppO.....', '....OPpppO......',
@@ -1858,6 +1880,35 @@ function fishPx(cooked: boolean): Px {
   return outlinePx(spritePx(rows, cooked
     ? { B: '#c08a4c', b: '#946430', L: '#e8c286', T: '#a8743e', t: '#7e5226', e: '#2a1a0e' }
     : { B: '#98b0c0', b: '#6e8898', L: '#e0dcc8', T: '#8098a8', t: '#5e7888', e: '#101418' }), 0.35);
+}
+
+/** Pork chop: teardrop cut with a fat rim and a round bone at the narrow end. */
+function chopPx(cooked: boolean): Px {
+  return outlinePx(spritePx([
+    '................', '................', '................', '....FFFFF.......',
+    '...FWWPPPFF.....', '..FWwWPPPPPF....', '..FWWPPpPPPPF...', '..FPPPPPPPpPF...',
+    '...FPPpPPPPPPF..', '....FPPPPPPPPF..', '.....FPPPpPPF...', '......FFPPPF....',
+    '........FFF.....', '................', '................', '................',
+  ], cooked
+    ? { F: '#c89a5a', P: '#a4643a', p: '#c4824c', W: '#ece0c4', w: '#c8b894' }
+    : { F: '#f6dcd0', P: '#e27880', p: '#f4a4aa', W: '#f6eedc', w: '#d6c8aa' }), 0.35);
+}
+
+/** Round instrument (compass/clock): lit metal ring, dark face, then `face` paints the dial. */
+function dialPx(ring: RGB[], face: (p: Px) => void): Px {
+  const p = new Px();
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      const d = Math.hypot(x - 7.5, y - 7.5);
+      if (d > 6.3) continue;
+      if (d > 4.9) {
+        const lit = (7.5 - x) + (7.5 - y); // top-left catches the light
+        p.set(x, y, ring[lit > 2 ? 2 : lit < -2 ? 0 : 1]);
+      } else p.set(x, y, d > 4.2 ? '#2e2e36' : '#44444e');
+    }
+  }
+  face(p);
+  return outlinePx(p, 0.35);
 }
 
 /** A small scatter of two-tone seeds (light tip, dark base). */
