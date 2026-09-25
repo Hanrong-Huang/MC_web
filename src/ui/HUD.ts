@@ -6,7 +6,7 @@
 
 import { Atlas } from '../engine/Textures';
 import { Inventory, Slot, matchRecipe, FurnaceState, ChestState, SMELT_TIME, allRecipes, RecipeView, furnaceSlotFor } from '../engine/Inventory';
-import { def, CREATIVE_ITEMS, I, B, spriteNameFor, mobLabel } from '../engine/Blocks';
+import { def, CREATIVE_ITEMS, I, B, spriteNameFor, mobLabel, enchantLabel } from '../engine/Blocks';
 import { SaveSummary, SlotData } from '../engine/Persistence';
 import { AudioEngine, SfxName, MobVoice } from '../engine/Audio';
 import type { GameMode } from '../engine/Player';
@@ -250,7 +250,7 @@ export class HUD {
   private packHandler: (files: File[]) => void = () => {};
   private importHandler: (file: File) => void = () => {};
   /** main sets this: leftover items that can't return to the inventory drop here */
-  onDropLeftover: (id: number, count: number, dur?: number, mob?: string) => void = () => {};
+  onDropLeftover: (id: number, count: number, dur?: number, mob?: string, ench?: Record<string, number>) => void = () => {};
   /** fired when the player takes a crafting result */
   onCraft: (id: number) => void = () => {};
   /** fired when the player completes a villager trade */
@@ -1403,15 +1403,11 @@ export class HUD {
     for (let i = 0; i < this.view.craftGrid.length; i++) {
       const s = this.view.craftGrid[i];
       if (s) {
-        const left = this.inv.add(s.id, s.count);
-        if (left > 0) this.onDropLeftover(s.id, left);
+        this.stow(this.inv, s);
         this.view.craftGrid[i] = null;
       }
     }
-    if (this.cursor && this.view.kind !== 'creative') {
-      const left = this.inv.add(this.cursor.id, this.cursor.count);
-      if (left > 0) this.onDropLeftover(this.cursor.id, left);
-    }
+    if (this.cursor && this.view.kind !== 'creative') this.stow(this.inv, this.cursor);
     this.cursor = null;
     this.view = null;
     this.inv = null;
@@ -1457,7 +1453,7 @@ export class HUD {
       if (!s) return;
       const n = e.ctrlKey || e.metaKey ? s.count : 1;
       if (this.view.kind !== 'creative' || arr === inv.slots) {
-        this.onDropLeftover(s.id, n, s.dur, s.mob); // keep wear + captured mob
+        this.onDropLeftover(s.id, n, s.dur, s.mob, s.ench); // keep wear + captured mob + enchantments
         s.count -= n;
         if (s.count <= 0) arr[i] = null;
         inv.onChange();
@@ -1487,6 +1483,10 @@ export class HUD {
     name.textContent = item.mob ? `Captured ${mobLabel(item.mob)}` : d.label;
     name.style.color = this.itemAccent(item.id);
     el('div', 'tt-cat', box).textContent = this.itemCategory(item.id);
+    for (const [k, lvl] of Object.entries(item.ench ?? {})) {
+      const l = el('div', 'tt-line tt-epic', box);
+      l.textContent = enchantLabel(k, lvl);
+    }
     const line = (text: string, cls = ''): HTMLElement => {
       const l = el('div', `tt-line${cls ? ` ${cls}` : ''}`, box);
       l.textContent = text;
@@ -1575,6 +1575,16 @@ export class HUD {
       const src = this.atlas.icon(item.id);
       ctx.drawImage(src, 0, 0);
     }
+    if (item.ench) {
+      // enchantment glint: a violet sheen over the item's own pixels
+      ctx.globalCompositeOperation = 'source-atop';
+      const gr = ctx.createLinearGradient(0, 0, 32, 32);
+      gr.addColorStop(0, 'rgba(170,90,255,0.08)'); gr.addColorStop(0.45, 'rgba(200,130,255,0.42)');
+      gr.addColorStop(0.55, 'rgba(200,130,255,0.42)'); gr.addColorStop(1, 'rgba(170,90,255,0.08)');
+      ctx.fillStyle = gr;
+      ctx.fillRect(0, 0, 32, 32);
+      ctx.globalCompositeOperation = 'source-over';
+    }
     // durability bar for worn tools (vanilla: 13px bar on a black track)
     const d = def(item.id);
     if (d.durability && item.dur !== undefined && item.dur < d.durability) {
@@ -1615,7 +1625,7 @@ export class HUD {
     for (let j = lo; j < hi && s.count > 0; j++) {
       if (!dst[j]) {
         const give = Math.min(max, s.count);
-        dst[j] = { id: s.id, count: give, ...(s.dur !== undefined ? { dur: s.dur } : {}), ...(s.mob !== undefined ? { mob: s.mob } : {}) };
+        dst[j] = { id: s.id, count: give, ...(s.dur !== undefined ? { dur: s.dur } : {}), ...(s.mob !== undefined ? { mob: s.mob } : {}), ...(s.ench ? { ench: s.ench } : {}) };
         s.count -= give; moved = true;
       }
     }
@@ -1641,7 +1651,7 @@ export class HUD {
       f[furnaceDest] = arr[0];
     } else if (armor && view.kind === 'inventory' && !inv.armor[armor.slot] && s) {
       // shift-clicking armor straight onto the body
-      inv.armor[armor.slot] = { id: s.id, count: 1, ...(s.dur !== undefined ? { dur: s.dur } : {}) };
+      inv.armor[armor.slot] = { id: s.id, count: 1, ...(s.dur !== undefined ? { dur: s.dur } : {}), ...(s.ench ? { ench: s.ench } : {}) };
       inv.slots[i] = null;
       this.audio.play('click');
       moved = true;
@@ -1670,12 +1680,12 @@ export class HUD {
       // right click: pick half / place one
       if (!this.cursor && s) {
         const half = Math.ceil(s.count / 2);
-        this.cursor = { id: s.id, count: half, ...(s.mob !== undefined ? { mob: s.mob } : {}) };
+        this.cursor = { id: s.id, count: half, ...(s.dur !== undefined ? { dur: s.dur } : {}), ...(s.mob !== undefined ? { mob: s.mob } : {}), ...(s.ench ? { ench: s.ench } : {}) };
         s.count -= half;
         if (s.count <= 0) arr[i] = null;
       } else if (this.cursor) {
         if (!s) {
-          arr[i] = { id: this.cursor.id, count: 1, ...(this.cursor.mob !== undefined ? { mob: this.cursor.mob } : {}) };
+          arr[i] = { id: this.cursor.id, count: 1, ...(this.cursor.dur !== undefined ? { dur: this.cursor.dur } : {}), ...(this.cursor.mob !== undefined ? { mob: this.cursor.mob } : {}), ...(this.cursor.ench ? { ench: this.cursor.ench } : {}) };
           this.cursor.count--;
         } else if (s.id === this.cursor.id && s.count < def(s.id).stack) {
           s.count++;
@@ -1709,7 +1719,7 @@ export class HUD {
     if (this.cursor) {
       const a = def(this.cursor.id).armor;
       if (!a || a.slot !== i || this.cursor.count !== 1) return;
-      inv.armor[i] = { id: this.cursor.id, count: 1, ...(this.cursor.dur !== undefined ? { dur: this.cursor.dur } : {}) };
+      inv.armor[i] = { id: this.cursor.id, count: 1, ...(this.cursor.dur !== undefined ? { dur: this.cursor.dur } : {}), ...(this.cursor.ench ? { ench: this.cursor.ench } : {}) };
       this.cursor = cur ?? null;
     } else if (cur) {
       this.cursor = cur;
@@ -1875,10 +1885,22 @@ export class HUD {
     for (let i = 0; i < view.craftGrid.length; i++) {
       const s = view.craftGrid[i];
       if (!s) continue;
-      const left = inv.add(s.id, s.count);
-      if (left > 0) this.onDropLeftover(s.id, left);
+      this.stow(inv, s);
       view.craftGrid[i] = null;
     }
+  }
+
+  /** Put a loose stack back in the inventory (or drop it), keeping its wear,
+   *  captured mob and enchantments — Inventory.add only carries id + count. */
+  private stow(inv: Inventory, s: SlotData): void {
+    if (s.dur !== undefined || s.mob !== undefined || s.ench) {
+      const free = inv.firstEmpty();
+      if (free >= 0) { inv.slots[free] = { ...s }; inv.onChange(); }
+      else this.onDropLeftover(s.id, s.count, s.dur, s.mob, s.ench);
+      return;
+    }
+    const left = inv.add(s.id, s.count);
+    if (left > 0) this.onDropLeftover(s.id, left);
   }
 
   private fillRecipe(r: RecipeView, view: ContainerView, inv: Inventory): boolean {

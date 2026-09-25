@@ -10,7 +10,10 @@ import { moveEntity, hasSupport, inWater, eyeInWater, boxIntersectsBlock, Vec3 }
 import {
   B, I, def, hasDef, breakTime, attackDamage, isSolid, canHarvest, FLOOR_BLOCKS, SELF_STACKING, mobLabel,
   attackCooldown, attackStrength, foodSaturation, pickItemFor, LEAF_BLOCKS,
+  SLAB_IDS, STAIR_IDS, META_BLOCKS, slabFullBlock, isPotion, isDrink, enchLevel, enchantsFor, enchantLabel,
+  repairMaterial, toolSpeed, ARMOR_CHEST, ARMOR_FEET, ARMOR_HEAD,
 } from './Blocks';
+import type { SlotData } from './Persistence';
 import { DoorFacing } from './World';
 import { Inventory } from './Inventory';
 import type { EntityManager } from './EntityManager';
@@ -41,13 +44,51 @@ const MOB_IFRAMES = 0.5;
 /** survival pause between finishing one block and starting to dig the next */
 const BREAK_DELAY = 0.25;
 
-/** Timed status effects (golden apples, spoiled food, milk clears them). */
-export type EffectId = 'regeneration' | 'absorption' | 'resistance' | 'fire_resistance' | 'hunger';
+/** Timed status effects (golden apples, potions, spoiled food; milk clears them). */
+export type EffectId = 'regeneration' | 'absorption' | 'resistance' | 'fire_resistance' | 'hunger'
+  | 'speed' | 'night_vision' | 'water_breathing' | 'strength' | 'jump_boost';
 export interface ActiveEffect { amp: number; t: number; total: number }
 export const EFFECT_LABELS: Record<EffectId, string> = {
   regeneration: 'Regeneration', absorption: 'Absorption', resistance: 'Resistance',
   fire_resistance: 'Fire Resistance', hunger: 'Hunger',
+  speed: 'Speed', night_vision: 'Night Vision', water_breathing: 'Water Breathing',
+  strength: 'Strength', jump_boost: 'Jump Boost',
 };
+
+/** What each potion does when drunk: an effect (seconds, level) or instant healing. */
+const POTION_EFFECTS: Partial<Record<number, { id?: EffectId; t?: number; amp?: number; heal?: number }>> = {
+  [I.POTION_HEALING]: { heal: 8 },
+  [I.POTION_SWIFTNESS]: { id: 'speed', t: 180 },
+  [I.POTION_NIGHT_VISION]: { id: 'night_vision', t: 180 },
+  [I.POTION_WATER_BREATHING]: { id: 'water_breathing', t: 180 },
+  [I.POTION_FIRE_RESISTANCE]: { id: 'fire_resistance', t: 180 },
+  [I.POTION_STRENGTH]: { id: 'strength', t: 180 },
+  [I.POTION_LEAPING]: { id: 'jump_boost', t: 180 },
+  [I.POTION_REGENERATION]: { id: 'regeneration', t: 45 },
+};
+
+/** Experience points needed to go from `level` to the next (vanilla curve). */
+export function xpForLevel(level: number): number {
+  return level >= 31 ? 9 * level - 158 : level >= 16 ? 5 * level - 38 : 2 * level + 7;
+}
+
+/** Things a composter accepts, with the chance each raises its level (vanilla). */
+const COMPOST_CHANCE = new Map<number, number>([
+  [I.SEEDS, 0.3], [I.BEETROOT_SEEDS, 0.3], [I.PUMPKIN_SEEDS, 0.3], [I.MELON_SEEDS, 0.3],
+  [B.LEAVES, 0.3], [B.BIRCH_LEAVES, 0.3], [B.SPRUCE_LEAVES, 0.3], [B.JUNGLE_LEAVES, 0.3],
+  [B.SAPLING, 0.3], [B.TALL_GRASS, 0.3], [I.MELON_SLICE, 0.5], [B.SUGAR_CANE, 0.5], [B.CACTUS, 0.5],
+  [I.WHEAT, 0.65], [I.APPLE, 0.65], [I.CARROT, 0.65], [I.POTATO, 0.65], [I.BEETROOT, 0.65],
+  [B.POPPY, 0.65], [B.DANDELION, 0.65], [B.CORNFLOWER, 0.65], [B.ALLIUM, 0.65], [B.OXEYE_DAISY, 0.65],
+  [B.BROWN_MUSHROOM, 0.65], [B.RED_MUSHROOM, 0.65], [B.PUMPKIN, 0.65], [B.MELON, 0.65],
+  [I.BREAD, 0.85], [I.BAKED_POTATO, 0.85], [I.COOKIE, 0.85], [B.HAY_BALE, 0.85],
+  [I.PUMPKIN_PIE, 1], [B.CAKE, 1],
+]);
+
+/** Plants that fit in a flower pot. */
+const POTTABLE = new Set<number>([
+  B.POPPY, B.DANDELION, B.CORNFLOWER, B.ALLIUM, B.OXEYE_DAISY, B.SAPLING,
+  B.BROWN_MUSHROOM, B.RED_MUSHROOM, B.TALL_GRASS, B.CACTUS,
+]);
 
 export interface PlayerDeps {
   world: World;
@@ -77,6 +118,12 @@ export interface PlayerDeps {
   onAdvance?: (id: string) => void;
   /** light a fire in an air cell (flint & steel); false if it can't burn there */
   ignite?: (x: number, y: number, z: number) => boolean;
+  /** experience earned at a spot (mined ore, smelting ...): spawn orbs there */
+  onXp?: (x: number, y: number, z: number, points: number) => void;
+  /** put a raw food item on a campfire; false if it's full or not cookable */
+  cookOnCampfire?: (x: number, y: number, z: number, itemId: number) => boolean;
+  /** throw a warp pearl / snowball along a direction */
+  throwItem?: (itemId: number, x: number, y: number, z: number, dx: number, dy: number, dz: number) => void;
 }
 
 export class Player {
@@ -157,6 +204,18 @@ export class Player {
 
   portalTimer = 0;
   portalCooldown = 0;
+
+  /** experience level + progress (0..1) toward the next one */
+  xpLevel = 0;
+  xpProgress = 0;
+  /** gliding on a worn glider (jump mid-fall to deploy) */
+  gliding = false;
+  private glideWearT = 0;
+  /** seconds of firework thrust left while gliding */
+  private rocketT = 0;
+  private prevSpace = false;
+  /** where the player last died (recovery compass), if ever */
+  lastDeath: { x: number; y: number; z: number; dim: 'overworld' | 'nether' } | null = null;
 
   init(deps: PlayerDeps): void {
     this.deps = deps;
@@ -256,7 +315,49 @@ export class Player {
       this.addEffect('hunger', 30, 0);
     } else if (id === I.MILK_BUCKET) {
       this.clearEffects();
+    } else if (isPotion(id)) {
+      const fx = POTION_EFFECTS[id];
+      if (fx?.heal) this.hp = Math.min(20, this.hp + fx.heal);
+      if (fx?.id) this.addEffect(fx.id, fx.t ?? 60, fx.amp ?? 0);
+      this.deps.onAdvance?.('potion');
+    } else if (id === I.EXPERIENCE_BOTTLE) {
+      this.addXp(3 + Math.floor(Math.random() * 9));
+    } else if (id === I.PUMPKIN_PIE || id === I.COOKIE || id === I.MUSHROOM_STEW) {
+      this.deps.onAdvance?.('baker');
     }
+  }
+
+  // --- experience --------------------------------------------------------------
+
+  /** Gain experience points; returns true if a level was reached. */
+  addXp(points: number): boolean {
+    if (points <= 0) return false;
+    let p = this.xpProgress * xpForLevel(this.xpLevel) + points;
+    let leveled = false;
+    while (p >= xpForLevel(this.xpLevel)) {
+      p -= xpForLevel(this.xpLevel);
+      this.xpLevel++;
+      leveled = true;
+    }
+    this.xpProgress = p / xpForLevel(this.xpLevel);
+    if (leveled) {
+      this.deps.audio.play(this.xpLevel % 5 === 0 ? 'advancement' : 'level', 0.7);
+      if (this.xpLevel >= 10) this.deps.onAdvance?.('xp_10');
+    }
+    return leveled;
+  }
+
+  /** Spend whole levels (enchanting, anvil); false if the player lacks them. Creative is free. */
+  spendLevels(n: number): boolean {
+    if (this.mode === 'creative') return true;
+    if (this.xpLevel < n) return false;
+    this.xpLevel -= n;
+    return true;
+  }
+
+  /** Points dropped on death (vanilla: 7 per level, capped at 100). */
+  deathXp(): number {
+    return Math.min(100, this.xpLevel * 7);
   }
 
   // --- item tossing + pick block ---------------------------------------------
@@ -406,8 +507,27 @@ export class Player {
     else speed = WALK_SPEED;
     if (wasInWater && !this.flying) speed *= 0.5;
     if ((this.blocking || this.scoping) && !this.flying) speed *= 0.3;
+    const swift = this.effects.get('speed');
+    if (swift && !this.flying) speed *= 1 + 0.2 * (swift.amp + 1);
 
     const underFeet = world.getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y - 0.1), Math.floor(this.pos.z));
+    // ice: barely any grip, so you glide on and skid to a stop
+    const onIce = this.onGround && !this.flying && (underFeet === B.ICE || underFeet === B.PACKED_ICE);
+    if (onIce && this.sprinting) speed *= 1.3;
+
+    // glider: a fresh jump press mid-fall deploys it; landing or water folds it
+    const spaceEdge = space && !this.prevSpace;
+    this.prevSpace = space;
+    if (!this.gliding && spaceEdge && this.canGlide() && !this.onGround && !wasInWater && !this.onLadder && !this.flying && this.vel.y < -1) {
+      this.gliding = true;
+      this.glideWearT = 0;
+      this.deps.audio.play('whoosh');
+      this.deps.onAdvance?.('glide');
+    }
+    if (this.gliding && (this.onGround || wasInWater || this.flying || this.onLadder || !this.canGlide())) {
+      this.gliding = false;
+      this.rocketT = 0;
+    }
     if (underFeet === B.SOUL_SAND && !this.flying) {
       speed *= 0.4;
     }
@@ -423,13 +543,19 @@ export class Player {
 
     // snappy acceleration with slight air control; a sprint-jumper keeps most of
     // the take-off boost through the air (that's what makes sprint-jumping fast)
-    const accelK = this.flying ? 9 : this.onGround ? 16 : wasInWater ? 7 : this.sprinting ? 1.8 : 4.2;
+    const accelK = this.flying ? 9 : this.onGround ? (onIce ? (underFeet === B.PACKED_ICE ? 0.8 : 1.3) : 16)
+      : wasInWater ? 7 : this.sprinting ? 1.8 : 4.2;
     const blend = Math.min(1, accelK * dt);
-    this.vel.x += (wx * speed - this.vel.x) * blend;
-    this.vel.z += (wz * speed - this.vel.z) * blend;
+    if (!this.gliding) {
+      this.vel.x += (wx * speed - this.vel.x) * blend;
+      this.vel.z += (wz * speed - this.vel.z) * blend;
+    }
 
     // vertical
-    if (this.flying) {
+    if (this.gliding) {
+      this.glidePhysics(dt);
+      this.fallDist = 0;
+    } else if (this.flying) {
       const upWish = (space ? FLY_VERT : 0) + (this.sneakKeyDown() ? -FLY_VERT : 0);
       this.vel.y += (upWish - this.vel.y) * Math.min(1, 10 * dt);
       this.fallDist = 0;
@@ -450,7 +576,8 @@ export class Player {
       this.vel.y -= GRAVITY * dt;
       if (this.vel.y < -TERMINAL) this.vel.y = -TERMINAL;
       if (space && this.onGround) {
-        this.vel.y = JUMP_VELOCITY;
+        const leap = this.effects.get('jump_boost');
+        this.vel.y = leap ? Math.sqrt(2 * GRAVITY * (1.25 + 0.55 * (leap.amp + 1))) : JUMP_VELOCITY;
         this.onGround = false;
         this.addExhaustion(this.sprinting ? 0.2 : 0.05);
         // sprint-jump: a forward shove along the facing direction (vanilla +0.2 b/tick)
@@ -463,7 +590,12 @@ export class Player {
 
     // integrate with collision
     const wasOnGround = this.onGround;
+    const glideSpeed = this.gliding ? Math.hypot(this.vel.x, this.vel.z) : 0;
     const res = moveEntity(world, this.pos, this.vel, dt, BOX, this.sneaking, wasOnGround);
+    // flying into a wall on a glider hurts (vanilla "kinetic energy")
+    if (this.gliding && (res.hitX || res.hitZ) && glideSpeed > 9 && this.mode === 'survival') {
+      this.damage(Math.max(1, Math.floor((glideSpeed - 9) * 0.6)), undefined, 'Experienced kinetic energy');
+    }
     const inWaterNow = inWater(world, this.pos, BOX);
     // touching water cancels accumulated fall distance (no fall damage into water)
     if (inWaterNow) this.fallDist = 0;
@@ -503,10 +635,13 @@ export class Player {
             this.deps.audio.step(def(below).sound, below);
           }
         }
-        let dmg = Math.floor(this.fallDist - 3);
+        const leap = this.effects.get('jump_boost');
+        let dmg = Math.floor(this.fallDist - 3 - (leap ? leap.amp + 1 : 0));
         // a hay bale breaks the fall (80% less damage, like vanilla)
         const landedOn = world.getBlock(Math.floor(this.pos.x), Math.floor(this.pos.y - 0.5), Math.floor(this.pos.z));
         if (landedOn === B.HAY_BALE) dmg = Math.floor(dmg * 0.2);
+        const feather = enchLevel(this.inventory.armor[ARMOR_FEET], 'feather_falling');
+        if (feather > 0 && dmg > 0) dmg = Math.floor(dmg * (1 - 0.12 * feather));
         if (dmg > 0 && this.mode === 'survival') {
           this.damage(dmg, undefined, 'Fell from a high place');
           this.addExhaustion(0.3);
@@ -657,6 +792,66 @@ export class Player {
     this.deps.renderer.setOutline(this.target ? { x: this.target.x, y: this.target.y, z: this.target.z } : null);
   }
 
+  /** Wearing a glider with some life left in it? */
+  private canGlide(): boolean {
+    const s = this.inventory.armor[ARMOR_CHEST];
+    return !!s && s.id === I.GLIDER && (s.dur ?? def(I.GLIDER).durability ?? 1) > 1;
+  }
+
+  /** Elytra-style flight, stepped in vanilla's per-tick units: looking down
+   *  trades height for speed, looking up trades speed back for height, and a
+   *  firework rocket shoves you along the view. */
+  private glidePhysics(dt: number): void {
+    const k = dt * 20; // ticks this frame
+    const d = this.lookDir();
+    const mcPitch = -this.pitch; // Minecraft pitch: positive looks down
+    const cosP = Math.cos(mcPitch), sq = cosP * cosP;
+    let vx = this.vel.x / 20, vy = this.vel.y / 20, vz = this.vel.z / 20;
+    const hLook = Math.hypot(d.x, d.z);
+    const hSpeed = Math.hypot(vx, vz);
+    vy += (-0.08 + sq * 0.06) * k;
+    if (vy < 0 && hLook > 0) {
+      const lift = vy * -0.1 * sq * k;
+      vy += lift; vx += (d.x / hLook) * lift; vz += (d.z / hLook) * lift;
+    }
+    if (mcPitch < 0 && hLook > 0) {
+      const climb = hSpeed * -Math.sin(mcPitch) * 0.04 * k;
+      vy += climb * 3.2; vx -= (d.x / hLook) * climb; vz -= (d.z / hLook) * climb;
+    }
+    if (hLook > 0) {
+      vx += ((d.x / hLook) * hSpeed - vx) * 0.1 * k;
+      vz += ((d.z / hLook) * hSpeed - vz) * 0.1 * k;
+    }
+    const dh = Math.pow(0.99, k), dv = Math.pow(0.98, k);
+    vx *= dh; vz *= dh; vy *= dv;
+    if (this.rocketT > 0) {
+      this.rocketT -= dt;
+      const kk = Math.min(1, k);
+      vx += (d.x * 0.1 + (d.x * 1.5 - vx) * 0.5) * kk;
+      vy += (d.y * 0.1 + (d.y * 1.5 - vy) * 0.5) * kk;
+      vz += (d.z * 0.1 + (d.z * 1.5 - vz) * 0.5) * kk;
+      if (Math.random() < 0.5) this.deps.entities.spawnTorchFlame(this.pos.x, this.pos.y + 0.2, this.pos.z);
+    }
+    this.vel.x = vx * 20; this.vel.y = vy * 20; this.vel.z = vz * 20;
+    // the canvas wears a point per second aloft
+    this.glideWearT += dt;
+    if (this.glideWearT >= 1 && this.mode === 'survival') {
+      this.glideWearT = 0;
+      const s = this.inventory.armor[ARMOR_CHEST];
+      if (s && !(Math.random() < this.unbreakingSkip(s))) {
+        s.dur = (s.dur ?? def(s.id).durability ?? 1) - 1;
+        if (s.dur <= 1) { this.deps.toast('Your Glider is worn out - mend it at an anvil'); this.deps.audio.play('lowdur'); }
+        this.inventory.onChange();
+      }
+    }
+  }
+
+  /** Chance a use doesn't wear the item, from Unbreaking (vanilla: 1/(lvl+1) of uses cost). */
+  private unbreakingSkip(s: SlotData | null): number {
+    const lvl = enchLevel(s, 'unbreaking');
+    return lvl > 0 ? 1 - 1 / (lvl + 1) : 0;
+  }
+
   private sneakKeyDown(): boolean {
     return this.deps.input.down('ControlLeft') || this.deps.input.down('ControlRight');
   }
@@ -786,6 +981,10 @@ export class Player {
       this.cancelBreaking();
       return;
     }
+    // Efficiency: vanilla adds lvl^2 + 1 to the right tool's mining speed
+    const eff = enchLevel(this.inventory.getSelected(), 'efficiency');
+    const ts = toolSpeed(t.id, this.heldId());
+    if (eff > 0 && ts > 1 && canHarvest(t.id, this.heldId())) total *= ts / (ts + eff * eff + 1);
     // vanilla penalties: digging with your head underwater or while airborne
     // (jumping, swimming, clinging to a ladder) is five times slower
     if (this.underwaterEye()) total *= 5;
@@ -867,10 +1066,26 @@ export class Player {
       bedDrop = true;
     }
 
+    // shaped blocks keep a small state value (facing, slab half, pot plant ...)
+    const meta = world.bedFacings.get(beKey) ?? 0;
+    if (META_BLOCKS.has(id)) world.bedFacings.delete(beKey);
+    if (id === B.FENCE_GATE) world.doorStates.delete(beKey);
+
     world.setBlock(x, y, z, B.AIR);
     audio.dig(def(id).sound, 1, 1, id);
     entities.spawnBlockParticles(x, y, z, id, 12);
     this.deps.onBreak(id);
+    // ice melts back into water when broken (unless it sat over nothing, or in the Nether)
+    if (id === B.ICE && this.mode === 'survival' && world.dimension !== 'nether' && world.getBlock(x, y - 1, z) !== B.AIR) {
+      world.waterLevels.delete(beKey);
+      if (world.setBlock(x, y, z, B.WATER)) world.scheduleWater(x, y, z);
+    }
+    if (withDrops && this.mode === 'survival') {
+      // what the block was holding comes out with it
+      if (id === B.FLOWER_POT && meta && hasDef(meta)) entities.spawnDrop(x + 0.5, y + 0.6, z + 0.5, meta, 1);
+      if (id === B.COMPOSTER && meta >= 8) entities.spawnDrop(x + 0.5, y + 0.6, z + 0.5, I.BONE_MEAL, 1);
+      if (id === B.SNOW_GRASS) entities.spawnDrop(x + 0.5, y + 0.6, z + 0.5, I.SNOWBALL, 1 + (Math.random() < 0.5 ? 1 : 0));
+    }
 
     if (doorDrop && withDrops && this.mode === 'survival') {
       entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.WOOD_DOOR, 1);
@@ -909,6 +1124,8 @@ export class Player {
         const r = Math.random();
         if (r < 0.14) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.SEEDS, 1);
         else if (r < 0.17) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.BEETROOT_SEEDS, 1);
+        else if (r < 0.19) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.PUMPKIN_SEEDS, 1);
+        else if (r < 0.205) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.MELON_SEEDS, 1);
         return;
       }
       if (id === B.WHEAT_0 || id === B.WHEAT_1) {
@@ -946,9 +1163,21 @@ export class Player {
         return;
       }
       const d = def(id);
+      // ores give up a little experience when mined
+      const oreXp = id === B.COAL_ORE ? [0, 2] : id === B.DIAMOND_ORE ? [3, 7]
+        : id === B.AMETHYST_ORE || id === B.QUARTZ_ORE ? [2, 5] : null;
+      if (oreXp) {
+        const n = oreXp[0] + Math.floor(Math.random() * (oreXp[1] - oreXp[0] + 1));
+        if (n > 0) this.deps.onXp?.(x + 0.5, y + 0.5, z + 0.5, n);
+      }
       if (d.drop === null) return;
       const drop = d.drop ?? { id, min: 1, max: 1 };
-      const count = drop.min + Math.floor(Math.random() * (drop.max - drop.min + 1));
+      let count = drop.min + Math.floor(Math.random() * (drop.max - drop.min + 1));
+      // Fortune multiplies gem drops (never a block dropping itself)
+      const fortune = enchLevel(this.inventory.getSelected(), 'fortune');
+      if (fortune > 0 && drop.id !== id && !def(drop.id).block) {
+        count *= 1 + Math.max(0, Math.floor(Math.random() * (fortune + 2)) - 1);
+      }
       if (count > 0) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, drop.id, count);
     }
   }
@@ -961,6 +1190,7 @@ export class Player {
     const d = def(slot.id);
     if (!d.durability) return;
     if (miningOnly && !d.toolInfo) return; // bows don't wear from punching blocks
+    if (Math.random() < this.unbreakingSkip(slot)) return;
     const prev = slot.dur ?? d.durability;
     slot.dur = prev - 1;
     if (slot.dur <= 0) {
@@ -986,7 +1216,7 @@ export class Player {
     const a = held ? def(held.id).armor : null;
     if (!held || !a) return;
     const prev = this.inventory.armor[a.slot];
-    this.inventory.armor[a.slot] = { id: held.id, count: 1, dur: held.dur };
+    this.inventory.armor[a.slot] = { id: held.id, count: 1, dur: held.dur, ...(held.ench ? { ench: held.ench } : {}) };
     if (this.mode !== 'creative') this.inventory.slots[sel] = prev ?? null;
     this.placeCooldown = 0.35;
     this.deps.renderer.triggerSwing();
@@ -999,9 +1229,12 @@ export class Player {
     let changed = false;
     for (let i = 0; i < this.inventory.armor.length; i++) {
       const s = this.inventory.armor[i];
-      if (!s) continue;
+      if (!s || s.id === I.GLIDER) continue; // the glider wears from flight, not blows
       const max = def(s.id).durability ?? 0;
       if (!max) continue;
+      // Unbreaking on armor: vanilla keeps 60% of hits wearing it, less the rest
+      const ub = enchLevel(s, 'unbreaking');
+      if (ub > 0 && Math.random() > 0.6 + 0.4 / (ub + 1)) continue;
       s.dur = (s.dur ?? max) - 1;
       if (s.dur <= 0) {
         this.deps.toast(`Your ${def(s.id).label} broke!`);
@@ -1113,6 +1346,202 @@ export class Player {
     return true;
   }
 
+  /** Glass bottle: fill from any water along the view ray (the water stays). */
+  private tryFillBottle(): boolean {
+    const world = this.deps.world;
+    const d = this.lookDir();
+    const ex = this.pos.x, ey = this.pos.y + this.eyeHeight(), ez = this.pos.z;
+    for (let t = 0; t <= 5; t += 0.1) {
+      const id = world.getBlock(Math.floor(ex + d.x * t), Math.floor(ey + d.y * t), Math.floor(ez + d.z * t));
+      if (id === B.WATER) {
+        this.swapHeldBucket(I.WATER_BOTTLE);
+        if (this.mode === 'creative') this.inventory.add(I.WATER_BOTTLE, 1);
+        this.placeCooldown = 0.3;
+        this.deps.renderer.triggerSwing();
+        this.deps.audio.play('bubble');
+        return true;
+      }
+      if (id !== B.AIR) return false;
+    }
+    return false;
+  }
+
+  /**
+   * Right-click on a workshop/decoration block. Returns true when the click was
+   * used (so it isn't also a placement or a bite of the held food).
+   */
+  private useDecorBlock(x: number, y: number, z: number, id: number): boolean {
+    const { world, audio, entities } = this.deps;
+    const DECOR = id === B.FENCE_GATE || id === B.BARREL || id === B.CAKE || id === B.FLOWER_POT ||
+      id === B.COMPOSTER || id === B.ANVIL || id === B.ENCHANTING_TABLE || id === B.CAMPFIRE;
+    if (!DECOR) return false;
+    if (this.placeCooldown > 0) return true;
+    const key = `${x},${y},${z}`;
+    const held = this.inventory.getSelected();
+    const meta = world.bedFacings.get(key) ?? 0;
+    const dirty = (): void => world.markDirty(Math.floor(x / 16), Math.floor(z / 16));
+    switch (id) {
+      case B.FENCE_GATE: {
+        const st = world.doorStates.get(key) ?? { facing: 0 as const, open: false };
+        st.open = !st.open;
+        world.doorStates.set(key, st);
+        this.placeCooldown = 0.3;
+        this.deps.renderer.triggerSwing();
+        audio.play(st.open ? 'doorOpen' : 'doorClose');
+        dirty();
+        return true;
+      }
+      case B.BARREL:
+        this.placeCooldown = 0.3;
+        this.deps.openContainer('chest', x, y, z);
+        return true;
+      case B.CAKE: {
+        if (this.mode !== 'survival' || this.hunger >= 20) return false;
+        this.hunger = Math.min(20, this.hunger + 2);
+        this.saturation = Math.min(this.hunger, this.saturation + 0.4);
+        audio.play('eat');
+        entities.spawnBlockParticles(x, y, z, B.CAKE, 6);
+        if (meta >= 6) { world.bedFacings.delete(key); world.setBlock(x, y, z, B.AIR); audio.play('burp'); }
+        else { world.bedFacings.set(key, meta + 1); dirty(); }
+        this.placeCooldown = 0.35;
+        this.deps.onAdvance?.('cake');
+        return true;
+      }
+      case B.FLOWER_POT: {
+        if (meta && (!held || !POTTABLE.has(held.id))) {
+          // take the plant back out
+          if (this.mode === 'survival' && this.inventory.add(meta, 1) > 0) entities.spawnDrop(x + 0.5, y + 0.6, z + 0.5, meta, 1);
+          world.bedFacings.set(key, 0);
+        } else if (!meta && held && POTTABLE.has(held.id)) {
+          world.bedFacings.set(key, held.id);
+          if (this.mode === 'survival') this.inventory.consumeSelected();
+          this.deps.onAdvance?.('flower_pot');
+        } else {
+          return false;
+        }
+        audio.dig('grass', 0.7);
+        this.deps.renderer.triggerSwing();
+        this.placeCooldown = 0.25;
+        dirty();
+        return true;
+      }
+      case B.COMPOSTER: {
+        if (meta >= 8) {
+          world.bedFacings.set(key, 0);
+          entities.spawnDrop(x + 0.5, y + 1.05, z + 0.5, I.BONE_MEAL, 1);
+          audio.play('pop');
+        } else {
+          const chance = held ? COMPOST_CHANCE.get(held.id) : undefined;
+          if (chance === undefined) return false;
+          if (this.mode === 'survival') this.inventory.consumeSelected();
+          if (Math.random() < chance) {
+            const next = meta + 1 >= 7 ? 8 : meta + 1; // the seventh layer ripens straight to bone meal
+            world.bedFacings.set(key, next);
+            if (next === 8) { audio.play('level', 0.5); this.deps.onAdvance?.('compost'); }
+          }
+          audio.dig('grass', 0.6);
+          entities.spawnBlockParticles(x, y, z, B.LEAVES, 5);
+        }
+        this.deps.renderer.triggerSwing();
+        this.placeCooldown = 0.2;
+        dirty();
+        return true;
+      }
+      case B.CAMPFIRE: {
+        if (!held || !this.deps.cookOnCampfire?.(x, y, z, held.id)) return false;
+        if (this.mode === 'survival') this.inventory.consumeSelected();
+        this.deps.renderer.triggerSwing();
+        audio.play('fuse', 0.5);
+        this.placeCooldown = 0.25;
+        return true;
+      }
+      case B.ANVIL:
+        this.placeCooldown = 0.4;
+        this.repairHeld(x, y, z);
+        return true;
+      case B.ENCHANTING_TABLE:
+        this.placeCooldown = 0.5;
+        this.enchantHeld(x, y, z);
+        return true;
+    }
+    return false;
+  }
+
+  /** Anvil: mend the held tool/armor by a quarter with one unit of its material + a level. */
+  private repairHeld(x: number, y: number, z: number): void {
+    const { audio, entities, toast } = this.deps;
+    const s = this.inventory.getSelected();
+    const d = s ? def(s.id) : null;
+    if (!s || !d?.durability) { toast('Hold a worn tool, weapon or armor piece to mend it on the anvil'); return; }
+    const cur = s.dur ?? d.durability;
+    if (cur >= d.durability) { toast(`Your ${d.label} is already in top shape`); return; }
+    const mat = repairMaterial(s.id);
+    if (!mat) { toast(`A ${d.label} can't be mended on an anvil`); return; }
+    if (this.mode === 'survival' && this.inventory.count(mat) < 1) { toast(`Mending needs ${def(mat).label}`); audio.play('fail'); return; }
+    if (!this.spendLevels(1)) { toast('Mending costs 1 experience level'); audio.play('fail'); return; }
+    if (this.mode === 'survival') this.inventory.removeOne(mat);
+    const next = Math.min(d.durability, cur + Math.ceil(d.durability * 0.25));
+    if (next >= d.durability) delete s.dur; else s.dur = next;
+    audio.dig('stone', 1, 1.3, B.IRON_BLOCK);
+    entities.spawnCritParticles(x + 0.5, y + 1.1, z + 0.5);
+    this.deps.renderer.triggerSwing();
+    toast(`Mended ${d.label} (${next} / ${d.durability})`);
+    this.deps.onAdvance?.('anvil');
+    this.inventory.onChange();
+  }
+
+  /**
+   * Enchanting table: turn levels + amethyst into enchantments on the held
+   * item. Bookshelves around the table (two blocks out) raise the power ceiling;
+   * the power used is capped by your level, and the cost is 1-3 levels and
+   * 1-3 amethyst depending on how strong the roll is.
+   */
+  private enchantHeld(x: number, y: number, z: number): void {
+    const { world, audio, entities, toast } = this.deps;
+    const s = this.inventory.getSelected();
+    const opts = s ? enchantsFor(s.id) : [];
+    if (!s || opts.length === 0) { toast('Hold a tool, weapon, bow or armor piece to enchant it'); return; }
+    if (s.ench) { toast('That item already carries an enchantment'); return; }
+    let shelves = 0;
+    for (let dy = 0; dy <= 1; dy++) {
+      for (let dz = -2; dz <= 2; dz++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== 2) continue;
+          if (world.getBlock(x + dx, y + dy, z + dz) === B.BOOKSHELF) shelves++;
+        }
+      }
+    }
+    const ceiling = Math.min(30, 8 + Math.min(15, shelves) * 2);
+    const power = this.mode === 'creative' ? ceiling : Math.min(ceiling, this.xpLevel);
+    if (power < 1) { toast('Enchanting needs experience - mine ores, smelt and fight to earn levels'); audio.play('fail'); return; }
+    const tier = power >= 20 ? 3 : power >= 10 ? 2 : 1;
+    if (this.mode === 'survival' && this.inventory.count(I.AMETHYST) < tier) {
+      toast(`Enchanting at power ${power} needs ${tier} amethyst`);
+      audio.play('fail');
+      return;
+    }
+    // roll: one primary enchantment scaled to the power, maybe a bonus or two
+    const pool = [...opts];
+    const ench: Record<string, number> = {};
+    let chance = 1;
+    while (pool.length && Math.random() < chance) {
+      const e = pool.splice((Math.random() * pool.length) | 0, 1)[0];
+      const lvl = Math.max(1, Math.min(e.max, Math.round((power / 30) * e.max + (Math.random() - 0.4))));
+      ench[e.id] = lvl;
+      chance = chance === 1 ? (power + 1) / 50 : chance / 2;
+    }
+    this.spendLevels(tier);
+    if (this.mode === 'survival') for (let i = 0; i < tier; i++) this.inventory.removeOne(I.AMETHYST);
+    s.ench = ench;
+    audio.play('level');
+    audio.dig('stone', 1, 1.2, B.AMETHYST_ORE);
+    for (let i = 0; i < 3; i++) entities.spawnCritParticles(x + 0.5, y + 1.2 + i * 0.2, z + 0.5);
+    this.deps.renderer.triggerSwing();
+    toast(`Enchanted: ${Object.entries(ench).map(([k, v]) => enchantLabel(k, v)).join(', ')}`);
+    this.deps.onAdvance?.('enchant');
+    this.inventory.onChange();
+  }
+
   /** Light a Nether portal: from the air block where ignition starts, flood the
    *  enclosed air pocket within a vertical obsidian frame (either the XY or ZY
    *  plane) and fill it with portal blocks. Returns false if no valid frame. */
@@ -1181,6 +1610,21 @@ export class Player {
 
     // shield / spyglass are "hold to use" items driven from update()
     if (held?.id === I.SHIELD || held?.id === I.SPYGLASS) return;
+
+    // firework rocket: a burst of thrust while gliding
+    if (held?.id === I.FIREWORK_ROCKET && this.placeCooldown <= 0) {
+      this.placeCooldown = 0.5;
+      if (this.gliding) {
+        this.rocketT = 1.4;
+        this.deps.renderer.triggerSwing();
+        audio.play('fuse');
+        audio.play('whoosh');
+        if (this.mode === 'survival') this.inventory.consumeSelected();
+      } else {
+        this.deps.toast('Fire a rocket while gliding for a boost');
+      }
+      return;
+    }
 
     // drawing a bow takes priority while held
     if (heldDef?.bow) {
@@ -1312,6 +1756,14 @@ export class Player {
       }
     }
 
+    // workshop + decoration blocks (campfire, composter, anvil, enchanting table,
+    // cake ...) take the click before held armor is worn or food is eaten
+    if (this.target && !this.sneaking && this.useDecorBlock(this.target.x, this.target.y, this.target.z, this.target.id)) {
+      this.eatT = 0;
+      this.eating = false;
+      return;
+    }
+
     // equip wearable armor onto the body (right-click swaps with the worn piece)
     if (heldDef?.armor && this.placeCooldown <= 0) {
       this.equipArmor();
@@ -1324,7 +1776,10 @@ export class Player {
       this.eatT += dt;
       this.eating = true;
       this.chewT -= dt;
-      if (this.chewT <= 0) { this.chewT = 0.25; audio.play(heldDef.id === I.MILK_BUCKET ? 'splash' : 'eat'); }
+      if (this.chewT <= 0) {
+        this.chewT = 0.25;
+        audio.play(heldDef.id === I.MILK_BUCKET ? 'splash' : isDrink(heldDef.id) ? 'bubble' : 'eat', isDrink(heldDef.id) ? 0.6 : 1);
+      }
       if (this.eatT >= 1.6) {
         const eaten = heldDef.id;
         if (heldDef.food) {
@@ -1337,14 +1792,17 @@ export class Player {
         } else {
           this.inventory.consumeSelected();
         }
-        if (eaten === I.BEETROOT_SOUP || eaten === I.VEGETABLE_STEW) {
-          const left = this.inventory.add(I.BOWL, 1);
-          if (left > 0) this.deps.entities.spawnDrop(this.pos.x, this.pos.y + 1, this.pos.z, I.BOWL, left);
+        // containers come back: bowls from stews, bottles from potions + water
+        const empty = eaten === I.BEETROOT_SOUP || eaten === I.VEGETABLE_STEW || eaten === I.MUSHROOM_STEW ? I.BOWL
+          : isPotion(eaten) || eaten === I.WATER_BOTTLE ? I.GLASS_BOTTLE : 0;
+        if (empty) {
+          const left = this.inventory.add(empty, 1);
+          if (left > 0) this.deps.entities.spawnDrop(this.pos.x, this.pos.y + 1, this.pos.z, empty, left);
         }
         this.applyFoodEffects(eaten);
         if (eaten === I.GOLDEN_APPLE || eaten === I.ENCHANTED_GOLDEN_APPLE) this.deps.onAdvance?.('golden_apple');
         this.eatT = 0;
-        audio.play('burp');
+        if (!isDrink(eaten)) audio.play('burp');
       }
       return;
     }
@@ -1358,6 +1816,7 @@ export class Player {
     if (held?.id === I.BUCKET && this.tryScoopLava()) return;
     if (held?.id === I.WATER_BUCKET && this.tryPlaceWater()) return;
     if (held?.id === I.LAVA_BUCKET && this.tryPlaceLava()) return;
+    if (held?.id === I.GLASS_BOTTLE && this.tryFillBottle()) return;
 
     // filled mob catcher: release the captured pet in front of the player. Step
     // the spot back toward the player if the far one is inside terrain, so a pet
@@ -1449,6 +1908,18 @@ export class Player {
           return;
         }
       }
+    }
+
+    // throwables: warp pearls teleport you where they land, snowballs knock mobs back
+    if (held && (held.id === I.WARP_PEARL || held.id === I.SNOWBALL) && this.deps.throwItem) {
+      const d = this.lookDir();
+      const ey = this.pos.y + this.eyeHeight();
+      this.deps.throwItem(held.id, this.pos.x + d.x * 0.4, ey + d.y * 0.4 - 0.1, this.pos.z + d.z * 0.4, d.x, d.y, d.z);
+      this.placeCooldown = held.id === I.WARP_PEARL ? 1 : 0.25;
+      this.deps.renderer.triggerSwing();
+      audio.play('whoosh');
+      if (this.mode === 'survival') this.inventory.consumeSelected();
+      return;
     }
 
     // flint & steel: ignite an obsidian frame into a Nether portal
@@ -1585,11 +2056,38 @@ export class Player {
     }
 
     if (!heldDef?.block) return;
+    // a slab laid onto the open half of the same slab fills out the whole block
+    if (SLAB_IDS.has(held.id) && this.target.id === held.id) {
+      const tm = world.bedFacings.get(`${this.target.x},${this.target.y},${this.target.z}`) ?? 0;
+      if ((this.target.ny === 1 && tm !== 1) || (this.target.ny === -1 && tm === 1)) {
+        this.mergeSlab(this.target.x, this.target.y, this.target.z, held.id);
+        return;
+      }
+    }
     const px = this.target.x + this.target.nx;
     const py = this.target.y + this.target.ny;
     const pz = this.target.z + this.target.nz;
     const existing = world.getBlock(px, py, pz);
+    if (SLAB_IDS.has(held.id) && existing === held.id) { this.mergeSlab(px, py, pz, held.id); return; }
     if (existing !== B.AIR && existing !== B.WATER) return;
+    // orientation for shaped blocks: which way the player faces, and whether the
+    // click landed on the upper half of a side face (or a block's underside)
+    const yawDeg = ((this.yaw * 180 / Math.PI) % 360 + 360) % 360;
+    const facing = Math.round(yawDeg / 90) % 4; // 0=-z, 1=-x, 2=+z, 3=+x
+    const hitY = this.pos.y + this.eyeHeight() + this.lookDir().y * this.target.dist;
+    const upper = this.target.ny === -1 || (this.target.ny === 0 && hitY - this.target.y > 0.5);
+    let meta = -1; // -1: no meta entry
+    if (SLAB_IDS.has(held.id)) meta = upper ? 1 : 0;
+    else if (STAIR_IDS.has(held.id)) meta = facing + (upper ? 4 : 0);
+    else if (held.id === B.GLASS_PANE) meta = facing % 2;
+    else if (held.id === B.ANVIL || held.id === B.CAMPFIRE) meta = facing & 1;
+    else if (held.id === B.JACK_O_LANTERN) meta = [4, 0, 5, 1][facing];
+    else if (held.id === B.LANTERN) {
+      // hangs from a ceiling (clicked underside), otherwise stands on the floor
+      const floor = isSolid(world.getBlock(px, py - 1, pz)), ceil = isSolid(world.getBlock(px, py + 1, pz));
+      if (this.target.ny === -1 ? !ceil : !floor && !ceil) return;
+      meta = this.target.ny === -1 || !floor ? 1 : 0;
+    }
 
     // torch: attach to a floor (clicked top face) or to a block wall (side face)
     if (held.id === B.TORCH) {
@@ -1639,7 +2137,10 @@ export class Player {
     if (isSolid(placeId) && boxIntersectsBlock(this.pos, BOX, px, py, pz)) return;
     if (isSolid(placeId) && this.deps.entities.anyMobIntersecting(px, py, pz)) return;
 
+    const pkey = `${px},${py},${pz}`;
+    if (META_BLOCKS.has(placeId)) { if (meta >= 0) world.bedFacings.set(pkey, meta); else world.bedFacings.delete(pkey); }
     if (world.setBlock(px, py, pz, placeId)) {
+      if (placeId === B.FENCE_GATE) world.doorStates.set(pkey, { facing: facing as DoorFacing, open: false });
       if (placeId === B.LEVER || placeId === B.WOODEN_BUTTON || placeId === B.STONE_BUTTON || placeId === B.PRESSURE_PLATE) {
         const facing = this.target.ny === -1 ? 0 : this.target.ny === 1 ? 1 : this.target.nz === -1 ? 2 : this.target.nz === 1 ? 3 : this.target.nx === -1 ? 4 : 5;
         world.redstoneStates.set(`${px},${py},${pz}`, { active: false, facing });
@@ -1676,18 +2177,35 @@ export class Player {
     if (this.mode === 'survival' && !this.inventory.removeOne(I.ARROW)) return;
     const d = this.lookDir();
     const ey = this.pos.y + this.eyeHeight();
+    const power = enchLevel(this.inventory.getSelected(), 'power');
     this.deps.entities.shootArrow(
       'player',
       this.pos.x + d.x * 0.4, ey + d.y * 0.4 - 0.05, this.pos.z + d.z * 0.4,
       d.x, d.y, d.z,
       14 + 36 * charge,
-      Math.ceil(2 + 7 * charge),
+      Math.ceil((2 + 7 * charge) * (power > 0 ? 1 + 0.25 * (power + 1) : 1)),
     );
     this.deps.renderer.triggerSwing();
     this.damageHeldTool();
   }
 
+  /** Two halves of the same slab make the full block. */
+  private mergeSlab(x: number, y: number, z: number, slab: number): void {
+    const world = this.deps.world;
+    const full = slabFullBlock(slab);
+    if (isSolid(full) && boxIntersectsBlock(this.pos, BOX, x, y, z)) return;
+    world.bedFacings.delete(`${x},${y},${z}`);
+    if (!world.setBlock(x, y, z, full)) return;
+    this.placeCooldown = 0.22;
+    this.deps.renderer.triggerSwing();
+    this.deps.audio.dig(def(slab).sound, 0.8, 1, full);
+    if (this.mode === 'survival') this.inventory.consumeSelected();
+    else this.inventory.onChange();
+  }
+
   private plantedCropFor(id: number): number {
+    if (id === I.PUMPKIN_SEEDS) return B.PUMPKIN_STEM;
+    if (id === I.MELON_SEEDS) return B.MELON_STEM;
     if (id === I.SEEDS) return B.WHEAT_0;
     if (id === I.CARROT) return B.CARROT_0;
     if (id === I.POTATO) return B.POTATO_0;
@@ -1712,7 +2230,10 @@ export class Player {
     if (hit && hit.entity !== this.riding && hit.dist < blockDist) {
       const target = hit.entity;
       const heldId = this.heldId();
-      let dmg = attackDamage(heldId) * attackStrength(charge);
+      // Sharpness (+0.5 per level +0.5) and Strength (+3 per level) add to the base hit
+      const sharp = enchLevel(this.inventory.getSelected(), 'sharpness');
+      const might = this.effects.get('strength');
+      let dmg = (attackDamage(heldId) + (sharp > 0 ? 0.5 * sharp + 0.5 : 0) + (might ? 3 * (might.amp + 1) : 0)) * attackStrength(charge);
       // critical hit: a charged swing while falling (mid-air, descending) deals +50%
       const crit = charge > 0.9 && !this.onGround && this.vel.y < -0.15 && !this.flying &&
         !this.onLadder && !this.swimming;
@@ -1735,6 +2256,11 @@ export class Player {
       ent.hurt(target, dmg, d.x, d.z, this, crit);
       // sprint-hit: extra knockback, and the sprint ends (vanilla)
       const kb = Math.hypot(d.x, d.z) || 1;
+      const knock = enchLevel(this.inventory.getSelected(), 'knockback');
+      if (knock > 0 && charge > 0.5) {
+        target.vel.x += (d.x / kb) * 4 * knock;
+        target.vel.z += (d.z / kb) * 4 * knock;
+      }
       if (this.sprinting && charge > 0.9) {
         target.vel.x += (d.x / kb) * 5;
         target.vel.z += (d.z / kb) * 5;
@@ -1782,9 +2308,10 @@ export class Player {
     if (this.dead) return;
 
     // drowning: lose a half-bubble every 0.75s underwater, then 1 dmg/s
-    if (this.underwaterEye()) {
+    // (Water Breathing stops it; Respiration stretches each breath)
+    if (this.underwaterEye() && !this.effects.has('water_breathing')) {
       this.airT += dts;
-      if (this.airT >= 0.75) {
+      if (this.airT >= 0.75 * (1 + enchLevel(this.inventory.armor[ARMOR_HEAD], 'respiration'))) {
         this.airT = 0;
         if (this.air > 0) this.air--;
       }
@@ -1891,6 +2418,12 @@ export class Player {
     if (ap > 0) {
       amount = Math.max(0, Math.round(amount * (1 - Math.min(20, ap) * 0.04)));
       this.damageArmor();
+    }
+    // Protection: each level on each worn piece shaves another 4% (cap 80%)
+    let prot = 0;
+    for (const s of this.inventory.armor) prot += enchLevel(s, 'protection');
+    if (prot > 0 && cause !== 'Starved to death' && cause !== 'Fell out of the world') {
+      amount = Math.max(0, Math.round(amount * (1 - Math.min(20, prot) * 0.04)));
     }
     // Resistance: 20% less per level
     const res = this.effects.get('resistance');

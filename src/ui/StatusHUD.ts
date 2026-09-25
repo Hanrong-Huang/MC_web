@@ -24,11 +24,14 @@ const ROMAN = ['', ' II', ' III', ' IV', ' V'];
 const EFFECT_NAMES: Record<EffectId, string> = {
   regeneration: 'Regeneration', absorption: 'Absorption', resistance: 'Resistance',
   fire_resistance: 'Fire Resistance', hunger: 'Hunger',
+  speed: 'Speed', night_vision: 'Night Vision', water_breathing: 'Water Breathing',
+  strength: 'Strength', jump_boost: 'Jump Boost',
 };
 /** badge accent per effect (vanilla potion colours) */
 const EFFECT_COLORS: Record<EffectId, string> = {
   regeneration: '#cd5cab', absorption: '#2552a5', resistance: '#99453a',
   fire_resistance: '#e49a3a', hunger: '#587653',
+  speed: '#7cafc6', night_vision: '#4a4af0', water_breathing: '#2e5299', strength: '#b8322a', jump_boost: '#22ff4c',
 };
 
 function canvas(w: number, h: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
@@ -95,6 +98,11 @@ function effectIcon(id: EffectId): HTMLCanvasElement {
     case 'resistance': pix(ctx, SHIELD_ICON, { O: '#1e1010', M: '#b0584a', m: '#7a3a30', L: '#e89a8a' }); break;
     case 'fire_resistance': pix(ctx, FLAME_ICON, { O: '#3a1204', Y: '#ffd23d', R: '#ff7a1a' }); break;
     case 'hunger': pix(ctx, SHANK_ICON, { O: '#101a0c', M: '#6f8a4a', B: '#4c6534', W: '#dcdcc8' }); break;
+    case 'speed': pix(ctx, ['...OO..', '..OLO..', '.OLLOOO', 'OLLLLLO', '.OLLOOO', '..OLO..', '...OO..'], { O: '#1c3440', L: '#9cd4ec' }); break;
+    case 'night_vision': pix(ctx, ['.......', '.OOOOO.', 'OWWWWWO', 'OWBKBWO', 'OWWWWWO', '.OOOOO.', '.......'], { O: '#10104a', W: '#dfe4ff', B: '#4a4af0', K: '#101020' }); break;
+    case 'water_breathing': pix(ctx, ['..OOO..', '.OLLLO.', 'OLWLLLO', 'OLLLLLO', 'OLLLLLO', '.OLLLO.', '..OOO..'], { O: '#10244a', L: '#5a8ae8', W: '#e8f2ff' }); break;
+    case 'strength': pix(ctx, ['.......', 'O.....O', 'OMO.OMO', 'OMMMMMO', 'OMLLLMO', '.OMMMO.', '..OOO..'], { O: '#2a0a08', M: '#b8322a', L: '#f07a6a' }); break;
+    case 'jump_boost': pix(ctx, ['...O...', '..OLO..', '.OLLLO.', 'OOOLOOO', '..OLO..', '..OLO..', '..OOO..'], { O: '#0a3a14', L: '#6cff8a' }); break;
   }
   return c;
 }

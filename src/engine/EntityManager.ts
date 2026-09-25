@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import { World } from './World';
 import { moveEntity, inWater, rayAABB, Vec3, MoveResult } from './Physics';
 import { B, I, def, hasDef, CROSS_BLOCKS, spriteNameFor, CAPTURABLE, mobLabel } from './Blocks';
-import { Atlas, extrudeSpriteGeometry } from './Textures';
+import { Atlas, extrudeSpriteGeometry, shapedItemGeometry, BLOCK_SPRITE_ICONS } from './Textures';
 import { AudioEngine } from './Audio';
 import { SEA_LEVEL } from './WorldGenerator';
 import type { Player } from './Player';
@@ -106,6 +106,8 @@ export class Entity {
   count = 0;
   /** captured-mob kind for dropped filled catchers (mirrors SlotData.mob) */
   mob?: string;
+  /** enchantments carried by a dropped item (mirrors SlotData.ench) */
+  ench?: Record<string, number>;
   // mob fields
   state: 'idle' | 'wander' | 'flee' | 'chase' | 'fuse' = 'idle';
   stateTime = 0;
@@ -243,13 +245,14 @@ export class EntityManager {
 
   // --- spawning ---------------------------------------------------------------
 
-  spawnDrop(x: number, y: number, z: number, itemId: number, count: number, dur?: number, mob?: string): Entity {
+  spawnDrop(x: number, y: number, z: number, itemId: number, count: number, dur?: number, mob?: string, ench?: Record<string, number>): Entity {
     const mesh = this.buildDropMesh(itemId, mob);
     const e = new Entity('drop', { x, y, z }, { w: 0.25, h: 0.25 }, mesh);
     e.itemId = itemId;
     e.count = count;
     if (dur !== undefined) e.dmg = dur; // reuse field for tool durability passthrough
     if (mob !== undefined) e.mob = mob;
+    if (ench) e.ench = ench;
     e.vel = { x: (Math.random() - 0.5) * 2.4, y: 3.2, z: (Math.random() - 0.5) * 2.4 };
     this.entities.push(e);
     this.scene.add(mesh);
@@ -1026,11 +1029,11 @@ export class EntityManager {
 
   private pickupDrop(e: Entity): number {
     const inv = this.player!.inventory;
-    if (e.dmg > 0) {
+    if (e.dmg > 0 || e.ench) {
       let left = e.count;
       for (let i = 0; i < inv.slots.length && left > 0; i++) {
         if (!inv.slots[i]) {
-          inv.slots[i] = { id: e.itemId, count: 1, dur: e.dmg };
+          inv.slots[i] = { id: e.itemId, count: 1, ...(e.dmg > 0 ? { dur: e.dmg } : {}), ...(e.ench ? { ench: e.ench } : {}) };
           left--;
         }
       }
@@ -2829,6 +2832,8 @@ export class EntityManager {
 
   /** Textured cube for drops, falling blocks, and primed TNT. */
   private makeBlockMesh(blockId: number, size: number): THREE.Mesh {
+    const shaped = shapedItemGeometry(blockId, this.atlas, size); // slabs, stairs, fences ...
+    if (shaped) return new THREE.Mesh(shaped, new THREE.MeshLambertMaterial({ map: this.atlas.texture, alphaTest: 0.35, vertexColors: true }));
     const d = def(blockId);
     const geo = new THREE.BoxGeometry(size, size, size);
     const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
@@ -2849,7 +2854,11 @@ export class EntityManager {
   private buildDropMesh(itemId: number, mob?: string): THREE.Group {
     const g = new THREE.Group();
     const d = def(itemId);
-    if (d.block && (CROSS_BLOCKS.has(itemId) || itemId === B.TORCH)) {
+    if (d.block && BLOCK_SPRITE_ICONS.has(d.name)) {
+      // cake, flower pot, campfire: tumble as their item sprite
+      const sprite = this.atlas.sprite(d.name);
+      if (sprite) g.add(new THREE.Mesh(extrudeSpriteGeometry(sprite, 0.34), new THREE.MeshLambertMaterial({ vertexColors: true })));
+    } else if (d.block && (CROSS_BLOCKS.has(itemId) || itemId === B.TORCH || itemId === B.LANTERN)) {
       // plants and torches drop as flat sprites of their tile
       const tex = new THREE.CanvasTexture(this.atlas.tileCanvas(d.faces!.sides));
       tex.magFilter = THREE.NearestFilter;

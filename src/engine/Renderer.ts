@@ -4,7 +4,7 @@
 // color behind it, block outline + crack overlay, and the first-person held item.
 
 import * as THREE from 'three';
-import { Atlas, extrudeSpriteGeometry } from './Textures';
+import { Atlas, extrudeSpriteGeometry, shapedItemGeometry, hasShapedItemModel, BLOCK_SPRITE_ICONS } from './Textures';
 import type { ChunkMeshData, GeoArrays } from './Mesher';
 import { B, def, hasDef, spriteNameFor, I, CROSS_BLOCKS } from './Blocks';
 
@@ -354,6 +354,10 @@ export class Renderer {
   private outline: THREE.LineSegments;
   /** optional block lookup (wired by main) so the outline can hug partial blocks */
   blockAt: ((x: number, y: number, z: number) => number) | null = null;
+  /** outline bounds [x0,y0,z0,x1,y1,z1] for shaped blocks (slabs, stairs, fences ...), else null */
+  outlineShape: ((x: number, y: number, z: number) => number[] | null) | null = null;
+  /** floor on the ambient light (Night Vision potion), 0 = off */
+  minAmbient = 0;
 
   // shared environment uniforms (sky function, fog, light colors)
   private env = {
@@ -870,6 +874,8 @@ export class Renderer {
     else if (id === B.PRESSURE_PLATE) { x0 = z0 = 0.0625; x1 = z1 = 0.9375; y1 = 0.08; }
     else if (id === B.REDSTONE_WIRE) y1 = 0.06;
     else if (id === B.TRAPDOOR) y0 = 0.8125;
+    const shaped = this.outlineShape?.(pos.x, pos.y, pos.z);
+    if (shaped) [x0, y0, z0, x1, y1, z1] = shaped;
     const e = 0.003;
     this.outline.scale.set(x1 - x0 + e * 2, y1 - y0 + e * 2, z1 - z0 + e * 2);
     this.outline.position.set(pos.x + (x0 + x1) / 2, pos.y + (y0 + y1) / 2, pos.z + (z0 + z1) / 2);
@@ -1079,10 +1085,10 @@ export class Renderer {
     this.bowStage = -1;
     this.heldIdleRot.set(0, 0, 0);
     this.heldRestPos.set(0, 0, 0);
-    if (id !== 0 && hasDef(id) && def(id).name === 'bed') {
+    if (id !== 0 && hasDef(id) && (def(id).name === 'bed' || BLOCK_SPRITE_ICONS.has(def(id).name))) {
       // the bed holds as its extruded item sprite (a real little 3/4-view bed),
       // which reads far better in hand than a textured 9/16 slab
-      const sprite = this.atlas.sprite('bed');
+      const sprite = this.atlas.sprite(def(id).name);
       const mesh = sprite
         ? new THREE.Mesh(extrudeSpriteGeometry(sprite, 0.28), new THREE.MeshLambertMaterial({ vertexColors: true }))
         : new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.3), new THREE.MeshLambertMaterial({ color: 0xb02e2e }));
@@ -1097,6 +1103,15 @@ export class Renderer {
       const tile = this.atlas.tileCanvas(d.faces!.sides);
       const { mesh, zc } = this.buildExtrudedItem(tile, 0.4);
       this.heldIdleRot.set(HELD_TILT, HELD_TURN, zc);
+      mesh.rotation.copy(this.heldIdleRot);
+      this.heldMesh = mesh;
+    } else if (id !== 0 && hasShapedItemModel(id)) {
+      // slabs, stairs, fences, anvils ... hold as their real little model
+      const mesh = new THREE.Mesh(shapedItemGeometry(id, this.atlas)!,
+        new THREE.MeshLambertMaterial({ map: this.atlas.texture, alphaTest: 0.35, vertexColors: true }));
+      mesh.scale.setScalar(0.2);
+      this.heldRestPos.set(-0.02, 0.14, 0);
+      this.heldIdleRot.set(0.3, -1.12, 0);
       mesh.rotation.copy(this.heldIdleRot);
       this.heldMesh = mesh;
     } else if (id !== 0 && hasDef(id) && def(id).block) {
@@ -1390,6 +1405,10 @@ export class Renderer {
    *  in air (a boolean `true` still means water, for older callers). */
   render(medium: boolean | 'water' | 'lava' | 'air'): void {
     const e = this.env;
+    if (this.minAmbient > 0) { // Night Vision: lift the dark floor (updateEnvironment resets it each frame)
+      const a = e.uAmbient.value, k = this.minAmbient;
+      a.setRGB(Math.max(a.r, k), Math.max(a.g, k), Math.max(a.b, k * 1.04));
+    }
     const m = medium === true ? 'water' : medium === false ? 'air' : medium;
     let near = this.viewNearOverride >= 0 ? this.viewNearOverride : this.viewNear;
     let far = this.viewFarOverride >= 0 ? this.viewFarOverride : this.viewFar;
