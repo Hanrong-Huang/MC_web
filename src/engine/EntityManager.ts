@@ -17,7 +17,8 @@ export type MobKind =
   | 'pig' | 'chicken' | 'sheep' | 'cow'
   | 'zombie' | 'skeleton' | 'spider' | 'creeper'
   | 'wolf' | 'villager' | 'phantom' | 'horse' | 'cat'
-  | 'cinderling' | 'ashstalker' | 'emberghast';
+  | 'cinderling' | 'ashstalker' | 'emberghast'
+  | 'rabbit' | 'bat';
 export type EntityKind = 'drop' | MobKind | 'arrow' | 'tnt' | 'falling' | 'particle' | 'bobber' | 'catcher';
 
 const MOB_KINDS = new Set<EntityKind>([
@@ -25,6 +26,7 @@ const MOB_KINDS = new Set<EntityKind>([
   'zombie', 'skeleton', 'spider', 'creeper',
   'wolf', 'villager', 'phantom', 'horse', 'cat',
   'cinderling', 'ashstalker', 'emberghast',
+  'rabbit', 'bat',
 ]);
 /** Nether-only hostile mobs. */
 const NETHER_MOBS: MobKind[] = ['cinderling', 'ashstalker', 'emberghast'];
@@ -40,6 +42,7 @@ const BREED_FOOD: Partial<Record<MobKind, number[]>> = {
   horse: [I.GOLDEN_CARROT, I.APPLE],
   wolf: [I.BEEF, I.COOKED_BEEF, I.PORKCHOP, I.COOKED_PORKCHOP, I.CHICKEN, I.COOKED_CHICKEN, I.MUTTON, I.COOKED_MUTTON],
   cat: [I.RAW_FISH, I.COOKED_FISH],
+  rabbit: [I.CARROT, I.GOLDEN_CARROT, B.DANDELION],
 };
 const BREED_NEEDS_TAME = new Set<MobKind>(['wolf', 'cat', 'horse']);
 
@@ -54,6 +57,7 @@ const LURE_FOOD: Partial<Record<MobKind, number[]>> = {
   pig: [I.WHEAT, I.CARROT, I.POTATO, I.BEETROOT],
   chicken: [I.SEEDS, I.BEETROOT_SEEDS],
   horse: [I.GOLDEN_CARROT, I.APPLE],
+  rabbit: [I.CARROT, I.GOLDEN_CARROT, B.DANDELION],
 };
 /** Animals that drift back toward their own kind when picking a wander heading. */
 const HERD_KINDS = new Set<MobKind>(['cow', 'sheep', 'pig', 'chicken', 'horse']);
@@ -86,6 +90,9 @@ const MOB_STATS: Record<MobKind, MobStats> = {
   cinderling: { box: { w: 0.5, h: 0.85 }, hp: 8, speed: 2.7, hostile: true },
   ashstalker: { box: { w: 0.8, h: 0.9 }, hp: 16, speed: 3.0, hostile: true },
   emberghast: { box: { w: 1.0, h: 1.0 }, hp: 10, speed: 1.8, hostile: true },
+  // ambient critters: a skittish hopping rabbit and a cave bat
+  rabbit: { box: { w: 0.4, h: 0.5 }, hp: 3, speed: 2.3, hostile: false },
+  bat: { box: { w: 0.5, h: 0.5 }, hp: 6, speed: 2.4, hostile: false },
 };
 /** Melee mobs that deal contact damage while chasing. */
 const MELEE_MOBS = new Set<MobKind>(['zombie', 'spider', 'cinderling', 'ashstalker']);
@@ -276,7 +283,7 @@ export class EntityManager {
     mesh.position.set(x, y, z);
     mesh.rotation.y = e.yaw;
     // soft contact shadow under grounded mobs (flyers get none)
-    if (kind !== 'phantom' && kind !== 'emberghast') {
+    if (kind !== 'phantom' && kind !== 'emberghast' && kind !== 'bat') {
       e.shadow = this.makeShadow(stats.box.w);
       mesh.add(e.shadow);
     }
@@ -1238,6 +1245,7 @@ export class EntityManager {
     if (e.kind === 'phantom') { this.updatePhantom(e, dt); return; }
     // emberghast: floats at range and spits fireballs
     if (e.kind === 'emberghast') { this.updateEmberghast(e, dt); return; }
+    if (e.kind === 'bat') { this.updateBat(e, dt); return; }
     // a ridden horse is driven by the player (see Player.updateRiding)
     if (e.ridden) return;
 
@@ -1352,6 +1360,16 @@ export class EntityManager {
     const angryWolf = e.kind === 'wolf' && e.angryT > 0 && e.state === 'chase';
     const speed = lured ? e.moveSpeed * 1.4
       : e.state === 'flee' ? e.moveSpeed * 2.2 : angryWolf ? e.moveSpeed * 2.4 : e.moveSpeed;
+    // rabbits bound: they only cover ground mid-hop, pausing between leaps
+    if (e.kind === 'rabbit' && (wishX !== 0 || wishZ !== 0)) {
+      e.shootCooldown -= dt;
+      if (e.onGround) {
+        if (e.shootCooldown <= 0) {
+          e.vel.y = e.state === 'flee' ? 6.2 : 5.2;
+          e.shootCooldown = e.state === 'flee' ? 0.05 : 0.25 + Math.random() * 0.35;
+        } else { wishX = 0; wishZ = 0; }
+      }
+    }
     const res = this.applyGroundMove(e, dt, wishX, wishZ, speed);
     // hop single-block barriers; spiders just climb straight up walls
     if ((res.hitX || res.hitZ) && (wishX !== 0 || wishZ !== 0)) {
@@ -1386,6 +1404,7 @@ export class EntityManager {
       e.state = 'fuse';
       e.fuseT = 1.5;
       this.audio.play('fuse');
+      this.spawnSmoke(e.pos.x, e.pos.y + e.box.h, e.pos.z, 4);
     }
 
     // animation
@@ -1535,6 +1554,13 @@ export class EntityManager {
         lg.rotation.y = (lg.userData.baseY as number) + Math.sin(ph) * 0.38 * e.limbAmt;
         lg.rotation.z = (lg.userData.baseZ as number) + side * Math.max(0, Math.cos(ph)) * 0.35 * e.limbAmt;
       }
+    } else if (e.kind === 'rabbit') {
+      // mid-hop the hind feet kick out behind and the forepaws reach ahead
+      const air = e.onGround ? 0 : Math.max(-1, Math.min(1, e.vel.y / 5));
+      const k = Math.min(1, 14 * dt);
+      const hind = e.onGround ? 0 : 0.9 - air * 0.4, fore = e.onGround ? 0 : -0.7;
+      L[0].rotation.x += (fore - L[0].rotation.x) * k; L[1].rotation.x = L[0].rotation.x;
+      L[2].rotation.x += (hind - L[2].rotation.x) * k; L[3].rotation.x = L[2].rotation.x;
     } else {
       for (let i = 0; i < L.length; i++) L[i].rotation.x = i % 2 === 0 ? swing : -swing;
     }
@@ -1831,6 +1857,50 @@ export class EntityManager {
   }
 
   /** Phantom: flies in circles above the player and periodically swoops. */
+  /** Cave bat: an erratic flutter between nearby open spots, shy of light
+   *  and of players, with its wings beating fast. Collides with blocks. */
+  private updateBat(e: Entity, dt: number): void {
+    const p = this.player!;
+    this.tintMob(e);
+    e.stateTime -= dt;
+    if (e.stateTime <= 0) {
+      // pick a new heading: mostly level darts, bias away from a close player
+      e.stateTime = 0.4 + Math.random() * 1.1;
+      let a = Math.random() * Math.PI * 2;
+      const dx = e.pos.x - p.pos.x, dz = e.pos.z - p.pos.z;
+      if (Math.hypot(dx, dz) < 4 && Math.random() < 0.7) a = Math.atan2(dz, dx) + (Math.random() - 0.5);
+      e._wishX = Math.cos(a);
+      e._wishZ = Math.sin(a);
+      e.lookPitch = (Math.random() - 0.45) * 2.2; // vertical drift
+      const ceil = this.world.isSolidAt(Math.floor(e.pos.x), Math.floor(e.pos.y + 1.2), Math.floor(e.pos.z));
+      const floor = this.world.isSolidAt(Math.floor(e.pos.x), Math.floor(e.pos.y - 0.8), Math.floor(e.pos.z));
+      if (ceil) e.lookPitch = -Math.abs(e.lookPitch);
+      else if (floor) e.lookPitch = Math.abs(e.lookPitch) + 0.5;
+    }
+    const sp = e.moveSpeed;
+    const k = Math.min(1, 4 * dt);
+    e.vel.x += (e._wishX * sp - e.vel.x) * k;
+    e.vel.z += (e._wishZ * sp - e.vel.z) * k;
+    e.vel.y += (e.lookPitch + Math.sin(e.age * 9) * 0.8 - e.vel.y) * k;
+    const res = moveEntity(this.world, e.pos, e.vel, dt, e.box);
+    if (res.hitX || res.hitZ) e.stateTime = 0; // bounce off walls into a new dart
+    e.yaw = Math.atan2(-e.vel.x, -e.vel.z);
+    if (e.limbs?.wings) {
+      const f = Math.sin(e.age * 34) * 0.9;
+      e.limbs.wings[0].rotation.y = f;
+      e.limbs.wings[1].rotation.y = -f;
+      const t0 = e.limbs.wings[0].children[1], t1 = e.limbs.wings[1].children[1];
+      if (t0) t0.rotation.y = f * 0.6;
+      if (t1) t1.rotation.y = -f * 0.6;
+    }
+    if (e.limbs?.faces) {
+      e.blinkT -= dt;
+      if (e.blinkT < -0.14) e.blinkT = 2 + Math.random() * 4;
+      for (const fc of e.limbs.faces) fc.mat.map = e.blinkT < 0 ? fc.closed : fc.open;
+    }
+    this.placeMob(e, dt);
+  }
+
   private updatePhantom(e: Entity, dt: number): void {
     const p = this.player!;
     this.tintMob(e);
@@ -2080,6 +2150,13 @@ export class EntityManager {
         else if (e.state === 'chase') { e.state = 'wander'; e.stateTime = 2; e.angryT = 0; }
       }
 
+      // rabbits bolt from a player who comes close without a carrot in hand
+      if (e.kind === 'rabbit' && !e.tamed && d < 5 && !p.dead && e.state !== 'flee'
+        && !this.isLureFood('rabbit', p.heldId()) && !p.sneaking) {
+        e.state = 'flee';
+        e.stateTime = 1.2 + Math.random();
+        e.yaw = Math.atan2(-(e.pos.x - p.pos.x), -(e.pos.z - p.pos.z)) + (Math.random() - 0.5) * 0.8;
+      }
       // villagers scatter from zombies
       if (e.kind === 'villager') {
         const z = this.nearestOf(e, 'zombie', 8);
@@ -2252,8 +2329,25 @@ export class EntityManager {
       const ground = this.world.getBlock(wx, h - 1, wz);
       if (ground !== B.GRASS && ground !== B.SNOW_GRASS && ground !== B.SAND) return;
       if (this.world.getBlock(wx, h, wz) !== B.AIR || this.world.getBlock(wx, h + 1, wz) !== B.AIR) return;
-      const kind = kinds[Math.floor(Math.random() * kinds.length)];
-      this.spawnMob(kind, wx + 0.5, h, wz + 0.5);
+      const label = this.world.generator.biomeLabel(wx, wz);
+      const pool = this.spawnPool(kinds, label);
+      if (!pool.length) return;
+      const kind = pool[Math.floor(Math.random() * pool.length)];
+      const variant = this.climateVariant(kind, wx, wz, label);
+      // farm animals and rabbits arrive as a small group
+      const group = kind === 'rabbit' ? 1 + Math.floor(Math.random() * 3)
+        : HERD_KINDS.has(kind) && kind !== 'horse' ? 1 + Math.floor(Math.random() * 3) : 1;
+      for (let i = 0; i < group; i++) {
+        const gx = i === 0 ? wx : wx + Math.floor((Math.random() - 0.5) * 5);
+        const gz = i === 0 ? wz : wz + Math.floor((Math.random() - 0.5) * 5);
+        const gc = this.world.getChunk(Math.floor(gx / 16), Math.floor(gz / 16));
+        if (!gc || !gc.ready) continue;
+        const gh = gc.heightmap[(gz & 15) * 16 + (gx & 15)];
+        if (Math.abs(gh - h) > 2 || this.world.getBlock(gx, gh, gz) !== B.AIR) continue;
+        const g = this.world.getBlock(gx, gh - 1, gz);
+        if (g !== B.GRASS && g !== B.SNOW_GRASS && g !== B.SAND) continue;
+        this.spawnMob(kind, gx + 0.5, gh, gz + 0.5, variant ?? undefined);
+      }
     };
 
     const caveSpawn = (): void => {
@@ -2305,6 +2399,14 @@ export class EntityManager {
     if (!isNight && passive < 10 && Math.random() < 0.5) {
       surfaceSpawn(['pig', 'chicken', 'sheep', 'cow'], 12, 36);
     }
+    // rabbits: snowfields, deserts, badlands, meadows and taiga
+    if (passive < 12 && Math.random() < 0.18) surfaceSpawn(['rabbit'], 12, 36);
+    // bats: flutter out of dark caves day or night
+    if (Math.random() < 0.25) {
+      let bats = 0;
+      for (const e of this.entities) if (e.kind === 'bat') bats++;
+      if (bats < 5) this.batSpawn();
+    }
     // wolves: rarer, prefer forests/taiga
     if (!isNight && passive < 8 && Math.random() < 0.12) {
       surfaceSpawn(['wolf'], 16, 40);
@@ -2322,6 +2424,49 @@ export class EntityManager {
       if (isNight && Math.random() < 0.7) surfaceSpawn(['zombie', 'skeleton', 'spider', 'creeper'], 14, 32);
       if (Math.random() < 0.5) caveSpawn();
     }
+  }
+
+  /** Which of `kinds` suit the biome a spawn attempt landed in. */
+  private spawnPool(kinds: MobKind[], label: string): MobKind[] {
+    const snowy = label === 'snow' || label === 'ice_spikes' || label === 'snowy_taiga';
+    const arid = label === 'desert' || label === 'badlands';
+    return kinds.filter((k) => {
+      switch (k) {
+        case 'rabbit': return snowy || arid || label === 'meadow' || label === 'flower_forest' || label === 'taiga'
+          || label === 'old_growth_taiga' || label === 'birch_forest' || label === 'savanna';
+        case 'pig': case 'sheep': return !arid && label !== 'jungle' && label !== 'dark_forest';
+        case 'cow': case 'chicken': return !arid && label !== 'ice_spikes';
+        case 'wolf': return label.includes('taiga') || label === 'forest' || label === 'birch_forest' || snowy;
+        case 'horse': return label === 'plains' || label === 'savanna' || label === 'meadow';
+        default: return true;
+      }
+    });
+  }
+
+  /** Biome-matched coat: warm/cold farm-animal variants, rabbit fur by terrain. */
+  private climateVariant(kind: MobKind, wx: number, wz: number, label: string): number | null {
+    if (kind === 'rabbit') {
+      if (label === 'snow' || label === 'ice_spikes' || label === 'snowy_taiga') return Math.random() < 0.8 ? 1 : 3;
+      if (label === 'desert' || label === 'badlands') return 2;
+      return Math.random() < 0.6 ? 0 : Math.random() < 0.5 ? 4 : 3;
+    }
+    if (kind !== 'pig' && kind !== 'cow' && kind !== 'chicken') return null;
+    const t = this.world.generator.temperatureAt(wx, wz);
+    return t > 0.6 ? 1 : t < 0.36 ? 2 : 0;
+  }
+
+  /** A bat in a dark open cave pocket near the player. */
+  private batSpawn(): void {
+    const p = this.player!;
+    const ang = Math.random() * Math.PI * 2, r = 8 + Math.random() * 20;
+    const wx = Math.floor(p.pos.x + Math.cos(ang) * r), wz = Math.floor(p.pos.z + Math.sin(ang) * r);
+    const chunk = this.world.getChunk(Math.floor(wx / 16), Math.floor(wz / 16));
+    if (!chunk || !chunk.ready) return;
+    const h = chunk.heightmap[(wz & 15) * 16 + (wx & 15)];
+    const wy = 12 + Math.floor(Math.random() * Math.max(4, h - 20));
+    for (let dy = 0; dy < 3; dy++) if (this.world.getBlock(wx, wy + dy, wz) !== B.AIR) return;
+    if (this.world.skyLight(wx, wy, wz) >= 0.3 || this.world.anyTorchNear(wx, wy, wz, 6)) return;
+    this.spawnMob('bat', wx + 0.5, wy + 1, wz + 0.5);
   }
 
   // --- combat -----------------------------------------------------------------
@@ -2349,7 +2494,10 @@ export class EntityManager {
     if (e.armorTier > 0) dmg *= 0.5; // iron horse barding halves damage
     e.hp -= dmg;
     e.hurtFlash = 0.35;
-    if (e.kind === 'spider') e.angryT = 12;
+    if (e.kind === 'spider') {
+      if (e.angryT <= 0) this.spawnAngry(e.pos.x, e.pos.y + e.box.h + 0.2, e.pos.z);
+      e.angryT = 12;
+    }
     // a hit pet pauses regen briefly before healing again
     if (this.isPet(e)) e.regenT = 6;
     const len = Math.hypot(kbX, kbZ) || 1;
@@ -2365,6 +2513,7 @@ export class EntityManager {
       for (const o of this.entities) {
         if (o.kind !== 'wolf' || o.tamed || o.dead) continue;
         if (o !== e && Math.hypot(o.pos.x - e.pos.x, o.pos.z - e.pos.z) > 16) continue;
+        if (o.angryT <= 0) this.spawnAngry(o.pos.x, o.pos.y + o.box.h + 0.2, o.pos.z);
         o.angryT = 25;
         o.state = 'chase';
         o.sitting = false;
@@ -2436,6 +2585,8 @@ export class EntityManager {
       case 'cinderling': at(I.QUARTZ, 0, 1); at(I.COAL, 0, 1); break;
       case 'ashstalker': at(I.COAL, 1, 2); at(I.BONE, 0, 1); break;
       case 'emberghast': at(I.QUARTZ, 1, 2); at(B.GLOWSTONE, 0, 1); break;
+      case 'rabbit': at(I.LEATHER, 0, 1); break; // rabbit hide
+      case 'bat': break;
       default: break;
     }
   }
@@ -2510,6 +2661,7 @@ export class EntityManager {
           this.spawnHearts(e.pos.x, e.pos.y + 0.7, e.pos.z);
           return 'tamed';
         }
+        this.spawnSmoke(e.pos.x, e.pos.y + 0.8, e.pos.z, 3); // not this time
         return null;
       }
       if (e.tamed) { e.sitting = !e.sitting; return 'sit'; }
@@ -2522,6 +2674,7 @@ export class EntityManager {
           this.spawnHearts(e.pos.x, e.pos.y + 0.5, e.pos.z);
           return 'tamed';
         }
+        this.spawnSmoke(e.pos.x, e.pos.y + 0.6, e.pos.z, 3);
         return null;
       }
       if (e.tamed) { e.sitting = !e.sitting; return 'sit'; }
@@ -2700,6 +2853,55 @@ export class EntityManager {
       this.entities.push(e);
       this.scene.add(mesh);
     }
+  }
+
+  /** Billboard particles from a small painted sprite (cached per key). */
+  private spriteParticles(key: string, paint: (ctx: CanvasRenderingContext2D) => void, n: number,
+    x: number, y: number, z: number, spread: number, size: number, vy: number, life: number, grav: number): void {
+    let mat = this.particleMats.get(key);
+    if (!mat) {
+      const c = document.createElement('canvas');
+      c.width = 8; c.height = 8;
+      const ctx = c.getContext('2d')!;
+      ctx.clearRect(0, 0, 8, 8);
+      paint(ctx);
+      const tex = new THREE.CanvasTexture(c);
+      tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter;
+      mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
+      this.particleMats.set(key, mat);
+    }
+    for (let i = 0; i < n; i++) {
+      const mesh = new THREE.Group();
+      const sz = size * (0.8 + Math.random() * 0.4);
+      mesh.add(new THREE.Mesh(new THREE.PlaneGeometry(sz, sz), mat));
+      const e = new Entity('particle',
+        { x: x + (Math.random() - 0.5) * spread, y: y + Math.random() * spread * 0.5, z: z + (Math.random() - 0.5) * spread },
+        { w: 0.05, h: 0.05 }, mesh);
+      e.vel = { x: (Math.random() - 0.5) * 0.5, y: vy * (0.7 + Math.random() * 0.6), z: (Math.random() - 0.5) * 0.5 };
+      e.maxLife = e.life = life * (0.8 + Math.random() * 0.4);
+      e.pGrav = grav;
+      this.entities.push(e);
+      this.scene.add(mesh);
+    }
+  }
+
+  /** Angry storm-cloud puffs over a mob that has turned on the player. */
+  spawnAngry(x: number, y: number, z: number): void {
+    this.spriteParticles('angry', (ctx) => {
+      ctx.fillStyle = '#3a3a40';
+      ctx.fillRect(1, 2, 6, 3); ctx.fillRect(2, 1, 4, 5); ctx.fillRect(0, 3, 8, 1);
+      ctx.fillStyle = '#56565e'; ctx.fillRect(2, 1, 2, 1); ctx.fillRect(1, 2, 2, 1);
+      ctx.fillStyle = '#e8322a'; ctx.fillRect(3, 5, 1, 1); ctx.fillRect(4, 6, 1, 1); ctx.fillRect(3, 7, 1, 1); // lightning jag
+    }, 3, x, y, z, 0.6, 0.3, 0.5, 1.1, -0.6);
+  }
+
+  /** Grey smoke puffs (creeper hiss, snuffed flames). */
+  spawnSmoke(x: number, y: number, z: number, n = 5): void {
+    this.spriteParticles('smoke', (ctx) => {
+      ctx.fillStyle = 'rgba(90,90,90,0.85)';
+      ctx.fillRect(2, 1, 4, 6); ctx.fillRect(1, 2, 6, 4);
+      ctx.fillStyle = 'rgba(140,140,140,0.9)'; ctx.fillRect(2, 2, 2, 2);
+    }, n, x, y, z, 0.5, 0.26, 0.9, 0.9, -1.2);
   }
 
   /** Gold sparkle burst for a critical hit. */
