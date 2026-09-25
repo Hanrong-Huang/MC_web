@@ -45,7 +45,7 @@ const DIR_Z = [-1, 0, 1, 0];
 /** direction index → World.torchFacings code (0=+x, 1=-x, 2=+z, 3=-z) */
 const TORCH_FACING = [3, 1, 2, 0];
 
-type PieceKind = 'well' | 'plaza' | 'house' | 'smithy' | 'farm' | 'lamp';
+type PieceKind = 'well' | 'plaza' | 'house' | 'smithy' | 'farm' | 'lamp' | 'tower';
 interface Piece {
   kind: PieceKind;
   x0: number; z0: number; sx: number; sz: number; // world footprint
@@ -1115,7 +1115,7 @@ export class WorldGenerator {
     // 2-4 roads radiate from the plaza, lined with plots on both sides
     const arms = [0, 1, 2, 3].filter((d) => rnd() < 0.8);
     if (arms.length < 2) arms.push(...[0, 2].filter((d) => !arms.includes(d)));
-    let houses = 0;
+    let houses = 0, hasTower = false;
     for (const dir of arms) {
       const ux = DIR_X[dir], uz = DIR_Z[dir];
       const px = -uz, pz = ux; // perpendicular (left/right of the road)
@@ -1141,7 +1141,8 @@ export class WorldGenerator {
           else if (roll < 0.52) { along = 7; deep = 5; }
           else if (roll < 0.66) { along = 9; deep = 6; }
           else if (roll < 0.78) { kind = 'smithy'; along = 7; deep = 6; }
-          else if (roll < 0.94) { kind = 'farm'; along = 9; deep = 7 + Math.floor(rnd() * 3); }
+          else if (roll < 0.91) { kind = 'farm'; along = 9; deep = 7 + Math.floor(rnd() * 3); }
+          else if (!hasTower && roll < 0.97) { kind = 'tower'; along = 5; deep = 5; }
           else { kind = 'lamp'; along = 1; deep = 1; }
           if (s + along - 1 > end + 1) break;
           const t0 = kind === 'lamp' ? 2 : 3, t1 = t0 + deep - 1;
@@ -1160,6 +1161,7 @@ export class WorldGenerator {
             v.pieces.push({ kind, x0, z0, sx, sz, y, side, v: rnd() });
             taken.push([x0, z0, x1, z1]);
             if (kind === 'house' || kind === 'smithy') houses++;
+            if (kind === 'tower') hasTower = true;
             v.minX = Math.min(v.minX, x0 - 2); v.maxX = Math.max(v.maxX, x1 + 2);
             v.minZ = Math.min(v.minZ, z0 - 2); v.maxZ = Math.max(v.maxZ, z1 + 2);
             s += along + 3 + Math.floor(rnd() * 3);
@@ -1208,6 +1210,7 @@ export class WorldGenerator {
           case 'well': this.buildWell(chunk, p, v.style); break;
           case 'lamp': this.buildLamp(chunk, p.x0, p.y, p.z0, v.style); break;
           case 'farm': this.buildFarm(chunk, p, v.style); break;
+          case 'tower': this.buildBellTower(chunk, p, v.style); break;
           default: this.buildHouse(chunk, p, v.style); break;
         }
       }
@@ -1400,6 +1403,55 @@ export class WorldGenerator {
     if (this.inChunk(chunk, sx, sz)) this.addVillager(sx + 0.5, y + 1, sz + 0.5);
   }
 
+  /** Village bell tower: a tall stone shaft with a ladder, an upper floor,
+   *  open belfry arches with a golden bell, and a stepped cap. */
+  private buildBellTower(chunk: Chunk, p: Piece, st: Style): void {
+    const side = p.side, y = p.y, N = 5;
+    const toX = (u: number, v: number): number =>
+      side === 0 ? p.x0 + u : side === 2 ? p.x0 + N - 1 - u : side === 1 ? p.x0 + v : p.x0 + N - 1 - v;
+    const toZ = (u: number, v: number): number =>
+      side === 0 ? p.z0 + v : side === 2 ? p.z0 + N - 1 - v : side === 1 ? p.z0 + N - 1 - u : p.z0 + u;
+    const wall = st.flat ? B.SANDSTONE : B.COBBLE, trim = st.flat ? B.SANDSTONE : B.STONE_BRICKS;
+    const top = y + 9;
+    for (let v = -1; v < N; v++) {
+      for (let u = 0; u < N; u++) {
+        const wx = toX(u, v), wz = toZ(u, v);
+        if (v === -1) { // front step
+          if (u !== 2) continue;
+          const g = this.heightAt(wx, wz);
+          if (g < y) this.underpin(chunk, wx, wz, y, wall); else this.put(chunk, wx, y, wz, st.path);
+          this.clearCol(chunk, wx, wz, y + 1, y + 3);
+          continue;
+        }
+        this.underpin(chunk, wx, wz, y, trim);
+        const edgeU = u === 0 || u === N - 1, edgeV = v === 0 || v === N - 1;
+        const corner = edgeU && edgeV;
+        for (let yy = y + 1; yy <= top + 4; yy++) {
+          let id = B.AIR;
+          if ((edgeU || edgeV) && yy <= top) {
+            id = corner || yy === y + 5 || yy === top ? trim : wall;
+            const mid = (edgeV && u === 2) || (edgeU && v === 2);
+            if (mid && (yy === y + 3 || yy === y + 6)) id = B.GLASS;
+            if (!corner && yy >= top - 2 && yy < top) id = B.AIR; // belfry arches
+          }
+          this.put(chunk, wx, yy, wz, id);
+        }
+        if (!edgeU && !edgeV && !(u === 1 && v === 3)) this.put(chunk, wx, y + 5, wz, st.floor);
+        // stepped cap
+        this.put(chunk, wx, top + 1, wz, st.flat ? st.roof : trim);
+        if (!edgeU && !edgeV) this.put(chunk, wx, top + 2, wz, st.flat ? st.roof : st.roof);
+      }
+    }
+    if (!st.flat) this.put(chunk, toX(2, 2), top + 3, toZ(2, 2), st.ridge);
+    for (let yy = y + 1; yy <= top - 1; yy++) this.put(chunk, toX(1, 3), yy, toZ(1, 3), B.LADDER);
+    this.put(chunk, toX(2, 2), top - 1, toZ(2, 2), B.GOLD_BLOCK); // the bell
+    this.put(chunk, toX(2, 2), top, toZ(2, 2), trim);
+    this.putDoor(chunk, toX(2, 0), y + 1, toZ(2, 0), side);
+    this.put(chunk, toX(3, 3), y + 1, toZ(3, 3), B.CHEST_LOOT);
+    this.putTorch(chunk, toX(2, 3), y + 2, toZ(2, 3), side);
+    this.putTorch(chunk, toX(3, -1), y + 3, toZ(3, -1), side);
+  }
+
   /** Stepped gable roof: each course steps in one block and up one, doubled
    *  underneath so it reads solid from inside; overhangs the walls by one. */
   private gableRoof(chunk: Chunk, p: Piece, y0: number, st: Style, gable: number): void {
@@ -1579,6 +1631,23 @@ export class WorldGenerator {
       const [lo, hi] = this.groundRange(ox - 1, oz - 1, 6, 3);
       if (lo > SEA_LEVEL && hi - lo <= 3 && hi <= 110 && !this.inVillage(ox, oz, 10)) {
         this.placeRuinedPortal(chunk, ox, lo, oz, roll(0x9074) < 0.5);
+      }
+    }
+    // shipwreck resting on the sea floor (or run aground in the shallows)
+    if (roll(0x5b1b) < 0.02) {
+      const ox = at(0x5b1c, 8, scx * CX + 4), oz = at(0x5b1d, 8, scz * CZ + 4);
+      const alongX = roll(0x5b1e) < 0.5;
+      const [lo, hi] = this.groundRange(alongX ? ox - 6 : ox - 2, alongX ? oz - 2 : oz - 6, alongX ? 13 : 5, alongX ? 5 : 13);
+      if (hi < SEA_LEVEL - 1 && lo >= SEA_LEVEL - 16 && hi - lo <= 4 && this.riverFactor(ox, oz) === 0) {
+        this.placeShipwreck(chunk, ox, lo + 1, oz, alongX);
+      }
+    }
+    // overgrown jungle temple
+    if (roll(0x1e3b) < 0.016) {
+      const ox = at(0x1e3c, 6, scx * CX + 2), oz = at(0x1e3d, 6, scz * CZ + 2);
+      const [lo, hi] = this.groundRange(ox, oz, 9, 11);
+      if (this.biomeIdx(ox + 4, oz + 5) === JUNGLE && lo > SEA_LEVEL && hi - lo <= 6) {
+        this.placeJungleTemple(chunk, ox, Math.round((lo + hi) / 2), oz);
       }
     }
     // boulders and stone outcrops make taiga, plains and mountain terrain easier to read
@@ -2052,6 +2121,90 @@ export class WorldGenerator {
       const by = this.heightAt(bx, bz);
       if (Math.abs(by - g) <= 2) this.put(chunk, bx, by, bz, B.GOLD_BLOCK);
     }
+  }
+
+  /** Sunken ship: a tapered plank hull on a spruce keel, a broken deck and
+   *  mast, holes knocked through the planking, and two loot chests below. */
+  private placeShipwreck(chunk: Chunk, ox: number, y0: number, oz: number, alongX: boolean): void {
+    const S = this.seed ^ 0x5b1f;
+    const L = 13, half = 6;
+    const at = (s: number, t: number, yy: number, id: number): void =>
+      this.put(chunk, alongX ? ox + s : ox + t, yy, alongX ? oz + t : oz + s, id);
+    const fill = (yy: number): number => (yy <= SEA_LEVEL ? B.WATER : B.AIR);
+    const tilt = hash2(S, ox, oz) < 0.5 ? 1 : 0; // one side sunk a block deeper
+    for (let s = -half; s < L - half; s++) {
+      const end = Math.abs(s) >= half - 1;
+      const w = end ? 1 : 2;
+      for (let t = -w; t <= w; t++) {
+        const wx = alongX ? ox + s : ox + t, wz = alongX ? oz + t : oz + s;
+        const base = y0 - (t > 0 ? tilt : 0);
+        const g = this.heightAt(wx, wz);
+        for (let y = g + 1; y < base; y++) this.put(chunk, wx, y, wz, B.PLANKS); // prop the hull on the seabed
+        const r = hash3(S ^ 1, wx, base, wz);
+        at(s, t, base, t === 0 ? B.SPRUCE_LOG : r < 0.15 ? fill(base) : B.PLANKS); // keel + bottom
+        for (let yy = base + 1; yy <= base + 3; yy++) {
+          const wallCell = Math.abs(t) === w;
+          const deck = yy === base + 3;
+          let id = fill(yy);
+          if (wallCell && !deck) id = hash3(S ^ 2, wx, yy, wz) < 0.2 ? fill(yy) : yy === base + 2 ? B.SPRUCE_LOG : B.PLANKS;
+          else if (deck) id = hash3(S ^ 3, wx, yy, wz) < 0.3 || (s === 0 && t === 0) ? fill(yy) : B.PLANKS;
+          at(s, t, yy, id);
+        }
+      }
+    }
+    // bowsprit + snapped mast
+    at(-half - 1, 0, y0 + 2, B.SPRUCE_LOG);
+    const mast = 3 + Math.floor(hash2(S ^ 4, ox, oz) * 5);
+    for (let k = 1; k <= mast; k++) at(1, 0, y0 + 3 + k, B.SPRUCE_LOG);
+    if (mast >= 5) for (let t = -2; t <= 2; t++) at(1, t, y0 + 3 + mast - 1, B.SPRUCE_LOG); // yard arm
+    at(-3, 0, y0 + 1, B.CHEST_LOOT);
+    at(4, 0, y0 + 1, B.CHEST_LOOT);
+  }
+
+  /** Overgrown jungle temple: two stepped tiers of mossy-looking cobble and
+   *  stone brick, vines of leaves spilling over, a pillared hall with loot and
+   *  a ladder up to a shrine on the upper tier. */
+  private placeJungleTemple(chunk: Chunk, ox: number, oy: number, oz: number): void {
+    const S = this.seed ^ 0x1e3e;
+    const W = 9, D = 11;
+    const stone = (wx: number, yy: number, wz: number): number =>
+      hash3(S, wx, yy, wz) < 0.4 ? B.STONE_BRICKS : B.COBBLE;
+    for (let dx = 0; dx < W; dx++) {
+      for (let dz = 0; dz < D; dz++) {
+        const wx = ox + dx, wz = oz + dz;
+        this.underpin(chunk, wx, wz, oy, B.COBBLE);
+        const e0 = dx === 0 || dx === W - 1 || dz === 0 || dz === D - 1;
+        const in1 = dx >= 1 && dx <= W - 2 && dz >= 1 && dz <= D - 2;
+        const e1 = in1 && (dx === 1 || dx === W - 2 || dz === 1 || dz === D - 2);
+        for (let yy = oy + 1; yy <= oy + 11; yy++) {
+          const lvl = yy - oy;
+          let id = B.AIR;
+          if (lvl <= 4) id = e0 ? stone(wx, yy, wz) : B.AIR;          // ground-floor hall
+          else if (lvl === 5) id = stone(wx, yy, wz);                  // hall roof / terrace
+          else if (lvl <= 8) id = e1 ? stone(wx, yy, wz) : B.AIR;      // shrine walls
+          else if (lvl === 9) id = in1 ? stone(wx, yy, wz) : B.AIR;    // shrine roof
+          else if (lvl === 10) id = dx >= 3 && dx <= W - 4 && dz >= 3 && dz <= D - 4 ? stone(wx, yy, wz) : B.AIR;
+          this.put(chunk, wx, yy, wz, id);
+        }
+        // leaf overgrowth spilling over the tiers
+        const r = hash2(S ^ 1, wx, wz);
+        if (r < 0.35) this.put(chunk, wx, oy + (in1 ? 10 : 6), wz, B.JUNGLE_LEAVES);
+        if (e0 && r > 0.8) for (let k = 0; k < 3; k++) this.putIfAir(chunk, wx + (dx === 0 ? -1 : dx === W - 1 ? 1 : 0), oy + 4 - k, wz + (dz === 0 ? -1 : dz === D - 1 ? 1 : 0), B.JUNGLE_LEAVES);
+      }
+    }
+    // entrances, pillars, windows
+    for (const yy of [oy + 1, oy + 2]) this.put(chunk, ox + 4, yy, oz, B.AIR);
+    for (const yy of [oy + 6, oy + 7]) this.put(chunk, ox + 4, yy, oz + 1, B.AIR);
+    for (const [px, pz] of [[2, 3], [6, 3], [2, 7], [6, 7]]) {
+      for (let yy = oy + 1; yy <= oy + 4; yy++) this.put(chunk, ox + px, yy, oz + pz, B.STONE_BRICKS);
+    }
+    for (const [wx, wz] of [[0, 5], [W - 1, 5]]) this.put(chunk, ox + wx, oy + 3, oz + wz, B.AIR);
+    this.put(chunk, ox + 4, oy + 1, oz + D - 2, B.CHEST_LOOT);
+    this.putTorch(chunk, ox + 2, oy + 3, oz + 4, 2);
+    this.putTorch(chunk, ox + 6, oy + 3, oz + 4, 2);
+    for (let yy = oy + 1; yy <= oy + 6; yy++) this.put(chunk, ox + 2, yy, oz + D - 3, B.LADDER); // up into the shrine
+    this.put(chunk, ox + 4, oy + 6, oz + D - 3, B.CHEST_LOOT);
+    this.putTorch(chunk, ox + 4, oy + 7, oz + D - 3);
   }
 
   /** Small stone keep: curtain walls on a levelled plinth, four corner towers
