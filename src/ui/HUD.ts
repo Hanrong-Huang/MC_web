@@ -16,6 +16,7 @@ import {
   GUI_ICONS, drawPlayerFigure, Fill,
 } from './Pixel';
 import { TitleBackdrop } from './TitleBackdrop';
+import { LoadingScreen, LoadSampler } from './LoadingScreen';
 
 export type ContainerKind = 'inventory' | 'table' | 'furnace' | 'chest' | 'creative' | 'trade';
 
@@ -111,23 +112,6 @@ const SPLASHES = [
   'Blocky and proud!', 'Mind the skeletons!', 'Chunk by chunk!', 'Moo!', 'Villagers trade!',
 ];
 
-const TIPS = [
-  'Punch a tree to get wood, then craft planks and a crafting table.',
-  'Hold Shift while clicking a slot to quick-move the whole stack.',
-  'Hover a slot and press 1-9 to swap it with that hotbar slot.',
-  'Sleep in a bed at night to skip to morning and set your spawn.',
-  'Torches keep monsters from spawning nearby.',
-  'Carry a compass to see the minimap; a clock shows the time.',
-  'Right-click a wolf with a bone to tame it.',
-  'Throw a mob catcher at a hostile mob to capture it as a pet.',
-  'Double-tap W to sprint; sprinting drains hunger faster.',
-  'Press F3 for coordinates and debug info.',
-  'The recipe book fills the crafting grid for you - just click a recipe.',
-  'Water cancels fall damage. Jump in!',
-  'Build a 4x5 obsidian frame and light it to reach the Nether.',
-  'Press L to see your advancements.',
-];
-
 /** Subtitle captions per sound effect (UI clicks are deliberately silent). */
 const SFX_CAPTIONS: Partial<Record<SfxName, string>> = {
   pop: 'Item picked up', hurt: 'Player hurts', hit: 'Something hit', eat: 'Eating', burp: 'Burp',
@@ -193,10 +177,8 @@ export class HUD {
   private deathEl: HTMLElement;
   private containerEl: HTMLElement;
   private loadingEl: HTMLElement;
-  private loadFill: HTMLElement | null = null;
-  private loadPct: HTMLElement | null = null;
-  private loadCells: HTMLElement[] = [];
-  private loadTipTimer: ReturnType<typeof setInterval> | null = null;
+  private loader: LoadingScreen | null = null;
+  private loadFadeTimer: ReturnType<typeof setTimeout> | null = null;
   private toastEl: HTMLElement;
   private cursorEl: HTMLElement;
   private tooltipEl!: HTMLElement;
@@ -1105,57 +1087,56 @@ export class HUD {
   // Loading screen
   // =========================================================================
 
+  /** World loading ('Generating world', a live terrain diorama + stages) or an
+   *  indeterminate spinner (progress = false: saving, quitting). */
   showLoading(text: string, progress = true): void {
-    this.loadingEl.classList.remove('hidden');
+    if (this.loadFadeTimer) { clearTimeout(this.loadFadeTimer); this.loadFadeTimer = null; }
+    this.loadingEl.classList.remove('hidden', 'fade-out');
     this.loadingEl.innerHTML = '';
     try {
       const dirt = this.atlas.tileCanvas('dirt').toDataURL();
-      this.loadingEl.style.backgroundImage = `linear-gradient(rgba(0,0,0,0.7), rgba(0,0,0,0.7)), url(${dirt})`;
+      this.loadingEl.style.backgroundImage =
+        `radial-gradient(ellipse at 50% 42%, rgba(60,48,36,0.25), rgba(0,0,0,0.82) 75%), url(${dirt})`;
       this.loadingEl.style.backgroundSize = 'auto, 64px 64px';
     } catch { /* plain background */ }
-    const box = el('div', 'load-box', this.loadingEl);
-    const head = el('div', 'load-title', box);
-    head.appendChild(scaled(pixelText(text.replace(/\.+$/, ''), '#ffffff'), 3));
-    head.setAttribute('aria-label', text);
-    if (!progress) {
-      // indeterminate (e.g. saving on quit): a sweeping bar instead of the chunk grid
-      const bar = el('div', 'load-bar indeterminate', box);
-      el('div', 'fill', bar);
-      this.loadFill = null; this.loadPct = null; this.loadCells = [];
-      if (this.loadTipTimer) { clearInterval(this.loadTipTimer); this.loadTipTimer = null; }
-      return;
-    }
-    // 5x5 chunk map that lights up as spawn chunks finish (vanilla's loading grid)
-    const map = el('div', 'load-map', box);
-    this.loadCells = [];
-    for (let i = 0; i < 25; i++) this.loadCells.push(el('div', 'load-cell', map));
-    const bar = el('div', 'load-bar', box);
-    bar.setAttribute('role', 'progressbar');
-    bar.setAttribute('aria-valuemin', '0');
-    bar.setAttribute('aria-valuemax', '100');
-    this.loadFill = el('div', 'fill', bar);
-    this.loadPct = el('div', 'load-pct', box);
-    this.loadPct.textContent = 'Preparing spawn area: 0%';
-    const tip = el('div', 'load-tip', box);
-    let ti = Math.floor(Math.random() * TIPS.length);
-    const setTip = (): void => { tip.textContent = `Tip: ${TIPS[ti % TIPS.length]}`; ti++; };
-    setTip();
-    if (this.loadTipTimer) clearInterval(this.loadTipTimer);
-    this.loadTipTimer = setInterval(setTip, 3500);
+    if (!this.loader) this.loader = new LoadingScreen(this.atlas);
+    this.loader.mount(this.loadingEl, text, progress ? 'world' : 'spinner');
   }
 
-  /** Spawn-area generation progress: 0..1 plus optional per-chunk readiness. */
-  setLoadingProgress(frac: number, cells?: boolean[]): void {
-    const pct = Math.round(Math.max(0, Math.min(1, frac)) * 100);
-    if (this.loadFill) this.loadFill.style.width = `${pct}%`;
-    if (this.loadFill?.parentElement) this.loadFill.parentElement.setAttribute('aria-valuenow', String(pct));
-    if (this.loadPct) this.loadPct.textContent = `Preparing spawn area: ${pct}%`;
-    if (cells) cells.forEach((on, i) => this.loadCells[i]?.classList.toggle('on', on));
+  /** Legacy single-number progress (kept for callers that only know a fraction). */
+  setLoadingProgress(frac: number): void {
+    this.loader?.setProgress(frac, frac);
+  }
+
+  /** Spawn-area progress: fraction of chunks generated and meshed. */
+  setLoadingDetail(gen: number, mesh: number): void {
+    this.loader?.setProgress(gen, mesh);
+  }
+
+  /** Live terrain source for the loading diorama. */
+  setLoadingTerrain(cx: number, cz: number, h0: number, sample: LoadSampler): void {
+    this.loader?.setTerrain(cx, cz, h0, sample);
+  }
+
+  /** Complete the bar, play the sting, then fade the screen away. Resolves once
+   *  the world should start rendering (the fade finishes over the live game). */
+  finishLoading(): Promise<void> {
+    this.loader?.finish();
+    this.audio.ui('loaded');
+    return new Promise((resolve) => {
+      this.loadFadeTimer = setTimeout(() => {
+        this.loadingEl.classList.add('fade-out');
+        this.loadFadeTimer = setTimeout(() => { this.loadFadeTimer = null; this.hideLoading(); }, 750);
+        resolve();
+      }, 650);
+    });
   }
 
   hideLoading(): void {
+    if (this.loadFadeTimer) { clearTimeout(this.loadFadeTimer); this.loadFadeTimer = null; }
     this.loadingEl.classList.add('hidden');
-    if (this.loadTipTimer) { clearInterval(this.loadTipTimer); this.loadTipTimer = null; }
+    this.loadingEl.classList.remove('fade-out');
+    this.loader?.unmount();
   }
 
   // =========================================================================

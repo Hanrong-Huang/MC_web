@@ -2030,4 +2030,100 @@ export class AudioEngine {
       this.mobSound('emberghast', rand(0.12, 0.25), 'idle', rand(-0.8, 0.8));
     }
   }
+
+  // ==========================================================================
+  // UI sound palette (menus, inventory, loading) — owned by the UI track
+  // ==========================================================================
+
+  /** Interface sounds: soft, dry and short so they never compete with the world. */
+  ui(name: UiSfx, vol = 1): void {
+    this.ensure();
+    if (!this.ctx) return;
+    if (!this.gate(`ui:${name}`, UI_GAP[name] ?? 0.03)) return;
+    const e = this.open('sfx', (UI_GAIN[name] ?? 1) * clamp(vol, 0, 1.5));
+    if (!e) return;
+    const p = rand(0.97, 1.03);
+    switch (name) {
+      case 'hover':
+        // a feather-light tick
+        this.tn(e, { dur: 0.028, f: 2350 * p, f1: 2150 * p, vol: 0.05, attack: 0.001 });
+        this.nz(e, { dur: 0.008, vol: 0.03, type: 'bandpass', f: 6200, q: 2 });
+        break;
+      case 'open':
+        // inventory open: an airy upward whoosh with a leathery flap
+        this.nz(e, { dur: 0.2, vol: 0.32, color: 'pink', type: 'bandpass', f: 520, f1: 2600, q: 1.1, attack: 0.07 });
+        this.nz(e, { at: 0.03, dur: 0.07, vol: 0.14, color: 'pink', type: 'lowpass', f: 900, curve: this.grains(3, 0.6) });
+        this.tn(e, { at: 0.02, dur: 0.09, f: 170 * p, f1: 240 * p, vol: 0.06 });
+        break;
+      case 'close':
+        // the same gesture folding back down
+        this.nz(e, { dur: 0.16, vol: 0.28, color: 'pink', type: 'bandpass', f: 2300, f1: 480, q: 1.1, attack: 0.03 });
+        this.tn(e, { at: 0.07, dur: 0.07, f: 200 * p, f1: 120 * p, vol: 0.09 });
+        break;
+      case 'pickup':
+        // lifting a stack: a small bright blip
+        this.tn(e, { dur: 0.055, f: 720 * p, f1: 1180 * p, glide: 0.03, vol: 0.1, attack: 0.002 });
+        this.nz(e, { dur: 0.02, vol: 0.05, type: 'bandpass', f: 3600, q: 1.2 });
+        break;
+      case 'place':
+        // setting it down: a dull wooden tock
+        this.tn(e, { dur: 0.05, f: 980 * p, f1: 620 * p, vol: 0.09, attack: 0.001 });
+        this.tn(e, { dur: 0.06, f: 260 * p, f1: 190 * p, vol: 0.08, attack: 0.001 });
+        this.nz(e, { dur: 0.018, vol: 0.06, color: 'pink', type: 'bandpass', f: 1800, q: 1 });
+        break;
+      case 'toggleOn':
+        this.tn(e, { dur: 0.05, f: 880, vol: 0.07, type: 'triangle' });
+        this.tn(e, { at: 0.055, dur: 0.08, f: 1320, vol: 0.07, type: 'triangle' });
+        break;
+      case 'toggleOff':
+        this.tn(e, { dur: 0.05, f: 1320, vol: 0.06, type: 'triangle' });
+        this.tn(e, { at: 0.055, dur: 0.08, f: 880, vol: 0.06, type: 'triangle' });
+        break;
+      case 'tab':
+        // page flick
+        this.nz(e, { dur: 0.045, vol: 0.18, type: 'highpass', f: 2600, curve: this.grains(3, 0.9, 1) });
+        this.tn(e, { dur: 0.025, f: 1500 * p, vol: 0.04 });
+        break;
+      case 'swipe':
+        // screen transition: a soft breath of air
+        this.nz(e, { dur: 0.26, vol: 0.14, color: 'pink', type: 'lowpass', f: 380, f1: 1900, attack: 0.1 });
+        break;
+      case 'created': {
+        // new world: a bright rising bell arpeggio
+        const notes = [523.25, 659.25, 783.99, 1046.5];
+        notes.forEach((f, i) => this.fm(e, { at: i * 0.075, f, ratio: 3.5, index: 0.7, dur: 0.9 - i * 0.1, vol: 0.075, idxDur: 0.15 }));
+        this.nz(e, { at: 0.25, dur: 0.5, vol: 0.05, type: 'highpass', f: 6000, curve: this.grains(10, 0.95, 1.1) });
+        break;
+      }
+      case 'loaded': {
+        // loading-complete sting: a warm chord swell under a sparkling run
+        for (const [f, v] of [[130.81, 0.09], [196, 0.06], [261.63, 0.05], [329.63, 0.04]] as [number, number][]) {
+          this.tn(e, { dur: 1.7, f, vol: v, wave: this.padWave ?? undefined, attack: 0.28, lp: 1600 });
+        }
+        [783.99, 987.77, 1174.66, 1567.98, 1975.53].forEach((f, i) =>
+          this.fm(e, { at: 0.12 + i * 0.065, f, ratio: 2, index: 0.8, dur: 1.1, vol: 0.05, idxDur: 0.2 }));
+        this.nz(e, { at: 0.1, dur: 0.9, vol: 0.05, type: 'highpass', f: 5200, curve: this.grains(14, 0.95, 0.9) });
+        this.duck(0.5, 0.8, 2.2);
+        break;
+      }
+      case 'shutter':
+        // screenshot: a mechanical camera shutter
+        this.nz(e, { dur: 0.018, vol: 0.4, type: 'highpass', f: 3000 });
+        this.tn(e, { dur: 0.03, f: 420, f1: 260, vol: 0.12 });
+        this.nz(e, { at: 0.07, dur: 0.035, vol: 0.3, type: 'bandpass', f: 2200, q: 1.4 });
+        this.tn(e, { at: 0.07, dur: 0.04, f: 520, f1: 300, vol: 0.1 });
+        break;
+    }
+    this.seal(e);
+  }
 }
+
+/** Interface sound names for AudioEngine.ui(). */
+export type UiSfx =
+  | 'hover' | 'open' | 'close' | 'pickup' | 'place' | 'toggleOn' | 'toggleOff'
+  | 'tab' | 'swipe' | 'created' | 'loaded' | 'shutter';
+const UI_GAIN: Partial<Record<UiSfx, number>> = {
+  hover: 4, open: 1.3, close: 1.3, pickup: 3.2, place: 3.2, toggleOn: 2.6, toggleOff: 2.6,
+  tab: 2.2, swipe: 1.6, created: 1.4, loaded: 1.5, shutter: 1.6,
+};
+const UI_GAP: Partial<Record<UiSfx, number>> = { hover: 0.04, pickup: 0.03, place: 0.03, tab: 0.05, open: 0.1, close: 0.1 };

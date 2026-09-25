@@ -16,6 +16,7 @@ import type { AmbientEnv } from './engine/Audio';
 import { TouchControls, isTouchDevice } from './ui/TouchControls';
 import { HUD, ContainerView } from './ui/HUD';
 import { StatusHUD } from './ui/StatusHUD';
+import type { LoadColumn } from './ui/LoadingScreen';
 import { SaveDB, SaveState, ChestSave, FurnaceSave, exportWorld, importWorld } from './engine/Persistence';
 import type { BlockEntitySave } from './engine/Persistence';
 import { FurnaceState, ChestState } from './engine/Inventory';
@@ -36,6 +37,7 @@ import type { Entity } from './engine/EntityManager';
 const DAY_LENGTH = 1200; // 20 real minutes
 const SAVE_VERSION = 2;
 const AUTOSAVE_SECONDS = 60;
+const INTRO_TIME = 1.9; // camera sweep from above into the player's eyes after loading
 // pressure plates stay powered this many 20 Hz ticks after the last step-off,
 // so walking across one doesn't flicker the plate (and slam wired doors)
 const PLATE_RELEASE_TICKS = 8;
@@ -107,6 +109,8 @@ class Game {
   private fire!: FireSystem;
   private fireAcc = 0;
   private mobBurnAcc = 0;
+  /** seconds into the post-loading camera sweep (>= INTRO_TIME: done) */
+  private introT = 99;
 
   constructor(app: App, slot: string, save: SaveState | null, fresh: { seed: number; mode: GameMode } | null) {
     this.app = app;
@@ -365,28 +369,35 @@ class Game {
   // --- boot -------------------------------------------------------------------
 
   private async pregenerate(): Promise<void> {
-    this.hud.showLoading('Generating world...');
+    this.hud.showLoading(this.world.dimension === 'nether' ? 'Entering the Nether' : 'Generating world');
     const px = this.player.pos.x, pz = this.player.pos.z;
+    // the loading diorama samples real spawn terrain as each chunk arrives
+    this.hud.setLoadingTerrain(px, pz, Math.floor(this.player.pos.y) - 1, (wx, wz) => this.sampleLoadColumn(wx, wz));
     for (let i = 0; i < 400 && !this.disposed; i++) {
       this.world.update(px, pz, 14);
       this.processMeshing(14);
       const pcx = Math.floor(px / CX), pcz = Math.floor(pz / CZ);
-      const cells: boolean[] = [];
+      let gen = 0, meshed = 0;
       for (let dz = -2; dz <= 2; dz++) {
         for (let dx = -2; dx <= 2; dx++) {
           const c = this.world.getChunk(pcx + dx, pcz + dz);
-          cells.push(!!c && c.ready && !this.world.dirtySet.has(chunkKey(pcx + dx, pcz + dz)));
+          if (!c || !c.ready) continue;
+          gen++;
+          if (!this.world.dirtySet.has(chunkKey(pcx + dx, pcz + dz))) meshed++;
         }
       }
-      const done = cells.filter(Boolean).length;
-      this.hud.setLoadingProgress(done / cells.length, cells);
-      if (done === cells.length) break;
+      this.hud.setLoadingDetail(gen / 25, meshed / 25);
+      if (meshed === 25) break;
       await new Promise((r) => requestAnimationFrame(r));
     }
     if (this.disposed) return;
-    this.hud.hideLoading();
+    await this.hud.finishLoading();
+    if (this.disposed) return;
     this.hud.showGameUI();
     this.state = 'playing';
+    // sweep the camera down into the player's eyes (dev/test hooks skip it so
+    // harness screenshots keep their framing)
+    this.introT = /nointro|debug|test/.test(location.hash) ? INTRO_TIME : 0;
     // dev helper: #debugmobs drops a few tameable/rideable mobs at spawn and
     // faces the player east toward the horse for screenshot testing
     if (location.hash.includes('debugmobs')) {
@@ -456,6 +467,58 @@ class Game {
     this.hud.toast('Click to capture the mouse');
     this.lastFrame = performance.now();
     this.loop(this.lastFrame);
+  }
+
+  /** After loading, the view starts high behind the player looking down at the
+   *  spawn and eases into first person (skipped for reduced-motion users). */
+  private applyIntroSweep(cam: THREE.PerspectiveCamera, dt: number): void {
+    this.introT += dt;
+    let reduced = false;
+    try { reduced = matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { /* old browser */ }
+    if (reduced || this.player.mode === 'creative' && this.player.flying) { this.introT = INTRO_TIME; return; }
+    const x = Math.min(1, this.introT / INTRO_TIME);
+    const k = 1 - x * x * x * (x * (x * 6 - 15) + 10); // 1 → 0, smootherstep
+    if (k <= 0) return;
+    const yaw = this.player.yaw + k * 0.9;
+    let back = 8 * k, up = 7 * k;
+    const px = cam.position.x, py = cam.position.y, pz = cam.position.z;
+    // keep the sweep out of hillsides: rise until the camera sits in air
+    for (let i = 0; i < 12 && k > 0.05; i++) {
+      const id = this.world.getBlock(Math.floor(px + Math.sin(yaw) * back), Math.floor(py + up), Math.floor(pz + Math.cos(yaw) * back));
+      if (id === B.AIR || !def(id).solid) break;
+      up += 1;
+    }
+    cam.position.set(px + Math.sin(yaw) * back, py + up, pz + Math.cos(yaw) * back);
+    cam.rotation.set(this.player.pitch * (1 - k) - 0.62 * k, yaw, 0);
+  }
+
+  /** One terrain column for the loading diorama: ground block + height, any
+   *  water above it, a tree standing on it, and the biome grass tint. */
+  private sampleLoadColumn(wx: number, wz: number): LoadColumn | null {
+    const c = this.world.getChunk(Math.floor(wx / CX), Math.floor(wz / CZ));
+    if (!c || !c.ready) return null;
+    let y = c.heightmap[(wz & 15) * 16 + (wx & 15)] - 1;
+    // the Nether has a roof: start just above spawn height and dig down to open air
+    if (this.world.dimension === 'nether') {
+      y = Math.min(y, Math.floor(this.player.pos.y) + 6);
+      while (y > 1 && this.world.getBlock(wx, y, wz) !== B.AIR) y--;
+    }
+    let water = -1, leaf = 0, log = 0;
+    for (; y > 0; y--) {
+      const id = this.world.getBlock(wx, y, wz);
+      if (id === B.AIR) continue;
+      if (id === B.LEAVES || id === B.BIRCH_LEAVES || id === B.SPRUCE_LEAVES) { if (!leaf) leaf = id; continue; }
+      if (id === B.LOG || id === B.BIRCH_LOG || id === B.SPRUCE_LOG) { log = id; continue; }
+      const d = def(id);
+      if (d.liquid) { if (water < 0 && id === B.WATER) water = y; continue; }
+      if (!d.solid) continue;
+      // the worker-computed biome tint rides on the chunk (no main-thread noise)
+      const ti = ((wz & 15) * 16 + (wx & 15)) * 3;
+      const t = c.tint;
+      const tint: [number, number, number] = t ? [Math.min(1, t[ti]), Math.min(1, t[ti + 1]), Math.min(1, t[ti + 2])] : [0.9, 1, 0.7];
+      return { y, id, water, leaf, log, tint };
+    }
+    return null;
   }
 
   private setupFluidTestScene(): void {
@@ -1272,6 +1335,9 @@ class Game {
     let dt = (now - this.lastFrame) / 1000;
     this.lastFrame = now;
     if (dt > 0.1) dt = 0.1;
+    // a rAF timestamp can predate the performance.now() the loop was seeded
+    // with (long frames, e.g. right after loading): negative dt tunnels physics
+    if (dt < 0) dt = 0;
     this.elapsed += dt;
     this.fps = this.fps * 0.95 + (1 / Math.max(dt, 1e-4)) * 0.05;
 
@@ -1386,6 +1452,7 @@ class Game {
     } else {
       cam.position.set(this.player.pos.x, this.player.pos.y + this.player.eyeHeight() + bobY, this.player.pos.z);
       cam.rotation.set(this.player.pitch, this.player.yaw, 0);
+      if (this.introT < INTRO_TIME) this.applyIntroSweep(cam, dt);
     }
     // damage screen shake: a decaying random offset while shakeT counts down
     if (this.player.shakeT > 0) {
