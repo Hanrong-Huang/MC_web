@@ -1479,6 +1479,7 @@ export class EntityManager {
         || (e.watching && distH < 8 && e.state !== 'flee' && e.grazeT <= 0));
       let tx = e.lookPitch, ty = e.lookYaw, tz = 0;
       if (hSpeed > 0.5 && !watch) { tx = 0; ty = 0; } // walking: eyes on the path
+      if (e.ridden) { tx = -0.3; ty = 0; }             // under a rider: head low, out of the view
       if (watch) {
         const dy = (p.pos.y + 1.6) - (e.pos.y + e.box.h * 0.9);
         tx = Math.atan2(dy, distH) * 0.7;
