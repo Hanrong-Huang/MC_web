@@ -12,6 +12,7 @@ import { Simplex2, Simplex3, hash2, hash3, mulberry32, smoothstep, spline } from
 import { Chunk, CX, CZ, CY } from './Chunk';
 import { B } from './Blocks';
 import type { DoorState } from './World';
+import { LM_CELL, planLandmark, drawLandmark, type Landmark } from './Landmarks';
 
 // Raised well above bedrock (y=0) so there's a deep stone column to mine through.
 export const SEA_LEVEL = 64;
@@ -19,6 +20,43 @@ export const SEA_LEVEL = 64;
 export type BiomeId = 'plains' | 'forest' | 'desert' | 'snow' | 'taiga' | 'swamp' | 'mountains' | 'jungle';
 const BIOMES: readonly BiomeId[] = ['plains', 'forest', 'desert', 'snow', 'taiga', 'swamp', 'mountains', 'jungle'];
 const PLAINS = 0, FOREST = 1, DESERT = 2, SNOW = 3, TAIGA = 4, SWAMP = 5, MOUNTAINS = 6, JUNGLE = 7;
+
+// Sub-biome variants layered on the eight base families. biomeAt() keeps
+// reporting the family (weather, music and saplings key off it); the variant
+// changes surface, flora, trees and tint, and biomeLabel() names it.
+const V_NONE = 0, V_SAVANNA = 1, V_MEADOW = 2, V_BIRCH = 3, V_FLOWER = 4, V_DARK = 5, V_BADLANDS = 6,
+  V_ICE_SPIKES = 7, V_SNOWY_TAIGA = 8, V_OLD_TAIGA = 9;
+const VARIANT_LABEL = ['', 'savanna', 'meadow', 'birch_forest', 'flower_forest', 'dark_forest', 'badlands',
+  'ice_spikes', 'snowy_taiga', 'old_growth_taiga'];
+// Column-scale landforms folded into the height field.
+const F_NONE = 0, F_VOLCANO = 1, F_CRATER = 2, F_SINKHOLE = 3;
+const VOLC_CELL = 640, CRATER_CELL = 448, SINK_CELL = 256, ISLAND_CELL = 208;
+
+/** Block id by registry name when it exists, else a fallback — lets the
+ *  generator pick up newer blocks (ice, terracotta, …) without hard ids. */
+const blk = (name: string, fallback: number): number => {
+  const v = (B as unknown as Record<string, number | undefined>)[name];
+  return typeof v === 'number' ? v : fallback;
+};
+const ICE_SPIKE = blk('PACKED_ICE', blk('ICE', B.QUARTZ_BLOCK));
+const CALCITE = blk('CALCITE', B.QUARTZ_BLOCK);
+const MUSHROOM_STEM = blk('MUSHROOM_STEM', B.QUARTZ_BLOCK);
+const RED_CAP = blk('RED_MUSHROOM_BLOCK', B.NETHERRACK);
+const BROWN_CAP = blk('BROWN_MUSHROOM_BLOCK', B.DIRT);
+const MOSS = blk('MOSS_BLOCK', B.GRASS);
+/** badlands strata, bottom-up; repeats every BAND_N blocks with a wobble */
+const BADLANDS_BANDS = [
+  B.SANDSTONE, blk('ORANGE_TERRACOTTA', B.SANDSTONE), blk('TERRACOTTA', B.NETHERRACK), B.SANDSTONE,
+  blk('WHITE_TERRACOTTA', B.QUARTZ_BLOCK), blk('BROWN_TERRACOTTA', B.DIRT), B.SANDSTONE,
+  blk('RED_TERRACOTTA', B.NETHERRACK), blk('YELLOW_TERRACOTTA', B.SANDSTONE), blk('TERRACOTTA', B.SMOOTH_STONE),
+  B.SANDSTONE, blk('LIGHT_GRAY_TERRACOTTA', B.SMOOTH_STONE),
+];
+const RED_SAND = blk('RED_SAND', B.SAND);
+
+interface Volcano { x: number; z: number; r: number; h: number; base: number; lava: number }
+interface Crater { x: number; z: number; r: number; floor: number }
+interface Sinkhole { x: number; z: number; r: number; floor: number }
+interface Island { x: number; z: number; r: number; y: number; v: number }
 
 /** continentalness → base land height (deep ocean … coast … high inland) */
 const CONT_KNOTS: ReadonlyArray<readonly [number, number]> = [
@@ -101,6 +139,10 @@ export class WorldGenerator {
   private lake: Simplex2;
   private patch: Simplex2;
   private flora: Simplex2;
+  /** low-frequency field that picks sub-biome variants and badlands */
+  private variety: Simplex2;
+  /** lush-cave / cave-lake regions */
+  private lush: Simplex2;
   /** villager spawn positions queued by village generation (consumed by EntityManager) */
   villageSpawns: { x: number; y: number; z: number }[] = [];
   /** door/torch/bed side-state written by the last generate(); World drains it */
@@ -117,6 +159,26 @@ export class WorldGenerator {
   private cM = new Float32Array(CACHE_N);
   private cP = new Float32Array(CACHE_N);
   private cR = new Float32Array(CACHE_N);
+  /** sub-biome variant (V_*) */
+  private cV = new Uint8Array(CACHE_N);
+  /** column landform (F_*) and its 0..1 strength / radial position */
+  private cF = new Uint8Array(CACHE_N);
+  private cK = new Float32Array(CACHE_N);
+  /** special fluid level (volcano lava lake), 0 = none */
+  private cL = new Int16Array(CACHE_N);
+
+  // raw-column scratch outputs (see rawColumn)
+  private rT = 0;
+  private rM = 0;
+  private rPeak = 0;
+  private rRv = 0;
+  private rDetail = 0;
+  private rBad = 0;
+  private rVn = 0;
+
+  private volcanoes = new Map<number, Volcano | null>();
+  private craters = new Map<number, Crater | null>();
+  private sinkholes = new Map<number, Sinkhole | null>();
 
   constructor(seed: number) {
     this.seed = seed | 0;
@@ -135,6 +197,8 @@ export class WorldGenerator {
     this.lake = new Simplex2(this.seed ^ 0x1a4e);
     this.patch = new Simplex2(this.seed ^ 0x9a7c);
     this.flora = new Simplex2(this.seed ^ 0xf102);
+    this.variety = new Simplex2(this.seed ^ 0x7a21);
+    this.lush = new Simplex2(this.seed ^ 0x105b);
   }
 
   /** Move the door/torch/bed state written by generate() into the world's maps.
@@ -196,8 +260,63 @@ export class WorldGenerator {
     return i;
   }
 
-  /** Compute height, climate, mountain + river factors and biome of a column. */
+  /** Compute height, climate, mountain + river factors, landform and biome of a column. */
   private fillColumn(i: number, wx: number, wz: number): void {
+    // landform records may evaluate their own centre column through
+    // rawColumn, so resolve them before this column's scratch outputs
+    const volc = this.volcanoAt(Math.floor(wx / VOLC_CELL), Math.floor(wz / VOLC_CELL));
+    const crat = this.craterAt(Math.floor(wx / CRATER_CELL), Math.floor(wz / CRATER_CELL));
+    const sink = this.sinkholeAt(Math.floor(wx / SINK_CELL), Math.floor(wz / SINK_CELL));
+    let h = this.rawColumn(wx, wz);
+    const t = this.rT, m = this.rM, peak = this.rPeak, rv = this.rRv, detail = this.rDetail;
+    let feat = F_NONE, fk = 0, fluid = 0;
+    if (volc) {
+      const d = Math.hypot(wx - volc.x, wz - volc.z);
+      const k = 1 - d / volc.r; // 0 at the foot, 1 at the vent
+      if (k > 0) {
+        // concave cone up to the rim (k=.8), then the crater bowl
+        const a = Math.atan2(wz - volc.z, wx - volc.x);
+        const gully = Math.abs(Math.sin(a * 7 + volc.x)) * 2.2 * smoothstep(0.1, 0.6, k); // eroded ribs
+        const cone = k < 0.8 ? Math.pow(k / 0.8, 1.55) : 1 - smoothstep(0.8, 0.9, k) * 0.28;
+        const target = volc.base + cone * volc.h - gully + detail * 1.5;
+        const w = smoothstep(0, 0.28, k);
+        h = h * (1 - w) + Math.max(h, target) * w;
+        feat = F_VOLCANO; fk = k;
+        if (k > 0.8) fluid = volc.lava;
+      }
+    }
+    if (crat) {
+      const d = Math.hypot(wx - crat.x, wz - crat.z) / crat.r;
+      if (d < 1.45) {
+        // bowl + raised ejecta rim
+        const rim = Math.exp(-(((d - 1) / 0.2) ** 2)) * (2 + crat.r * 0.12);
+        if (h > crat.floor) h = crat.floor + (h - crat.floor) * smoothstep(0.3, 1.02, d);
+        if (d < 1) h -= (1 - d * d) * 1.5;
+        h += rim;
+        if (d < 1.1) { feat = F_CRATER; fk = d; }
+      }
+    }
+    if (sink && h > SEA_LEVEL + 2) {
+      const a = Math.atan2(wz - sink.z, wx - sink.x);
+      const r = sink.r * (1 + 0.22 * Math.sin(a * 3 + sink.x) + 0.12 * Math.sin(a * 5 - sink.z));
+      const d = Math.hypot(wx - sink.x, wz - sink.z);
+      if (d < r) { h = Math.min(h, sink.floor + (d / r) * 3); feat = F_SINKHOLE; fk = d / r; }
+    }
+
+    const hi = Math.max(4, Math.min(CY - 10, Math.floor(h)));
+    this.cKx[i] = wx; this.cKz[i] = wz;
+    this.cH[i] = hi;
+    this.cT[i] = t; this.cM[i] = m;
+    this.cP[i] = peak; this.cR[i] = rv;
+    this.cF[i] = feat; this.cK[i] = fk; this.cL[i] = fluid;
+    const b = this.pickBiome(hi, t + detail * 0.012, m - detail * 0.012, feat === F_VOLCANO ? Math.max(peak, 0.45) : peak, this.rBad);
+    this.cB[i] = b;
+    this.cV[i] = this.pickVariant(b, hi, t, m, this.rVn, this.rBad, wx, wz);
+  }
+
+  /** Base terrain height of a column from the climate fields (no landforms);
+   *  climate side outputs land in the r* scratch fields. */
+  private rawColumn(wx: number, wz: number): number {
     const cont = this.continent.fbm(wx * 0.0011, wz * 0.0011, 4);
     const ero = this.erosion.fbm(wx * 0.0021, wz * 0.0021, 3) * 0.5 + 0.5;
     const pv = 1 - Math.abs(this.ridge.fbm(wx * 0.0024, wz * 0.0024, 4));
@@ -243,6 +362,20 @@ export class WorldGenerator {
       const duneH = h * 0.85 + (SEA_LEVEL + 5 + inland * 4) * 0.15 + dune * 2.6;
       h += (duneH - h) * dry * (1 - plat);
     }
+    // badlands: part of the dry belt rises into terraced mesas with sheer
+    // banded cliffs, hoodoo pillars standing on the flats between them
+    const vn = this.variety.fbm(wx * 0.0026, wz * 0.0026, 2);
+    const bad = dry * smoothstep(0.1, 0.26, vn);
+    if (bad > 0) {
+      const mn = this.plateau.fbm(wx * 0.0085 + 40.2, wz * 0.0085 - 17.7, 3);
+      const top = smoothstep(0.0, 0.12, mn);
+      const floorH = SEA_LEVEL + 4 + hills * 1.5 + detail * 0.6;
+      let mesaH = floorH + top * (15 + (this.plateau.noise(wx * 0.017, wz * 0.017) * 0.5 + 0.5) * 13);
+      const s = mesaH / 4, f = s - Math.floor(s);
+      mesaH = (Math.floor(s) + smoothstep(0.5, 0.85, f)) * 4;
+      if (top < 0.3) mesaH += this.hoodoo(wx, wz) * (1 - top / 0.3);
+      h += (mesaH - h) * smoothstep(0, 0.55, bad);
+    }
     // swamp basins sit near sea level with shallow, flat waterlogged ground
     const swampK = smoothstep(0.37, 0.43, t) * smoothstep(0.68, 0.74, m) * smoothstep(0.35, 0.1, cont) *
       (1 - smoothstep(0.05, 0.2, peak));
@@ -275,23 +408,122 @@ export class WorldGenerator {
       h += (Math.min(h, bed) - h) * rv;
     }
 
-    const hi = Math.max(4, Math.min(CY - 10, Math.floor(h)));
-    this.cKx[i] = wx; this.cKz[i] = wz;
-    this.cH[i] = hi;
-    this.cT[i] = t; this.cM[i] = m;
-    this.cP[i] = peak; this.cR[i] = rv;
-    this.cB[i] = this.pickBiome(hi, t + detail * 0.012, m - detail * 0.012, peak);
+    this.rT = t; this.rM = m; this.rPeak = peak; this.rRv = rv; this.rDetail = detail;
+    this.rBad = bad; this.rVn = vn;
+    return h;
   }
 
-  private pickBiome(h: number, t: number, m: number, peak: number): number {
+  /** Extra height of a badlands hoodoo (sandstone spire) at this column, 0 if none. */
+  private hoodoo(wx: number, wz: number): number {
+    const gx = Math.floor(wx / 9), gz = Math.floor(wz / 9);
+    let best = 0;
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const cx = gx + dx, cz = gz + dz;
+        const r0 = hash2(this.seed ^ 0x40d0, cx, cz);
+        if (r0 > 0.3) continue;
+        const px = cx * 9 + 2 + hash2(this.seed ^ 0x40d1, cx, cz) * 5;
+        const pz = cz * 9 + 2 + hash2(this.seed ^ 0x40d2, cx, cz) * 5;
+        const r = 0.8 + hash2(this.seed ^ 0x40d3, cx, cz) * 1.3;
+        const d = Math.hypot(wx + 0.5 - px, wz + 0.5 - pz);
+        if (d < r) best = Math.max(best, 6 + r0 * 36 * (1 - d / r * 0.35));
+      }
+    }
+    return best;
+  }
+
+  /** Volcano (if any) of a VOLC_CELL square: a lone cone with a lava-lake crater. */
+  private volcanoAt(gx: number, gz: number): Volcano | null {
+    const key = gx * 65536 + gz;
+    let v = this.volcanoes.get(key);
+    if (v !== undefined) return v;
+    v = null;
+    const S = this.seed ^ 0x7017;
+    if (hash2(S, gx, gz) < 0.42) {
+      const r = 30 + hash2(S ^ 1, gx, gz) * 14;
+      const x = Math.floor(gx * VOLC_CELL + r + 8 + hash2(S ^ 2, gx, gz) * (VOLC_CELL - 2 * r - 16));
+      const z = Math.floor(gz * VOLC_CELL + r + 8 + hash2(S ^ 3, gx, gz) * (VOLC_CELL - 2 * r - 16));
+      const base = this.rawColumn(x, z);
+      // on dry, not-too-high land away from rivers
+      if (base > SEA_LEVEL + 1 && base < SEA_LEVEL + 26 && this.rRv === 0 && this.rPeak < 0.3 && this.rM < 0.7) {
+        const h = 34 + hash2(S ^ 4, gx, gz) * 16;
+        v = { x, z, r, h, base, lava: Math.floor(base + h * 0.8) };
+      }
+    }
+    this.volcanoes.set(key, v);
+    return v;
+  }
+
+  /** Impact crater (if any) of a CRATER_CELL square, with a meteorite at its centre. */
+  private craterAt(gx: number, gz: number): Crater | null {
+    const key = gx * 65536 + gz;
+    let c = this.craters.get(key);
+    if (c !== undefined) return c;
+    c = null;
+    const S = this.seed ^ 0xc2a7;
+    if (hash2(S, gx, gz) < 0.3) {
+      const r = 11 + hash2(S ^ 1, gx, gz) * 8;
+      const x = Math.floor(gx * CRATER_CELL + 30 + hash2(S ^ 2, gx, gz) * (CRATER_CELL - 60));
+      const z = Math.floor(gz * CRATER_CELL + 30 + hash2(S ^ 3, gx, gz) * (CRATER_CELL - 60));
+      const base = this.rawColumn(x, z);
+      if (base > SEA_LEVEL + 3 && base < SEA_LEVEL + 30 && this.rRv === 0 && this.rPeak < 0.25 && this.rM < 0.62) {
+        c = { x, z, r, floor: Math.floor(base - r * 0.55) };
+      }
+    }
+    this.craters.set(key, c);
+    return c;
+  }
+
+  /** Sinkhole (cenote) of a SINK_CELL square: a sheer shaft flooded to sea level. */
+  private sinkholeAt(gx: number, gz: number): Sinkhole | null {
+    const key = gx * 65536 + gz;
+    let s = this.sinkholes.get(key);
+    if (s !== undefined) return s;
+    s = null;
+    const S = this.seed ^ 0x51c4;
+    if (hash2(S, gx, gz) < 0.3) {
+      const r = 3 + hash2(S ^ 1, gx, gz) * 3;
+      const x = Math.floor(gx * SINK_CELL + 16 + hash2(S ^ 2, gx, gz) * (SINK_CELL - 32));
+      const z = Math.floor(gz * SINK_CELL + 16 + hash2(S ^ 3, gx, gz) * (SINK_CELL - 32));
+      const base = this.rawColumn(x, z);
+      if (base > SEA_LEVEL + 5 && base < SEA_LEVEL + 40 && this.rPeak < 0.3 && this.rM > 0.35 && this.rBad === 0) {
+        s = { x, z, r, floor: Math.floor(SEA_LEVEL - 9 - hash2(S ^ 4, gx, gz) * 14) };
+      }
+    }
+    this.sinkholes.set(key, s);
+    return s;
+  }
+
+  private pickBiome(h: number, t: number, m: number, peak: number, bad = 0): number {
     if (peak > 0.42 || h > 98) return h > 118 || t < 0.32 ? SNOW : MOUNTAINS;
     if (t < 0.3) return SNOW;
     if (t < 0.43 && m > 0.45) return TAIGA;
-    if (t > 0.6 && m < 0.42 && h < SEA_LEVEL + 30) return DESERT;
-    if (t > 0.4 && m > 0.71 && h <= SEA_LEVEL + 5) return SWAMP;
+    if (bad > 0.35 || (t > 0.6 && m < 0.42 && h < SEA_LEVEL + 30)) return DESERT;
+    if (t > 0.4 && m > 0.71 && h <= SEA_LEVEL + 5 && h >= SEA_LEVEL - 5) return SWAMP;
     if (t > 0.56 && m > 0.62 && h < SEA_LEVEL + 24) return JUNGLE; // hot + very humid lowlands
     if (m > 0.52) return FOREST;
     return PLAINS;
+  }
+
+  /** Sub-biome variant of a base family from climate + the variety field. */
+  private pickVariant(b: number, h: number, t: number, m: number, vn: number, bad: number, wx: number, wz: number): number {
+    switch (b) {
+      case PLAINS:
+        if (t > 0.5 && m < 0.47) return V_SAVANNA;
+        if (vn < -0.2 && h > SEA_LEVEL + 6) return V_MEADOW;
+        return V_NONE;
+      case FOREST:
+        if (vn > 0.34) return V_FLOWER;
+        if (vn < -0.28 && m > 0.57) return V_DARK;
+        if (this.flora.noise(wx * 0.006 + 555, wz * 0.006 - 555) > 0.25) return V_BIRCH;
+        return V_NONE;
+      case DESERT: return bad > 0.35 ? V_BADLANDS : V_NONE;
+      case SNOW: return vn > 0.28 && h < SEA_LEVEL + 26 && h >= SEA_LEVEL ? V_ICE_SPIKES : V_NONE;
+      case TAIGA:
+        if (vn > 0.36) return V_OLD_TAIGA;
+        return t < 0.37 ? V_SNOWY_TAIGA : V_NONE;
+    }
+    return V_NONE;
   }
 
   /** Per-column grass/foliage tint multiplier (warm-dry, lush, cold-pale). */
@@ -310,10 +542,33 @@ export class WorldGenerator {
     }
     // swamps read murky olive
     if (this.cB[i] === SWAMP) { out.r *= 0.86; out.g *= 0.92; out.b *= 0.72; }
+    switch (this.cV[i]) {
+      case V_SAVANNA: out.r = Math.min(1.2, out.r * 1.12); out.g *= 0.95; out.b *= 0.6; break; // sun-baked olive
+      case V_BADLANDS: out.r = 1.12; out.g = 0.9; out.b = 0.5; break;
+      case V_DARK: out.r *= 0.72; out.g *= 0.86; out.b *= 0.78; break;
+      case V_FLOWER: out.r *= 0.9; out.g *= 1.04; out.b *= 0.92; break;
+      case V_MEADOW: out.r *= 0.88; out.b = Math.min(1, out.b * 1.12); break;
+      case V_BIRCH: out.r *= 1.02; out.b *= 0.9; break;
+      case V_OLD_TAIGA: out.r *= 0.92; out.g *= 0.94; break;
+    }
   }
 
   biomeAt(wx: number, wz: number): BiomeId {
     return BIOMES[this.cB[this.slot(wx, wz)]];
+  }
+
+  /** Finer-grained biome name for the debug screen: variants, landforms, water. */
+  biomeLabel(wx: number, wz: number): string {
+    const i = this.slot(wx, wz);
+    const f = this.cF[i];
+    if (f === F_VOLCANO) return 'volcano';
+    if (f === F_CRATER) return 'impact_crater';
+    if (f === F_SINKHOLE) return 'sinkhole';
+    const h = this.cH[i];
+    if (this.cR[i] > 0.3 && h < SEA_LEVEL) return 'river';
+    if (h < SEA_LEVEL - 14) return 'deep_ocean';
+    if (h < SEA_LEVEL - 4 && this.cB[i] !== SWAMP) return 'ocean';
+    return VARIANT_LABEL[this.cV[i]] || BIOMES[this.cB[i]];
   }
 
   private biomeIdx(wx: number, wz: number): number {
@@ -326,7 +581,7 @@ export class WorldGenerator {
   }
 
   /** Largest height step to a 4-neighbour (0 = flat). */
-  private slopeAt(wx: number, wz: number, h: number): number {
+  slopeAt(wx: number, wz: number, h: number): number {
     const a = this.heightAt(wx + 1, wz), b = this.heightAt(wx - 1, wz);
     const c = this.heightAt(wx, wz + 1), d = this.heightAt(wx, wz - 1);
     this.sDrop = h - Math.min(a, b, c, d);
@@ -341,6 +596,32 @@ export class WorldGenerator {
   private sDepth = 0;
   private sUnder = 0;
   private sUnderDepth = 0;
+  /** filler follows the badlands strata table instead of sFill */
+  private sBands = false;
+
+  /** badlands strata by height: a seeded table of 1-3 block bands */
+  private bandTable: Uint16Array | null = null;
+  private bandAt(wx: number, y: number, wz: number): number {
+    return this.bandRow(y + this.bandOffset(wx, wz));
+  }
+  /** strata tilt and wobble gently across the landscape */
+  private bandOffset(wx: number, wz: number): number {
+    return Math.round(this.detail.noise(wx * 0.011, wz * 0.011) * 2.5);
+  }
+  private bandRow(y: number): number {
+    if (!this.bandTable) {
+      const rnd = mulberry32(this.seed ^ 0xba2d);
+      const tab = new Uint16Array(64);
+      let k = 0;
+      while (k < 64) {
+        const id = BADLANDS_BANDS[Math.floor(rnd() * BADLANDS_BANDS.length)];
+        const n = 1 + Math.floor(rnd() * 3);
+        for (let j = 0; j < n && k < 64; j++) tab[k++] = id;
+      }
+      this.bandTable = tab;
+    }
+    return this.bandTable[(y + 640) & 63];
+  }
 
   /** Pick top / filler / under-layer blocks for a column from biome, altitude,
    *  slope and a couple of patch noises. Pure function of the column. */
@@ -352,6 +633,27 @@ export class WorldGenerator {
     const r = hash2(this.seed ^ 0x5e0d, wx, wz);
     this.sDepth = 3 + (pat > 0.2 ? 1 : 0) + (r < 0.35 ? 1 : 0);
     this.sUnder = B.STONE; this.sUnderDepth = 0;
+    this.sBands = false;
+
+    const feat = this.cF[i], v = this.cV[i];
+    if (feat === F_VOLCANO) {
+      const k = this.cK[i];
+      const vc = this.volcanoAt(Math.floor(wx / VOLC_CELL), Math.floor(wz / VOLC_CELL));
+      const a = vc ? Math.atan2(wz - vc.z, wx - vc.x) : 0;
+      this.sFill = B.STONE; this.sDepth = 4;
+      if (k > 0.8) { this.sTop = r < 0.45 ? B.MAGMA : r < 0.75 ? B.OBSIDIAN : B.COBBLE; this.sFill = B.OBSIDIAN; return; }
+      if (k > 0.72) { this.sTop = r < 0.3 ? B.OBSIDIAN : r < 0.5 ? B.MAGMA : B.COBBLE; return; }
+      // radial lava channels and scree streaks down the flanks
+      const chan = Math.abs(this.detail.noise(a * 3.2 + k * 0.6, k * 1.5));
+      if (k > 0.25 && chan < 0.05) { this.sTop = B.MAGMA; return; }
+      this.sTop = pat > 0.35 ? B.GRAVEL : pat < -0.3 ? B.COBBLE : r < 0.06 ? B.OBSIDIAN : B.STONE;
+      return;
+    }
+    if (feat === F_CRATER && this.cK[i] < 0.98 && h >= SEA_LEVEL) {
+      this.sTop = r < 0.3 ? B.GRAVEL : r < 0.55 ? B.COBBLE : B.STONE;
+      this.sFill = B.STONE; this.sDepth = 3;
+      return;
+    }
 
     if (h < SEA_LEVEL) { // lake, river and sea floors
       if (b === SWAMP) { this.sTop = B.DIRT; this.sFill = B.DIRT; }
@@ -362,6 +664,15 @@ export class WorldGenerator {
     }
     const snowLine = 104 + (t - 0.5) * 60 + this.detail.noise(wx * 0.05, wz * 0.05) * 4;
     const steep = slope >= 4 || (slope >= 3 && h > SEA_LEVEL + 22);
+    if (v === V_BADLANDS) {
+      // banded cliffs all the way down; red-sand flats, scrubby mesa tops
+      this.sBands = true;
+      this.sDepth = Math.max(4, h - SEA_LEVEL + 8);
+      if (steep || slope >= 2) this.sTop = this.bandAt(wx, h, wz);
+      else if (h > SEA_LEVEL + 16) this.sTop = pat > 0.1 ? B.GRASS : r < 0.5 ? B.DIRT : RED_SAND;
+      else { this.sTop = RED_SAND; this.sDepth = Math.max(4, h - SEA_LEVEL + 8); }
+      return;
+    }
     if (b === DESERT) {
       if (steep) { this.sTop = B.SANDSTONE; this.sFill = B.SANDSTONE; this.sDepth = 6; return; }
       this.sTop = B.SAND; this.sFill = B.SAND; this.sUnder = B.SANDSTONE; this.sUnderDepth = 3;
@@ -375,7 +686,7 @@ export class WorldGenerator {
     }
     const rocky = peak > 0.3;
     if (steep) { this.sTop = B.STONE; this.sFill = B.STONE; return; }
-    if (h >= snowLine || b === SNOW) {
+    if (h >= snowLine || b === SNOW || (v === V_SNOWY_TAIGA && slope <= 2)) {
       // on rock, snow only settles where no side face is exposed — a snowy
       // grass block's dirt flank on every step reads as brown stripes
       const settles = rocky ? this.sDrop <= 0 || (this.sDrop <= 1 && pat > -0.1) : slope <= 2;
@@ -396,7 +707,9 @@ export class WorldGenerator {
       this.sFill = B.STONE;
       return;
     }
-    if (b === TAIGA && pat > 0.55 && slope <= 1) this.sTop = B.DIRT; // bare needle-litter patches
+    if (b === TAIGA && pat > (v === V_OLD_TAIGA ? 0.1 : 0.55) && slope <= 1) this.sTop = B.DIRT; // bare needle-litter patches
+    if (v === V_SAVANNA && pat > 0.5 && r < 0.6) this.sTop = B.DIRT; // coarse, sun-cracked patches
+    if (v === V_DARK && pat > 0.45 && r < 0.5) this.sTop = MOSS;
     if (b === SWAMP && h <= SEA_LEVEL && pat < -0.2) this.sTop = B.DIRT; // mud flats at the waterline
     // highland soil is a thin skin: where a step face is exposed, show rock
     // under the turf instead of brown dirt bands
@@ -623,6 +936,13 @@ export class WorldGenerator {
         const rv = h >= SEA_LEVEL + 3 ? this.ravineMask(wx, wz) : 0;
         const rvFloor = rv > 0 ? 11 + Math.round((1 - rv) * 24) : CY;
         this.caveColumn(x, z, ny);
+        const bandOff = this.sBands ? this.bandOffset(wx, wz) : 0;
+        const bands = this.sBands;
+        // underground regions: flooded cavern lakes, and lush pockets (moss,
+        // grass, hanging leaves, glow clusters) under humid country
+        const ln = this.lush.noise(wx * 0.014 + 77.1, wz * 0.014 - 31.9);
+        const caveLake = ln < -0.38;
+        const lushCol = ln > 0.36 && this.cM[this.slot(wx, wz)] > 0.46;
 
         chunk.setRaw(x, 0, z, B.BEDROCK);
         for (let y = 1; y <= h; y++) {
@@ -633,12 +953,13 @@ export class WorldGenerator {
             if (cave === 1 || (cave === 2 && y <= cavernCeil)) {
               // deep caves/ravines below y=8 flood with lava; above that they stay airy
               if (y <= 8) chunk.setRaw(x, y, z, B.LAVA);
+              else if (caveLake && cave === 2 && y <= 24) chunk.setRaw(x, y, z, B.WATER);
               continue;
             }
           }
           let id: number;
           if (y === h) id = top;
-          else if (y > fillFrom) id = fill;
+          else if (y > fillFrom) id = bands ? this.bandRow(y + bandOff) : fill;
           else if (y > underFrom) id = under;
           else {
             id = B.STONE;
@@ -654,8 +975,12 @@ export class WorldGenerator {
           chunk.setRaw(x, y, z, id);
         }
         for (let y = h + 1; y <= SEA_LEVEL; y++) chunk.setRaw(x, y, z, B.WATER);
+        const lavaTop = this.cL[this.slot(wx, wz)];
+        for (let y = h + 1; y <= lavaTop; y++) chunk.setRaw(x, y, z, B.LAVA); // volcano crater lake
+        if (lushCol) this.lushColumn(chunk, x, z, wx, wz, h);
       }
     }
+    this.decorateLandforms(chunk, bx, bz);
 
     // --- vegetation: trees, bushes, fallen logs ---------------------------
     // Candidates within a 6-block margin are visited in world order, so a
@@ -679,8 +1004,23 @@ export class WorldGenerator {
         if (chunk.get(x, h + 1, z) !== B.AIR) continue;
         const surface = chunk.get(x, h, z);
         const b = this.biomeIdx(wx, wz);
+        const vr = this.cV[this.slot(wx, wz)];
         const r = hash2(this.seed ^ 0xf10a, wx, wz);
-        if (surface === B.GRASS) {
+        if (surface === B.GRASS && (vr === V_FLOWER || vr === V_MEADOW || vr === V_SAVANNA)) {
+          // flower forests and meadows are carpeted; savanna grass grows waist-high everywhere
+          const fl = vr === V_FLOWER ? 0.3 : vr === V_MEADOW ? 0.16 : 0.004;
+          const gr = vr === V_MEADOW ? 0.42 : vr === V_SAVANNA ? 0.38 : 0.12;
+          if (r < fl) {
+            const tint = this.flora.noise(wx * 0.05 - 300, wz * 0.05 + 300) + (hash2(this.seed ^ 0xf10b, wx, wz) - 0.5) * 0.9;
+            chunk.setRaw(x, h + 1, z, tint > 0 ? B.POPPY : B.DANDELION);
+          } else if (r < fl + gr) chunk.setRaw(x, h + 1, z, B.TALL_GRASS);
+        } else if (surface === RED_SAND && vr === V_BADLANDS) {
+          if (r < 0.003 && this.cactusRoom(chunk, x, h, z)) {
+            for (let dy = 1; dy <= 1 + Math.floor(hash2(this.seed ^ 0xcac7, wx, wz) * 2); dy++) chunk.setRaw(x, h + dy, z, B.CACTUS);
+          } else if (r > 0.975) chunk.setRaw(x, h + 1, z, B.TALL_GRASS); // dead bush (dry tint)
+        } else if (surface === B.GRASS && vr === V_DARK) {
+          if (r < 0.07) chunk.setRaw(x, h + 1, z, B.TALL_GRASS); // shaded, sparse undergrowth
+        } else if (surface === B.GRASS) {
           // meadows: dense drifts of one flower colour, mixing at the edges
           const meadow = this.flora.noise(wx * 0.035 + 91.7, wz * 0.035 - 13.3);
           const lush = smoothstep(-0.5, 0.6, this.flora.noise(wx * 0.06 - 40.1, wz * 0.06 + 7.7));
@@ -730,6 +1070,12 @@ export class WorldGenerator {
     for (let scz = chunk.cz - 1; scz <= chunk.cz + 1; scz++) {
       for (let scx = chunk.cx - 1; scx <= chunk.cx + 1; scx++) this.structuresFrom(chunk, scx, scz);
     }
+    for (let rz = Math.floor(bz / LM_CELL); rz <= Math.floor((bz + CZ - 1) / LM_CELL); rz++) {
+      for (let rx = Math.floor(bx / LM_CELL); rx <= Math.floor((bx + CX - 1) / LM_CELL); rx++) {
+        const lm = this.landmarkAt(rx, rz);
+        if (lm) drawLandmark(this, chunk, lm);
+      }
+    }
     this.placeVillages(chunk, bx, bz);
 
 
@@ -739,8 +1085,214 @@ export class WorldGenerator {
     chunk.dirty = true;
   }
 
+  /** Lush cave pocket pass over one column: mossy floors with grass tufts and
+   *  flowers, leaf "vines" and the odd glow cluster hanging from ceilings. */
+  private lushColumn(chunk: Chunk, x: number, z: number, wx: number, wz: number, h: number): void {
+    const S = this.seed ^ 0x1c5a;
+    for (let y = 10; y < h - 6; y++) {
+      if (chunk.get(x, y, z) !== B.AIR) continue;
+      const below = chunk.get(x, y - 1, z);
+      if (below === B.STONE || below === B.DIRT || below === B.GRAVEL) {
+        chunk.setRaw(x, y - 1, z, MOSS);
+        const r = hash3(S, wx, y, wz);
+        if (r < 0.32) chunk.setRaw(x, y, z, B.TALL_GRASS);
+        else if (r < 0.36) chunk.setRaw(x, y, z, r < 0.34 ? B.POPPY : B.DANDELION);
+      }
+      const above = chunk.get(x, y + 1, z);
+      if (above === B.STONE || above === B.DIRT) {
+        const r = hash3(S ^ 1, wx, y, wz);
+        if (r < 0.012) chunk.setRaw(x, y + 1, z, B.GLOWSTONE); // glow-berry cluster
+        else if (r < 0.2) {
+          const len = 1 + Math.floor(hash3(S ^ 2, wx, y, wz) * 4);
+          for (let k = 0; k < len && chunk.get(x, y - k, z) === B.AIR; k++) chunk.setRaw(x, y - k, z, B.JUNGLE_LEAVES);
+        }
+      }
+    }
+  }
+
+  /** Landform decorations drawn after the terrain columns: ice spikes,
+   *  floating islands, crater meteorites and amethyst geodes. Each is keyed to
+   *  a world-space cell so neighbouring chunks draw the same shapes. */
+  private decorateLandforms(chunk: Chunk, bx: number, bz: number): void {
+    const S = this.seed;
+    // ice spikes: tapering pillars on the ice-spike plains, a few towering ones
+    for (let gz = Math.floor((bz - 4) / 11); gz <= Math.floor((bz + CZ + 3) / 11); gz++) {
+      for (let gx = Math.floor((bx - 4) / 11); gx <= Math.floor((bx + CX + 3) / 11); gx++) {
+        const r0 = hash2(S ^ 0x1c35, gx, gz);
+        if (r0 > 0.5) continue;
+        const px = gx * 11 + 3 + Math.floor(hash2(S ^ 0x1c36, gx, gz) * 5);
+        const pz = gz * 11 + 3 + Math.floor(hash2(S ^ 0x1c37, gx, gz) * 5);
+        if (this.cV[this.slot(px, pz)] !== V_ICE_SPIKES) continue;
+        const huge = r0 < 0.06;
+        const rad = huge ? 2.6 + r0 * 8 : 1.1 + r0 * 2.2;
+        const tall = huge ? 24 + Math.floor(r0 * 150) : 5 + Math.floor(hash2(S ^ 0x1c38, gx, gz) * 12);
+        const g = this.heightAt(px, pz);
+        const R = Math.ceil(rad);
+        for (let dz = -R; dz <= R; dz++) {
+          for (let dx = -R; dx <= R; dx++) {
+            const d = Math.hypot(dx, dz);
+            if (d > rad) continue;
+            const top = g + Math.round(tall * Math.pow(1 - d / rad, huge ? 1.6 : 1.25));
+            const base = this.heightAt(px + dx, pz + dz) - 1;
+            for (let y = base; y <= Math.min(top, CY - 4); y++) this.put(chunk, px + dx, y, pz + dz, ICE_SPIKE);
+          }
+        }
+      }
+    }
+
+    // floating islands: grassy sky islands with a stone keel, a tree, and
+    // sometimes a spring spilling off the edge as a waterfall to the ground
+    for (let gz = Math.floor((bz - 20) / ISLAND_CELL); gz <= Math.floor((bz + CZ + 20) / ISLAND_CELL); gz++) {
+      for (let gx = Math.floor((bx - 20) / ISLAND_CELL); gx <= Math.floor((bx + CX + 20) / ISLAND_CELL); gx++) {
+        const isl = this.islandAt(gx, gz);
+        if (isl && Math.abs(isl.x - (bx + 8)) < isl.r + 12 && Math.abs(isl.z - (bz + 8)) < isl.r + 12) this.drawIsland(chunk, isl);
+      }
+    }
+
+    // crater meteorites: a scorched lump of obsidian, magma and ore at the bowl's centre
+    for (let gz = Math.floor((bz - 4) / CRATER_CELL); gz <= Math.floor((bz + CZ + 4) / CRATER_CELL); gz++) {
+      for (let gx = Math.floor((bx - 4) / CRATER_CELL); gx <= Math.floor((bx + CX + 4) / CRATER_CELL); gx++) {
+        const c = this.craterAt(gx, gz);
+        if (!c || Math.abs(c.x - (bx + 8)) > 12 || Math.abs(c.z - (bz + 8)) > 12) continue;
+        const g = this.heightAt(c.x, c.z);
+        for (let dx = -2; dx <= 2; dx++) {
+          for (let dz = -2; dz <= 2; dz++) {
+            for (let dy = -1; dy <= 2; dy++) {
+              const d = Math.hypot(dx, dz, dy * 1.2);
+              if (d > 2.3) continue;
+              const r = hash3(S ^ 0x3e7e, c.x + dx, g + dy, c.z + dz);
+              if (d > 1.7 && r < 0.4) continue;
+              const id = r < 0.3 ? B.OBSIDIAN : r < 0.5 ? B.MAGMA : r < 0.66 ? B.IRON_ORE : r < 0.74 ? B.GOLD_ORE :
+                r < 0.78 ? B.DIAMOND_ORE : B.COAL_BLOCK;
+              this.put(chunk, c.x + dx, g + dy, c.z + dz, id);
+            }
+          }
+        }
+      }
+    }
+
+    // amethyst geodes: a hollow of amethyst inside calcite and a dark outer rind
+    if (hash2(S ^ 0x6e0d, chunk.cx, chunk.cz) < 0.08) {
+      const cx = bx + 5 + Math.floor(hash2(S ^ 0x6e0e, chunk.cx, chunk.cz) * 6);
+      const cz = bz + 5 + Math.floor(hash2(S ^ 0x6e0f, chunk.cx, chunk.cz) * 6);
+      const cy = 14 + Math.floor(hash2(S ^ 0x6e10, chunk.cx, chunk.cz) * 26);
+      const R = 4 + hash2(S ^ 0x6e11, chunk.cx, chunk.cz) * 1.2;
+      if (cy + R + 6 < this.heightAt(cx, cz)) {
+        const n = Math.ceil(R);
+        for (let dx = -n; dx <= n; dx++) {
+          for (let dz = -n; dz <= n; dz++) {
+            for (let dy = -n; dy <= n; dy++) {
+              const d = Math.hypot(dx, dy * 1.1, dz) + hash3(S ^ 0x6e12, cx + dx, cy + dy, cz + dz) * 0.5;
+              if (d > R + 0.3) continue;
+              const id = d < R - 2.4 ? B.AIR : d < R - 1.4 ? B.AMETHYST_ORE : d < R - 0.5 ? CALCITE : B.COBBLE;
+              this.put(chunk, cx + dx, cy + dy, cz + dz, id);
+            }
+          }
+        }
+        // a few crystals catch the light inside
+        this.put(chunk, cx, cy - Math.floor(R - 2.4), cz, B.GLOWSTONE);
+      }
+    }
+  }
+
+  /** Floating island (if any) of an ISLAND_CELL square. */
+  private islands = new Map<number, Island | null>();
+  private islandAt(gx: number, gz: number): Island | null {
+    const key = gx * 65536 + gz;
+    let s = this.islands.get(key);
+    if (s !== undefined) return s;
+    s = null;
+    const S = this.seed ^ 0x1514;
+    if (hash2(S, gx, gz) < 0.3) {
+      const r = 6 + hash2(S ^ 1, gx, gz) * 7;
+      const x = Math.floor(gx * ISLAND_CELL + 20 + hash2(S ^ 2, gx, gz) * (ISLAND_CELL - 40));
+      const z = Math.floor(gz * ISLAND_CELL + 20 + hash2(S ^ 3, gx, gz) * (ISLAND_CELL - 40));
+      const ground = this.heightAt(x, z);
+      const y = Math.max(ground + 30, 112) + Math.floor(hash2(S ^ 4, gx, gz) * 14);
+      if (y + 14 < CY) s = { x, z, r, y, v: hash2(S ^ 5, gx, gz) };
+    }
+    this.islands.set(key, s);
+    return s;
+  }
+
+  private drawIsland(chunk: Chunk, isl: Island): void {
+    const S = this.seed ^ 0x1515;
+    const R = Math.ceil(isl.r * 1.35);
+    const top = (dx: number, dz: number): number => {
+      const a = Math.atan2(dz, dx);
+      const rr = isl.r * (0.85 + 0.2 * Math.sin(a * 3 + isl.v * 9) + 0.12 * Math.sin(a * 5 - isl.v * 4));
+      const d = Math.hypot(dx, dz) / rr;
+      return d >= 1 ? -1 : d;
+    };
+    for (let dx = -R; dx <= R; dx++) {
+      for (let dz = -R; dz <= R; dz++) {
+        const wx = isl.x + dx, wz = isl.z + dz;
+        if (!this.inChunk(chunk, wx, wz)) continue;
+        const d = top(dx, dz);
+        if (d < 0) continue;
+        const surf = isl.y + Math.round((1 - d) * 2 + this.detail.noise(wx * 0.15, wz * 0.15));
+        const depth = Math.round((1 - Math.pow(d, 1.6)) * isl.r * 0.95 + hash2(S, wx, wz) * 2);
+        for (let y = surf - depth; y <= surf; y++) {
+          const id = y === surf ? B.GRASS : y > surf - 3 ? B.DIRT :
+            hash3(S ^ 1, wx, y, wz) < 0.04 ? B.COAL_ORE : hash3(S ^ 2, wx, y, wz) < 0.025 ? B.IRON_ORE : B.STONE;
+          this.put(chunk, wx, y, wz, id);
+        }
+        // ground cover
+        const r = hash2(S ^ 3, wx, wz);
+        if (r < 0.2) this.put(chunk, wx, surf + 1, wz, B.TALL_GRASS);
+        else if (r < 0.25) this.put(chunk, wx, surf + 1, wz, r < 0.225 ? B.POPPY : B.DANDELION);
+      }
+    }
+    // a tree or two
+    const ty = isl.y + 2;
+    if (isl.v < 0.5) this.placeTree(chunk, isl.x, ty + 1, isl.z, 5 + Math.floor(isl.v * 4), B.LOG, B.LEAVES);
+    else this.placeTree(chunk, isl.x, ty + 1, isl.z, 5 + Math.floor(isl.v * 3), B.BIRCH_LOG, B.BIRCH_LEAVES);
+    if (isl.r > 9) this.placeBush(chunk, isl.x + 4, ty + 1 - 1, isl.z - 3, B.LOG, B.LEAVES, isl.v);
+    // spring: a pool on the rim spilling a waterfall down to the ground below
+    if (isl.v > 0.35) {
+      const a = isl.v * 40;
+      let ex = isl.x, ez = isl.z;
+      for (let s = 0; s < R + 2; s++) {
+        const nx = isl.x + Math.round(Math.cos(a) * s), nz = isl.z + Math.round(Math.sin(a) * s);
+        if (top(nx - isl.x, nz - isl.z) < 0) break;
+        ex = nx; ez = nz;
+      }
+      const d = top(ex - isl.x, ez - isl.z);
+      const surf = isl.y + Math.round((1 - d) * 2 + this.detail.noise(ex * 0.15, ez * 0.15));
+      const ox = ex + Math.round(Math.cos(a)), oz = ez + Math.round(Math.sin(a));
+      this.put(chunk, ex, surf, ez, B.WATER);
+      this.put(chunk, ex, surf + 1, ez, B.AIR);
+      const g = Math.max(this.heightAt(ox, oz), SEA_LEVEL);
+      for (let y = surf; y > g; y--) this.put(chunk, ox, y, oz, B.WATER);
+    }
+  }
+
+  private landmarks = new Map<number, Landmark | null>();
+  /** The landmark planned for LM_CELL square (rx, rz), cached. */
+  landmarkAt(rx: number, rz: number): Landmark | null {
+    const key = rx * 65536 + rz;
+    let lm = this.landmarks.get(key);
+    if (lm === undefined) {
+      if (this.landmarks.size > 1024) this.landmarks.clear();
+      lm = planLandmark(this, rx, rz);
+      this.landmarks.set(key, lm);
+    }
+    return lm;
+  }
+
+  /** A village or surface landmark sits within `pad` of the spot (keeps one-off structures apart). */
+  private blocked(wx: number, wz: number, pad: number): boolean {
+    return this.inVillage(wx, wz, pad) || this.nearLandmark(wx, wz, pad + 6);
+  }
+
+  /** True when a surface landmark's box (+pad) touches the column. */
+  nearLandmark(wx: number, wz: number, pad: number): boolean {
+    const lm = this.landmarkAt(Math.floor(wx / LM_CELL), Math.floor(wz / LM_CELL));
+    return !!lm && !lm.underground && wx >= lm.x0 - pad && wx <= lm.x1 + pad && wz >= lm.z0 - pad && wz <= lm.z1 + pad;
+  }
+
   /** Write a voxel into this chunk if the world position lands inside it. */
-  private put(chunk: Chunk, wx: number, wy: number, wz: number, id: number, keepSolid = false): void {
+  put(chunk: Chunk, wx: number, wy: number, wz: number, id: number, keepSolid = false): void {
     const x = wx - chunk.cx * CX;
     const z = wz - chunk.cz * CZ;
     if (x < 0 || x >= CX || z < 0 || z >= CZ || wy < 0 || wy >= CY) return;
@@ -769,20 +1321,32 @@ export class WorldGenerator {
           this.heightAt(wx, wz + 3) < SEA_LEVEL || this.heightAt(wx, wz - 3) < SEA_LEVEL) &&
         !this.inVillage(wx, wz, 4)) {
         this.placePalm(chunk, wx, h + 1, wz, hash2(this.seed ^ 0x9a1f, wx, wz));
+      } else if (r < 0.014 && this.cV[i] === V_BADLANDS && h > SEA_LEVEL + 16 && this.slopeAt(wx, wz, h) <= 1) {
+        // wooded mesa tops: squat, wind-bent oaks
+        this.placeTree(chunk, wx, h + 1, wz, 4 + Math.floor(hash2(this.seed ^ 0x9a20, wx, wz) * 2), B.LOG, B.LEAVES);
       }
       return;
     }
     if (h < (b === SWAMP ? SEA_LEVEL - 1 : SEA_LEVEL) || h > 118) return;
+    const feat = this.cF[i];
+    if ((feat === F_VOLCANO && this.cK[i] > 0.04) || (feat === F_CRATER && this.cK[i] < 1.05)) return;
+    const vr = this.cV[i];
     // groves and clearings: density swings across a forest instead of a uniform fuzz
     const dens = smoothstep(-0.55, 0.55, this.flora.noise(wx * 0.011, wz * 0.011));
     let chance: number;
     switch (b) {
-      case FOREST: chance = 0.036 * (0.3 + 1.3 * dens); break;
-      case PLAINS: chance = 0.0022 + 0.024 * smoothstep(0.62, 0.9, dens); break;
-      case TAIGA: chance = 0.032 * (0.4 + dens); break;
-      case SNOW: chance = 0.009 * (0.3 + dens); break;
+      case FOREST:
+        chance = vr === V_DARK ? 0.075 : vr === V_FLOWER ? 0.022 * (0.4 + dens) : 0.036 * (0.3 + 1.3 * dens);
+        break;
+      case PLAINS:
+        chance = vr === V_SAVANNA ? 0.0045 + 0.012 * dens : vr === V_MEADOW ? 0.0016 :
+          0.0022 + 0.024 * smoothstep(0.62, 0.9, dens);
+        break;
+      case TAIGA: chance = vr === V_OLD_TAIGA ? 0.045 : 0.032 * (0.4 + dens); break;
+      case SNOW: chance = vr === V_ICE_SPIKES ? 0.002 : 0.009 * (0.3 + dens); break;
       case SWAMP: chance = 0.017; break;
       case JUNGLE: chance = 0.088; break;
+      case DESERT: chance = 0; break;
       default: chance = this.cP[i] < 0.45 ? 0.012 : 0; // mountains: scattered firs low down
     }
     if (r >= chance) return;
@@ -790,22 +1354,41 @@ export class WorldGenerator {
     const ground = this.sTop;
     if (h < SEA_LEVEL && b === SWAMP) { /* swamp oaks root in shallow water */ }
     else if (ground !== B.GRASS && ground !== B.SNOW_GRASS && ground !== B.DIRT) return;
-    if (this.inVillage(wx, wz, 4)) return;
+    if (this.inVillage(wx, wz, 4) || this.nearLandmark(wx, wz, 5)) return;
     const v = hash2(this.seed ^ 0x8888, wx, wz);
     const v2 = hash2(this.seed ^ 0x8889, wx, wz);
     const y = h + 1;
     switch (b) {
       case FOREST: {
+        if (vr === V_DARK) {
+          // roofed forest: a closed canopy of thick dark oaks, huge mushrooms beneath
+          if (v < 0.1) this.placeHugeMushroom(chunk, wx, y, wz, v2);
+          else if (v < 0.16) this.placeBush(chunk, wx, y, wz, B.LOG, B.LEAVES, v2);
+          else this.placeDarkOak(chunk, wx, y, wz, v2);
+          break;
+        }
         // birch groves: a low-frequency patch where pale birches dominate
-        const birchy = this.flora.noise(wx * 0.006 + 555, wz * 0.006 - 555) > 0.25;
+        const birchy = vr === V_BIRCH;
         if (v < 0.07) this.placeFallenLog(chunk, wx, y, wz, birchy ? B.BIRCH_LOG : B.LOG, v2);
         else if (v < 0.16) this.placeBush(chunk, wx, y, wz, B.LOG, birchy ? B.BIRCH_LEAVES : B.LEAVES, v2);
-        else if (birchy ? v < 0.85 : v < 0.3) this.placeTree(chunk, wx, y, wz, 5 + Math.floor(v2 * 3), B.BIRCH_LOG, B.BIRCH_LEAVES);
-        else if (v > 0.86 && !birchy) this.placeBigOak(chunk, wx, y, wz, v2);
+        else if (birchy ? v < 0.9 : v < 0.3) {
+          // mature birch woods grow tall, slender trunks
+          const tall = birchy && v2 > 0.6 ? 3 : 0;
+          this.placeTree(chunk, wx, y, wz, 5 + Math.floor(v2 * 3) + tall, B.BIRCH_LOG, B.BIRCH_LEAVES);
+        } else if (v > 0.86 && !birchy) this.placeBigOak(chunk, wx, y, wz, v2);
         else this.placeTree(chunk, wx, y, wz, 4 + Math.floor(v2 * 3), B.LOG, B.LEAVES);
         break;
       }
       case PLAINS:
+        if (vr === V_SAVANNA) {
+          if (v < 0.22) this.placeBush(chunk, wx, y, wz, B.LOG, B.LEAVES, v2);
+          else this.placeAcacia(chunk, wx, y, wz, v2);
+          break;
+        }
+        if (vr === V_MEADOW) {
+          this.placeTree(chunk, wx, y, wz, 5 + Math.floor(v2 * 3), B.BIRCH_LOG, B.BIRCH_LEAVES); // lone birches
+          break;
+        }
         if (v < 0.35) this.placeBush(chunk, wx, y, wz, B.LOG, B.LEAVES, v2);
         else if (v < 0.58) this.placeBigOak(chunk, wx, y, wz, v2);
         else if (v < 0.68) this.placeTree(chunk, wx, y, wz, 5 + Math.floor(v2 * 3), B.BIRCH_LOG, B.BIRCH_LEAVES);
@@ -814,6 +1397,7 @@ export class WorldGenerator {
       case TAIGA:
       case SNOW:
       case MOUNTAINS:
+        if (vr === V_OLD_TAIGA && v > 0.62) { this.placeGiantSpruce(chunk, wx, y, wz, 20 + Math.floor(v2 * 10)); break; }
         if (v < 0.08 && b === TAIGA) this.placeFallenLog(chunk, wx, y, wz, B.SPRUCE_LOG, v2);
         else if (v < 0.18) this.placeBush(chunk, wx, y, wz, B.SPRUCE_LOG, B.SPRUCE_LEAVES, v2);
         else if (v > 0.8 && b === TAIGA) this.placeSpruce(chunk, wx, y, wz, 11 + Math.floor(v2 * 5), true);
@@ -831,7 +1415,7 @@ export class WorldGenerator {
   }
 
   /** Classic round oak/birch: two wide layers, two narrow layers, cross on top. */
-  private placeTree(chunk: Chunk, wx: number, wy: number, wz: number, height: number, log: number, leaves: number): void {
+  placeTree(chunk: Chunk, wx: number, wy: number, wz: number, height: number, log: number, leaves: number): void {
     for (let dy = height - 3; dy <= height; dy++) {
       const rad = dy >= height - 1 ? 1 : 2;
       for (let dx = -rad; dx <= rad; dx++) {
@@ -914,7 +1498,7 @@ export class WorldGenerator {
   }
 
   /** Low shrub: a stub of log under a squat leaf mound. */
-  private placeBush(chunk: Chunk, wx: number, wy: number, wz: number, log: number, leaves: number, v: number): void {
+  placeBush(chunk: Chunk, wx: number, wy: number, wz: number, log: number, leaves: number, v: number): void {
     this.put(chunk, wx, wy, wz, log);
     const rh = 1.3 + v * 0.9;
     this.leafBlob(chunk, wx, wy, wz, rh, 1.25, leaves);
@@ -1029,15 +1613,135 @@ export class WorldGenerator {
     }
   }
 
+  /** Savanna acacia: a trunk that kinks sideways, forks, and carries one or
+   *  two flat, wide canopy plates. */
+  private placeAcacia(chunk: Chunk, wx: number, wy: number, wz: number, v: number): void {
+    const d = Math.floor(v * 4000) & 3;
+    const ux = DIR_X[d], uz = DIR_Z[d];
+    const H = 4 + Math.floor(v * 3);
+    const bend = 2 + Math.floor(hash2(this.seed ^ 0xacac, wx, wz) * 2);
+    let x = wx, z = wz, y = wy;
+    for (let k = 0; k < H; k++, y++) {
+      if (k >= bend) { x += ux; z += uz; } // leaning upper trunk
+      this.put(chunk, x, y, z, B.LOG);
+    }
+    const plate = (cx: number, cy: number, cz: number, r: number): void => {
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dz = -r; dz <= r; dz++) {
+          const m = Math.abs(dx) + Math.abs(dz);
+          if (m > r + 1 || (Math.abs(dx) === r && Math.abs(dz) === r)) continue;
+          if (m === r + 1 && hash3(this.seed ^ 0xacad, cx + dx, cy, cz + dz) < 0.5) continue;
+          this.putIfAir(chunk, cx + dx, cy, cz + dz, B.LEAVES);
+        }
+      }
+      for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) this.putIfAir(chunk, cx + dx, cy + 1, cz + dz, B.LEAVES);
+    };
+    plate(x, y, z, 3);
+    // a second, lower branch on the other side
+    if (hash2(this.seed ^ 0xacae, wx, wz) < 0.6) {
+      let bx = wx, bz = wz, by = wy + bend;
+      for (let k = 0; k < 2; k++) { bx -= ux; bz -= uz; by++; this.put(chunk, bx, by, bz, B.LOG); }
+      plate(bx, by + 1, bz, 2);
+    }
+  }
+
+  /** Dark oak: a 2x2 trunk with root knees and a broad, flat-bottomed crown. */
+  private placeDarkOak(chunk: Chunk, wx: number, wy: number, wz: number, v: number): void {
+    const H = 6 + Math.floor(v * 3);
+    for (let dy = 0; dy < H; dy++) {
+      for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]]) this.put(chunk, wx + dx, wy + dy, wz + dz, B.SPRUCE_LOG);
+    }
+    for (const [dx, dz] of [[-1, 0], [2, 1], [1, -1], [0, 2]]) {
+      if (hash2(this.seed ^ 0xda40, wx + dx, wz + dz) < 0.45) this.put(chunk, wx + dx, wy, wz + dz, B.SPRUCE_LOG);
+    }
+    // stubby side branches under the crown
+    for (let k = 0; k < 2; k++) {
+      const d = Math.floor(hash3(this.seed ^ 0xda41, wx, k, wz) * 4);
+      this.put(chunk, wx + (DIR_X[d] > 0 ? 2 : DIR_X[d]), wy + H - 2, wz + (DIR_Z[d] > 0 ? 2 : DIR_Z[d]), B.SPRUCE_LOG);
+    }
+    const cx = wx + 0.5, cz = wz + 0.5;
+    for (let dy = -1; dy <= 2; dy++) {
+      const R = dy <= 0 ? 3.6 : dy === 1 ? 2.8 : 1.6;
+      const n = Math.ceil(R);
+      for (let dx = -n; dx <= n + 1; dx++) {
+        for (let dz = -n; dz <= n + 1; dz++) {
+          const d = Math.hypot(wx + dx - cx, wz + dz - cz);
+          if (d > R) continue;
+          if (d > R - 0.8 && hash3(this.seed ^ 0xda42, wx + dx, wy + H + dy, wz + dz) < 0.45) continue;
+          this.putIfAir(chunk, wx + dx, wy + H + dy, wz + dz, B.LEAVES);
+        }
+      }
+    }
+  }
+
+  /** Huge mushroom: a pale stem under a red domed cap (or a flat brown one). */
+  private placeHugeMushroom(chunk: Chunk, wx: number, wy: number, wz: number, v: number): void {
+    const red = v < 0.55;
+    const H = 5 + Math.floor(v * 4) % 3;
+    for (let dy = 0; dy < H; dy++) this.put(chunk, wx, wy + dy, wz, MUSHROOM_STEM);
+    if (red) {
+      // dome: 5x5 ring hanging down the sides, 3x3 cap on top
+      for (let dy = -3; dy <= 0; dy++) {
+        const r = dy === 0 ? 1 : 2;
+        for (let dx = -r; dx <= r; dx++) {
+          for (let dz = -r; dz <= r; dz++) {
+            if (dy < 0 && Math.abs(dx) < 2 && Math.abs(dz) < 2) continue; // hollow skirt
+            if (dy < 0 && Math.abs(dx) === 2 && Math.abs(dz) === 2) continue;
+            const spot = hash3(this.seed ^ 0x3a5f, wx + dx, wy + dy, wz + dz) < 0.12;
+            this.put(chunk, wx + dx, wy + H + dy, wz + dz, spot ? B.QUARTZ_BLOCK : RED_CAP);
+          }
+        }
+      }
+    } else {
+      // brown: one wide flat plate with clipped corners
+      for (let dx = -3; dx <= 3; dx++) {
+        for (let dz = -3; dz <= 3; dz++) {
+          if (Math.abs(dx) === 3 && Math.abs(dz) === 3) continue;
+          this.put(chunk, wx + dx, wy + H, wz + dz, BROWN_CAP);
+        }
+      }
+    }
+  }
+
+  /** Old-growth "mega" spruce: a 2x2 trunk rising far above the canopy with
+   *  a narrow, shaggy spire of needles on its upper third. */
+  private placeGiantSpruce(chunk: Chunk, wx: number, wy: number, wz: number, height: number): void {
+    for (let dy = -1; dy < height; dy++) {
+      for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]]) this.put(chunk, wx + dx, wy + dy, wz + dz, B.SPRUCE_LOG);
+    }
+    const start = Math.floor(height * 0.55);
+    for (let dy = start; dy <= height + 1; dy++) {
+      const f = (dy - start) / (height + 1 - start); // 0 bottom .. 1 tip
+      const R = dy > height ? 0.8 : 1.2 + (1 - f) * 2.6 + ((height - dy) % 3 === 0 ? 0.6 : 0);
+      const n = Math.ceil(R);
+      for (let dx = -n; dx <= n + 1; dx++) {
+        for (let dz = -n; dz <= n + 1; dz++) {
+          const d = Math.hypot(dx - 0.5, dz - 0.5);
+          if (d > R) continue;
+          if (d > R - 0.7 && hash3(this.seed ^ 0x61a5, wx + dx, wy + dy, wz + dz) < 0.4) continue;
+          this.putIfAir(chunk, wx + dx, wy + dy, wz + dz, B.SPRUCE_LEAVES);
+        }
+      }
+    }
+    // podzol-ish litter around the foot
+    for (let dx = -2; dx <= 3; dx++) {
+      for (let dz = -2; dz <= 3; dz++) {
+        if (hash2(this.seed ^ 0x61a6, wx + dx, wz + dz) < 0.5 && this.heightAt(wx + dx, wz + dz) === wy - 1) {
+          this.put(chunk, wx + dx, wy - 1, wz + dz, B.DIRT);
+        }
+      }
+    }
+  }
+
   // --- block + side-state helpers ------------------------------------------
 
-  private inChunk(chunk: Chunk, wx: number, wz: number): boolean {
+  inChunk(chunk: Chunk, wx: number, wz: number): boolean {
     const x = wx - chunk.cx * CX, z = wz - chunk.cz * CZ;
     return x >= 0 && x < CX && z >= 0 && z < CZ;
   }
 
   /** Closed wooden door (both halves) facing `side` (0=-z,1=-x,2=+z,3=+x). */
-  private putDoor(chunk: Chunk, wx: number, wy: number, wz: number, side: number, hingeRight = false): void {
+  putDoor(chunk: Chunk, wx: number, wy: number, wz: number, side: number, hingeRight = false): void {
     if (!this.inChunk(chunk, wx, wz)) return;
     this.put(chunk, wx, wy, wz, B.DOOR_LOWER);
     this.put(chunk, wx, wy + 1, wz, B.DOOR_UPPER);
@@ -1046,14 +1750,14 @@ export class WorldGenerator {
 
   /** Torch; `dir` (0=-z,1=-x,2=+z,3=+x) is the way a wall torch leans out,
    *  omitted for a floor torch. */
-  private putTorch(chunk: Chunk, wx: number, wy: number, wz: number, dir?: number): void {
+  putTorch(chunk: Chunk, wx: number, wy: number, wz: number, dir?: number): void {
     if (!this.inChunk(chunk, wx, wz)) return;
     this.put(chunk, wx, wy, wz, B.TORCH);
     if (dir !== undefined) this.pendingTorches.push([`${wx},${wy},${wz}`, TORCH_FACING[dir]]);
   }
 
   /** Two-block bed: foot at (wx, wz), head one step toward `dir`. */
-  private putBed(chunk: Chunk, wx: number, wy: number, wz: number, dir: number): void {
+  putBed(chunk: Chunk, wx: number, wy: number, wz: number, dir: number): void {
     const hx = wx + DIR_X[dir], hz = wz + DIR_Z[dir];
     if (this.inChunk(chunk, wx, wz)) {
       this.put(chunk, wx, wy, wz, B.BED);
@@ -1067,17 +1771,17 @@ export class WorldGenerator {
 
   /** Fill a column with `id` from just above the natural ground up to `topY`
    *  (inclusive) so a structure never floats over a dip. */
-  private underpin(chunk: Chunk, wx: number, wz: number, topY: number, id: number): void {
+  underpin(chunk: Chunk, wx: number, wz: number, topY: number, id: number): void {
     const g = this.heightAt(wx, wz);
     for (let y = Math.max(1, g - 1); y <= topY; y++) this.put(chunk, wx, y, wz, id);
   }
 
-  private clearCol(chunk: Chunk, wx: number, wz: number, fromY: number, toY: number): void {
+  clearCol(chunk: Chunk, wx: number, wz: number, fromY: number, toY: number): void {
     for (let y = fromY; y <= toY; y++) this.put(chunk, wx, y, wz, B.AIR);
   }
 
   /** Min/max natural ground over a rectangle (sampled every 2 blocks + far edges). */
-  private groundRange(x0: number, z0: number, sx: number, sz: number): [number, number] {
+  groundRange(x0: number, z0: number, sx: number, sz: number): [number, number] {
     let lo = 9999, hi = -9999;
     for (let dz = 0; dz < sz; dz += 2) {
       for (let dx = 0; dx < sx; dx += 2) {
@@ -1125,7 +1829,7 @@ export class WorldGenerator {
   }
 
   /** True when (wx, wz) lies inside a village footprint (+pad). */
-  private inVillage(wx: number, wz: number, pad: number): boolean {
+  inVillage(wx: number, wz: number, pad: number): boolean {
     return this.villagesNear(wx, wz, wx, wz, pad).length > 0;
   }
 
@@ -1588,7 +2292,7 @@ export class WorldGenerator {
 
   /** Strip tree blocks (logs, leaves, jungle understory) from a box around a
    *  structure so crowns don't grow through its walls. */
-  private clearTrees(chunk: Chunk, x0: number, z0: number, x1: number, z1: number, fromY: number): void {
+  clearTrees(chunk: Chunk, x0: number, z0: number, x1: number, z1: number, fromY: number): void {
     const bx = chunk.cx * CX, bz = chunk.cz * CZ;
     const ax = Math.max(x0, bx), az = Math.max(z0, bz), ex = Math.min(x1, bx + CX - 1), ez = Math.min(z1, bz + CZ - 1);
     for (let wz = az; wz <= ez; wz++) {
@@ -1615,7 +2319,7 @@ export class WorldGenerator {
       const b = this.biomeIdx(ox + 3, oz + 3);
       const [lo, hi] = this.groundRange(ox, oz, sx, sz);
       if (lo > SEA_LEVEL && hi - lo <= 4 && hi <= SEA_LEVEL + 34 && b !== SWAMP && b !== MOUNTAINS &&
-        !this.inVillage(ox, oz, 12)) {
+        !this.blocked(ox, oz, 12)) {
         const st = b === DESERT ? STYLE_DESERT : b === TAIGA || b === SNOW ? STYLE_SPRUCE : STYLE_OAK;
         this.clearTrees(chunk, ox - 2, oz - 2, ox + sx + 1, oz + sz + 1, lo);
         this.buildHouse(chunk, { kind: 'house', x0: ox, z0: oz, sx, sz, y: Math.ceil((lo + hi) / 2), side, v: roll(0xbef1) }, st);
@@ -1648,7 +2352,7 @@ export class WorldGenerator {
       const oy = this.heightAt(ox + 3, oz + 2);
       const b = this.biomeIdx(ox + 3, oz + 2);
       if ((b === PLAINS || b === FOREST || b === TAIGA || b === JUNGLE) && oy > SEA_LEVEL && oy <= 96 &&
-        !this.inVillage(ox, oz, 10)) {
+        !this.blocked(ox, oz, 10)) {
         this.clearTrees(chunk, ox - 1, oz - 1, ox + 9, oz + 8, oy - 3);
         this.placeRuin(chunk, ox, oy, oz);
       }
@@ -1658,7 +2362,7 @@ export class WorldGenerator {
       const ox = at(0x7eac, 5, scx * CX + 2), oz = at(0x7ead, 5, scz * CZ + 2);
       const [lo, hi] = this.groundRange(ox, oz, 13, 13);
       if (this.biomeIdx(ox + 6, oz + 6) === DESERT && lo > SEA_LEVEL && hi - lo <= 8 && hi <= SEA_LEVEL + 26 &&
-        !this.inVillage(ox, oz, 14)) {
+        !this.blocked(ox, oz, 14)) {
         this.placeTemple(chunk, ox, Math.round((lo + hi) / 2), oz);
       }
     }
@@ -1666,7 +2370,7 @@ export class WorldGenerator {
     if (roll(0xd3e1) < 0.02) {
       const ox = at(0xd3e2, 10, scx * CX + 3), oz = at(0xd3e3, 10, scz * CZ + 3);
       const [lo, hi] = this.groundRange(ox - 2, oz - 2, 5, 5);
-      if (this.biomeIdx(ox, oz) === DESERT && lo > SEA_LEVEL && hi - lo <= 2 && !this.inVillage(ox, oz, 8)) {
+      if (this.biomeIdx(ox, oz) === DESERT && lo > SEA_LEVEL && hi - lo <= 2 && !this.blocked(ox, oz, 8)) {
         this.placeDesertWell(chunk, ox, hi, oz);
       }
     }
@@ -1674,7 +2378,7 @@ export class WorldGenerator {
     if (roll(0x191e) < 0.016) {
       const ox = at(0x191f, 6, scx * CX + 3), oz = at(0x1920, 6, scz * CZ + 3);
       const [lo, hi] = this.groundRange(ox + 1, oz + 1, 7, 7);
-      if (this.biomeIdx(ox + 4, oz + 4) === SNOW && lo > SEA_LEVEL && hi - lo <= 3 && hi <= 110) {
+      if (this.biomeIdx(ox + 4, oz + 4) === SNOW && lo > SEA_LEVEL && hi - lo <= 3 && hi <= 110 && !this.blocked(ox, oz, 8)) {
         this.placeIgloo(chunk, ox, hi, oz);
       }
     }
@@ -1682,7 +2386,7 @@ export class WorldGenerator {
     if (roll(0x5eab) < 0.02) {
       const ox = at(0x5eac, 8, scx * CX + 2), oz = at(0x5ead, 8, scz * CZ + 2);
       const oy = this.heightAt(ox + 4, oz + 4);
-      if (this.biomeIdx(ox + 4, oz + 4) === SWAMP && oy >= SEA_LEVEL - 2 && oy <= SEA_LEVEL + 8) {
+      if (this.biomeIdx(ox + 4, oz + 4) === SWAMP && oy >= SEA_LEVEL - 2 && oy <= SEA_LEVEL + 8 && !this.blocked(ox, oz, 8)) {
         this.placeSwampHut(chunk, ox, Math.max(oy, SEA_LEVEL), oz);
       }
     }
@@ -1692,7 +2396,7 @@ export class WorldGenerator {
       const [lo, hi] = this.groundRange(ox, oz, 7, 7);
       const b = this.biomeIdx(ox + 3, oz + 3);
       if ((b === PLAINS || b === FOREST || b === TAIGA || b === DESERT || b === SNOW) && lo > SEA_LEVEL &&
-        hi - lo <= 5 && hi <= 100 && !this.inVillage(ox, oz, 12)) {
+        hi - lo <= 5 && hi <= 100 && !this.blocked(ox, oz, 12)) {
         this.clearTrees(chunk, ox - 3, oz - 3, ox + 9, oz + 9, lo);
         this.placeWatchtower(chunk, ox, Math.round((lo + hi) / 2), oz, b === DESERT);
       }
@@ -1703,7 +2407,7 @@ export class WorldGenerator {
       const [lo, hi] = this.groundRange(ox, oz, 13, 13);
       const b = this.biomeIdx(ox + 6, oz + 6);
       if ((b === MOUNTAINS || b === PLAINS || b === TAIGA || b === SNOW) && lo > SEA_LEVEL + 3 && hi <= 112 &&
-        hi - lo <= 7 && !this.inVillage(ox, oz, 16)) {
+        hi - lo <= 7 && !this.blocked(ox, oz, 16)) {
         this.clearTrees(chunk, ox - 3, oz - 3, ox + 15, oz + 15, lo);
         this.placeKeep(chunk, ox, Math.round((lo + hi) / 2) + 1, oz);
       }
@@ -1714,7 +2418,7 @@ export class WorldGenerator {
       const oy = this.heightAt(ox + 3, oz + 3);
       const b = this.biomeIdx(ox + 3, oz + 3);
       if ((b === PLAINS || b === FOREST || b === SWAMP || b === JUNGLE) && oy >= SEA_LEVEL && oy <= SEA_LEVEL + 12 &&
-        this.slopeAt(ox + 3, oz + 3, oy) <= 1 && !this.inVillage(ox + 3, oz + 3, 8)) {
+        this.slopeAt(ox + 3, oz + 3, oy) <= 1 && !this.blocked(ox + 3, oz + 3, 8)) {
         this.placePond(chunk, ox, oy, oz);
       }
     }
@@ -1722,7 +2426,7 @@ export class WorldGenerator {
     if (roll(0x9071) < 0.004) {
       const ox = at(0x9072, 8, scx * CX + 4), oz = at(0x9073, 8, scz * CZ + 4);
       const [lo, hi] = this.groundRange(ox - 1, oz - 1, 6, 3);
-      if (lo > SEA_LEVEL && hi - lo <= 3 && hi <= 110 && !this.inVillage(ox, oz, 10)) {
+      if (lo > SEA_LEVEL && hi - lo <= 3 && hi <= 110 && !this.blocked(ox, oz, 10)) {
         this.clearTrees(chunk, ox - 5, oz - 5, ox + 6, oz + 6, lo - 2);
         this.placeRuinedPortal(chunk, ox, lo, oz, roll(0x9074) < 0.5);
       }
@@ -1740,9 +2444,47 @@ export class WorldGenerator {
     if (roll(0x1e3b) < 0.016) {
       const ox = at(0x1e3c, 6, scx * CX + 2), oz = at(0x1e3d, 6, scz * CZ + 2);
       const [lo, hi] = this.groundRange(ox, oz, 9, 11);
-      if (this.biomeIdx(ox + 4, oz + 5) === JUNGLE && lo > SEA_LEVEL && hi - lo <= 6) {
+      if (this.biomeIdx(ox + 4, oz + 5) === JUNGLE && lo > SEA_LEVEL && hi - lo <= 6 && !this.blocked(ox, oz, 10)) {
         this.clearTrees(chunk, ox - 3, oz - 3, ox + 11, oz + 13, lo);
         this.placeJungleTemple(chunk, ox, Math.round((lo + hi) / 2), oz);
+      }
+    }
+    // natural stone arches over badlands, desert, savanna and mountain country
+    if (roll(0xa2c4) < 0.028) {
+      const ox = at(0xa2c5, 12, scx * CX + 2), oz = at(0xa2c6, 12, scz * CZ + 2);
+      const i = this.slot(ox, oz);
+      const b = this.cB[i], v = this.cV[i];
+      if ((v === V_BADLANDS || v === V_SAVANNA || b === DESERT || b === MOUNTAINS) && this.cH[i] > SEA_LEVEL + 1 &&
+        this.cF[i] === F_NONE && !this.blocked(ox, oz, 12)) {
+        this.placeArch(chunk, ox, oz, roll(0xa2c7) < 0.5, 9 + Math.floor(roll(0xa2c8) * 8), roll(0xa2c9));
+      }
+    }
+    // cliff waterfalls: a spring bursting from a rock face, pooling at its foot
+    if (roll(0xfa11) < 0.22) {
+      for (let k = 0; k < 6; k++) {
+        const wx = at(0xfa12 + k, 16, scx * CX), wz = at(0xfa20 + k, 16, scz * CZ);
+        const h = this.heightAt(wx, wz);
+        if (h < SEA_LEVEL + 12 || h > 130 || this.cF[this.slot(wx, wz)] !== F_NONE) continue;
+        let dir = -1, low = h;
+        for (let d = 0; d < 4; d++) {
+          const n = this.heightAt(wx + DIR_X[d], wz + DIR_Z[d]);
+          if (n < low - 6) { low = n; dir = d; }
+        }
+        if (dir < 0) continue;
+        const fx = wx + DIR_X[dir], fz = wz + DIR_Z[dir];
+        const top = h - 1 - Math.floor(hash2(S ^ 0xfa30, wx, wz) * 2);
+        this.put(chunk, wx, top, wz, B.WATER); // the spring, set into the cliff
+        const foot = Math.max(this.heightAt(fx, fz), SEA_LEVEL - 1);
+        for (let y = top; y > foot; y--) this.put(chunk, fx, y, fz, B.WATER);
+        // plunge pool
+        for (let dx = -1; dx <= 1; dx++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            const px = fx + dx + DIR_X[dir], pz = fz + dz + DIR_Z[dir];
+            const g = this.heightAt(px, pz);
+            if (g <= foot + 1 && g >= foot - 2 && g >= SEA_LEVEL) { this.put(chunk, px, g, pz, B.WATER); this.put(chunk, px, g + 1, pz, B.AIR); }
+          }
+        }
+        break;
       }
     }
     // boulders and stone outcrops make taiga, plains and mountain terrain easier to read
@@ -1751,8 +2493,36 @@ export class WorldGenerator {
       const oy = this.heightAt(ox, oz);
       const b = this.biomeIdx(ox, oz);
       if ((b === TAIGA || b === MOUNTAINS || b === PLAINS || b === SNOW) && oy > SEA_LEVEL && oy <= 112 &&
-        !this.inVillage(ox, oz, 6)) {
+        !this.blocked(ox, oz, 6)) {
         this.placeBoulder(chunk, ox, oy + 1, oz, 1 + Math.floor(hash2(S ^ 0xb014, ox, oz) * 2.4));
+      }
+    }
+  }
+
+  /** Natural arch: a thick, weathered half-ring of rock spanning `span`
+   *  blocks, its legs rooted in the ground on either side. */
+  private placeArch(chunk: Chunk, ox: number, oz: number, alongX: boolean, span: number, v: number): void {
+    const S = this.seed ^ 0xa2ca;
+    const half = span / 2, H = span * (0.55 + v * 0.35);
+    const T = 2.2; // ring thickness
+    const cx = alongX ? ox + half : ox, cz = alongX ? oz : oz + half;
+    const g0 = Math.min(this.heightAt(alongX ? ox : ox, alongX ? oz : oz), this.heightAt(alongX ? ox + span : ox, alongX ? oz : oz + span));
+    const bad = this.cV[this.slot(ox, oz)] === V_BADLANDS, sandy = bad || this.cB[this.slot(ox, oz)] === DESERT;
+    for (let s = -2; s <= span + 2; s++) {
+      for (let t = -2; t <= 2; t++) {
+        const wx = alongX ? ox + s : ox + t, wz = alongX ? oz + t : oz + s;
+        const ground = this.heightAt(wx, wz);
+        const ds = (alongX ? wx - cx : wz - cz);
+        for (let y = ground + 1; y <= g0 + H + T + 1; y++) {
+          const dy = y - g0;
+          const outer = (ds * ds) / ((half + T) ** 2) + (dy * dy) / ((H + T) ** 2);
+          const inner = (ds * ds) / (Math.max(0.5, half - T) ** 2) + (dy * dy) / (Math.max(0.5, H - T) ** 2);
+          const width = 1.6 - Math.max(0, dy / (H + T)) * 0.5; // slimmer toward the crown
+          if (outer > 1 || inner < 1 || Math.abs(t) > width) continue;
+          if (hash3(S, wx, y, wz) < 0.06 && outer > 0.85) continue; // weathered edge
+          const id = bad ? this.bandAt(wx, y, wz) : sandy ? B.SANDSTONE : hash3(S ^ 1, wx, y, wz) < 0.3 ? B.COBBLE : B.STONE;
+          this.put(chunk, wx, y, wz, id);
+        }
       }
     }
   }
@@ -1887,7 +2657,7 @@ export class WorldGenerator {
     if (hash2(this.seed ^ 0x3a23, ox, oz) < 0.5) this.put(chunk, ox - 1, oy + 1, oz - L + 1, B.CHEST_LOOT);
   }
 
-  private putIfAir(chunk: Chunk, wx: number, wy: number, wz: number, id: number): void {
+  putIfAir(chunk: Chunk, wx: number, wy: number, wz: number, id: number): void {
     const x = wx - chunk.cx * CX;
     const z = wz - chunk.cz * CZ;
     if (x < 0 || x >= CX || z < 0 || z >= CZ || wy < 0 || wy >= CY) return;

@@ -1954,7 +1954,7 @@ class Game {
       `XYZ: ${p.x.toFixed(3)} / ${p.y.toFixed(3)} / ${p.z.toFixed(3)}`,
       `Chunk: ${Math.floor(p.x / 16)} ${Math.floor(p.z / 16)}  in ${Math.floor(p.x) & 15} ${Math.floor(p.z) & 15}`,
       `Facing: ${facing} (yaw ${yawDeg.toFixed(1)})`,
-      `Biome: ${biome}  Day: ${(this.dayTime * 100).toFixed(0)}%`,
+      `Biome: ${this.world.generator.biomeLabel(Math.floor(p.x), Math.floor(p.z))}  Day: ${(this.dayTime * 100).toFixed(0)}%`,
       `Chunks: ${this.world.countLoaded()} loaded, ${this.world.dirtySet.size} dirty`,
       `Mesh: ${this.meshMs.toFixed(2)} ms/chunk (${this.meshPerFrame}/frame)  Gen: ${this.world.genMs.toFixed(1)} ms/chunk`,
       `Entities: ${c.mobs} mobs, ${c.drops} drops, ${c.other} fx`,
