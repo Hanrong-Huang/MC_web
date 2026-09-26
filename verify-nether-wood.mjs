@@ -167,7 +167,8 @@ const climb = await page.evaluate(({ ox, oy, oz }) => {
   return { x, z, y0: p.pos.y };
 }, s);
 await page.keyboard.down('Space');
-await page.waitForTimeout(1500);
+// hold until it has climbed (or 6 s: a loaded machine runs the sim slower)
+await page.waitForFunction((y0) => window.__game.player.pos.y - y0 > 1.6, climb.y0, { timeout: 6000, polling: 100 }).catch(() => {});
 const climbed = await page.evaluate(() => ({ y: window.__game.player.pos.y, onLadder: window.__game.player.onLadder }));
 await page.screenshot({ path: `${DIR}/wood-climb.png` });
 await page.keyboard.up('Space');
@@ -202,7 +203,8 @@ check('bone meal grows a vine', chain.grew && chain.l1 > chain.l0, `${chain.l0} 
 
 // --- 5. generated vines in the forests ----------------------------------------------------------
 await page.evaluate(() => window.__game.teleportPlayerDimension());
-await page.waitForTimeout(3000);
+await page.waitForFunction(() => window.__game.world.dimension === 'nether', null, { timeout: 120000 });
+await page.waitForTimeout(1500);
 for (const [biome, name] of [['crimson', 'WEEPING_VINES'], ['warped', 'TWISTING_VINES']]) {
   const spot = await page.evaluate(({ biome }) => {
     const gen = window.__game.world.generator;
@@ -260,7 +262,8 @@ for (const [biome, name] of [['crimson', 'WEEPING_VINES'], ['warped', 'TWISTING_
 
 // --- 6. an old-format save (u8 RLE) loads and migrates --------------------------------------
 await page.evaluate(() => window.__game.teleportPlayerDimension());
-await page.waitForTimeout(2500);
+await page.waitForFunction(() => window.__game.world.dimension === 'overworld', null, { timeout: 120000 });
+await page.waitForTimeout(3000);
 const legacy = await page.evaluate(async ({ ox, oz }) => {
   const g = window.__game, B = window.__B, w = g.world;
   // well away from the platform (whose chunks hold ids > 255 and stay v2)
@@ -297,9 +300,9 @@ const legacy = await page.evaluate(async ({ ox, oz }) => {
   }
   const legacyOk = P.rleIsLegacy(st.world[key]);
   await db.save(slot, st);
-  return { slot, key, x, y, z, lx, lz, maxId, kept, legacyOk, hasKey: key in st.world };
+  return { slot, key, x, y, z, lx, lz, maxId, kept, legacyOk, hasKey: key in st.world, savedDim: st.dimension ?? "overworld" };
 }, s);
-check('legacy save written', legacy.hasKey && legacy.legacyOk && legacy.maxId < 256, JSON.stringify(legacy));
+check('legacy save written', legacy.hasKey && legacy.legacyOk && legacy.maxId < 256 && legacy.savedDim === 'overworld', JSON.stringify(legacy));
 await page.waitForTimeout(1500);
 // #loading is still hidden from the last session: wait for the new Game instead
 await page.evaluate(() => { window.__game.__stale = true; });
@@ -317,6 +320,7 @@ const loaded = await page.evaluate(async ({ x, y, z, lx, lz, ox, oy, oz }) => {
     twisting: [gb(x, y - 3, z), gb(x, y - 2, z)].every((id) => id === B.TWISTING_VINES),
     floorRoots: gb(x, y - 3, z1) === B.CRIMSON_ROOTS,
     platform: gb(ox + 1, oy, oz) === B.CRIMSON_PLANKS && gb(ox + 3, oy, oz + 3) === B.CRIMSON_STAIRS,
+    dim: w.dimension, stale: !!g.__stale, slot: g.slot,
   };
   await g.saveGame();
   const P = await import('/src/engine/Persistence.ts');
