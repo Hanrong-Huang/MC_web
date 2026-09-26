@@ -107,5 +107,48 @@ check('slab beside a soul lantern carries soul light', slabSoul > 0.3);
 check('soul lantern glows fully soul', lanternSoul > 0.99);
 check('a plain torch keeps its warm flame', torchSoul === 0);
 
+// mixed light: a stone beam high in the air with a torch at one end and a soul
+// lantern at the other. The tint follows how much light each source actually
+// delivers, so it runs warm -> balanced -> cyan along the beam instead of
+// snapping to cyan wherever the soul light merely matches the torch.
+const Y = Math.min(h + 24, 110);
+for (let x = 0; x < 16; x++) for (let z = 2; z <= 6; z++) for (let y = Y; y <= Y + 4; y++) world.setBlock(x, y, z, B.AIR);
+for (let x = 1; x <= 14; x++) world.setBlock(x, Y, 4, B.STONE);
+world.setBlock(2, Y + 1, 4, B.TORCH);
+world.setBlock(13, Y + 1, 4, B.SOUL_LANTERN);
+const geo4 = buildChunkGeometry(world, chunk, mockAtlas);
+const P4 = geo4.solid!.positions, L4 = geo4.solid!.lights;
+/** average soul share of the beam's upper vertices over stone cell x */
+const beamSoul = (cx: number): number => {
+  let sum = 0, n = 0;
+  for (let i = 0; i < P4.length / 3; i++) {
+    const px = P4[i * 3], py = P4[i * 3 + 1], pz = P4[i * 3 + 2];
+    if (Math.abs(py - (Y + 1)) > 0.001 || px < cx - 0.001 || px > cx + 1.001 || pz < 3.999 || pz > 5.001) continue;
+    sum += soulShare(L4[i * 2 + 1]); n++;
+  }
+  return n ? sum / n : -1;
+};
+const beam = Array.from({ length: 10 }, (_, k) => beamSoul(3 + k));
+console.log(`  beam soul share x=3..12: ${beam.map((s) => s.toFixed(2)).join(' ')}`);
+check('beside the torch (soul lantern 10 away) stays warm', beam[0] >= 0 && beam[0] <= 1 / 7 + 0.001);
+check('torch-dominant side is mostly warm', beam[2] < 0.35);
+check('halfway between equal sources is a balanced mix', beam[5] > 0.3 && beam[5] < 0.7 && beam[4] > 0.25 && beam[4] < 0.65);
+check('soul-dominant side is mostly cyan', beam[7] > 0.55 && beam[8] > 0.7);
+check('beside the soul lantern is nearly all cyan', beam[9] >= 6 / 7 - 0.001);
+let rising = true;
+for (let k = 1; k < beam.length; k++) if (beam[k] < beam[k - 1] - 0.001) rising = false;
+check('tint shifts steadily from warm to cyan', rising);
+// a pure soul area stays fully cyan
+world.setBlock(2, Y + 1, 4, B.AIR);
+const geo5 = buildChunkGeometry(world, chunk, mockAtlas);
+const P5 = geo5.solid!.positions, L5 = geo5.solid!.lights;
+let pureMin = 1;
+for (let i = 0; i < P5.length / 3; i++) {
+  const px = P5[i * 3], py = P5[i * 3 + 1], pz = P5[i * 3 + 2];
+  if (Math.abs(py - (Y + 1)) < 0.001 && px >= 3 && px <= 13 && pz >= 3.999 && pz <= 5.001 && L5[i * 2 + 1] % 8 % 2 > 0.02) pureMin = Math.min(pureMin, soulShare(L5[i * 2 + 1]));
+}
+console.log(`  soul lantern alone: min soul share ${pureMin.toFixed(2)}`);
+check('soul light alone is fully cyan', pureMin > 0.99);
+
 console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');
 process.exit(failures ? 1 : 0);
