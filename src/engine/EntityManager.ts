@@ -10,6 +10,7 @@ import { B, I, def, hasDef, allDefs, CROSS_BLOCKS, spriteNameFor, CAPTURABLE, mo
 import { Atlas, extrudeSpriteGeometry, shapedItemGeometry, BLOCK_SPRITE_ICONS } from './Textures';
 import { AudioEngine } from './Audio';
 import { SEA_LEVEL } from './WorldGenerator';
+import { netherStructureAt } from './NetherStructures';
 import type { Player } from './Player';
 import { MobModels, LimbSet, MOB_EXPOSURE, MAGMA_SIZES, rollVariant } from './MobModels';
 import { buildOrbRig, setOrbOpen, disposeOrb, orbGlowTexture, orbStarTexture, ORB_GLOW, ORB_IDLE_GLOW, OrbRig } from './CatcherOrb';
@@ -39,7 +40,7 @@ const MOB_KINDS = new Set<EntityKind>([
 ]);
 
 /** Nether regions a spawn attempt can land in. */
-type NetherRegion = 'wastes' | 'crimson' | 'warped' | 'soul' | 'basalt' | 'fortress';
+type NetherRegion = 'wastes' | 'crimson' | 'warped' | 'soul' | 'basalt' | 'fortress' | 'bastion';
 /** Per-region spawn tables: [kind, weight, min pack, max pack] (vanilla-ish). */
 const NETHER_TABLES: Record<NetherRegion, [MobKind, number, number, number][]> = {
   wastes: [['zombified_piglin', 40, 2, 4], ['cinderling', 16, 1, 2], ['piglin', 10, 1, 3],
@@ -48,6 +49,8 @@ const NETHER_TABLES: Record<NetherRegion, [MobKind, number, number, number][]> =
   warped: [['cinderling', 5, 1, 1], ['ashstalker', 4, 1, 1], ['strider', 1, 1, 1]],
   soul: [['skeleton', 30, 2, 4], ['emberghast', 12, 1, 1], ['ashstalker', 6, 1, 2], ['wither_skeleton', 4, 1, 1]],
   basalt: [['magma_cube', 40, 1, 3], ['emberghast', 8, 1, 1], ['cinderling', 5, 1, 1]],
+  // bastion remnants: piglin strongholds with hoglin stables
+  bastion: [['piglin', 40, 2, 4], ['hoglin', 8, 1, 2], ['magma_cube', 3, 1, 1]],
   fortress: [['blaze', 20, 1, 3], ['wither_skeleton', 16, 1, 3], ['zombified_piglin', 5, 1, 2],
     ['magma_cube', 4, 1, 1], ['skeleton', 3, 1, 1]],
 };
@@ -3552,6 +3555,10 @@ export class EntityManager {
   /** Which nether region a spot belongs to: fortress bricks nearby win, then
    *  the ground block, then the generator's nether biome if it has one. */
   private netherRegion(wx: number, wy: number, wz: number, ground: number): NetherRegion {
+    // generated structures: inside a fortress's or bastion's footprint
+    const built = netherStructureAt(this.world.generator.seed, wx, wz);
+    if (built === 'fortress' || built === 'bastion') return built;
+    // hand-built (or older-world) fortresses: nether bricks all around
     const bricks = brickIds();
     let n = 0;
     for (let dy = -3; dy <= 4; dy++) {
@@ -3561,15 +3568,11 @@ export class EntityManager {
         }
       }
     }
-    const byBlock = regionOfBlock(hasDef(ground) ? def(ground).name : '');
-    if (byBlock !== 'wastes') return byBlock;
-    const gen = this.world.generator as unknown as { netherBiomeAt?: (x: number, z: number, y?: number) => unknown };
-    if (typeof gen.netherBiomeAt === 'function') {
-      const b = gen.netherBiomeAt(wx, wz, wy);
-      const label = typeof b === 'string' ? b : (b && typeof b === 'object' && 'name' in b) ? String((b as { name: unknown }).name) : '';
-      if (label) return regionOfBiome(label);
-    }
-    return 'wastes';
+    // the generator's nether biome, then the ground block (player-placed
+    // nylium/soul sand/basalt pockets, or terrain from before the biomes)
+    const biome = regionOfBiome(String(this.world.generator.netherBiomeAt(wx, wz)));
+    if (biome !== 'wastes') return biome;
+    return regionOfBlock(hasDef(ground) ? def(ground).name : '');
   }
 
   /** Spawn a pack of `kind` around (wx,wy,wz): each member needs a clear

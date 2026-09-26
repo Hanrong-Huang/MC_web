@@ -211,8 +211,21 @@ const beh = await page.evaluate(async () => {
   // fortress detection: bricks around a spot
   for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) g.world.setBlock(ox - 8 + dx, oy - 1, oz + 6 + dz, B.NETHER_BRICKS);
   out.fortress = em.netherRegion(ox - 8, oy, oz + 6, B.NETHER_BRICKS);
-  out.soul = em.netherRegion(ox + 8, oy, oz + 8, B.SOUL_SAND);
-  out.wastes = em.netherRegion(ox + 8, oy, oz + 8, B.NETHERRACK);
+  // biome-driven regions: find nether-wastes and crimson columns (far from any
+  // generated structure), then check the ground-block fallback in the wastes
+  const gen = g.world.generator;
+  let wastesAt = null, crimsonAt = null;
+  for (let i = 0; i < 4000 && (!wastesAt || !crimsonAt); i++) {
+    const x = (i % 63) * 37 - 1100, z = Math.floor(i / 63) * 41 - 1300;
+    const b = gen.netherBiomeAt(x, z);
+    if (b === 'wastes' && !wastesAt) wastesAt = [x, z];
+    if (b === 'crimson' && !crimsonAt) crimsonAt = [x, z];
+  }
+  out.biomes = { wastesAt, crimsonAt };
+  const [wx, wz] = wastesAt ?? [ox + 8, oz + 8];
+  out.soul = em.netherRegion(wx, 300, wz, B.SOUL_SAND);
+  out.wastes = em.netherRegion(wx, 300, wz, B.NETHERRACK);
+  out.crimson = crimsonAt ? em.netherRegion(crimsonAt[0], 300, crimsonAt[1], B.NETHERRACK) : 'none';
   // capture every new hostile kind
   out.capt = ['piglin', 'zombified_piglin', 'hoglin', 'blaze', 'wither_skeleton', 'magma_cube'].map((k) => {
     const m = em.spawnMob(k, ox + 0.5, oy + 3, oz - 6);
@@ -233,6 +246,7 @@ check('big magma cube splits into 2-4 medium', beh.split >= 2 && beh.split <= 4 
 check('fortress bricks -> fortress region', beh.fortress === 'fortress', beh.fortress);
 check('soul sand -> soul region', beh.soul === 'soul', beh.soul);
 check('netherrack -> wastes', beh.wastes === 'wastes', beh.wastes);
+check('crimson forest biome -> crimson spawns', beh.crimson === 'crimson', `${beh.crimson} ${JSON.stringify(beh.biomes)}`);
 check('all new hostiles capturable', beh.capt.every(Boolean), JSON.stringify(beh.capt));
 check('strider saddles + mounts', beh.saddle === 'saddle' && beh.mount === 'mount' && beh.isMount);
 
