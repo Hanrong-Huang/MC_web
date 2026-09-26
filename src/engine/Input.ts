@@ -76,6 +76,15 @@ export class Input {
     return v;
   }
 
+  /** Forget held buttons and queued clicks — called when a screen opens or
+   *  closes, so a click spent on the UI (or the right-click that opened a chest)
+   *  isn't replayed into the world and reopens the chest you're looking at. */
+  clearClicks(): void {
+    this.leftDown = false;
+    this.rightDown = false;
+    this.rightClickQueued = false;
+  }
+
   private mouseup = (e: MouseEvent): void => {
     if (e.button === 0) this.leftDown = false;
     if (e.button === 2) this.rightDown = false;

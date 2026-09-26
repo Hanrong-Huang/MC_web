@@ -875,6 +875,7 @@ class Game {
     if (this.state !== 'paused') return;
     this.hud.hidePause();
     this.state = 'playing';
+    this.input.clearClicks();
     this.input.requestLock();
   }
 
@@ -890,6 +891,7 @@ class Game {
     };
     this.containerPos = null;
     this.state = 'container';
+    this.input.clearClicks();
     this.input.exitLock();
     this.hud.openContainer(this.container, this.player.inventory, this.player.mode);
   }
@@ -924,6 +926,7 @@ class Game {
       this.containerPos = null;
     }
     this.state = 'container';
+    this.input.clearClicks();
     if (kind === 'chest') this.audio.play('chestOpen');
     this.input.exitLock();
     this.hud.openContainer(this.container, this.player.inventory, this.player.mode);
@@ -942,6 +945,7 @@ class Game {
     this.containerPos = null;
     this.tradeVillager = villager;
     this.state = 'container';
+    this.input.clearClicks();
     this.input.exitLock();
     this.hud.openContainer(this.container, this.player.inventory, this.player.mode);
   }
@@ -1185,6 +1189,7 @@ class Game {
     this.container = null;
     this.containerPos = null;
     this.state = 'playing';
+    this.input.clearClicks();
     this.input.requestLock();
   }
 

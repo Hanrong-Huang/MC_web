@@ -1709,7 +1709,10 @@ export class Player {
 
   private updateRightClick(dt: number): void {
     const { input, world, audio } = this.deps;
-    if (!input.rightDown && !input.takeRightClick()) {
+    // always drain the queue: a click made while the button is held must not
+    // linger and fire later (it reopened a just-closed chest)
+    const clicked = input.takeRightClick();
+    if (!input.rightDown && !clicked) {
       this.eatT = 0;
       this.eating = false;
       return;
