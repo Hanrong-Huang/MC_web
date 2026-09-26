@@ -3,7 +3,7 @@
 
 import { Chunk, chunkKey, CX, CZ, CY, isGlower } from './Chunk';
 import { WorldGenerator } from './WorldGenerator';
-import { B, isSolid, def, hasDef, DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, doorBox, trapdoorBox, REDSTONE_IDS, PLATE_IDS, POLL_IDS } from './Blocks';
+import { B, isSolid, def, hasDef, DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, doorBox, trapdoorBox, REDSTONE_IDS, PLATE_IDS, POLL_IDS, RAIL_IDS } from './Blocks';
 import type { Box } from './Blocks';
 import { BlockEntity } from './Inventory';
 import { rleDecode, rleEncode, rleIsLegacy } from './Persistence';
@@ -461,6 +461,14 @@ export class World {
     const st = this.doorStateAt(x, y, z);
     const swing = st?.swing ?? (st?.open ? 1 : 0);
     return doorBox(st?.facing ?? 0, !!st?.hingeRight, swing >= 0.5);
+  }
+
+  /** Aiming box of a rail (a flat strip, half a block for a slope), or null.
+   *  Only raycasts use it: rails never collide. */
+  railShape(x: number, y: number, z: number, id = this.getBlock(x, y, z)): Box | null {
+    if (!RAIL_IDS.has(id)) return null;
+    const s = this.bedFacings.get(`${x},${y},${z}`) ?? 0;
+    return [0, 0, 0, 1, s >= 2 && s <= 5 ? 0.5 : 0.125, 1];
   }
 
   /** Is this door block currently closed (i.e. should it block movement)? */
@@ -933,7 +941,8 @@ export class World {
     for (let i = 0; i < 256; i++) {
       const id = this.getBlock(x, y, z);
       if (id !== B.AIR && id !== B.WATER && t <= maxDist) {
-        const shape = this.doorShape(x, y, z, id);
+        // thin blocks are hit by their shape (aim past an open door, at a cart on a rail)
+        const shape = this.doorShape(x, y, z, id) ?? this.railShape(x, y, z, id);
         if (!shape) return { x, y, z, nx, ny, nz, id, dist: t };
         // a door leaf / trapdoor only fills part of the cell: aim past it
         // through the open part (vanilla — reach through an open trapdoor)

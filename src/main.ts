@@ -29,7 +29,7 @@ import type { MeshJob, MeshChunkSnap } from './engine/mesh-worker';
 import { chunkKey, CX, CY, CZ } from './engine/Chunk';
 import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, HANGING_PLANTS, def, hasDef, isSolid, mobLabel } from './engine/Blocks';
 import { SHAPED, META_BLOCKS, FENCE_IDS, GATE_IDS, VINE_BLOCKS, vineDrops, shapeBoxes, connectsTo, enchantLabel } from './engine/Blocks';
-import { DOOR_LOWERS, DOOR_UPPERS, doorItemFor } from './engine/Blocks';
+import { DOOR_LOWERS, DOOR_UPPERS, doorItemFor, RAIL_IDS } from './engine/Blocks';
 import { craftRemainders } from './engine/Inventory';
 import { ExperienceOrbs, XpBar } from './engine/Experience';
 import { Throwables } from './engine/Throwables';
@@ -230,6 +230,7 @@ class Game {
         const gloom = w.kind === 'clear' ? 1 : 1 - 0.25 * w.intensity;
         return 15 * open * Math.min(1, sun * 1.6) * gloom;
       },
+      cartAt: (x, y, z) => this.entities.cartAt(x, y, z),
     });
     this.fire = new FireSystem(this.world, {
       rainingAt: (x, y, z) => this.isRainingOn(x, y, z),
@@ -416,6 +417,7 @@ class Game {
       if (save.villageSpawns) this.world.generator.villageSpawns = save.villageSpawns.map((s) => ({ ...s }));
       // captured pets come back with the player (wild mobs respawn naturally)
       if (save.pets?.length) this.entities.loadPets(save.pets);
+      if (save.carts?.length) this.entities.loadCarts(save.carts);
     } else {
       this.player.mode = fresh!.mode;
       const spawn = this.world.generator.findSpawn();
@@ -1435,6 +1437,7 @@ class Game {
       environment: { dayTime: this.dayTime },
       villageSpawns: this.world.generator.villageSpawns.map((s) => ({ ...s })),
       pets: this.entities.savePets(),
+      carts: this.entities.saveCarts(),
       advancements: this.adv.serialize(),
       ...(this.fire.count > 0 ? { fires: this.fire.serialize() } : {}),
       campfires: this.campfires.serialize(),
@@ -2076,6 +2079,10 @@ class Game {
     const id = this.world.getBlock(x, y, z);
     const door = this.world.doorShape(x, y, z, id);
     if (door) return [...door];
+    if (RAIL_IDS.has(id)) {
+      const s = this.world.bedFacings.get(`${x},${y},${z}`) ?? 0;
+      return [0, 0, 0, 1, s >= 2 && s <= 5 ? 0.5 : 0.125, 1];
+    }
     if (!SHAPED.has(id)) return null;
     const key = `${x},${y},${z}`;
     const gate = GATE_IDS.has(id) ? this.world.doorStates.get(key) : undefined;

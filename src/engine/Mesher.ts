@@ -8,7 +8,7 @@
 // light model stays 2-channel without another attribute.
 
 import { CX, CZ, CY } from './Chunk';
-import { B, def, hasDef, ID_LIMIT, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, FENCE_IDS, GATE_IDS, DOOR_IDS, TRAPDOOR_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel, doorFootprints, DOOR_THICK, trapdoorBox, dustShape, H4 } from './Blocks';
+import { B, def, hasDef, ID_LIMIT, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, FENCE_IDS, GATE_IDS, DOOR_IDS, TRAPDOOR_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel, doorFootprints, DOOR_THICK, trapdoorBox, dustShape, H4, RAIL_IDS } from './Blocks';
 import type { Box } from './Blocks';
 import type { UVRect } from './Textures';
 
@@ -270,7 +270,7 @@ function kindOf(id: number): number {
         id === B.BED || id === B.BED_HEAD || TRAPDOOR_IDS.has(id) || id === B.PRESSURE_PLATE ||
         id === B.LEVER || id === B.WOODEN_BUTTON || id === B.STONE_BUTTON ||
         id === B.REDSTONE_TORCH || id === B.REDSTONE_TORCH_OFF || id === B.REPEATER || id === B.STONE_PRESSURE_PLATE ||
-        id === B.COMPARATOR || id === B.OBSERVER ||
+        id === B.COMPARATOR || id === B.OBSERVER || RAIL_IDS.has(id) ||
         id === B.REDSTONE_WIRE || CROSS_BLOCKS.has(id) || SHAPED.has(id)) ? 2 : 1;
     KIND[id] = k;
   }
@@ -580,6 +580,11 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           const state = world.redstoneStates.get(`${bx + x},${y},${bz + z}`);
           const active = !!state?.active;
           emitPressurePlate(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), active, id === B.STONE_PRESSURE_PLATE ? 'stone' : 'planks');
+          continue;
+        }
+        if (RAIL_IDS.has(id)) {
+          const k = `${bx + x},${y},${bz + z}`;
+          emitRail(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), id, world.bedFacings.get(k) ?? 0, !!world.redstoneStates.get(k)?.active);
           continue;
         }
         if (id === B.COMPARATOR) {
@@ -1085,6 +1090,40 @@ function emitBox(
   push(x0, y1, z0, r.u1, r.v0);
   push(x0, y0, z0, r.u1, r.v1);
   quad(base);
+}
+
+/** Rail: one textured quad 1/16 above the floor (sloped for ascending
+ *  shapes), its tile turned to the shape: straight tracks run along the
+ *  texture's v axis, the corner tile joins its bottom (+z) and right (+x)
+ *  edges. Powered/detector/activator rails switch to an "_on" tile. */
+function emitRail(
+  g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number,
+  sky: number, torch: number, id: number, shape: number, active: boolean,
+): void {
+  const base = def(id).faces!.top;
+  const curve = shape >= 6 && shape <= 9;
+  const rect = atlas.rect(curve ? 'rail_corner' : id !== B.RAIL && active ? `${base}_on` : base);
+  // texture turns (quarter turns, see emitBox's topRot): N-S/slopes N,S 0, E-W 1; corners SE 0, NE 1, NW 2, SW 3
+  const rot = [0, 1, 1, 1, 0, 0, 0, 3, 2, 1][shape] ?? 0;
+  const h = 1 / 16;
+  // corner heights (x0z0, x1z0, x1z1, x0z1): slopes rise toward their high side
+  const hy = [h, h, h, h];
+  if (shape === 2) { hy[1] += 1; hy[2] += 1; }      // up east (+x)
+  else if (shape === 3) { hy[0] += 1; hy[3] += 1; } // up west
+  else if (shape === 4) { hy[0] += 1; hy[1] += 1; } // up north (-z)
+  else if (shape === 5) { hy[2] += 1; hy[3] += 1; } // up south
+  const tc: [number, number][] = [[rect.u0, rect.v0], [rect.u1, rect.v0], [rect.u1, rect.v1], [rect.u0, rect.v1]];
+  const cx = [0, 1, 1, 0], cz = [0, 0, 1, 1];
+  const lit = torch + soulFlagAt(x, y, z);
+  const b0 = g.vertCount;
+  // counter-clockwise seen from above: corners 0, 3, 2, 1
+  for (const i of [0, 3, 2, 1]) {
+    const [u, v] = tc[(i + rot) & 3];
+    g.v(x + cx[i], y + hy[i], z + cz[i], sky, lit, 1, 1, 1, u, v);
+  }
+  g.tri2(b0, b0 + 1, b0 + 2, b0, b0 + 2, b0 + 3);
+  // and from below (a slope seen from its underside, a rail over a drop)
+  g.tri2(b0, b0 + 2, b0 + 1, b0, b0 + 3, b0 + 2);
 }
 
 /** Comparator: the repeater's slab with two rear torches (lit while it

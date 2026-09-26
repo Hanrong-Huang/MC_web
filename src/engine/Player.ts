@@ -26,6 +26,7 @@ import { netheriteUpgrade, GATE_IDS, SHAPED, CLIMBABLE, HANGING_PLANTS, VINE_BLO
 import { DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, REDSTONE_ONLY_DOORS, doorBlocksFor, doorItemFor } from './Blocks';
 import { PORTAL_TIME_CREATIVE, PORTAL_TIME_SURVIVAL } from './NetherPortal';
 import { buttonTicks } from './Redstone';
+import { RAIL_IDS, railShapeFor, railRelinks } from './Blocks';
 
 export type GameMode = 'survival' | 'creative';
 
@@ -914,7 +915,8 @@ export class Player {
   mount(horse: Entity): void {
     this.riding = horse;
     this.prevSneak = true; // ignore the shift that may still be held from sneaking
-    this.deps.entities.mountHorse(horse);
+    if (horse.kind === 'minecart') horse.ridden = true;
+    else this.deps.entities.mountHorse(horse);
     this.deps.audio.play('mount');
   }
 
@@ -924,6 +926,7 @@ export class Player {
   private updateRiding(dt: number): void {
     const { input, entities, renderer } = this.deps;
     const horse = this.riding!;
+    if (horse.kind === 'minecart') { this.updateCartRide(dt); return; }
     if (horse.dead || !entities.isMount(horse) || !horse.ridden) { this.dismount(false); return; }
     this.target = null;
     renderer.setOutline(null);
@@ -958,6 +961,36 @@ export class Player {
     if (dismount) this.dismount(true);
   }
 
+  /** Sit in a minecart: W nudges it toward where you look, a tapped shift
+   *  (or an activator rail) gets you out. */
+  private updateCartRide(dt: number): void {
+    const { input, entities, renderer } = this.deps;
+    const cart = this.riding!;
+    if (cart.dead || cart.kind !== 'minecart') { this.dismount(false); return; }
+    this.target = null;
+    renderer.setOutline(null);
+    this.cancelBreaking();
+    this.bowCharge = 0;
+    const uiOpen = this.deps.isUIOpen() || this.dead;
+    let fwd = 0, getOut = false;
+    if (!uiOpen && input.active) {
+      if (input.down('KeyW')) fwd = 1;
+      const sneak = this.sneakKeyDown();
+      getOut = sneak && !this.prevSneak;
+      this.prevSneak = sneak;
+    }
+    entities.pushCart(cart, dt, fwd, this.yaw);
+    this.pos.x = cart.pos.x;
+    this.pos.z = cart.pos.z;
+    this.pos.y = cart.pos.y + 0.25;
+    this.vel.x = cart.vel.x; this.vel.y = cart.vel.y; this.vel.z = cart.vel.z;
+    this.onGround = true;
+    this.sprinting = false;
+    this.fallDist = 0;
+    if (cart.eject) { cart.eject = false; this.dismount(true); return; }
+    if (getOut) this.dismount(true);
+  }
+
   /** Stop riding; optionally step the player off to the side onto safe ground. */
   dismount(stepOff: boolean): void {
     const horse = this.riding;
@@ -965,7 +998,17 @@ export class Player {
     this.prevSneak = false;
     if (!horse) return;
     this.deps.entities.dismountHorse(horse);
-    if (stepOff) {
+    if (stepOff && horse.kind === 'minecart') {
+      const { world } = this.deps;
+      const free = (x: number, y: number, z: number): boolean =>
+        !isSolid(world.getBlock(x, y, z)) && !isSolid(world.getBlock(x, y + 1, z));
+      const cx = Math.floor(horse.pos.x), cy = Math.floor(horse.pos.y + 0.1), cz = Math.floor(horse.pos.z);
+      const spots: [number, number, number][] = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [1, 1, 0], [-1, 1, 0], [0, 1, 1], [0, 1, -1], [0, 1, 0]];
+      const s = spots.find(([dx, dy, dz]) => free(cx + dx, cy + dy, cz + dz) && isSolid(world.getBlock(cx + dx, cy + dy - 1, cz + dz))) ??
+        spots.find(([dx, dy, dz]) => free(cx + dx, cy + dy, cz + dz)) ?? [0, 1, 0];
+      this.pos.x = cx + s[0] + 0.5; this.pos.y = cy + s[1] + 0.01; this.pos.z = cz + s[2] + 0.5;
+      this.vel = { x: 0, y: 0, z: 0 };
+    } else if (stepOff) {
       // a side vector perpendicular to the look direction
       this.pos.x = horse.pos.x + Math.cos(this.yaw) * 1.0;
       this.pos.z = horse.pos.z - Math.sin(this.yaw) * 1.0;
@@ -1824,6 +1867,17 @@ export class Player {
       }
     }
 
+    // a minecart: climb in
+    if (!this.riding && !this.sneaking && this.placeCooldown <= 0) {
+      const d = this.lookDir();
+      const ch = this.deps.entities.raycastCarts(this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z, d.x, d.y, d.z, 3.5);
+      if (ch && !ch.entity.ridden && ch.dist < (this.target?.dist ?? 4.5)) {
+        this.placeCooldown = 0.4;
+        this.mount(ch.entity);
+        return;
+      }
+    }
+
     // mob interaction: tame wolves / open villager trades (before generic use)
     if (!this.sneaking && this.placeCooldown <= 0) {
       const hit = this.deps.entities.raycastMobs(
@@ -2200,6 +2254,19 @@ export class Player {
       return;
     }
 
+    // a minecart goes onto the rail you click
+    if (held.id === I.MINECART) {
+      const t = this.target;
+      if (RAIL_IDS.has(t.id) && this.placeCooldown <= 0) {
+        this.deps.entities.spawnMinecart(t.x, t.y, t.z);
+        this.placeCooldown = 0.3;
+        this.deps.renderer.triggerSwing();
+        audio.dig('stone', 0.8, 1, B.IRON_BLOCK);
+        if (this.mode === 'survival') this.inventory.consumeSelected();
+      }
+      return;
+    }
+
     if (!heldDef?.block) return;
     // a slab laid onto the open half of the same slab fills out the whole block
     if (SLAB_IDS.has(held.id) && this.target.id === held.id) {
@@ -2225,6 +2292,11 @@ export class Player {
     if (SLAB_IDS.has(held.id)) meta = upper ? 1 : 0;
     else if (STAIR_IDS.has(held.id)) meta = facing + (upper ? 4 : 0);
     else if (held.id === B.GLASS_PANE) meta = facing % 2;
+    else if (RAIL_IDS.has(held.id)) {
+      const get = (a: number, b: number, c: number): number => world.getBlock(a, b, c);
+      const shapeAt = (a: number, b: number, c: number): number => world.bedFacings.get(`${a},${b},${c}`) ?? 0;
+      meta = railShapeFor(get, shapeAt, px, py, pz, held.id === B.RAIL, facing);
+    }
     else if (held.id === B.ANVIL || held.id === B.CAMPFIRE) meta = facing & 1;
     else if (held.id === B.JACK_O_LANTERN) meta = [4, 0, 5, 1][facing];
     else if (held.id === B.LANTERN || held.id === B.SOUL_LANTERN) {
@@ -2309,6 +2381,16 @@ export class Player {
     if (world.setBlock(px, py, pz, placeId)) {
       if (GATE_IDS.has(placeId)) world.doorStates.set(pkey, { facing: facing as DoorFacing, open: false });
       if (TRAPDOOR_IDS.has(placeId)) this.deps.onRedstoneUpdate(px, py, pz); // opens at once beside live power
+      if (RAIL_IDS.has(placeId)) {
+        // neighbouring rails turn / slope to join the new one
+        const get = (a: number, b: number, c: number): number => world.getBlock(a, b, c);
+        const shapeAt = (a: number, b: number, c: number): number => world.bedFacings.get(`${a},${b},${c}`) ?? 0;
+        for (const [rx, ry, rz, rs] of railRelinks(get, shapeAt, px, py, pz)) {
+          world.bedFacings.set(`${rx},${ry},${rz}`, rs);
+          world.markDirty(Math.floor(rx / 16), Math.floor(rz / 16));
+          this.deps.onRedstoneUpdate(rx, ry, rz);
+        }
+      }
       if (placeId === B.LEVER || placeId === B.WOODEN_BUTTON || placeId === B.STONE_BUTTON || placeId === B.PRESSURE_PLATE) {
         const facing = this.target.ny === -1 ? 0 : this.target.ny === 1 ? 1 : this.target.nz === -1 ? 2 : this.target.nz === 1 ? 3 : this.target.nx === -1 ? 4 : 5;
         world.redstoneStates.set(`${px},${py},${pz}`, { active: false, facing });
@@ -2423,6 +2505,11 @@ export class Player {
     const blockDist = this.target?.dist ?? Infinity;
     const ent = this.deps.entities;
     const hit = ent.raycastMobs(this.pos.x, ey, this.pos.z, d.x, d.y, d.z, 3.5);
+    const cart = ent.raycastCarts(this.pos.x, ey, this.pos.z, d.x, d.y, d.z, 3.5);
+    if (cart && cart.entity !== this.riding && cart.dist < blockDist && (!hit || cart.dist < hit.dist)) {
+      ent.hitCart(cart.entity, this.mode === 'creative');
+      return;
+    }
     if (hit && hit.entity !== this.riding && hit.dist < blockDist) {
       const target = hit.entity;
       const heldId = this.heldId();

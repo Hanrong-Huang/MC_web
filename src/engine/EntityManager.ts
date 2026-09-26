@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import { World } from './World';
 import { moveEntity, inWater, rayAABB, Vec3, MoveResult } from './Physics';
 import { B, I, def, hasDef, allDefs, CROSS_BLOCKS, spriteNameFor, CAPTURABLE, mobLabel, BLAST_PROOF } from './Blocks';
-import { isFireproof } from './Blocks';
+import { isFireproof, RAIL_IDS, RAIL_ENDS, RAIL_Y, isSolid } from './Blocks';
 import { Atlas, extrudeSpriteGeometry, shapedItemGeometry, BLOCK_SPRITE_ICONS } from './Textures';
 import { AudioEngine } from './Audio';
 import { SEA_LEVEL } from './WorldGenerator';
@@ -16,6 +16,9 @@ import type { Player } from './Player';
 import { netherFX } from './NetherFX';
 import { MobModels, LimbSet, MOB_EXPOSURE, MAGMA_SIZES, rollVariant } from './MobModels';
 import { buildOrbRig, setOrbOpen, disposeOrb, orbGlowTexture, orbStarTexture, ORB_GLOW, ORB_IDLE_GLOW, OrbRig } from './CatcherOrb';
+
+/** minecart physics: slope pull, powered-rail boost (m/s²), top speed (m/s) */
+const CART_SLOPE_G = 6, CART_BOOST = 14, CART_MAX = 8;
 
 // capture-orb glow for the nether mobs (button, inner light, beams)
 Object.assign(ORB_GLOW, {
@@ -30,7 +33,7 @@ export type MobKind =
   | 'cinderling' | 'ashstalker' | 'emberghast'
   | 'rabbit' | 'bat'
   | 'piglin' | 'zombified_piglin' | 'hoglin' | 'strider' | 'blaze' | 'wither_skeleton' | 'magma_cube';
-export type EntityKind = 'drop' | MobKind | 'arrow' | 'tnt' | 'falling' | 'particle' | 'bobber' | 'catcher' | 'orbfx';
+export type EntityKind = 'drop' | MobKind | 'arrow' | 'tnt' | 'falling' | 'particle' | 'bobber' | 'catcher' | 'orbfx' | 'minecart';
 
 const MOB_KINDS = new Set<EntityKind>([
   'pig', 'chicken', 'sheep', 'cow',
@@ -250,6 +253,13 @@ export class Entity {
   sitting = false;
   /** coat/breed variant index (horse, cat) */
   variant = 0;
+  // minecart fields
+  /** dimension the cart was placed in (carts elsewhere are hidden + frozen) */
+  cartDim = 'overworld';
+  /** last direction of travel along the rail's a->b segment (+1 / -1) */
+  cartSign = 1;
+  /** an activator rail asks the rider to get out */
+  eject = false;
   // horse riding fields
   ridden = false;
   /** seconds left in a buck-off (untamed mount attempt); >0 = bucking */
@@ -1590,6 +1600,7 @@ export class EntityManager {
         case 'bobber': this.updateBobber(e, dt); break;
         case 'catcher': this.updateCatcher(e, dt); break;
         case 'orbfx': this.updateOrbFx(e, dt); break;
+        case 'minecart': this.updateCart(e, dt); break;
         default: this.updateMob(e, dt); break;
       }
     }
@@ -4273,6 +4284,194 @@ export class EntityManager {
       ctx.fillRect(4, 0, 1, 6); ctx.fillRect(5, 0, 2, 1); ctx.fillRect(6, 1, 1, 1); // stem + flag
       ctx.fillRect(2, 5, 3, 2); ctx.fillRect(1, 6, 1, 1); ctx.fillRect(2, 7, 2, 1); // head
     }, 1, x, y, z, 0.1, 0.3, 0.9, 0.9, -0.2);
+  }
+
+  // --- minecarts -------------------------------------------------------------------
+  // A cart on a rail runs the straight segment between the rail's two ends
+  // (RAIL_ENDS; curves are diagonals, as in vanilla), keeping its speed round
+  // bends, rolling down slopes, boosted/braked by powered rails. Off the
+  // rails it falls and slides like a heavy block.
+
+  /** Put a minecart on the rail at block (x, y, z). */
+  spawnMinecart(x: number, y: number, z: number, dim: string = this.world.dimension): Entity {
+    const mesh = this.buildCartMesh();
+    const e = new Entity('minecart', { x: x + 0.5, y: y + RAIL_Y, z: z + 0.5 }, { w: 0.98, h: 0.7 }, mesh);
+    e.cartDim = dim;
+    e.hp = 6;
+    mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+    this.entities.push(e);
+    this.scene.add(mesh);
+    return e;
+  }
+
+  private buildCartMesh(): THREE.Group {
+    const g = new THREE.Group();
+    const tub = new THREE.Group();
+    g.add(tub);
+    const iron = new THREE.MeshLambertMaterial({ color: 0x8b8f96 });
+    const dark = new THREE.MeshLambertMaterial({ color: 0x45484e });
+    const rim = new THREE.MeshLambertMaterial({ color: 0xb9bdc4 });
+    const box = (w: number, h: number, d: number, m: THREE.Material, x: number, y: number, z: number): void => {
+      const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+      b.position.set(x, y, z);
+      tub.add(b);
+    };
+    box(0.84, 0.06, 1.06, dark, 0, 0.16, 0);                 // floor
+    for (const s of [-1, 1]) {
+      box(0.06, 0.5, 1.06, iron, s * 0.42, 0.43, 0);          // long sides
+      box(0.84, 0.5, 0.06, iron, 0, 0.43, s * 0.53);          // ends
+      box(0.08, 0.05, 1.1, rim, s * 0.42, 0.7, 0);            // rolled rim
+      box(0.9, 0.05, 0.08, rim, 0, 0.7, s * 0.53);
+      for (const t of [-1, 1]) box(0.08, 0.16, 0.16, dark, s * 0.4, 0.08, t * 0.32); // wheels
+    }
+    box(0.7, 0.02, 0.9, new THREE.MeshLambertMaterial({ color: 0x2c2e32 }), 0, 0.2, 0); // inside floor
+    return g;
+  }
+
+  /** The rail a cart is riding, if any: under it, or one down (a slope's foot). */
+  private cartRail(e: Entity): { x: number; y: number; z: number; id: number; shape: number } | null {
+    const w = this.world;
+    const x = Math.floor(e.pos.x), z = Math.floor(e.pos.z), y = Math.floor(e.pos.y + 0.1);
+    for (const yy of [y, y - 1]) {
+      const id = w.getBlock(x, yy, z);
+      if (!RAIL_IDS.has(id)) continue;
+      if (e.pos.y - (yy + RAIL_Y) > 1.1) continue; // falling from higher up: not yet
+      const shape = w.bedFacings.get(`${x},${yy},${z}`) ?? 0;
+      return { x, y: yy, z, id, shape: shape >= 0 && shape <= 9 ? shape : 0 };
+    }
+    return null;
+  }
+
+  private updateCart(e: Entity, dt: number): void {
+    const w = this.world;
+    const here = e.cartDim === w.dimension;
+    e.mesh.visible = here;
+    if (!here) return;
+    e.hurtFlash = Math.max(0, e.hurtFlash - dt);
+    let rem = Math.min(dt, 0.25); // sub-stepped below, so slow frames don't slow the cart
+    let yaw = e.yaw, pitch = 0;
+    while (rem > 1e-5) {
+      const h = Math.min(rem, 0.025);
+      rem -= h;
+      const r = this.cartRail(e);
+      if (!r) {
+        e.vel.y -= 24 * h;
+        const res = moveEntity(w, e.pos, e.vel, h, e.box);
+        e.onGround = res.onGround;
+        if (res.onGround) { const f = Math.pow(0.02, h); e.vel.x *= f; e.vel.z *= f; }
+        continue;
+      }
+      const [ea, eb] = RAIL_ENDS[r.shape];
+      const ax = r.x + 0.5 + ea[0] * 0.5, az = r.z + 0.5 + ea[2] * 0.5, ay = r.y + ea[1] + RAIL_Y;
+      const bx = r.x + 0.5 + eb[0] * 0.5, bz = r.z + 0.5 + eb[2] * 0.5, by = r.y + eb[1] + RAIL_Y;
+      const dx = bx - ax, dz = bz - az, L = Math.hypot(dx, dz), ux = dx / L, uz = dz / L;
+      const rise = (by - ay) / L;
+      // speed along a->b; the magnitude carries round curves
+      const dot = e.vel.x * ux + e.vel.z * uz;
+      const sign = dot > 1e-4 ? 1 : dot < -1e-4 ? -1 : e.cartSign;
+      let s = Math.hypot(e.vel.x, e.vel.z) * sign;
+      if (rise !== 0) s -= CART_SLOPE_G * Math.sign(rise) * h; // rolls down, slows going up
+      const st = w.redstoneStates.get(`${r.x},${r.y},${r.z}`);
+      if (r.id === B.POWERED_RAIL) {
+        if (st?.active) {
+          if (Math.abs(s) < 0.4) {
+            // standing start: pushed away from a block at one end (vanilla)
+            const wallA = isSolid(w.getBlock(r.x + ea[0], r.y + ea[1], r.z + ea[2]));
+            const wallB = isSolid(w.getBlock(r.x + eb[0], r.y + eb[1], r.z + eb[2]));
+            if (wallA && !wallB) s = 2;
+            else if (wallB && !wallA) s = -2;
+            else if (Math.abs(s) > 0.05) s += Math.sign(s) * CART_BOOST * h;
+          } else s += Math.sign(s) * CART_BOOST * h;
+        } else {
+          s *= Math.pow(1e-6, h); // an unpowered powered rail brakes hard
+          if (Math.abs(s) < 0.5) s = 0;
+        }
+      } else if (r.id === B.ACTIVATOR_RAIL && st?.active && e.ridden) {
+        e.eject = true;
+      }
+      s *= Math.pow(e.ridden ? 0.94 : 0.5, h); // rolling friction: a ridden cart coasts further
+      if (rise === 0 && Math.abs(s) < 0.03) s = 0;
+      s = Math.max(-CART_MAX, Math.min(CART_MAX, s));
+      const t = ((e.pos.x - ax) * ux + (e.pos.z - az) * uz) / L + (s * h) / L;
+      e.pos.x = ax + dx * t;
+      e.pos.z = az + dz * t;
+      e.pos.y = ay + (by - ay) * Math.max(0, Math.min(1, t));
+      e.vel.x = ux * s; e.vel.z = uz * s; e.vel.y = 0;
+      if (s !== 0) e.cartSign = Math.sign(s);
+      e.onGround = true;
+      yaw = Math.atan2(ux, uz);
+      pitch = -Math.atan(rise);
+    }
+    // an empty cart gets shoved when walked into
+    const p = this.player;
+    if (p && !e.ridden && p.riding !== e) {
+      const dx = e.pos.x - p.pos.x, dz = e.pos.z - p.pos.z, d = Math.hypot(dx, dz);
+      if (d > 0.01 && d < 0.85 && Math.abs(p.pos.y - e.pos.y) < 1.2) { e.vel.x += (dx / d) * 6 * dt; e.vel.z += (dz / d) * 6 * dt; }
+    }
+    // carts bump each other apart
+    for (const o of this.entities) {
+      if (o === e || o.kind !== 'minecart' || o.dead || o.cartDim !== e.cartDim) continue;
+      const dx = e.pos.x - o.pos.x, dz = e.pos.z - o.pos.z, d = Math.hypot(dx, dz);
+      if (d > 0.01 && d < 0.95 && Math.abs(o.pos.y - e.pos.y) < 0.8) { e.vel.x += (dx / d) * 4 * dt; e.vel.z += (dz / d) * 4 * dt; }
+    }
+    e.yaw = yaw;
+    e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+    e.mesh.rotation.y = yaw;
+    const tub = e.mesh.children[0];
+    tub.rotation.x = pitch;
+    tub.rotation.z = Math.sin(e.age * 40) * 0.18 * e.hurtFlash;
+  }
+
+  /** Right-click ray against minecarts (in this dimension). */
+  raycastCarts(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number):
+    { entity: Entity; dist: number } | null {
+    let best: { entity: Entity; dist: number } | null = null;
+    for (const e of this.entities) {
+      if (e.kind !== 'minecart' || e.dead || e.cartDim !== this.world.dimension) continue;
+      const t = rayAABB(ox, oy, oz, dx, dy, dz, e.pos.x - 0.5, e.pos.y, e.pos.z - 0.5, e.pos.x + 0.5, e.pos.y + 0.75, e.pos.z + 0.5);
+      if (t !== null && t <= maxDist && (!best || t < best.dist)) best = { entity: e, dist: t };
+    }
+    return best;
+  }
+
+  /** A punch: carts break after a few (at once in creative), dropping themselves in survival. */
+  hitCart(e: Entity, creative: boolean): void {
+    if (e.dead) return;
+    e.hp -= 2;
+    e.hurtFlash = 0.4;
+    this.audio.play('hit');
+    if (!creative && e.hp > 0) return;
+    e.dead = true;
+    this.spawnBlockParticles(Math.floor(e.pos.x), Math.floor(e.pos.y), Math.floor(e.pos.z), B.IRON_BLOCK, 8);
+    if (!creative) this.spawnDrop(e.pos.x, e.pos.y + 0.3, e.pos.z, I.MINECART, 1);
+  }
+
+  /** Rider holding W: nudge the cart toward where they look. */
+  pushCart(e: Entity, dt: number, fwd: number, yaw: number): void {
+    if (fwd <= 0) return;
+    const lx = -Math.sin(yaw), lz = -Math.cos(yaw);
+    if (Math.hypot(e.vel.x, e.vel.z) < 4) { e.vel.x += lx * 3 * dt; e.vel.z += lz * 3 * dt; }
+  }
+
+  /** Is there a minecart on the rail at (x, y, z)? */
+  cartAt(x: number, y: number, z: number): boolean {
+    for (const e of this.entities) {
+      if (e.kind !== 'minecart' || e.dead || e.cartDim !== this.world.dimension) continue;
+      if (Math.floor(e.pos.x) === x && Math.floor(e.pos.z) === z && Math.floor(e.pos.y + 0.1) === y) return true;
+    }
+    return false;
+  }
+
+  saveCarts(): { x: number; y: number; z: number; dim: string }[] {
+    return this.entities.filter((e) => e.kind === 'minecart' && !e.dead)
+      .map((e) => ({ x: e.pos.x, y: e.pos.y, z: e.pos.z, dim: e.cartDim }));
+  }
+
+  loadCarts(list: { x: number; y: number; z: number; dim: string }[]): void {
+    for (const c of list) {
+      const e = this.spawnMinecart(Math.floor(c.x), Math.floor(c.y), Math.floor(c.z), c.dim === 'nether' ? 'nether' : 'overworld');
+      e.pos.x = c.x; e.pos.y = c.y; e.pos.z = c.z;
+    }
   }
 
   /** Angry storm-cloud puffs over a mob that has turned on the player. */

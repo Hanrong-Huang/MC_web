@@ -265,8 +265,9 @@ const misc = await page.evaluate(async ({ ox, oy, oz }) => {
   w.setBlock(lx, oy, z, B.LADDER); w.setBlock(lx, oy + 1, z, B.LADDER);
   w.setBlock(lx, oy + 2, z, B.TRAPDOOR); w.doorStates.set(`${lx},${oy + 2},${z}`, { facing: 0, open: true, top: false });
   window.__stand(lx + 0.5, oy + 2.05, z + 0.5);
-  await new Promise((r) => setTimeout(r, 100));
-  res.onLadder = p.onLadder;
+  // a frame has to run first (slow under a loaded headless browser)
+  res.onLadder = false;
+  for (let i = 0; i < 30 && !res.onLadder; i++) { await new Promise((r) => setTimeout(r, 100)); res.onLadder = p.onLadder && p.pos.y > oy + 1.5; }
   return res;
 }, s);
 console.log(JSON.stringify(misc));

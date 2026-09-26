@@ -26,7 +26,7 @@
 
 import {
   B, def, hasDef, H4, D6, conducts, dustShape, dustPowerMask, PLATE_IDS, BUTTON_IDS, REDSTONE_TORCHES,
-  DOOR_IDS, DOOR_UPPERS, TRAPDOOR_IDS, REDSTONE_ONLY_DOORS, REDSTONE_IDS,
+  DOOR_IDS, DOOR_UPPERS, TRAPDOOR_IDS, REDSTONE_ONLY_DOORS, REDSTONE_IDS, RAIL_IDS, RAIL_ENDS, railAt,
 } from './Blocks';
 import type { Slot } from './Inventory';
 import type { World, RedstoneState } from './World';
@@ -49,6 +49,8 @@ export interface RedstoneHooks {
   smoke(x: number, y: number, z: number): void;
   /** raw daylight at a detector: 0 (night / roofed over) .. 15 (open sky at noon) */
   sunlight(x: number, y: number, z: number): number;
+  /** is a minecart sitting on the rail at (x, y, z)? (detector rails) */
+  cartAt(x: number, y: number, z: number): boolean;
 }
 
 /** lever/button facing (0..5, from the clicked face) -> the block it hangs on */
@@ -62,12 +64,15 @@ for (let dy = -2; dy <= 2; dy++) for (let dz = -2; dz <= 2; dz++) for (let dx = 
 }
 const COMPONENTS = new Set<number>([
   B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT, B.PISTON, B.STICKY_PISTON, B.NOTE_BLOCK, B.TNT,
-  B.REDSTONE_TORCH, B.REDSTONE_TORCH_OFF, B.REPEATER, B.COMPARATOR, ...DOOR_IDS, ...TRAPDOOR_IDS,
+  B.REDSTONE_TORCH, B.REDSTONE_TORCH_OFF, B.REPEATER, B.COMPARATOR, B.POWERED_RAIL, B.ACTIVATOR_RAIL,
+  ...DOOR_IDS, ...TRAPDOOR_IDS,
 ]);
+/** powered/activator rails pass power this many rails down a straight run */
+const RAIL_REACH = 8;
 /** what a comparator takes as a side input (blocks, even powered ones, don't count) */
 const SIDE_SOURCES = new Set<number>([
   B.REDSTONE_WIRE, B.REPEATER, B.COMPARATOR, B.REDSTONE_BLOCK, B.REDSTONE_TORCH, B.LEVER, B.WOODEN_BUTTON,
-  B.STONE_BUTTON, B.PRESSURE_PLATE, B.STONE_PRESSURE_PLATE, B.OBSERVER, B.DAYLIGHT_DETECTOR,
+  B.STONE_BUTTON, B.PRESSURE_PLATE, B.STONE_PRESSURE_PLATE, B.OBSERVER, B.DAYLIGHT_DETECTOR, B.DETECTOR_RAIL,
 ]);
 /** respawn anchor charge 0..4 -> comparator level */
 const ANCHOR_LEVEL = [0, 3, 7, 11, 15];
@@ -252,6 +257,22 @@ export class Redstone {
         const id = w.getBlock(x, y, z);
         if (id === B.COMPARATOR && (this.tickNo & 1) === 0) this.evaluate(k);
         else if (id === B.DAYLIGHT_DETECTOR && sun) this.readDaylight(x, y, z);
+        else if (id === B.DETECTOR_RAIL) {
+          const st = w.redstoneStates.get(k);
+          const on = this.hooks.cartAt(x, y, z);
+          // stays pressed while a cart is on it, releases a moment after it leaves
+          if (on) {
+            const s2 = st ?? { active: false };
+            s2.releaseT = 10;
+            if (!s2.active) { s2.active = true; w.markDirty(Math.floor(x / 16), Math.floor(z / 16)); this.dirty.add(k); this.observe(x, y, z); }
+            w.redstoneStates.set(k, s2);
+          } else if (st?.active && --st.releaseT! <= 0) {
+            st.active = false;
+            w.markDirty(Math.floor(x / 16), Math.floor(z / 16));
+            this.dirty.add(k);
+            this.observe(x, y, z);
+          }
+        }
       }
     }
     if (this.sched.size) {
@@ -288,7 +309,7 @@ export class Redstone {
       const f = this.world.torchFacings.get(key(x, y, z));
       return f === undefined ? [0, -1, 0] : [TORCH_WALL[f][0], 0, TORCH_WALL[f][1]];
     }
-    if (PLATE_IDS.has(id) || id === B.REPEATER || id === B.COMPARATOR || id === B.REDSTONE_WIRE) return [0, -1, 0];
+    if (PLATE_IDS.has(id) || id === B.REPEATER || id === B.COMPARATOR || id === B.REDSTONE_WIRE || RAIL_IDS.has(id)) return [0, -1, 0];
     const f = this.world.redstoneStates.get(key(x, y, z))?.facing;
     return ATTACH[f ?? 1] ?? ATTACH[1];
   }
@@ -306,7 +327,7 @@ export class Redstone {
         if (!w.redstoneStates.get(key(nx, ny, nz))?.active) continue;
         const a = this.attachOf(nx, ny, nz, id);
         if (a[0] === -dx && a[1] === -dy && a[2] === -dz) return 15;
-      } else if (PLATE_IDS.has(id)) {
+      } else if (PLATE_IDS.has(id) || id === B.DETECTOR_RAIL) {
         if (dy === 1 && w.redstoneStates.get(key(nx, ny, nz))?.active) return 15;
       } else if (id === B.REDSTONE_TORCH) {
         if (dy === -1) return 15; // a torch powers the block above it
@@ -355,6 +376,8 @@ export class Redstone {
       }
       case B.DAYLIGHT_DETECTOR:
         return w.redstoneStates.get(key(sx, sy, sz))?.level ?? 0;
+      case B.DETECTOR_RAIL:
+        return w.redstoneStates.get(key(sx, sy, sz))?.active ? 15 : 0;
       case B.LEVER: case B.WOODEN_BUTTON: case B.STONE_BUTTON: case B.PRESSURE_PLATE: case B.STONE_PRESSURE_PLATE:
         return w.redstoneStates.get(key(sx, sy, sz))?.active ? 15 : 0;
       case B.REDSTONE_TORCH: {
@@ -446,6 +469,29 @@ export class Redstone {
       case B.RESPAWN_ANCHOR: return ANCHOR_LEVEL[Math.max(0, Math.min(4, w.bedFacings.get(k) ?? 0))];
       default: return null;
     }
+  }
+
+  /** A powered/activator rail is on when it, or a rail of its kind up to
+   *  8 rails along its run, gets power directly (vanilla propagation). */
+  private railPowered(x: number, y: number, z: number, id: number): boolean {
+    const w = this.world;
+    const get = (a: number, b: number, c: number): number => w.getBlock(a, b, c);
+    const seen = new Set<string>([key(x, y, z)]);
+    let frontier: [number, number, number][] = [[x, y, z]];
+    for (let d = 0; d <= RAIL_REACH && frontier.length; d++) {
+      const next: [number, number, number][] = [];
+      for (const [a, b, c] of frontier) {
+        if (this.input(a, b, c) > 0) return true;
+        for (const e of RAIL_ENDS[w.bedFacings.get(key(a, b, c)) ?? 0] ?? RAIL_ENDS[0]) {
+          const n = railAt(get, a, b, c, e);
+          if (!n || get(n[0], n[1], n[2]) !== id) continue;
+          const nk = key(n[0], n[1], n[2]);
+          if (!seen.has(nk)) { seen.add(nk); next.push(n); }
+        }
+      }
+      frontier = next;
+    }
+    return false;
   }
 
   /** Re-read a daylight detector (invert: meta 1) and pass a change on. */
@@ -613,6 +659,21 @@ export class Redstone {
         if (this.comparatorOut(x, y, z, st) !== (st.level ?? 0)) this.schedule(k, 2);
         return;
       }
+      case B.POWERED_RAIL: case B.ACTIVATOR_RAIL: {
+        const st = this.state(k);
+        const on = this.railPowered(x, y, z, id);
+        if (on === !!st.active) return;
+        st.active = on;
+        w.redstoneStates.set(k, st);
+        w.markDirty(Math.floor(x / 16), Math.floor(z / 16));
+        this.observe(x, y, z);
+        // pass the change down the run (each rail re-checks its own reach)
+        for (const e of RAIL_ENDS[w.bedFacings.get(k) ?? 0] ?? RAIL_ENDS[0]) {
+          const c = railAt((a, b, cc) => w.getBlock(a, b, cc), x, y, z, e);
+          if (c && w.getBlock(c[0], c[1], c[2]) === id) this.dirty.add(key(c[0], c[1], c[2]));
+        }
+        return;
+      }
     }
     if (DOOR_IDS.has(id) || TRAPDOOR_IDS.has(id)) {
       const ly = DOOR_UPPERS.has(id) ? y - 1 : y;
@@ -704,7 +765,7 @@ export class Redstone {
    *  on, plates/dust/repeaters/torches their floor or wall). null = not a part. */
   supported(x: number, y: number, z: number, id: number): boolean | null {
     if (!(id === B.LEVER || BUTTON_IDS.has(id) || PLATE_IDS.has(id) || REDSTONE_TORCHES.has(id) ||
-      id === B.REPEATER || id === B.COMPARATOR || id === B.REDSTONE_WIRE)) return null;
+      id === B.REPEATER || id === B.COMPARATOR || id === B.REDSTONE_WIRE || RAIL_IDS.has(id))) return null;
     const [ax, ay, az] = this.attachOf(x, y, z, id);
     const b = this.world.getBlock(x + ax, y + ay, z + az);
     return b !== B.AIR && hasDef(b) && def(b).solid;

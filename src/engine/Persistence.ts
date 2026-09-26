@@ -73,6 +73,8 @@ export interface SaveState {
   spawn?: { x: number; y: number; z: number };
   /** captured pets following the player (wild mobs are not persisted) */
   pets?: { kind: string; x: number; y: number; z: number; hp: number; sitting: boolean }[];
+  /** placed minecarts (each remembers its dimension) */
+  carts?: { x: number; y: number; z: number; dim: string }[];
   /** unlocked advancement ids */
   advancements?: string[];
   /** burning fires: "dimension|x,y,z" + seconds of burn left */

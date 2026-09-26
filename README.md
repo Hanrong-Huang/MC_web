@@ -40,7 +40,7 @@ Your worlds are saved in your browser automatically (every 60 s, and when you ch
 - **Discover buildings** with loot: villages, temples, mineshafts, shipwrecks, a woodland mansion, raider outposts, lighthouses, windmill farms, river forts, sunken ruins, an underground library and a deep ancient vault.
 - **Survive** your health, hunger and the night. Zombies, skeletons, creepers and spiders come out after dark.
 - **Craft** tools from wood up to diamond, plus armor, a bow and a shield. Brew potions and enchant your gear with experience. The recipe book shows what you can make.
-- **Build** with bricks, stone bricks, slabs, stairs, fences, glass panes, colored wool, terracotta, ice, lanterns and more. Wire up redstone: levers, buttons, pressure plates, torches, repeaters, comparators, observers, daylight detectors, lamps, pistons and tunable note blocks. Open iron doors with a button, or light the TNT.
+- **Build** with bricks, stone bricks, slabs, stairs, fences, glass panes, colored wool, terracotta, ice, lanterns and more. Wire up redstone: levers, buttons, pressure plates, torches, repeaters, comparators, observers, daylight detectors, lamps, pistons and tunable note blocks. Open iron doors with a button, or light the TNT. Lay rails (powered, detector and activator too) and ride minecarts.
 - **Farm and tame**: grow wheat, pumpkins and melons, bake cake, breed animals, tame wolves and cats, ride horses, shear sheep and chase rabbits.
 - **Catch mobs** with the Mob Catcher: throw the orb, watch it wobble and click, then release the mob as a loyal pet that fights beside you.
 - **Swim** in water that streams downhill and down waterfalls, reflects the sky and splashes when you dive in.

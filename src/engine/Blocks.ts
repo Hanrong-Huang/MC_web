@@ -218,6 +218,11 @@ export enum B {
   OBSERVER = 287,
   /** level in redstoneStates; meta 1 (bedFacings) = inverted (night sensor) */
   DAYLIGHT_DETECTOR = 288,
+  // --- rails (289-292): shape 0..9 in bedFacings meta (see RAIL_ENDS); powered/active in redstoneStates ---
+  RAIL = 289,
+  POWERED_RAIL = 290,
+  DETECTOR_RAIL = 291,
+  ACTIVATOR_RAIL = 292,
 }
 
 export enum I {
@@ -374,6 +379,8 @@ export enum I {
   CRIMSON_DOOR = 390,
   WARPED_DOOR = 391,
   IRON_DOOR = 392,
+  /** places a minecart entity on a rail (EntityManager kind 'minecart') */
+  MINECART = 395,
 }
 
 /** Wearable-armor slot index: 0 head, 1 chest, 2 legs, 3 feet. */
@@ -2146,14 +2153,16 @@ export const REDSTONE_IDS = new Set<number>([
   B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT, B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD,
   B.REDSTONE_TORCH, B.REDSTONE_TORCH_OFF, B.REDSTONE_BLOCK, B.REPEATER, B.NOTE_BLOCK,
   B.COMPARATOR, B.OBSERVER, B.DAYLIGHT_DETECTOR,
+  B.POWERED_RAIL, B.DETECTOR_RAIL, B.ACTIVATOR_RAIL,
   ...DOOR_IDS, ...TRAPDOOR_IDS,
 ]);
-/** Parts the engine re-reads on a timer (comparators watch containers, daylight detectors the sun). */
-export const POLL_IDS = new Set<number>([B.COMPARATOR, B.DAYLIGHT_DETECTOR]);
+/** Parts the engine re-reads on a timer (comparators watch containers,
+ *  daylight detectors the sun, detector rails for minecarts). */
+export const POLL_IDS = new Set<number>([B.COMPARATOR, B.DAYLIGHT_DETECTOR, B.DETECTOR_RAIL]);
 /** Parts dust visibly joins up with (besides more dust and a repeater's ends). */
 const DUST_JOINS = new Set<number>([
   B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON, B.PRESSURE_PLATE, B.STONE_PRESSURE_PLATE,
-  B.REDSTONE_TORCH, B.REDSTONE_TORCH_OFF, B.REDSTONE_BLOCK, B.DAYLIGHT_DETECTOR,
+  B.REDSTONE_TORCH, B.REDSTONE_TORCH_OFF, B.REDSTONE_BLOCK, B.DAYLIGHT_DETECTOR, B.DETECTOR_RAIL,
 ]);
 /** Solid, opaque blocks that still don't carry power (vanilla). */
 const NON_CONDUCTORS = new Set<number>([B.OBSERVER, B.PISTON, B.STICKY_PISTON]);
@@ -2220,3 +2229,119 @@ FLOOR_BLOCKS.add(B.COMPARATOR);
 for (const list of [PLACEABLE, CREATIVE_ITEMS]) {
   list.splice(list.indexOf(B.REPEATER) + 1, 0, B.COMPARATOR, B.OBSERVER, B.DAYLIGHT_DETECTOR);
 }
+
+// --- rails + minecart (289-292, item 395) ---
+for (const [id, name, label, tile] of [
+  [B.RAIL, 'rail', 'Rail', 'rail'],
+  [B.POWERED_RAIL, 'powered_rail', 'Powered Rail', 'powered_rail'],
+  [B.DETECTOR_RAIL, 'detector_rail', 'Detector Rail', 'detector_rail'],
+  [B.ACTIVATOR_RAIL, 'activator_rail', 'Activator Rail', 'activator_rail'],
+] as [number, string, string, string][]) {
+  blockDef({
+    id, name, label, hardness: 0.7, tool: 'pickaxe', sound: 'stone',
+    solid: false, opaque: false, occludes: false,
+    faces: { top: tile, bottom: tile, sides: tile },
+  });
+}
+itemDef({ id: I.MINECART, name: 'minecart', label: 'Minecart', sprite: 'minecart', stack: 1 });
+
+/** Every rail. Plain rails can curve; the other three are straight or sloped. */
+export const RAIL_IDS = new Set<number>([B.RAIL, B.POWERED_RAIL, B.DETECTOR_RAIL, B.ACTIVATOR_RAIL]);
+for (const id of RAIL_IDS) { META_BLOCKS.add(id); FLOOR_BLOCKS.add(id); }
+for (const list of [PLACEABLE, CREATIVE_ITEMS]) {
+  list.splice(list.indexOf(B.DAYLIGHT_DETECTOR) + 1, 0, B.RAIL, B.POWERED_RAIL, B.DETECTOR_RAIL, B.ACTIVATOR_RAIL);
+}
+CREATIVE_ITEMS.splice(CREATIVE_ITEMS.indexOf(B.ACTIVATOR_RAIL) + 1, 0, I.MINECART);
+
+/** Rail shapes (vanilla order): 0 N-S, 1 E-W, 2 up to the east, 3 up to the
+ *  west, 4 up to the north, 5 up to the south, 6 S-E curve, 7 S-W, 8 N-W, 9 N-E
+ *  (N = -z, E = +x). Each shape's two ends as [dx, dy, dz] from the cell: dy 1
+ *  is the high end of a slope. A cart runs the straight segment between them. */
+export const RAIL_ENDS: readonly [[number, number, number], [number, number, number]][] = [
+  [[0, 0, -1], [0, 0, 1]],
+  [[1, 0, 0], [-1, 0, 0]],
+  [[1, 1, 0], [-1, 0, 0]],
+  [[-1, 1, 0], [1, 0, 0]],
+  [[0, 1, -1], [0, 0, 1]],
+  [[0, 1, 1], [0, 0, -1]],
+  [[0, 0, 1], [1, 0, 0]],
+  [[0, 0, 1], [-1, 0, 0]],
+  [[0, 0, -1], [-1, 0, 0]],
+  [[0, 0, -1], [1, 0, 0]],
+];
+
+type Get = (x: number, y: number, z: number) => number;
+
+/** The rail cell an end of the rail at (x, y, z) leads to, or null: level
+ *  with it, one up (its own slope's high end) or one down (a slope below). */
+export function railAt(get: Get, x: number, y: number, z: number, end: readonly [number, number, number]): [number, number, number] | null {
+  const nx = x + end[0], nz = z + end[2];
+  if (end[1] === 1) return RAIL_IDS.has(get(nx, y + 1, nz)) ? [nx, y + 1, nz] : null;
+  if (RAIL_IDS.has(get(nx, y, nz))) return [nx, y, nz];
+  if (RAIL_IDS.has(get(nx, y - 1, nz))) return [nx, y - 1, nz];
+  return null;
+}
+
+/** Does the rail at (x, y, z) (shape s) have an end reaching cell (tx, ty, tz)? */
+function railReaches(get: Get, x: number, y: number, z: number, s: number, tx: number, ty: number, tz: number): boolean {
+  for (const e of RAIL_ENDS[s]) {
+    const c = railAt(get, x, y, z, e);
+    if (c && c[0] === tx && c[1] === ty && c[2] === tz) return true;
+  }
+  return false;
+}
+
+/** Shape for a rail at (x, y, z) joining the rails around it the way vanilla
+ *  does: toward neighbours that are free (fewer than two connections) or
+ *  already point here, curving at corners (plain rails only), sloping up to a
+ *  rail one block higher. `prefer` (a facing, 0=-z..3=+x) picks the axis
+ *  when nothing is around. */
+export function railShapeFor(get: Get, shapeAt: Get, x: number, y: number, z: number, curves: boolean, prefer = 0): number {
+  const dirs = [[0, -1], [0, 1], [1, 0], [-1, 0]]; // N, S, E, W
+  const link = [false, false, false, false];
+  const up = [false, false, false, false];
+  dirs.forEach(([dx, dz], i) => {
+    for (const dy of [0, 1, -1]) {
+      const nx = x + dx, ny = y + dy, nz = z + dz;
+      if (!RAIL_IDS.has(get(nx, ny, nz))) continue;
+      const ns = shapeAt(nx, ny, nz);
+      let free = railReaches(get, nx, ny, nz, ns, x, y, z);
+      if (!free) {
+        let n = 0;
+        for (const e of RAIL_ENDS[ns]) if (railAt(get, nx, ny, nz, e)) n++;
+        free = n < 2;
+      }
+      if (free) { link[i] = true; up[i] = dy === 1; break; }
+    }
+  });
+  const [n, so, e, w] = link;
+  if (curves && (n || so) && (e || w) && !((n && so) || (e && w))) {
+    if (so && e) return 6;
+    if (so && w) return 7;
+    if (n && w) return 8;
+    return 9;
+  }
+  if (n || so) return up[0] ? 4 : up[1] ? 5 : 0;
+  if (e || w) return up[2] ? 2 : up[3] ? 3 : 1;
+  return (prefer & 1) === 1 ? 1 : 0;
+}
+
+/** After a rail at (x, y, z) is laid: neighbours its ends reach that don't
+ *  point back yet re-shape toward it (a free end turns, a lower rail slopes
+ *  up). Returns [x, y, z, newShape] for each neighbour to change. */
+export function railRelinks(get: Get, shapeAt: Get, x: number, y: number, z: number): [number, number, number, number][] {
+  const out: [number, number, number, number][] = [];
+  for (const e of RAIL_ENDS[shapeAt(x, y, z)] ?? RAIL_ENDS[0]) {
+    const c = railAt(get, x, y, z, e);
+    if (!c) continue;
+    const [nx, ny, nz] = c;
+    const ns = shapeAt(nx, ny, nz);
+    if (railReaches(get, nx, ny, nz, ns, x, y, z)) continue;
+    const want = railShapeFor(get, shapeAt, nx, ny, nz, get(nx, ny, nz) === B.RAIL, ns === 1 || ns === 2 || ns === 3 ? 1 : 0);
+    if (want !== ns && railReaches(get, nx, ny, nz, want, x, y, z)) out.push([nx, ny, nz, want]);
+  }
+  return out;
+}
+
+/** Rail surface height above its block's floor (carts ride on this). */
+export const RAIL_Y = 1 / 16;

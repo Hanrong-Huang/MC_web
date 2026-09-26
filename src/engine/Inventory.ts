@@ -340,6 +340,12 @@ const RECIPES: Recipe[] = [
   { shape: [[P, P, P], [P, I.REDSTONE, P], [P, P, P]], out: B.NOTE_BLOCK, n: 1 },
   { shape: [[0, B.REDSTONE_TORCH, 0], [B.REDSTONE_TORCH, I.QUARTZ, B.REDSTONE_TORCH], [B.STONE, B.STONE, B.STONE]], out: B.COMPARATOR, n: 1 },
   { shape: [[C, C, C], [I.REDSTONE, I.REDSTONE, I.QUARTZ], [C, C, C]], out: B.OBSERVER, n: 1 },
+  // rails + minecart
+  { shape: [[FE, 0, FE], [FE, S, FE], [FE, 0, FE]], out: B.RAIL, n: 16 },
+  { shape: [[AU, 0, AU], [AU, S, AU], [AU, I.REDSTONE, AU]], out: B.POWERED_RAIL, n: 6 },
+  { shape: [[FE, 0, FE], [FE, B.STONE_PRESSURE_PLATE, FE], [FE, I.REDSTONE, FE]], out: B.DETECTOR_RAIL, n: 6 },
+  { shape: [[FE, S, FE], [FE, B.REDSTONE_TORCH, FE], [FE, S, FE]], out: B.ACTIVATOR_RAIL, n: 6 },
+  { shape: [[FE, 0, FE], [FE, FE, FE]], out: I.MINECART, n: 1 },
   { shape: [[B.GLASS, B.GLASS, B.GLASS], [I.QUARTZ, I.QUARTZ, I.QUARTZ], [B.OAK_SLAB, B.OAK_SLAB, B.OAK_SLAB]], out: B.DAYLIGHT_DETECTOR, n: 1 },
   // light + utility
   { shape: [[I.COAL], [S]], out: B.TORCH, n: 4 },

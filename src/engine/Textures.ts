@@ -4689,6 +4689,79 @@ Object.assign(PACK_MAP, {
   daylight_detector_side: { paths: ['block/daylight_detector_side'], kind: 'tile' },
 } satisfies Record<string, PackEntry>);
 
+// Rails: two steel (or gold) rails on wooden ties over a transparent tile (the
+// chunk material alpha-tests), with a dust strip / sensor plate for the
+// redstone rails; the corner tile bends round the tile's bottom-right corner
+// so its ends line up with the straight rails at the edge.
+type RailKind = 'rail' | 'powered' | 'detector' | 'activator';
+function railPx(kind: RailKind, lit: boolean, corner = false): Px {
+  const p = new Px();
+  for (let i = 0; i < p.d.length; i += 4) p.d[i + 3] = 0;
+  const tie = kind === 'activator' ? ['#5a3424', '#482818'] : ['#7a5a32', '#5e4424'];
+  const rail = kind === 'powered' ? ['#f2d25a', '#d0a42a', '#8a6a14'] : ['#d6d6d6', '#a8a8a8', '#6a6a6a'];
+  if (!corner) {
+    for (const ty of [1, 5, 9, 13]) for (let x = 1; x <= 14; x++) { p.set(x, ty, tie[0]); p.set(x, ty + 1, tie[1]); }
+    for (let y = 0; y < 16; y++) {
+      for (const rx of [3, 11]) { p.set(rx, y, rail[0]); p.set(rx + 1, y, rail[y % 4 === 0 ? 2 : 1]); }
+    }
+    if (kind !== 'rail' && kind !== 'detector') {
+      const dust = lit ? ['#ff3a20', '#ff9070'] : ['#5a1810', '#7a2a20'];
+      for (let y = 0; y < 16; y++) { p.set(7, y, dust[0]); p.set(8, y, dust[y % 3 === 0 ? 1 : 0]); }
+    }
+    if (kind === 'detector') {
+      for (let y = 5; y <= 10; y++) for (let x = 6; x <= 9; x++) p.set(x, y, y === 5 || x === 6 ? '#b0b0b0' : '#7c7c7c');
+      const dot = lit ? '#ff4a2e' : '#5a1810';
+      p.set(7, 7, dot); p.set(8, 7, dot); p.set(7, 8, dot); p.set(8, 8, dot);
+    }
+    return p;
+  }
+  // corner: rails are arcs about the tile's bottom-right corner (radius 4.5
+  // and 12.5 meet the straight rails' columns 3-4 / 11-12 at both edges)
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    const dx = 16 - (x + 0.5), dy = 16 - (y + 0.5);
+    const r = Math.hypot(dx, dy), a = Math.atan2(dy, dx) * 180 / Math.PI; // 0 = along the bottom edge
+    const onTie = r > 2.8 && r < 14.2 && [12, 45, 78].some((t) => Math.abs(a - t) < 7);
+    if (onTie) p.set(x, y, r % 2 < 1 ? tie[0] : tie[1]);
+  }
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    const r = Math.hypot(16 - (x + 0.5), 16 - (y + 0.5));
+    for (const rr of [4.5, 12.5]) {
+      if (Math.abs(r - rr) < 1) p.set(x, y, r < rr ? rail[0] : rail[1]);
+    }
+  }
+  return p;
+}
+
+Object.assign(TILE_PAINTERS, {
+  rail: (c: Ctx, x: number, y: number) => railPx('rail', false).put(c, x, y),
+  rail_corner: (c: Ctx, x: number, y: number) => railPx('rail', false, true).put(c, x, y),
+  powered_rail: (c: Ctx, x: number, y: number) => railPx('powered', false).put(c, x, y),
+  powered_rail_on: (c: Ctx, x: number, y: number) => railPx('powered', true).put(c, x, y),
+  detector_rail: (c: Ctx, x: number, y: number) => railPx('detector', false).put(c, x, y),
+  detector_rail_on: (c: Ctx, x: number, y: number) => railPx('detector', true).put(c, x, y),
+  activator_rail: (c: Ctx, x: number, y: number) => railPx('activator', false).put(c, x, y),
+  activator_rail_on: (c: Ctx, x: number, y: number) => railPx('activator', true).put(c, x, y),
+});
+Object.assign(ITEM_PAINTERS, {
+  minecart: (c: Ctx) => pixmap(c, 0, 0, [
+    '................', '................', '................', '................',
+    '.RRRRRRRRRRRRRR.', '.RIIIIIIIIIIIIR.', '.RIddddddddddIR.', '.RIddddddddddIR.',
+    '.RIIIIIIIIIIIIR.', '..IIIIIIIIIIII..', '..iiiiiiiiiiii..', '...iiiiiiiiii...',
+    '...kk......kk...', '...kk......kk...', '................', '................',
+  ], { R: '#c6cad0', I: '#8b8f96', i: '#6e7278', d: '#3a3c40', k: '#2a2c30' }),
+});
+Object.assign(PACK_MAP, {
+  rail: { paths: ['block/rail'], kind: 'tile' },
+  rail_corner: { paths: ['block/rail_corner'], kind: 'tile' },
+  powered_rail: { paths: ['block/powered_rail'], kind: 'tile' },
+  powered_rail_on: { paths: ['block/powered_rail_on'], kind: 'tile' },
+  detector_rail: { paths: ['block/detector_rail'], kind: 'tile' },
+  detector_rail_on: { paths: ['block/detector_rail_on'], kind: 'tile' },
+  activator_rail: { paths: ['block/activator_rail'], kind: 'tile' },
+  activator_rail_on: { paths: ['block/activator_rail_on'], kind: 'tile' },
+  minecart: { paths: ['item/minecart'], kind: 'item' },
+} satisfies Record<string, PackEntry>);
+
 // =============================================================================
 // Nether utility pass: netherite block + gear, soul torch / soul lantern, the
 // respawn anchor (charge meter + portal pool), fire charge, blaze powder and
