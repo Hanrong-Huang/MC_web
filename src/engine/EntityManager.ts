@@ -13,6 +13,7 @@ import { AudioEngine } from './Audio';
 import { SEA_LEVEL } from './WorldGenerator';
 import { netherStructureAt } from './NetherStructures';
 import type { Player } from './Player';
+import { netherFX } from './NetherFX';
 import { MobModels, LimbSet, MOB_EXPOSURE, MAGMA_SIZES, rollVariant } from './MobModels';
 import { buildOrbRig, setOrbOpen, disposeOrb, orbGlowTexture, orbStarTexture, ORB_GLOW, ORB_IDLE_GLOW, OrbRig } from './CatcherOrb';
 
@@ -173,6 +174,14 @@ const MOB_STATS: Record<MobKind, MobStats> = {
 /** Melee mobs that deal contact damage while chasing. */
 const MELEE_MOBS = new Set<MobKind>(['zombie', 'spider', 'cinderling', 'ashstalker',
   'piglin', 'zombified_piglin', 'hoglin', 'wither_skeleton', 'magma_cube']);
+/** Nether natives that shrug off fire: never set alight (vanilla fire immunity). */
+const FIRE_IMMUNE = new Set<string>(['blaze', 'magma_cube', 'wither_skeleton', 'zombified_piglin', 'strider',
+  'emberghast', 'cinderling', 'ashstalker']);
+/** "a Blaze" / "an Emberghast" for death messages. */
+function mobWithArticle(kind: string): string {
+  const label = mobLabel(kind);
+  return (/^[AEIOU]/.test(label) ? 'an ' : 'a ') + label;
+}
 /** Contact hit [damage, reach, cooldown] per melee mob (zombie-ish default). */
 const MELEE: Partial<Record<MobKind, [number, number, number]>> = {
   spider: [2, 1.4, 1], cinderling: [2, 1.1, 0.7], ashstalker: [4, 1.3, 1],
@@ -220,9 +229,14 @@ export class Entity {
   fuseT = 0;         // creeper / tnt
   shootCooldown = 0; // skeleton
   materials: THREE.MeshLambertMaterial[] = [];
-  // arrow fields ('pet'/'petghast' = fired by a captured pet: hurts hostiles,
-  // never the owner or another pet)
-  owner: 'player' | 'skeleton' | 'emberghast' | 'pet' | 'petghast' = 'player';
+  // projectile fields. `owner` is the side it fights for: 'player' hurts
+  // mobs, 'mob' (a wild shooter) hurts the player and pets, 'pet' (a captured
+  // pet) hurts wild mobs but never the owner or another pet. `shooter` names
+  // who loosed it (a mob kind, or 'player') for death messages; `proj` is the
+  // projectile itself.
+  owner: 'player' | 'mob' | 'pet' = 'player';
+  shooter = 'player';
+  proj: 'arrow' | 'fireball' | 'small_fireball' = 'arrow';
   dmg = 0;
   /** arrow embedded in a block: seconds since it struck (-1 = in flight) */
   stuckT = -1;
@@ -348,9 +362,9 @@ export class EntityManager {
   private arrowSprite: HTMLCanvasElement | null = null;
   private spawnTick = 0;
   mobsEnabled = true;
-  /** seconds of wither left on the player (wither skeleton hits) */
-  witherT = 0;
-  private witherTick = 0;
+  /** a blaze's small fireball struck a block: light the open cell it flew through */
+  onIgnite: ((x: number, y: number, z: number) => void) | null = null;
+  private smallFireMats: THREE.MeshBasicMaterial[] | null = null;
 
   constructor(scene: THREE.Scene, world: World, atlas: Atlas, audio: AudioEngine) {
     this.scene = scene;
@@ -1299,13 +1313,16 @@ export class EntityManager {
     return g;
   }
 
-  shootArrow(owner: 'player' | 'skeleton', x: number, y: number, z: number,
-    dx: number, dy: number, dz: number, speed: number, dmg: number): void {
+  /** Loose an arrow (a crossbow bolt when a piglin fires). `shooter` is
+   *  'player' or the mob kind that fired it; `pet` marks a captured pet's shot. */
+  shootArrow(shooter: string, x: number, y: number, z: number,
+    dx: number, dy: number, dz: number, speed: number, dmg: number, pet = false): void {
     const mesh = this.buildArrowMesh();
     const len = Math.hypot(dx, dy, dz) || 1;
     const e = new Entity('arrow', { x, y, z }, { w: 0.1, h: 0.1 }, mesh);
     e.vel = { x: (dx / len) * speed, y: (dy / len) * speed, z: (dz / len) * speed };
-    e.owner = owner;
+    e.owner = shooter === 'player' ? 'player' : pet ? 'pet' : 'mob';
+    e.shooter = shooter;
     e.dmg = dmg;
     this.entities.push(e);
     this.scene.add(mesh);
@@ -1566,7 +1583,7 @@ export class EntityManager {
       e.age += dt;
       switch (e.kind) {
         case 'drop': this.updateDrop(e, dt, elapsed); break;
-        case 'arrow': this.updateArrow(e, dt); break;
+        case 'arrow': this.updateArrow(e, dt, camQ); break;
         case 'tnt': this.updateTnt(e, dt); break;
         case 'falling': this.updateFalling(e, dt); break;
         case 'particle': this.updateParticle(e, dt, camQ); break;
@@ -1686,14 +1703,18 @@ export class EntityManager {
     return inv.add(e.itemId, e.count);
   }
 
-  private updateArrow(e: Entity, dt: number): void {
+  private updateArrow(e: Entity, dt: number, camQ: THREE.Quaternion): void {
     if (e.stuckT >= 0) { this.updateStuckArrow(e, dt); return; }
     const speed = Math.hypot(e.vel.x, e.vel.y, e.vel.z);
     const steps = Math.max(1, Math.ceil(speed * dt / 0.45));
     const sdt = dt / steps;
-    const fireball = e.owner === 'emberghast' || e.owner === 'petghast';
-    const hurtsPlayer = e.owner === 'skeleton' || e.owner === 'emberghast';
-    const fromPet = e.owner === 'pet' || e.owner === 'petghast';
+    const fireball = e.proj !== 'arrow';
+    const small = e.proj === 'small_fireball';
+    const hurtsPlayer = e.owner === 'mob';
+    const fromPet = e.owner === 'pet';
+    // trails: a small fireball sheds embers, the emberghast's big one smokes
+    if (small) netherFX.fireTrail(e.pos.x, e.pos.y, e.pos.z);
+    else if (fireball && Math.random() < dt * 10) this.spawnSmoke(e.pos.x, e.pos.y, e.pos.z, 1);
     for (let s = 0; s < steps && !e.dead; s++) {
       if (!fireball) e.vel.y -= 16 * sdt; // fireballs fly flat
       e.pos.x += e.vel.x * sdt;
@@ -1703,9 +1724,18 @@ export class EntityManager {
       const id = this.world.getBlock(Math.floor(e.pos.x), Math.floor(e.pos.y), Math.floor(e.pos.z));
       if (id !== B.AIR && id !== B.WATER && id !== B.TORCH && def(id).solid) {
         e.dead = true;
-        if (fireball) { this.fireballBurst(e.pos.x, e.pos.y, e.pos.z); return; }
+        if (fireball) {
+          // the flame takes in the open cell the shot flew through
+          if (small) {
+            const cx = Math.floor(e.pos.x - e.vel.x * sdt), cy = Math.floor(e.pos.y - e.vel.y * sdt);
+            const cz = Math.floor(e.pos.z - e.vel.z * sdt);
+            if (this.world.getBlock(cx, cy, cz) === B.AIR) this.onIgnite?.(cx, cy, cz);
+          }
+          this.fireballBurst(e, e.pos.x, e.pos.y, e.pos.z);
+          return;
+        }
         this.audio.play('arrowHit');
-        if (e.owner === 'player' || e.owner === 'skeleton') {
+        if (e.owner === 'player' || e.owner === 'mob') {
           // arrows bury their tip in the block and quiver (vanilla), staying
           // put until picked up or the block under them is broken
           const len = Math.hypot(e.vel.x, e.vel.y, e.vel.z) || 1;
@@ -1736,10 +1766,13 @@ export class EntityManager {
           e.pos.x > p.pos.x - hw && e.pos.x < p.pos.x + hw &&
           e.pos.y > p.pos.y && e.pos.y < p.pos.y + 1.8 &&
           e.pos.z > p.pos.z - hw && e.pos.z < p.pos.z + hw) {
-          p.damage(e.dmg, undefined, fireball ? 'Fireballed by an Emberghast' : 'Shot by a Skeleton');
+          const who = mobWithArticle(e.shooter);
+          const landed = p.damage(e.dmg, undefined, fireball ? `Fireballed by ${who}` : `Shot by ${who}`);
           p.applyKnockback(e.vel.x, e.vel.z, 5);
+          // a blaze's fireball sets you alight (Fire Resistance / a shield keep it off)
+          if (small && landed) p.setOnFire(5, who);
           e.dead = true;
-          if (fireball) this.fireballBurst(e.pos.x, e.pos.y, e.pos.z);
+          if (fireball) this.fireballBurst(e, e.pos.x, e.pos.y, e.pos.z);
           return;
         }
         // pets fight on the player's side, so hostile shots wound them too
@@ -1750,8 +1783,9 @@ export class EntityManager {
             e.pos.y > m.pos.y && e.pos.y < m.pos.y + m.box.h &&
             e.pos.z > m.pos.z - mw && e.pos.z < m.pos.z + mw) {
             this.hurt(m, e.dmg, e.vel.x, e.vel.z);
+            if (small) this.setMobOnFire(m, 5);
             e.dead = true;
-            if (fireball) this.fireballBurst(e.pos.x, e.pos.y, e.pos.z);
+            if (fireball) this.fireballBurst(e, e.pos.x, e.pos.y, e.pos.z);
             return;
           }
         }
@@ -1764,16 +1798,30 @@ export class EntityManager {
             e.pos.y > m.pos.y && e.pos.y < m.pos.y + m.box.h &&
             e.pos.z > m.pos.z - hw && e.pos.z < m.pos.z + hw) {
             this.hurt(m, e.dmg, e.vel.x, e.vel.z, fromPet ? undefined : this.player ?? undefined);
+            if (small) this.setMobOnFire(m, 5);
             e.dead = true;
-            if (fireball) this.fireballBurst(e.pos.x, e.pos.y, e.pos.z);
+            if (fireball) this.fireballBurst(e, e.pos.x, e.pos.y, e.pos.z);
             return;
           }
         }
       }
     }
-    if (e.age > 30 || e.pos.y < -8) e.dead = true;
+    if (e.age > 30 || e.pos.y < -8 || (small && e.age > 5)) e.dead = true;
     e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
-    e.mesh.lookAt(e.pos.x + e.vel.x, e.pos.y + e.vel.y, e.pos.z + e.vel.z);
+    if (small) {
+      // a camera-facing fire-charge sprite, spinning as it flies
+      e.mesh.quaternion.copy(camQ);
+      e.mesh.rotateZ(e.age * 9);
+    } else {
+      e.mesh.lookAt(e.pos.x + e.vel.x, e.pos.y + e.vel.y, e.pos.z + e.vel.z);
+    }
+  }
+
+  /** Set a mob alight (a blaze fireball, a fire charge): fire-immune Nether
+   *  natives don't catch. */
+  setMobOnFire(m: Entity, seconds: number): void {
+    if (FIRE_IMMUNE.has(m.kind as string) || m.dead) return;
+    m.burnT = Math.max(m.burnT, seconds);
   }
 
   /** An arrow embedded in a block: quivers briefly, can be walked over to pick
@@ -2053,11 +2101,12 @@ export class EntityManager {
         if (foe) {
           this.hurt(foe, dmg, dx, dz, e);
         } else if (p.mode === 'survival') {
-          p.damage(dmg, e, `Slain by ${mobLabel(e.kind as string)}`);
+          const landed = p.damage(dmg, e, `Slain by ${mobWithArticle(e.kind as string)}`);
           p.applyKnockback(dx, dz, e.kind === 'ashstalker' ? 7 : e.kind === 'hoglin' ? 11 : 5);
           // a hoglin tosses you skyward with its tusks; wither skeletons wither
+          // (vanilla: 10 s of Wither I per landed cut)
           if (e.kind === 'hoglin') p.vel.y = Math.max(p.vel.y, 9.5);
-          if (e.kind === 'wither_skeleton') this.witherT = Math.max(this.witherT, 10);
+          if (e.kind === 'wither_skeleton' && landed) p.addEffect('wither', 10, 0);
         }
         if (e.kind === 'hoglin' || e.kind === 'piglin' || e.kind === 'zombified_piglin') {
           this.audio.mobSound(e.kind, 0.7, 'idle');
@@ -2582,11 +2631,11 @@ export class EntityManager {
       if (e.kind === 'blaze' && distH < 14) {
         e.attackCooldown = 1.3;
         this.spawnBlazeCharge(e.pos.x, e.pos.y + 1.2, e.pos.z,
-          t.pos.x - e.pos.x, (t.pos.y + t.box.h * 0.5) - (e.pos.y + 1.2), t.pos.z - e.pos.z, 'petghast');
+          t.pos.x - e.pos.x, (t.pos.y + t.box.h * 0.5) - (e.pos.y + 1.2), t.pos.z - e.pos.z, 'pet');
       } else if (e.kind === 'emberghast' && distH < 16) {
         e.attackCooldown = 2.4;
         this.spawnFireball(e.pos.x, e.pos.y, e.pos.z,
-          t.pos.x - e.pos.x, (t.pos.y + t.box.h * 0.5) - e.pos.y, t.pos.z - e.pos.z, 'petghast');
+          t.pos.x - e.pos.x, (t.pos.y + t.box.h * 0.5) - e.pos.y, t.pos.z - e.pos.z, 'pet');
       } else if (e.kind === 'phantom' && distH < 1.8
         && Math.abs(t.pos.y + t.box.h * 0.5 - e.pos.y) < 2.2) {
         e.attackCooldown = 1.1;
@@ -2670,8 +2719,7 @@ export class EntityManager {
       if (!foe && e.attackCooldown <= 0 && Math.hypot(p.pos.x - e.pos.x, p.pos.z - e.pos.z) < 0.9
         && Math.abs(p.pos.y - e.pos.y) < 1.6) {
         e.attackCooldown = 1;
-        p.damage(4, e, 'Burned by a Blaze');
-        p.fireT = Math.max(p.fireT, 4);
+        if (p.damage(4, e, 'Burned by a Blaze')) p.setOnFire(4, 'a Blaze');
         p.applyKnockback(p.pos.x - e.pos.x, p.pos.z - e.pos.z, 4);
       }
     } else {
@@ -2687,19 +2735,51 @@ export class EntityManager {
     this.placeMob(e, dt);
   }
 
-  /** A blaze's small fireball: flies flat and fast, 5 damage, sets the
-   *  player alight on a hit (burst handled by the shared projectile code). */
+  /** Sprite + glow materials for a blaze's small fireball: the fire-charge
+   *  sprite (vanilla draws the item) over a soft additive halo. */
+  private smallFireballMats(): THREE.MeshBasicMaterial[] {
+    if (this.smallFireMats) return this.smallFireMats;
+    const src = this.atlas.sprite('fire_charge');
+    const tex = new THREE.CanvasTexture(src ?? document.createElement('canvas'));
+    tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const halo = document.createElement('canvas');
+    halo.width = halo.height = 32;
+    const hctx = halo.getContext('2d')!;
+    const grad = hctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+    grad.addColorStop(0, 'rgba(255,214,90,0.9)');
+    grad.addColorStop(0.45, 'rgba(255,120,24,0.45)');
+    grad.addColorStop(1, 'rgba(255,60,0,0)');
+    hctx.fillStyle = grad;
+    hctx.fillRect(0, 0, 32, 32);
+    const htex = new THREE.CanvasTexture(halo);
+    htex.colorSpace = THREE.SRGBColorSpace;
+    this.smallFireMats = [
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, alphaTest: 0.3, side: THREE.DoubleSide }),
+      new THREE.MeshBasicMaterial({ map: htex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }),
+    ];
+    return this.smallFireMats;
+  }
+
+  /** A blaze's small fireball: flies flat and fast, 5 damage, sets what it
+   *  hits alight (the player, a pet, or the block it lands against).
+   *  `owner` 'pet' = loosed by a captured blaze at a wild mob. */
   spawnBlazeCharge(x: number, y: number, z: number, dx: number, dy: number, dz: number,
-    owner: 'emberghast' | 'petghast' = 'emberghast'): void {
+    owner: 'mob' | 'pet' = 'mob'): void {
+    const [spriteMat, haloMat] = this.smallFireballMats();
     const mesh = new THREE.Group();
-    mesh.add(new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.2), new THREE.MeshBasicMaterial({ color: 0xffe070 })));
-    mesh.add(new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.34),
-      new THREE.MeshBasicMaterial({ color: 0xff7a18, transparent: true, opacity: 0.5 })));
+    const halo = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.62), haloMat);
+    halo.renderOrder = 1;
+    const core = new THREE.Mesh(new THREE.PlaneGeometry(0.34, 0.34), spriteMat);
+    core.position.z = 0.01;
+    mesh.add(halo, core);
     const len = Math.hypot(dx, dy, dz) || 1;
     const speed = 13;
     const e = new Entity('arrow', { x, y, z }, { w: 0.2, h: 0.2 }, mesh);
     e.vel = { x: (dx / len) * speed, y: (dy / len) * speed, z: (dz / len) * speed };
     e.owner = owner;
+    e.shooter = 'blaze';
+    e.proj = 'small_fireball';
     e.dmg = 5;
     this.entities.push(e);
     this.scene.add(mesh);
@@ -2708,18 +2788,11 @@ export class EntityManager {
     this.audio.mobSound('blaze_shoot', Math.max(0.15, 1 - dist / 28), 'idle');
   }
 
-  /** The player is withering (a wither skeleton's cut): 1 damage every
-   *  2 seconds with dark wisps, until it runs out. */
+  /** Dark wisps curl off a withering player (the Wither effect itself — its
+   *  damage, badge and black hearts — lives on Player / StatusHUD). */
   private tickWither(): void {
     const p = this.player;
-    if (!p || this.witherT <= 0) return;
-    if (p.dead) { this.witherT = 0; return; }
-    this.witherT -= 0.05;
-    this.witherTick += 0.05;
-    if (this.witherTick >= 2) {
-      this.witherTick = 0;
-      if (p.mode === 'survival') p.damage(1, undefined, 'Withered away');
-    }
+    if (!p || p.dead || !p.effects.has('wither')) return;
     if (Math.random() < 0.35) {
       this.spriteParticles('wither', (ctx) => {
         ctx.fillStyle = 'rgba(20,16,20,0.9)';
@@ -2907,10 +2980,11 @@ export class EntityManager {
     e.mesh.rotation.y = e.yaw;
   }
 
-  /** Launch a slow, flat-flying fireball toward a direction. `owner` decides who
-   *  it can hurt: 'emberghast' burns the player, 'petghast' burns hostile mobs. */
+  /** Launch an emberghast's slow, flat-flying fireball toward a direction.
+   *  `owner` decides who it can hurt: 'mob' burns the player (and pets), 'pet'
+   *  (a captured emberghast) burns wild mobs. */
   spawnFireball(x: number, y: number, z: number, dx: number, dy: number, dz: number,
-    owner: 'emberghast' | 'petghast' = 'emberghast'): void {
+    owner: 'mob' | 'pet' = 'mob'): void {
     const mesh = new THREE.Group();
     const core = new THREE.Mesh(
       new THREE.BoxGeometry(0.3, 0.3, 0.3),
@@ -2926,15 +3000,26 @@ export class EntityManager {
     const e = new Entity('arrow', { x, y, z }, { w: 0.3, h: 0.3 }, mesh);
     e.vel = { x: (dx / len) * speed, y: (dy / len) * speed, z: (dz / len) * speed };
     e.owner = owner;
+    e.shooter = 'emberghast';
+    e.proj = 'fireball';
     e.dmg = 4;
     this.entities.push(e);
     this.scene.add(mesh);
-    this.audio.play('bow');
+    this.audio.mobSound('emberghast_shoot', Math.max(0.2, this.voiceVol(e)), 'idle');
   }
 
-  /** A small fiery puff where a fireball lands. */
-  private fireballBurst(x: number, y: number, z: number): void {
-    this.audio.play('arrowHit');
+  /** Where a fireball lands: a blaze's small one spits sparks and sizzles, an
+   *  emberghast's big one bursts with a deeper whump and smoke. */
+  private fireballBurst(e: Entity, x: number, y: number, z: number): void {
+    const vol = this.voiceVol(e);
+    if (e.proj === 'small_fireball') {
+      this.audio.mobSound('small_fireball_hit', vol, 'idle');
+      netherFX.fireBurst(x, y, z, 10);
+      return;
+    }
+    this.audio.mobSound('fireball_hit', vol, 'idle');
+    netherFX.fireBurst(x, y, z, 18);
+    this.spawnSmoke(x, y, z, 3);
     for (let i = 0; i < 8; i++) {
       this.spawnFirefly(x + (Math.random() - 0.5) * 0.8, y + (Math.random() - 0.5) * 0.8, z + (Math.random() - 0.5) * 0.8);
     }
@@ -3055,7 +3140,7 @@ export class EntityManager {
               if (!this.world.raycast(ex, ey, ez, (tx - ex) / dist3, (ty - ey) / dist3, (tz - ez) / dist3, dist3)) {
                 e.shootCooldown = 2.4 + Math.random() * 0.8;
                 const spread = () => (Math.random() - 0.5) * 0.04;
-                this.shootArrow('skeleton', ex, ey, ez,
+                this.shootArrow('piglin', ex, ey, ez,
                   (tx - ex) / dist3 + spread(), (ty - ey) / dist3 + 0.02 * dist3 / 15 + spread(), (tz - ez) / dist3 + spread(),
                   28, 4);
               } else e.shootCooldown = 0.4;
@@ -3067,7 +3152,7 @@ export class EntityManager {
       // burning: flames + 2 damage a second until it dies, finds water or shade
       if (e.burnT > 0) {
         e.burnT -= 0.05;
-        if (inWater(this.world, e.pos, e.box)) e.burnT = 0;
+        if (inWater(this.world, e.pos, e.box) || FIRE_IMMUNE.has(e.kind as string)) e.burnT = 0;
         if (Math.random() < 0.5) {
           this.spawnTorchFlame(e.pos.x + (Math.random() - 0.5) * e.box.w, e.pos.y + Math.random() * e.box.h,
             e.pos.z + (Math.random() - 0.5) * e.box.w);

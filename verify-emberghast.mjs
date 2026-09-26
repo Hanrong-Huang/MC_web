@@ -41,7 +41,7 @@ for (let i = 0; i < 6; i++) {
   const s = await page.evaluate(() => {
     const g = window.__game;
     const e = g.entities.entities.find((x) => x.kind === 'emberghast');
-    const fb = g.entities.entities.filter((x) => x.kind === 'arrow' && x.owner === 'emberghast').length;
+    const fb = g.entities.entities.filter((x) => x.kind === 'arrow' && x.shooter === 'emberghast').length;
     return e ? { x: +e.pos.x.toFixed(2), y: +e.pos.y.toFixed(2), z: +e.pos.z.toFixed(2), fb } : null;
   });
   samples.push(s);

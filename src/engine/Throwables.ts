@@ -77,7 +77,7 @@ export class Throwables {
               this.entities.hurt(hit.entity, fiery ? 3 : 0, s.vx, s.vz);
             } else if (s.id === I.FIRE_CHARGE) {
               this.entities.hurt(hit.entity, 5, s.vx * 0.3, s.vz * 0.3);
-              hit.entity.burnT = Math.max(hit.entity.burnT, 5);
+              this.entities.setMobOnFire(hit.entity, 5);
             }
             landed = true;
             break;
