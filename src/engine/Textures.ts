@@ -3893,3 +3893,370 @@ export function shapedItemGeometry(id: number, atlas: Atlas, size = 1): THREE.Bu
   geo.computeVertexNormals();
   return geo;
 }
+
+// =============================================================================
+// Nether biome tiles: nylium, fungus stems + wart caps, shroomlight, basalt,
+// blackstone, soul soil, nether gold ore, ancient debris, roots and vines, and
+// blue soul fire (fire burning on soul sand/soil, picked by the mesher).
+// =============================================================================
+
+/** Plain netherrack, painted exactly like its own tile so nylium sides and
+ *  the nether ores sit flush against it. */
+function netherrackPx(): Px {
+  const f = fbm(7002, [[4, 0.4], [8, 0.35], [16, 0.25]], 2.0);
+  const p = rampFill(new Px(), NETHERRACK_R, f, 7003, 0.35);
+  const r = mulberry32(7004);
+  for (let i = 0; i < 6; i++) {
+    let cx = (r() * 16) | 0, cy = (r() * 16) | 0;
+    for (let k = 0; k < 4; k++) {
+      p.set(cx, cy, '#2c0909');
+      p.set(cx, cy - 1, NETHERRACK_R[6]);
+      cx += 1; if (r() < 0.4) cy += r() < 0.5 ? 1 : -1;
+    }
+  }
+  return p;
+}
+
+/** Nylium top: a dense fungal moss with bright hyphae tips over dark roots. */
+function nyliumTopPx(ramp: RGB[], tip: RGB, seed: number): Px {
+  const f = fbm(seed, [[4, 0.3], [8, 0.4], [16, 0.3]], 1.9);
+  const p = rampFill(new Px(), ramp, f, seed + 1, 0.55);
+  const r = mulberry32(seed + 2);
+  for (let i = 0; i < 12; i++) {
+    const x = (r() * 16) | 0, y = (r() * 16) | 0;
+    p.set(x, y, tip);
+    p.set(x, y + 1, ramp[0]);
+    if (r() < 0.4) p.set(x + 1, y, ramp[ramp.length - 1]);
+  }
+  return p;
+}
+
+/** Nylium side: netherrack under a ragged moss lip with a few hanging strands. */
+function nyliumSidePx(ramp: RGB[], seed: number): Px {
+  const p = netherrackPx();
+  const r = mulberry32(seed);
+  const wave = tileNoise(seed + 3, 4, 1);
+  const f = fbm(seed + 5, [[8, 0.5], [16, 0.5]], 1.6);
+  for (let x = 0; x < 16; x++) {
+    let d = 3 + Math.round(wave(x, 0) * 2 - 0.4);
+    if (r() < 0.22) d += 1;
+    if (r() < 0.1) d += 2 + ((r() * 3) | 0); // a hyphae strand creeping down
+    for (let y = 0; y < d; y++) {
+      const idx = clampI((f(x, y) + (r() - 0.5) * 0.5) * ramp.length, ramp.length);
+      p.set(x, y, y === d - 1 ? shade(ramp[0], 0.8) : ramp[idx]);
+    }
+    p.mul(x, d, 0.72); // soft shadow under the lip
+  }
+  return p;
+}
+
+/** Fungus stem side: furrowed bark shot through with glowing hyphae veins. */
+function stemSidePx(ramp: RGB[], glow: RGB[], seed: number): Px {
+  const p = barkPx(ramp, seed);
+  const r = mulberry32(seed + 9);
+  for (let i = 0; i < 8; i++) {
+    const x = (r() * 16) | 0, y0 = (r() * 16) | 0, len = 2 + ((r() * 4) | 0);
+    for (let k = 0; k < len; k++) p.set(x, y0 + k, glow[k === 0 || k === len - 1 ? 0 : 1]);
+  }
+  for (let i = 0; i < 5; i++) p.set((r() * 16) | 0, (r() * 16) | 0, glow[2]);
+  return p;
+}
+
+/** Wart block: lumpy fungal flesh, each knot lit on top and shaded below. */
+function wartPx(ramp: RGB[], seed: number): Px {
+  const n = 15;
+  const v = voronoi(seed, n, 1);
+  const r = mulberry32(seed + 1);
+  const tone = Array.from({ length: n }, () => 1.5 + r() * (ramp.length - 3));
+  const f = fbm(seed + 2, [[8, 0.5], [16, 0.5]], 1.5);
+  const p = new Px().fill((x, y) => ramp[clampI(tone[cellAt(v, x, y)] + (f(x, y) - 0.5) * 2 + (r() - 0.5) * 0.9, ramp.length)]);
+  bevelRegions(p, v, 1.18, 0.74, null);
+  // a few dark pores
+  for (let i = 0; i < 6; i++) p.set((r() * 16) | 0, (r() * 16) | 0, shade(ramp[0], 0.8));
+  return p;
+}
+
+/** Shroomlight: glowing orange globules with white-hot cores in dark seams. */
+function shroomlightPx(): Px {
+  const ramp = pal(['#a2400f', '#c4561a', '#df7224', '#f08f31', '#f8ac42', '#fcc85c', '#ffe188', '#fff3c4']);
+  const n = 11;
+  const v = voronoi(8710, n, 1);
+  // per-cell centroids (wrap-aware) so each globule brightens toward its core
+  const sx = new Float32Array(n), sy = new Float32Array(n), cnt = new Float32Array(n);
+  const ax = new Float32Array(n), ay = new Float32Array(n);
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      const k = cellAt(v, x, y);
+      if (!cnt[k]) { ax[k] = x; ay[k] = y; }
+      let dx = x - ax[k], dy = y - ay[k];
+      if (dx > 8) dx -= 16; if (dx < -8) dx += 16; if (dy > 8) dy -= 16; if (dy < -8) dy += 16;
+      sx[k] += dx; sy[k] += dy; cnt[k]++;
+    }
+  }
+  const r = mulberry32(8711);
+  const p = new Px().fill((x, y) => {
+    const k = cellAt(v, x, y);
+    let dx = x - (ax[k] + sx[k] / cnt[k]), dy = y - (ay[k] + sy[k] / cnt[k]);
+    dx = ((dx % 16) + 24) % 16 - 8; dy = ((dy % 16) + 24) % 16 - 8;
+    const rad = Math.sqrt(cnt[k] / Math.PI) + 0.5;
+    const t = 1 - Math.min(1, Math.hypot(dx, dy) / rad);
+    return ramp[clampI(1.5 + t * 6 + (r() - 0.5) * 1.1, ramp.length)];
+  });
+  bevelRegions(p, v, 1.05, 0.82, hex('#7a2c0c'), false);
+  return p;
+}
+
+const BASALT_R = pal(['#2a2a2f', '#333338', '#3c3c42', '#46464c', '#515157', '#5c5c63', '#6a6a71']);
+
+/** Basalt side: tall columnar striations with dark grooves and lit ridges. */
+function basaltSidePx(): Px {
+  const r = mulberry32(8601);
+  const colTone = Array.from({ length: 16 }, () => r());
+  const f = fbm(8602, [[8, 0.6, 2], [16, 0.4, 4]], 1.8);
+  const p = new Px().fill((x, y) =>
+    BASALT_R[clampI((colTone[x] * 0.5 + f(x, y) * 0.6) * BASALT_R.length + (r() - 0.5) * 0.7, BASALT_R.length)]);
+  for (const gx of [1, 5, 8, 12, 14]) {
+    for (let y = 0; y < 16; y++) {
+      if (r() < 0.88) p.set(gx, y, BASALT_R[0]);
+      if (r() < 0.55) p.set(gx + 1, y, BASALT_R[5]);
+    }
+  }
+  // the odd horizontal crack across a column
+  for (let i = 0; i < 4; i++) {
+    const x = (r() * 16) | 0, y = (r() * 16) | 0;
+    p.set(x, y, BASALT_R[0]); p.set(x + 1, y, BASALT_R[0]); p.set(x, y - 1, BASALT_R[6]);
+  }
+  return p;
+}
+
+/** Basalt top: the column's cut end, a rounded swirl of grey growth rings. */
+function basaltTopPx(): Px {
+  return ringsPx(BASALT_R, pal(['#35353b', '#4a4a51', '#57575e', '#66666d']), 8603);
+}
+
+const BLACKSTONE_R = pal(['#131016', '#1a171e', '#211d26', '#28232e', '#302a37', '#393241', '#443c4d']);
+
+/** Blackstone: near-black volcanic rock with faint violet grain and flecks. */
+function blackstonePx(): Px {
+  const f = fbm(8620, [[4, 0.25], [8, 0.45], [16, 0.3]], 2.0);
+  const p = rampFill(new Px(), BLACKSTONE_R, f, 8621, 0.3);
+  const r = mulberry32(8622);
+  for (let i = 0; i < 8; i++) {
+    const x = (r() * 16) | 0, y = (r() * 16) | 0, len = 2 + ((r() * 3) | 0);
+    for (let k = 0; k < len; k++) {
+      p.set(x + k, y, BLACKSTONE_R[0]);
+      if (r() < 0.6) p.set(x + k, y - 1, BLACKSTONE_R[5]);
+    }
+  }
+  for (let i = 0; i < 5; i++) p.set((r() * 16) | 0, (r() * 16) | 0, '#5a5068');
+  return p;
+}
+
+/** Blackstone top: the same rock split into chunky bevelled slabs. */
+function blackstoneTopPx(): Px {
+  const v = voronoi(8630, 7, 1);
+  const r = mulberry32(8631);
+  const base = Array.from({ length: 7 }, () => 1.5 + r() * 3.5);
+  const f = fbm(8632, [[8, 0.5], [16, 0.5]], 1.4);
+  const p = new Px().fill((x, y) => BLACKSTONE_R[clampI(base[cellAt(v, x, y)] + (f(x, y) - 0.5) * 2 + (r() - 0.5) * 0.8, BLACKSTONE_R.length)]);
+  bevelRegions(p, v, 1.25, 0.75, hex('#0c0a0e'), false);
+  return p;
+}
+
+/** Soul soil: dark packed ash-brown earth, pale grains, no faces. */
+function soulSoilPx(): Px {
+  const ramp = pal(['#2c2018', '#35271d', '#3f2e23', '#483629', '#523e30', '#5c4737', '#685141']);
+  const f = fbm(8640, [[4, 0.4], [8, 0.35], [16, 0.25]], 1.9);
+  const p = rampFill(new Px(), ramp, f, 8641, 0.4);
+  const r = mulberry32(8642);
+  for (let i = 0; i < 8; i++) {
+    const x = (r() * 16) | 0, y = (r() * 16) | 0;
+    p.set(x, y, '#7a6552'); p.set(x, y + 1, ramp[0]);
+  }
+  // shallow dark hollows
+  for (let i = 0; i < 3; i++) {
+    const x = (r() * 16) | 0, y = (r() * 16) | 0;
+    p.set(x, y, '#1f1610'); p.set(x + 1, y, '#241a13'); p.set(x, y - 1, ramp[5]);
+  }
+  return p;
+}
+
+/** Nether gold ore: netherrack studded with bright gold nuggets. */
+function netherGoldOrePx(): Px {
+  const p = netherrackPx();
+  const hi = hex('#fff39a'), mid = hex('#f6c936'), lo = hex('#b8801a');
+  const spots: [number, number, string[]][] = [
+    [2, 2, ['##']], [7, 1, ['#', '#']], [12, 3, ['##', '.#']], [4, 6, ['#']], [9, 7, ['##']],
+    [1, 10, ['#.', '##']], [13, 9, ['#']], [6, 12, ['##']], [11, 13, ['#', '#']], [3, 14, ['#']],
+  ];
+  for (const [x, y, s] of spots) oreBlob(p, x, y, s, hi, mid, lo, 0.7);
+  return p;
+}
+
+const DEBRIS_R = pal(['#2f1f1a', '#3b2721', '#48302a', '#553a32', '#62443b', '#6f4f45', '#7d5b51']);
+
+/** Ancient debris side: scorched brown slag in wavy compressed layers. */
+function debrisSidePx(): Px {
+  const wave = tileNoise(8650, 4, 2);
+  const f = fbm(8651, [[8, 0.5], [16, 0.5]], 1.5);
+  const r = mulberry32(8652);
+  const p = new Px().fill((x, y) => {
+    const band = (y + wave(x, y) * 5) % 4;
+    const t = band < 0.9 ? 0.5 : band < 1.6 ? 5.5 : 2.5 + f(x, y) * 2.5;
+    return DEBRIS_R[clampI(t + (r() - 0.5) * 1.2, DEBRIS_R.length)];
+  });
+  for (let i = 0; i < 6; i++) p.set((r() * 16) | 0, (r() * 16) | 0, '#8f6e62');
+  return p;
+}
+
+/** Ancient debris top: tight concentric swirls around a bright core. */
+function debrisTopPx(): Px {
+  const n = tileNoise(8660, 4);
+  const r = mulberry32(8661);
+  return new Px().fill((x, y) => {
+    const dx = x - 7.5, dy = y - 7.5;
+    const d = Math.max(Math.abs(dx), Math.abs(dy)) * 0.55 + Math.hypot(dx, dy) * 0.45 + (n(x, y) - 0.5) * 1.3;
+    const ring = d % 2.4;
+    const t = ring < 0.8 ? 0.6 : 3 + (1 - d / 11) * 3;
+    return DEBRIS_R[clampI(t + (r() - 0.5) * 1.1, DEBRIS_R.length)];
+  });
+}
+
+/** Crossed-plant tuft of curling stalks (crimson/warped roots). */
+function rootsPx(cols: string[], seed: number, bulbs: boolean): Px {
+  const p = new Px();
+  const r = mulberry32(seed);
+  const n = 6;
+  for (let i = 0; i < n; i++) {
+    let x = 2 + ((i * 12) / (n - 1) + (r() - 0.5) * 2) | 0;
+    const h = 6 + ((r() * 9) | 0);
+    const lean = x < 8 ? -1 : 1;
+    for (let j = 0; j < h; j++) {
+      const t = j / h;
+      if (t > 0.55 && r() < 0.35) x += lean;
+      const k = Math.min(cols.length - 1, (t * (cols.length - 1) + 0.3) | 0);
+      p.set(x, 15 - j, cols[k]);
+    }
+    // curled tip (roots) or a round bud (warped roots)
+    const ty = 15 - h;
+    if (bulbs) { p.set(x, ty, cols[cols.length - 1]); p.set(x + lean, ty, cols[cols.length - 2]); p.set(x, ty - 1, cols[cols.length - 1]); }
+    else { p.set(x + lean, ty, cols[cols.length - 1]); p.set(x + lean * 2, ty + 1, cols[cols.length - 2]); }
+  }
+  return p;
+}
+
+/** Vine strands running the tile's full height (tile-periodic, so stacked
+ *  cells join up); `tipAt` >= 0 ends them there with a leafy bulb. */
+function vinePx(cols: string[], seed: number, hanging: boolean, tipAt: number): Px {
+  const p = new Px();
+  const r = mulberry32(seed);
+  const strands = [3, 8, 12];
+  for (const [si, bx] of strands.entries()) {
+    const phase = r() * Math.PI * 2, amp = 1 + r();
+    for (let yy = 0; yy < 16; yy++) {
+      // hanging vines end low in the tile, climbing ones end high
+      const y = hanging ? yy : 15 - yy;
+      if (tipAt >= 0 && yy > tipAt + si) break;
+      const x = Math.round(bx + Math.sin((yy / 16) * Math.PI * 2 + phase) * amp);
+      p.set(x, y, cols[1 + ((yy + si) % 3 === 0 ? 1 : 0)]);
+      // leaflets on alternating sides
+      if ((yy + si * 2) % 3 === 0) {
+        const side = (yy >> 1) % 2 === 0 ? 1 : -1;
+        p.set(x + side, y, cols[3]);
+        p.set(x + side, y + (hanging ? 1 : -1), cols[0]);
+      }
+    }
+    if (tipAt >= 0) {
+      const yy = Math.min(15, tipAt + si), y = hanging ? yy : 15 - yy;
+      const x = Math.round(bx + Math.sin((yy / 16) * Math.PI * 2 + phase) * amp);
+      p.set(x, y, cols[4]); p.set(x - 1, y, cols[3]); p.set(x + 1, y, cols[3]);
+      p.set(x, y + (hanging ? 1 : -1), cols[3]);
+    }
+  }
+  return p;
+}
+
+const CRIMSON_ROOT_C = ['#4f0612', '#7a0d1c', '#a3182a', '#c52b3b', '#e0475a'];
+const WARPED_ROOT_C = ['#0b3f3b', '#135f58', '#1d8479', '#2ea596', '#52cdb9'];
+const WEEPING_C = ['#4a0808', '#861616', '#a8201c', '#c9372b', '#ea5c3f'];
+const TWISTING_C = ['#0a3e3c', '#127168', '#1a8f84', '#27ae9e', '#56d8c4'];
+
+/** Soul fire: licking flame tongues in pale turquoise-to-deep-blue. */
+function paintSoulFire(ctx: Ctx, x0: number, y0: number): void {
+  const r = mulberry32(8690);
+  const heights = [8, 11, 14, 12, 9, 12, 15, 16, 13, 10, 12, 15, 14, 10, 11, 13];
+  const ramp = ['#f2ffff', '#b9fbff', '#6fe9f4', '#35c8dc', '#1f98b8', '#15668a'];
+  for (let x = 0; x < TILE; x++) {
+    const h = Math.max(4, heights[x] - ((r() * 3) | 0));
+    for (let y = TILE - 1; y >= TILE - h; y--) {
+      const t = (TILE - 1 - y) / h;
+      if (t > 0.55 && r() < (t - 0.55) * 0.9) continue;
+      const i = Math.min(ramp.length - 1, Math.floor(t * ramp.length + (r() - 0.5) * 1.2));
+      ctx.fillStyle = ramp[Math.max(0, i)];
+      ctx.fillRect(x0 + x, y0 + y, 1, 1);
+    }
+  }
+}
+
+const CRIMSON_NYLIUM_R = pal(['#560909', '#6b0e0e', '#801414', '#941b1a', '#a82422', '#b92f2b']);
+const WARPED_NYLIUM_R = pal(['#0d4540', '#12554e', '#17655b', '#1c7568', '#238576', '#2c9583']);
+const CRIMSON_BARK_R = pal(['#3a0f20', '#4a1529', '#5a1c33', '#6a233d', '#7a2b47', '#8b3552']);
+const WARPED_BARK_R = pal(['#241b33', '#2c2240', '#342a4b', '#3c3257', '#453b63', '#50466f']);
+
+const NETHER_TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = {
+  crimson_nylium_top: (c, x, y) => nyliumTopPx(CRIMSON_NYLIUM_R, hex('#dd4436'), 8501).put(c, x, y),
+  crimson_nylium_side: (c, x, y) => nyliumSidePx(CRIMSON_NYLIUM_R, 8502).put(c, x, y),
+  warped_nylium_top: (c, x, y) => nyliumTopPx(WARPED_NYLIUM_R, hex('#4fd1b8'), 8503).put(c, x, y),
+  warped_nylium_side: (c, x, y) => nyliumSidePx(WARPED_NYLIUM_R, 8504).put(c, x, y),
+  crimson_stem_side: (c, x, y) => stemSidePx(CRIMSON_BARK_R, pal(['#b3263f', '#d8364f', '#ff6a7a']), 8510).put(c, x, y),
+  crimson_stem_top: (c, x, y) => ringsPx(CRIMSON_BARK_R, pal(['#5c2238', '#7e3350', '#91405f', '#a8526f']), 8511).put(c, x, y),
+  warped_stem_side: (c, x, y) => stemSidePx(WARPED_BARK_R, pal(['#1f8c83', '#2fb3a5', '#6ff0da']), 8512).put(c, x, y),
+  warped_stem_top: (c, x, y) => ringsPx(WARPED_BARK_R, pal(['#1a5552', '#287470', '#318a84', '#43a39a']), 8513).put(c, x, y),
+  nether_wart_block: (c, x, y) => wartPx(pal(['#470405', '#5c0807', '#710c0b', '#861211', '#9a1a17', '#ae241f', '#c03129']), 8520).put(c, x, y),
+  warped_wart_block: (c, x, y) => wartPx(pal(['#063d3a', '#0a514c', '#0f655f', '#147972', '#1b8c83', '#239e93', '#31b0a2']), 8521).put(c, x, y),
+  shroomlight: (c, x, y) => shroomlightPx().put(c, x, y),
+  basalt_side: (c, x, y) => basaltSidePx().put(c, x, y),
+  basalt_top: (c, x, y) => basaltTopPx().put(c, x, y),
+  blackstone: (c, x, y) => blackstonePx().put(c, x, y),
+  blackstone_top: (c, x, y) => blackstoneTopPx().put(c, x, y),
+  soul_soil: (c, x, y) => soulSoilPx().put(c, x, y),
+  nether_gold_ore: (c, x, y) => netherGoldOrePx().put(c, x, y),
+  ancient_debris_side: (c, x, y) => debrisSidePx().put(c, x, y),
+  ancient_debris_top: (c, x, y) => debrisTopPx().put(c, x, y),
+  crimson_roots: (c, x, y) => rootsPx(CRIMSON_ROOT_C, 8680, false).put(c, x, y),
+  warped_roots: (c, x, y) => rootsPx(WARPED_ROOT_C, 8681, true).put(c, x, y),
+  weeping_vines: (c, x, y) => vinePx(WEEPING_C, 8682, true, -1).put(c, x, y),
+  weeping_vines_tip: (c, x, y) => vinePx(WEEPING_C, 8682, true, 9).put(c, x, y),
+  twisting_vines: (c, x, y) => vinePx(TWISTING_C, 8683, false, -1).put(c, x, y),
+  twisting_vines_tip: (c, x, y) => vinePx(TWISTING_C, 8683, false, 9).put(c, x, y),
+  soul_fire: paintSoulFire,
+};
+Object.assign(TILE_PAINTERS, NETHER_TILE_PAINTERS);
+Object.assign(PACK_MAP, {
+  crimson_nylium_top: { paths: ['block/crimson_nylium'], kind: 'tile' },
+  crimson_nylium_side: { paths: ['block/crimson_nylium_side'], kind: 'tile' },
+  warped_nylium_top: { paths: ['block/warped_nylium'], kind: 'tile' },
+  warped_nylium_side: { paths: ['block/warped_nylium_side'], kind: 'tile' },
+  crimson_stem_side: { paths: ['block/crimson_stem'], kind: 'tile' },
+  crimson_stem_top: { paths: ['block/crimson_stem_top'], kind: 'tile' },
+  warped_stem_side: { paths: ['block/warped_stem'], kind: 'tile' },
+  warped_stem_top: { paths: ['block/warped_stem_top'], kind: 'tile' },
+  nether_wart_block: { paths: ['block/nether_wart_block'], kind: 'tile' },
+  warped_wart_block: { paths: ['block/warped_wart_block'], kind: 'tile' },
+  shroomlight: { paths: ['block/shroomlight'], kind: 'tile' },
+  basalt_side: { paths: ['block/basalt_side'], kind: 'tile' },
+  basalt_top: { paths: ['block/basalt_top'], kind: 'tile' },
+  blackstone: { paths: ['block/blackstone'], kind: 'tile' },
+  blackstone_top: { paths: ['block/blackstone_top'], kind: 'tile' },
+  soul_soil: { paths: ['block/soul_soil'], kind: 'tile' },
+  nether_gold_ore: { paths: ['block/nether_gold_ore'], kind: 'tile' },
+  ancient_debris_side: { paths: ['block/ancient_debris_side'], kind: 'tile' },
+  ancient_debris_top: { paths: ['block/ancient_debris_top'], kind: 'tile' },
+  crimson_roots: { paths: ['block/crimson_roots'], kind: 'tile' },
+  warped_roots: { paths: ['block/warped_roots'], kind: 'tile' },
+  weeping_vines: { paths: ['block/weeping_vines_plant'], kind: 'tile' },
+  weeping_vines_tip: { paths: ['block/weeping_vines'], kind: 'tile' },
+  twisting_vines: { paths: ['block/twisting_vines_plant'], kind: 'tile' },
+  twisting_vines_tip: { paths: ['block/twisting_vines'], kind: 'tile' },
+  soul_fire: { paths: ['block/soul_fire_0'], kind: 'tile' },
+} satisfies Record<string, PackEntry>);

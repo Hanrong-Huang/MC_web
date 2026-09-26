@@ -8,7 +8,7 @@
 // light model stays 2-channel without another attribute.
 
 import { CX, CZ, CY } from './Chunk';
-import { B, def, hasDef, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, connectsTo } from './Blocks';
+import { B, def, hasDef, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, connectsTo, crossTile } from './Blocks';
 import type { Box } from './Blocks';
 import type { UVRect } from './Textures';
 
@@ -548,9 +548,10 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           continue;
         }
         if (CROSS_BLOCKS.has(id)) {
-          const tileName = def(id).faces!.sides;
+          // neighbour-dependent variants: soul fire, weeping/twisting vines
+          const tileName = crossTile(id, get(x, y - 1, z), get(x, y + 1, z));
           const tint = TINTED_TILES.has(tileName) ? tintAt(x, z) : null;
-          emitCross(solid, atlas, id, x, y, z, skyAt(x, y, z), torchAt(x, y, z), tint);
+          emitCross(solid, atlas, tileName, x, y, z, skyAt(x, y, z), torchAt(x, y, z), tint, !tileName.includes('vines'));
           continue;
         }
         }
@@ -700,8 +701,8 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
 
 /** Crossed billboards for plants (flowers, grass, sugar cane). Both windings
  *  are emitted so the front-face-culled chunk material shows them from any side. */
-function emitCross(g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: number, z: number, sky: number, torch: number, tint: Float32Array | null): void {
-  const rect = atlas.rect(def(id).faces!.sides);
+function emitCross(g: GeoBuilder, atlas: MeshAtlas, tile: string, x: number, y: number, z: number, sky: number, torch: number, tint: Float32Array | null, sway = true): void {
+  const rect = atlas.rect(tile);
   const a = 0.146, b = 0.854; // ~ MC's sqrt(2)/2-inset diagonal
   const tr = tint ? tint[0] : 1, tg = tint ? tint[1] : 1, tb = tint ? tint[2] : 1;
   const planes: [number, number, number, number][] = [
@@ -718,8 +719,8 @@ function emitCross(g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: nu
       const vs = [rect.v1, rect.v1, rect.v0, rect.v0];
       for (let i = 0; i < 4; i++) {
         // the top edge sways in the wind (flag stripped by the vertex shader)
-        const sway = corners[i][1] > 0 ? FLAG_SWAY : 0;
-        g.v(x + corners[i][0], y + corners[i][1], z + corners[i][2], sky, torch + sway,
+        const flag = sway && corners[i][1] > 0 ? FLAG_SWAY : 0;
+        g.v(x + corners[i][0], y + corners[i][1], z + corners[i][2], sky, torch + flag,
           tr, tg, tb, us[i], vs[i]);
       }
       g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);

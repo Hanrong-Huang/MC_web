@@ -1,5 +1,5 @@
 // Fire: flames lit by flint & steel or lightning. Each fire burns for a few
-// seconds (forever on netherrack/magma), creeps into neighbouring flammable
+// seconds (forever on netherrack/magma/soul blocks), creeps into neighbouring flammable
 // blocks, consumes them, and is doused by rain. Ticked a few times a second
 // from the main logic loop; live fires persist with the save.
 
@@ -55,7 +55,7 @@ export class FireSystem {
   /** Is this flame fed forever (netherrack / magma underneath)? */
   private eternal(x: number, y: number, z: number): boolean {
     const below = this.world.getBlock(x, y - 1, z);
-    return below === B.NETHERRACK || below === B.MAGMA;
+    return below === B.NETHERRACK || below === B.MAGMA || below === B.SOUL_SAND || below === B.SOUL_SOIL;
   }
 
   private loaded(x: number, z: number): boolean {

@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { World } from './World';
 import { moveEntity, inWater, rayAABB, Vec3, MoveResult } from './Physics';
-import { B, I, def, hasDef, CROSS_BLOCKS, spriteNameFor, CAPTURABLE, mobLabel } from './Blocks';
+import { B, I, def, hasDef, CROSS_BLOCKS, spriteNameFor, CAPTURABLE, mobLabel, BLAST_PROOF } from './Blocks';
 import { Atlas, extrudeSpriteGeometry, shapedItemGeometry, BLOCK_SPRITE_ICONS } from './Textures';
 import { AudioEngine } from './Audio';
 import { SEA_LEVEL } from './WorldGenerator';
@@ -1375,7 +1375,7 @@ export class EntityManager {
           if (d > power - 0.7 && Math.random() < 0.45) continue; // ragged crater edge
           const bxp = cx + dx, byp = cy + dy, bzp = cz + dz;
           const id = this.world.getBlock(bxp, byp, bzp);
-          if (id === B.AIR || id === B.WATER || id === B.BEDROCK) continue;
+          if (id === B.AIR || id === B.WATER || BLAST_PROOF.has(id)) continue;
           if (id === B.TNT) {
             this.world.setBlock(bxp, byp, bzp, B.AIR);
             this.spawnTnt(bxp, byp, bzp, 0.3 + Math.random() * 0.6);
