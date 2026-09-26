@@ -2230,7 +2230,11 @@ export class EntityManager {
     const res = moveEntity(this.world, e.pos, e.vel, dt, e.box);
     // striders walk on lava: its surface is a floor, and one that sank bobs up
     if (e.kind === 'strider') {
-      const x = Math.floor(e.pos.x), z = Math.floor(e.pos.z), fy = Math.floor(e.pos.y - 0.02);
+      const x = Math.floor(e.pos.x), z = Math.floor(e.pos.z);
+      let fy = Math.floor(e.pos.y - 0.02);
+      // a long frame can drop it clean through a one-deep pool onto the bed
+      // below: its feet are then level with the lava cell, not above it
+      if (this.world.getBlock(x, fy, z) !== B.LAVA && this.world.getBlock(x, fy + 1, z) === B.LAVA) fy++;
       if (this.world.getBlock(x, fy, z) === B.LAVA) {
         if (this.world.getBlock(x, fy + 1, z) === B.LAVA) e.vel.y = Math.max(e.vel.y, 4);
         else if (e.vel.y <= 0) { e.pos.y = fy + 1; e.vel.y = 0; res.onGround = true; }
