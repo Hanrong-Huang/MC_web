@@ -2607,6 +2607,7 @@ class App {
     window.addEventListener('touchend', unlock, { capture: true });
     // resume audio when returning to the tab (mobile suspends it in the background)
     document.addEventListener('visibilitychange', () => { if (!document.hidden) this.audio.ensure(); });
+    (window as unknown as { __audio: AudioEngine }).__audio = this.audio; // dev: title-screen music harnesses
     void this.showMenu();
   }
 
