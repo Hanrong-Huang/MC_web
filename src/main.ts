@@ -33,6 +33,7 @@ import { craftRemainders } from './engine/Inventory';
 import { ExperienceOrbs, XpBar } from './engine/Experience';
 import { Throwables } from './engine/Throwables';
 import { Campfires } from './engine/Campfires';
+import { fillNetherChest } from './engine/NetherStructures';
 import { MapOverlay } from './ui/MapOverlay';
 import { Weather } from './engine/Weather';
 import { getControls, setControls } from './engine/ControlsSettings';
@@ -885,7 +886,8 @@ class Game {
         st = kind === 'furnace' ? new FurnaceState() : new ChestState();
         // generated chests roll loot on first open, then become normal chests
         if (kind === 'chest' && this.world.getBlock(x, y, z) === B.CHEST_LOOT) {
-          this.rollLoot(st as ChestState);
+          if (this.world.dimension === 'nether') fillNetherChest((st as ChestState).slots, this.world.generator.seed, x, y, z);
+          else this.rollLoot(st as ChestState);
           this.world.setBlock(x, y, z, B.CHEST);
           this.audio.play('level');
           this.adv.unlock('dungeon');

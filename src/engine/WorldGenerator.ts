@@ -14,6 +14,7 @@ import { B } from './Blocks';
 import type { DoorState } from './World';
 import { LM_CELL, planLandmark, drawLandmark, type Landmark } from './Landmarks';
 import { NetherGen, type NetherBiome } from './NetherGen';
+import { drawNetherStructures } from './NetherStructures';
 
 // Raised well above bedrock (y=0) so there's a deep stone column to mine through.
 export const SEA_LEVEL = 64;
@@ -866,6 +867,8 @@ export class WorldGenerator {
 
     if (this.dimension === 'nether') {
       this.nether.generate(chunk);
+      // --- Nether structures (fortresses, bastions, ruined portals, small features) ---
+      drawNetherStructures(this, chunk);
       chunk.computeHeightmap(); // mark ready like the overworld path does at the end
       chunk.scanTorches();
       chunk.ready = true;
@@ -1734,6 +1737,11 @@ export class WorldGenerator {
       this.put(chunk, hx, wy, hz, B.BED_HEAD);
       this.pendingBeds.push([`${hx},${wy},${hz}`, dir]);
     }
+  }
+
+  /** Shaped-block meta (stair facing, campfire facing, …) for a block a structure wrote. */
+  putMeta(chunk: Chunk, wx: number, wy: number, wz: number, meta: number): void {
+    if (this.inChunk(chunk, wx, wz)) this.pendingBeds.push([`${wx},${wy},${wz}`, meta]);
   }
 
   /** Fill a column with `id` from just above the natural ground up to `topY`
