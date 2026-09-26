@@ -16,7 +16,8 @@
 // bus has a voice cap so a TNT chain or a mob crowd can't swamp the CPU.
 
 import { SoundClass, def, hasDef } from './Blocks';
-import { compose, fragment, stinger, mtof, MNote, TITLE_SEED, MusicEnv, MusicBiomeKey, StingerKind } from './AudioMusic';
+import { compose, fragment, stinger, mtof, MNote, TITLE_SEED, MusicEnv, MusicBiomeKey, StingerKind, Inst } from './AudioMusic';
+import type { SampleBank, SampledInst } from './AudioSamples';
 import { probeScape, Scape, ScapeWorld, ScapePlayer, ScapeMob, ScapeWeather } from './AudioScape';
 
 export type SfxName =
@@ -52,7 +53,9 @@ type Mat = 'grass' | 'plant' | 'gravel' | 'sand' | 'snow' | 'wood' | 'stone' | '
   | 'wool' | 'nether' | 'soul' | 'amethyst' | 'none';
 type Act = 'step' | 'hit' | 'break' | 'place';
 
-interface Piece { notes: MNote[]; i: number; t0: number; end: number; out: GainNode; env: string; fading: boolean; name: string; tonic: number; minor: boolean }
+interface Piece { notes: MNote[]; i: number; t0: number; end: number; out: GainNode; env: string; fading: boolean; name: string; tonic: number; minor: boolean; sampled: ReadonlySet<Inst> }
+/** No sampled instruments (synth voices only). */
+const NONE: ReadonlySet<Inst> = new Set();
 /** A continuous ambience loop: sources → (own filters) → lp → gain → pan → amb bus. */
 interface Bed { srcs: AudioScheduledSourceNode[]; g: GainNode; pan: StereoPannerNode; lp: BiquadFilterNode; nodes: AudioNode[]; x: Record<string, AudioNode>; quiet: number } // quiet = ctx time it fell silent (0 = playing)
 /** How rain is heard: out in it, under a canopy, under a roof, or deep inside. */
@@ -133,6 +136,11 @@ export class AudioEngine {
   // held so the effect graph isn't garbage-collected mid-session
   private fx: AudioNode[] = [];
   private pumpTimer = 0;
+  // sampled instruments (AudioSamples.ts, lazily imported with Tone.js)
+  private samples: SampleBank | null = null;
+  private samplesAt = -1;       // ctx time sample loading was requested (-1 = never)
+  private samplesLoad: Promise<void> | null = null;
+  private samplesDone = false;
 
   // generative music state
   private musicMode: 'menu' | 'game' = 'game';
@@ -420,6 +428,10 @@ export class AudioEngine {
         this.pumpTimer = window.setInterval(this.pump, 120);
         // build the rain texture ahead of time, off the critical path
         window.setTimeout(() => { if (!this.rainBuf && this.ctx) this.rainBuf = this.makeRain(); }, 4000);
+        // real instrument samples for the music: fetched in the background
+        // once the context exists (a user gesture made it), synth until then
+        this.samplesAt = ctx.currentTime;
+        window.setTimeout(() => { void this.loadSamples(); }, 250);
       }
       this.nextPieceAt = ctx.currentTime + (this.musicMode === 'menu' ? 0.6 : 6);
       return true;
@@ -429,13 +441,34 @@ export class AudioEngine {
     }
   }
 
+  /** Load the sampled music instruments (Tone.js + public/audio). Called by
+   *  itself on a live context; harnesses call it on an offline one. Resolves
+   *  to the instruments that ended up sampled. */
+  async loadSamples(only?: readonly SampledInst[]): Promise<string[]> {
+    const ctx = this.ctx;
+    if (!ctx) return [];
+    this.samplesLoad ??= (async () => {
+      try {
+        const { SampleBank } = await import('./AudioSamples');
+        const bank = new SampleBank(ctx, 'audio/') // relative to the page, like the build's base './';
+        this.samples = bank;
+        await bank.load(only);
+      } catch { /* offline / blocked: the synth voices carry on */ }
+      this.samplesDone = true;
+    })();
+    await this.samplesLoad;
+    return [...(this.samples?.ready() ?? [])];
+  }
+
   /** Voice / scheduler counters (for harnesses and debugging). */
-  debugStats(): { live: Record<Pool, number>; peak: Record<Pool, number>; piece: string | null; rain: string; nether: boolean; beds: Record<string, number>; threat: number; fading: number } {
+  debugStats(): { live: Record<Pool, number>; peak: Record<Pool, number>; piece: string | null; rain: string; nether: boolean; beds: Record<string, number>; threat: number; fading: number; samples: Record<string, string> | null; sampledNotes: number; sampleVoices: number } {
     const beds: Record<string, number> = {};
     for (const [k, b] of this.beds) beds[k] = +b.g.gain.value.toFixed(4);
     return {
       live: { ...this.live }, peak: { ...this.livePeak }, piece: this.piece?.name ?? null, rain: this.rainState,
       nether: !!this.netherBed, beds, threat: +this.threat.toFixed(2), fading: this.old.length,
+      samples: this.samples?.status() ?? null, sampledNotes: this.samples?.played ?? 0,
+      sampleVoices: this.samples && this.ctx ? this.samples.voices(this.ctx.currentTime) : 0,
     };
   }
 
@@ -2219,7 +2252,7 @@ export class AudioEngine {
       const n = p.notes[p.i++];
       const at = p.t0 + n.t;
       if (at < now - 0.08) continue; // tab was throttled — drop, don't pile up
-      this.note(n, Math.max(at, now + 0.01), p.out);
+      this.note(n, Math.max(at, now + 0.01), p.out, p.sampled);
     }
   }
 
@@ -2228,7 +2261,7 @@ export class AudioEngine {
     // pieces fading under a crossfade keep playing (quieter and quieter) until done
     if (this.old.length) {
       this.old = this.old.filter((q) => {
-        if (now > q.end) { q.out.disconnect(); return false; }
+        if (now > q.end) { q.out.disconnect(); this.samples?.drop(q.out); return false; }
         this.schedule(q, now, Math.min(now + ahead, q.end - 0.3));
         return true;
       });
@@ -2239,6 +2272,7 @@ export class AudioEngine {
       this.schedule(p, now, now + ahead);
       if (now > p.end) {
         p.out.disconnect();
+        this.samples?.drop(p.out);
         this.piece = null;
         // a natural ending earns a silence
         this.nextPieceAt = now + (this.musicMode === 'menu' ? rand(5, 10) : this.scape?.creative ? rand(25, 60) : rand(35, 90));
@@ -2247,7 +2281,10 @@ export class AudioEngine {
     }
     if (!this.settings.music || this.settings.musicVol <= 0) return;
     const live = this.musicMode === 'menu' || now - this.envAt < 4;
-    if (live && now >= this.nextPieceAt) this.startPiece(now);
+    // give the piano samples a few seconds to arrive so the title theme opens
+    // on the real instrument (the synth takes over if they don't)
+    const waiting = this.samplesAt >= 0 && !this.samplesDone && this.samples?.pending('piano') !== false && now - this.samplesAt < 6;
+    if (live && now >= this.nextPieceAt && !waiting) this.startPiece(now);
   }
 
   /** What the music should be about right now. */
@@ -2298,6 +2335,7 @@ export class AudioEngine {
     this.piece = {
       notes: c.notes, i: 0, t0: now + 0.2, end: now + 0.2 + c.len + 9, out,
       env: menu ? 'menu' : this.musicCtx, fading: false, name: c.name, tonic: c.tonic, minor: c.minor,
+      sampled: this.samples?.ready() ?? NONE,
     };
     return c.name;
   }
@@ -2328,7 +2366,8 @@ export class AudioEngine {
     this.lastAt.set('sting', now);
     const c = stinger(kind, (Math.random() * 2 ** 31) | 0, this.piece?.tonic);
     const t0 = now + 0.15;
-    for (const n of c.notes) this.note(n, t0 + n.t, this.musicBus);
+    const sampled = this.samples?.ready() ?? NONE;
+    for (const n of c.notes) this.note(n, t0 + n.t, this.musicBus, sampled);
     const p = this.piece;
     if (p) {
       const g = p.out.gain;
@@ -2382,10 +2421,12 @@ export class AudioEngine {
     }
   }
 
-  /** Instantiate one scored note on its instrument. */
-  private note(n: MNote, at: number, to: AudioNode): void {
+  /** Instantiate one scored note on its instrument: the sampled voice when the
+   *  piece has it, else the synth. The combat layer stays synth by design. */
+  private note(n: MNote, at: number, to: AudioNode, sampled: ReadonlySet<Inst> = NONE): void {
     const f = mtof(n.m);
     const pan = n.p ?? clamp((n.m - 62) / 60, -0.3, 0.3);
+    if (sampled.has(n.i) && this.samples?.play(n.i as SampledInst, at, n.m, n.v, n.d, n.i === 'strings' ? pan * 0.5 : pan, to)) return;
     switch (n.i) {
       case 'piano': this.piano(at, f, n.v, n.d, to, pan); break;
       case 'epiano': this.epiano(at, f, n.v, n.d, to, pan); break;
@@ -2808,7 +2849,8 @@ export class AudioEngine {
     if (!ctx || !this.musicBus) return;
     const c = fragment(env, (Math.random() * 2 ** 31) | 0);
     const t0 = ctx.currentTime + 0.1;
-    for (const n of c.notes) this.note(n, t0 + n.t, this.musicBus);
+    const sampled = this.samples?.ready() ?? NONE;
+    for (const n of c.notes) this.note(n, t0 + n.t, this.musicBus, sampled);
   }
 
   /** Probe the world around the player a few times a second and steer every

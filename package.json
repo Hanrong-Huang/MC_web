@@ -10,7 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "three": "^0.180.0"
+    "three": "^0.180.0",
+    "tone": "^15.1.22"
   },
   "devDependencies": {
     "@types/three": "^0.180.0",
