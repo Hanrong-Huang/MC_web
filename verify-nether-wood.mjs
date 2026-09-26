@@ -329,6 +329,10 @@ const loaded = await page.evaluate(async ({ x, y, z, lx, lz, ox, oy, oz }) => {
   r.resavedV2 = !!st.world[key] && !P.rleIsLegacy(st.world[key]);
   return r;
 }, { ...legacy, ox, oy, oz });
+// the save was made standing in the portal we came home through: reloading
+// must not carry us straight back to the Nether (it used to, 0.6 s of sim
+// time after load, which made this section flaky on a fast machine)
+check('old save: reloaded in the portal, still in the Overworld', loaded.dim === 'overworld', loaded.dim);
 check('old save: blocks restored', loaded.gold, JSON.stringify(loaded));
 check('old save: v2 chunks in the same save still load', loaded.platform);
 check('old save: hanging roots became weeping vines', loaded.weeping);

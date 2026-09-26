@@ -55,8 +55,8 @@ export interface ChunkMeshData { solid: GeoArrays | null; water: GeoArrays | nul
 /** Vertex flags packed into the torch channel (see header). */
 export const FLAG_SWAY = 2;
 export const FLAG_LAVA = 4;
-/** Soul-light share of the block light, 0..7 steps of this (cube faces only):
- *  the shader shifts the torch colour toward soul-fire cyan by that much. */
+/** Soul-light share of the block light, 0..7 steps of this: the shader shifts
+ *  the torch colour toward soul-fire cyan by that much. */
 export const FLAG_SOUL = 8;
 
 // face order: +x, -x, +y, -y, +z, -z
@@ -94,6 +94,7 @@ for (let i = 0; i < 16; i++) { const l = i / 15; LIGHT_CURVE[i] = l / ((1 - l) *
 const SKY9 = new Float32Array(9);
 const TORCH9 = new Float32Array(9);
 const SOUL9 = new Float32Array(9);
+const WARM9 = new Float32Array(9);
 const OCC9 = new Uint8Array(9);
 const SOLID9 = new Uint8Array(9);
 
@@ -128,9 +129,13 @@ const SKY_LEVEL = 15;
 // out column-major (y innermost) so a column's open sky is one fill() call.
 const RX0 = -15, RX1 = 30;
 const RW = RX1 - RX0 + 1; // 46
+// Block light is two floods: TORCHR carries the warm emitters (torches,
+// glowstone, lava...) and SOULR the soul flames. The light a cell gets is the
+// brighter of the two (one fill of every emitter would give the same levels);
+// its colour is the mix of both, weighted by each one's brightness.
 const TORCHR = new Uint8Array(RW * RW * CY);
 const SKYR = new Uint8Array(RW * RW * CY);
-const SOULR = new Uint8Array(RW * RW * CY); // soul-fire share of the block light
+const SOULR = new Uint8Array(RW * RW * CY);
 const QLEN = 1 << 17;
 const QUEUE = new Int32Array(QLEN);
 const QMASK = QLEN - 1;
@@ -143,6 +148,13 @@ function regionIdx(rx: number, rz: number, y: number): number {
 let soulOn = false;
 /** Full soul share: FLAG_SOUL eighths for light that is entirely soul fire. */
 const SOUL_FULL = 7 * 8;
+/** Soul share of a warm + soul light pair as 0..7 eighths: each source tints
+ *  in proportion to how much light it actually delivers, so a torch beside a
+ *  distant soul lantern stays warm and equal sources blend half and half. */
+export function soulEighths(warm: number, soul: number): number {
+  if (soul <= 0.02) return 0;
+  return Math.round((soul / (warm + soul)) * 7);
+}
 /** Soul-fire share of the block light in local cell (x,y,z), as FLAG_SOUL
  *  eighths ready to add to a vertex's torch channel — the special emitters
  *  (torches, plants, doors, shaped blocks...) sample their own cell the way
@@ -150,9 +162,7 @@ const SOUL_FULL = 7 * 8;
 function soulFlagAt(x: number, y: number, z: number): number {
   if (!soulOn || y < 0 || y >= CY || x < RX0 || x > RX1 || z < RX0 || z > RX1) return 0;
   const ri = regionIdx(x, z, y);
-  const t = LIGHT_CURVE[TORCHR[ri]];
-  if (t <= 0.02) return 0;
-  return Math.round(Math.min(1, LIGHT_CURVE[SOULR[ri]] / t) * 7) * FLAG_SOUL;
+  return soulEighths(LIGHT_CURVE[TORCHR[ri]], LIGHT_CURVE[SOULR[ri]]) * FLAG_SOUL;
 }
 
 // Padded block copy of the chunk + a 1-block rim (18x18 columns, y from -1 to
@@ -484,18 +494,19 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
         const meta = world.bedFacings.get(`${c.cx * CX + (t & 15)},${t >> 8},${c.cz * CZ + ((t >> 4) & 15)}`) ?? 0;
         return emitLevel(id, meta);
       }
-      if (soulSource(c, t)) { hasSoul = true; return id === B.FIRE ? 10 : emitLevel(id); }
       return id === B.PORTAL ? emitLevel(id) : GLOW_LEVEL;
     };
     for (const c of refs) {
       if (!c || (c.torches.size === 0 && c.glowers.size === 0)) continue;
       for (const t of c.torches) seed(c, t, TORCH_LEVEL);
-      for (const t of c.glowers) seed(c, t, glowLevel(c, t)); // glowstone/lamp burn a touch brighter
+      for (const t of c.glowers) {
+        if (soulSource(c, t)) { hasSoul = true; continue; } // flooded separately below
+        seed(c, t, glowLevel(c, t)); // glowstone/lamp burn a touch brighter
+      }
     }
     floodFill(TORCHR, refs, qTail, 0);
     if (hasSoul) {
-      // a second fill carrying only the soul flames: where it matches the
-      // combined light, that light is cold blue
+      // the soul flames get their own fill (see TORCHR)
       SOULR.fill(0);
       qTail = 0;
       for (const c of refs) {
@@ -515,7 +526,8 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
   };
   const torchAt = (x: number, y: number, z: number): number => {
     if (!hasLights || y < 0 || y >= CY || x < RX0 || x > RX1 || z < RX0 || z > RX1) return 0;
-    return LIGHT_CURVE[TORCHR[regionIdx(x, z, y)]];
+    const ri = regionIdx(x, z, y);
+    return LIGHT_CURVE[hasSoul ? Math.max(TORCHR[ri], SOULR[ri]) : TORCHR[ri]];
   };
 
   // --- geometry --------------------------------------------------------------
@@ -686,13 +698,17 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
               OCC9[gi] = OCCLUDE_LUT[gid];
               SOLID9[gi] = OPAQUE_LUT[gid];
               // inline skyAt/torchAt: gx/gz are always inside the light region
-              if (gy >= CY) { SKY9[gi] = 1; TORCH9[gi] = 0; SOUL9[gi] = 0; }
-              else if (gy < 0) { SKY9[gi] = 0; TORCH9[gi] = 0; SOUL9[gi] = 0; }
+              if (gy >= CY) { SKY9[gi] = 1; TORCH9[gi] = 0; SOUL9[gi] = 0; WARM9[gi] = 0; }
+              else if (gy < 0) { SKY9[gi] = 0; TORCH9[gi] = 0; SOUL9[gi] = 0; WARM9[gi] = 0; }
               else {
                 const ri = ((gz - RX0) * RW + (gx - RX0)) * CY + gy;
                 SKY9[gi] = LIGHT_CURVE[SKYR[ri]];
-                TORCH9[gi] = hasLights ? LIGHT_CURVE[TORCHR[ri]] : 0;
-                SOUL9[gi] = hasSoul ? LIGHT_CURVE[SOULR[ri]] : 0;
+                if (hasSoul) {
+                  const w = TORCHR[ri], sl = SOULR[ri];
+                  WARM9[gi] = LIGHT_CURVE[w];
+                  SOUL9[gi] = LIGHT_CURVE[sl];
+                  TORCH9[gi] = LIGHT_CURVE[w > sl ? w : sl];
+                } else TORCH9[gi] = hasLights ? LIGHT_CURVE[TORCHR[ri]] : 0;
               }
             }
           }
@@ -739,7 +755,7 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
             }
             // soul-fire share of this corner's block light, in eighths (0..7)
             let soul = 0;
-            if (hasSoul && !isLava && torch > 0.02) soul = Math.round(Math.min(1, cornerLight(SOUL9, a, b) / torch) * 7);
+            if (hasSoul && !isLava && torch > 0.02) soul = soulEighths(cornerLight(WARM9, a, b), cornerLight(SOUL9, a, b));
             target.v(x + px, y + py, z + pz, k * sky, k * torch + flag + soul * FLAG_SOUL,
               tint[0], tint[1], tint[2],
               a ? rect.u1 : rect.u0,

@@ -2703,5 +2703,9 @@ export class Player {
     this.xpLevel = Math.max(0, p.xpLevel ?? 0) | 0;
     this.xpProgress = Math.max(0, Math.min(0.999, p.xpProgress ?? 0));
     this.lastDeath = p.lastDeath ? { ...p.lastDeath } : null;
+    // loading a world counts as arriving where you stand: a save made right
+    // after coming through a portal must not carry you straight back
+    this.portalExitPending = true;
+    this.portalTimer = 0;
   }
 }
