@@ -199,10 +199,15 @@ const DECOR_RECIPES: Recipe[] = [
   // Nether wood: stems saw into planks; fences/gates keep their colour
   { shape: [[B.CRIMSON_STEM]], out: B.CRIMSON_PLANKS, n: 4 },
   { shape: [[B.WARPED_STEM]], out: B.WARPED_PLANKS, n: 4 },
-  ...([[B.CRIMSON_PLANKS, B.CRIMSON_FENCE, B.CRIMSON_FENCE_GATE], [B.WARPED_PLANKS, B.WARPED_FENCE, B.WARPED_FENCE_GATE]] as const)
-    .flatMap(([NP, fence, gate]): Recipe[] => [
+  ...([
+    [B.CRIMSON_PLANKS, B.CRIMSON_FENCE, B.CRIMSON_FENCE_GATE, I.CRIMSON_DOOR, B.CRIMSON_TRAPDOOR],
+    [B.WARPED_PLANKS, B.WARPED_FENCE, B.WARPED_FENCE_GATE, I.WARPED_DOOR, B.WARPED_TRAPDOOR],
+  ] as const)
+    .flatMap(([NP, fence, gate, door, trap]): Recipe[] => [
       { shape: [[NP, S, NP], [NP, S, NP]], out: fence, n: 3 },
       { shape: [[S, NP, S], [S, NP, S]], out: gate, n: 1 },
+      { shape: [[NP, NP], [NP, NP], [NP, NP]], out: door, n: 3 },
+      { shape: [[NP, NP, NP], [NP, NP, NP]], out: trap, n: 2 },
     ]),
   { shape: [[FG, FG, FG], [FG, FG, FG]], out: B.GLASS_PANE, n: 16 },
   { shape: [[0, FE, 0], [FE, B.TORCH, FE], [0, FE, 0]], out: B.LANTERN, n: 2 },
@@ -349,9 +354,9 @@ const RECIPES: Recipe[] = [
   { shape: [[ST, ST], [ST, ST]], out: B.WOOL, n: 1 },
   // buildable interactivity
   { shape: [[P, P], [P, P], [P, P]], out: I.WOOD_DOOR, n: 3 },
-  { shape: [[P, P, P], [P, P, P], [0, 0, 0]], out: I.WOOD_DOOR, n: 3 },
   { shape: [[P, P, P], [0, S, 0], [0, S, 0]], out: B.LADDER, n: 3 },
-  { shape: [[P, P, P], [P, 0, P], [P, P, P]], out: B.TRAPDOOR, n: 2 },
+  // 3x2 like vanilla (the old ring shape was the chest's, so it never crafted)
+  { shape: [[P, P, P], [P, P, P]], out: B.TRAPDOOR, n: 2 },
   // tools & utilities
   { shape: [[0, 0, S], [0, S, ST], [S, 0, 0]], out: I.FISHING_ROD, n: 1 },
   // compass: 4 iron in a diamond around a central iron (dial)
@@ -433,18 +438,35 @@ const TAG_OF = new Map<number, number>([
   [B.CRIMSON_SLAB, B.OAK_SLAB], [B.WARPED_SLAB, B.OAK_SLAB],
 ]);
 
-/** Every id a recipe ingredient accepts (itself first), for the recipe book. */
-export function ingredientOptions(id: number): number[] {
-  const out = [id];
-  for (const [alt, base] of TAG_OF) if (base === id) out.push(alt);
-  return out;
+/** Outputs that belong to one wood (oak slab, crimson door ...). Their recipes
+ *  need exactly that wood's planks, so the tag pass never applies to them:
+ *  crimson planks make crimson stairs, never oak ones. */
+const WOOD_SPECIFIC = new Set<number>([
+  B.OAK_SLAB, B.OAK_STAIRS, B.OAK_FENCE, B.FENCE_GATE, I.WOOD_DOOR, B.TRAPDOOR,
+  B.CRIMSON_SLAB, B.CRIMSON_STAIRS, B.CRIMSON_FENCE, B.CRIMSON_FENCE_GATE, I.CRIMSON_DOOR, B.CRIMSON_TRAPDOOR,
+  B.WARPED_SLAB, B.WARPED_STAIRS, B.WARPED_FENCE, B.WARPED_FENCE_GATE, I.WARPED_DOOR, B.WARPED_TRAPDOOR,
+]);
+
+/** Is this recipe output a particular wood's own block (no plank substitution)? */
+export function isWoodSpecific(out: number): boolean {
+  return WOOD_SPECIFIC.has(out);
 }
 
-function findRecipe(shape: number[][]): Recipe | null {
+/** Every id a recipe ingredient accepts (itself first), for the recipe book.
+ *  Pass the recipe's output: wood-specific recipes accept only their own wood. */
+export function ingredientOptions(id: number, out?: number): number[] {
+  const opts = [id];
+  if (out !== undefined && WOOD_SPECIFIC.has(out)) return opts;
+  for (const [alt, base] of TAG_OF) if (base === id) opts.push(alt);
+  return opts;
+}
+
+function findRecipe(shape: number[][], tagged = false): Recipe | null {
   for (const r of RECIPES) {
     // the portal recipe exists only as a recipe-book hint; the real way to make
     // one is to ignite an obsidian frame with flint & steel (see Player).
     if (r.out === B.PORTAL) continue;
+    if (tagged && WOOD_SPECIFIC.has(r.out)) continue;
     if (shapeEquals(shape, r.shape) || shapeEquals(shape, mirror(r.shape))) return r;
   }
   return null;
@@ -455,7 +477,7 @@ export function matchRecipe(grid: Slot[], w: number): { id: number; count: numbe
   if (!cropped) return null;
   let r = findRecipe(cropped);
   if (!r && cropped.some((row) => row.some((id) => TAG_OF.has(id)))) {
-    r = findRecipe(cropped.map((row) => row.map((id) => TAG_OF.get(id) ?? id)));
+    r = findRecipe(cropped.map((row) => row.map((id) => TAG_OF.get(id) ?? id)), true);
   }
   return r ? { id: r.out, count: r.n } : null;
 }

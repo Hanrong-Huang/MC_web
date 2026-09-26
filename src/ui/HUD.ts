@@ -6,7 +6,7 @@
 
 import { Atlas } from '../engine/Textures';
 import { Inventory, Slot, matchRecipe, FurnaceState, ChestState, SMELT_TIME, allRecipes, RecipeView, furnaceSlotFor, ingredientOptions } from '../engine/Inventory';
-import { def, CREATIVE_ITEMS, I, B, spriteNameFor, mobLabel, enchantLabel } from '../engine/Blocks';
+import { def, CREATIVE_ITEMS, I, B, spriteNameFor, mobLabel, enchantLabel, DOOR_ITEMS } from '../engine/Blocks';
 import { SaveSummary, SlotData } from '../engine/Persistence';
 import { AudioEngine, SfxName, MobVoice } from '../engine/Audio';
 import type { GameMode } from '../engine/Player';
@@ -2051,21 +2051,22 @@ ${seedLine.textContent}`;
     return w <= craftW && h <= craftW;
   }
 
-  /** How many of an ingredient the player holds, counting tag alternatives (any planks). */
-  private haveCount(inv: Inventory, id: number): number {
-    return ingredientOptions(id).reduce((n, alt) => n + inv.count(alt), 0);
+  /** How many of an ingredient the player holds for recipe `out`, counting tag
+   *  alternatives (any planks) unless the output is a particular wood's own. */
+  private haveCount(inv: Inventory, id: number, out: number): number {
+    return ingredientOptions(id, out).reduce((n, alt) => n + inv.count(alt), 0);
   }
 
   private canFillRecipe(r: RecipeView, inv: Inventory, craftW: number): boolean {
     if (r.out === B.PORTAL) return false;
-    return this.recipeFitsGrid(r, craftW) && r.counts.every((need) => this.haveCount(inv, need.id) >= need.count);
+    return this.recipeFitsGrid(r, craftW) && r.counts.every((need) => this.haveCount(inv, need.id, r.out) >= need.count);
   }
 
   private recipeCategory(r: RecipeView): Exclude<RecipeFilter, 'all' | 'ready'> {
     const d = def(r.out);
     if (d.toolInfo || d.bow || r.out === I.FISHING_ROD) return 'tools';
     if (d.food) return 'food';
-    if (d.block || r.out === I.WOOD_DOOR) return 'blocks';
+    if (d.block || DOOR_ITEMS.has(r.out)) return 'blocks';
     return 'utility';
   }
 
@@ -2087,7 +2088,7 @@ ${seedLine.textContent}`;
     if (!this.recipeFitsGrid(r, craftW)) return 'Requires crafting table';
     if (this.cursor) return 'Clear cursor first';
     const missing = r.counts
-      .map((need) => ({ ...need, have: this.haveCount(inv, need.id) }))
+      .map((need) => ({ ...need, have: this.haveCount(inv, need.id, r.out) }))
       .filter((need) => need.have < need.count);
     if (missing.length === 0) return 'Ready';
     return `Missing ${missing.map((need) => `${need.count - need.have} ${def(need.id).label}`).join(', ')}`;
@@ -2134,12 +2135,22 @@ ${seedLine.textContent}`;
     if (this.cursor || !this.canFillRecipe(r, inv, view.craftW)) return false;
     this.returnCraftGrid(view, inv);
     if (!this.canFillRecipe(r, inv, view.craftW)) return false;
+    // tagged ingredients (any planks) prefer one variant that covers every
+    // cell, so a chest comes out of one wood; wood-specific recipes (oak
+    // stairs, crimson door ...) only ever take their own planks
+    const needOf = new Map(r.counts.map((c) => [c.id, c.count]));
+    const prefer = new Map<number, number>();
+    for (const [id, n] of needOf) {
+      const whole = ingredientOptions(id, r.out).find((alt) => inv.count(alt) >= n);
+      if (whole !== undefined) prefer.set(id, whole);
+    }
     for (let y = 0; y < r.shape.length; y++) {
       for (let x = 0; x < r.shape[y].length; x++) {
         const id = r.shape[y][x];
         if (id === 0) continue;
-        // tagged ingredients (any planks) take whichever variant is on hand
-        const got = ingredientOptions(id).find((alt) => inv.count(alt) > 0) ?? id;
+        const pref = prefer.get(id);
+        const got = pref !== undefined && inv.count(pref) > 0 ? pref
+          : ingredientOptions(id, r.out).find((alt) => inv.count(alt) > 0) ?? id;
         if (!this.takeFromInventory(inv, got, 1)) return false;
         view.craftGrid[y * view.craftW + x] = { id: got, count: 1 };
       }
@@ -2162,7 +2173,7 @@ ${seedLine.textContent}`;
   private recipeNeedsEl(r: RecipeView, inv: Inventory, parent: HTMLElement): void {
     const needs = el('div', 'recipe-needs', parent);
     for (const need of r.counts) {
-      const have = this.haveCount(inv, need.id);
+      const have = this.haveCount(inv, need.id, r.out);
       const chip = el('span', have >= need.count ? 'need-ok' : 'need-miss', needs);
       chip.textContent = `${Math.min(have, need.count)}/${need.count} ${def(need.id).label}`;
     }
@@ -2614,7 +2625,7 @@ ${seedLine.textContent}`;
             if (q && !label.includes(q) && !d.name.toLowerCase().includes(q)) continue;
             const cat = d.toolInfo || d.bow || d.armor || id === I.FISHING_ROD ? 'tools'
               : d.food ? 'food'
-              : d.block || id === I.WOOD_DOOR ? 'blocks'
+              : d.block || DOOR_ITEMS.has(id) ? 'blocks'
               : 'utility';
             if (this.creativeFilter !== 'all' && cat !== this.creativeFilter) continue;
             shown++;

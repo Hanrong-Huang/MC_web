@@ -5,8 +5,9 @@ import {
   B, B2, I, breakTime, canHarvest, attackCooldown, attackStrength, foodSaturation, pickItemFor, def,
   CREATIVE_ITEMS, shapeBoxes, slabFullBlock, connectsTo, enchantsFor, enchantLabel, repairMaterial,
   ID_LIMIT, allDefs, crossTile, CLIMBABLE, vineDrops,
+  DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, doorBlocksFor, doorItemFor, FLAMMABLE,
 } from './src/engine/Blocks.ts';
-import { craftRemainders } from './src/engine/Inventory.ts';
+import { craftRemainders, ingredientOptions, isWoodSpecific } from './src/engine/Inventory.ts';
 import { xpForLevel } from './src/engine/Player.ts';
 import { campfireCooks } from './src/engine/Campfires.ts';
 import { migrateLegacyChunk } from './src/engine/World.ts';
@@ -289,6 +290,40 @@ check('pick stone -> stone', pickItemFor(B.STONE) === B.STONE);
   check('nether slabs double into their planks', slabFullBlock(B.CRIMSON_SLAB) === CP);
   check('nether fences join oak fences', connectsTo(B.CRIMSON_FENCE, B.OAK_FENCE) && connectsTo(B.OAK_FENCE, B.WARPED_FENCE_GATE));
   check('nether gate opens', shapeBoxes(B.WARPED_FENCE_GATE, 0, 0, true, true)?.length === 0);
+  // wood-specific outputs need their own wood; generic plank recipes take any
+  check('crimson planks -> crimson slab', r9([CP, CP, CP, 0, 0, 0, 0, 0, 0]) === B.CRIMSON_SLAB);
+  check('oak slab recipe is not satisfied by mixed planks', r9([P, CP, P, 0, 0, 0, 0, 0, 0]) === undefined);
+  check('oak stairs not from crimson+oak', r9([CP, 0, 0, P, P, 0, P, P, P]) === undefined);
+  check('oak door not from crimson planks', r9([CP, CP, 0, CP, CP, 0, CP, CP, 0]) === I.CRIMSON_DOOR &&
+    r9([CP, CP, 0, P, P, 0, P, P, 0]) === undefined);
+  check('sticks from any planks', matchRecipe(g4(WP, 0, WP, 0), 2)?.id === I.STICK && matchRecipe(g4(P, 0, CP, 0), 2)?.id === I.STICK);
+  check('book: oak slab recipe accepts only oak planks',
+    ingredientOptions(P, B.OAK_SLAB).length === 1 && ingredientOptions(P, B.CHEST).includes(CP) && ingredientOptions(P, I.STICK).includes(WP));
+  check('book: wood-specific outputs flagged', isWoodSpecific(B.OAK_STAIRS) && isWoodSpecific(I.WOOD_DOOR) && isWoodSpecific(B.TRAPDOOR) &&
+    !isWoodSpecific(B.CHEST) && !isWoodSpecific(I.STICK) && !isWoodSpecific(B.BARREL));
+  // doors + trapdoors: 6 planks -> 3 doors / 2 trapdoors, per wood
+  const dr = matchRecipe(g9([P, P, 0, P, P, 0, P, P, 0]), 3);
+  check('oak door x3', dr?.id === I.WOOD_DOOR && dr.count === 3);
+  const td = matchRecipe(g9([P, P, P, P, P, P, 0, 0, 0]), 3);
+  check('oak trapdoor x2 (3x2)', td?.id === B.TRAPDOOR && td.count === 2);
+  check('chest is still the ring', r9([P, P, P, P, 0, P, P, P, P]) === B.CHEST);
+  const cd = matchRecipe(g9([0, CP, CP, 0, CP, CP, 0, CP, CP]), 3);
+  check('crimson door x3', cd?.id === I.CRIMSON_DOOR && cd.count === 3);
+  check('warped door', r9([WP, WP, 0, WP, WP, 0, WP, WP, 0]) === I.WARPED_DOOR);
+  const ct = matchRecipe(g9([0, 0, 0, CP, CP, CP, CP, CP, CP]), 3);
+  check('crimson trapdoor x2', ct?.id === B.CRIMSON_TRAPDOOR && ct.count === 2);
+  check('warped trapdoor', r9([WP, WP, WP, WP, WP, WP, 0, 0, 0]) === B.WARPED_TRAPDOOR);
+  check('mixed planks make no trapdoor', r9([WP, WP, WP, CP, CP, CP, 0, 0, 0]) === undefined);
+  check('door sets cover every wood', DOOR_LOWERS.has(B.CRIMSON_DOOR_LOWER) && DOOR_UPPERS.has(B.WARPED_DOOR_UPPER) &&
+    DOOR_IDS.has(B.DOOR_UPPER) && TRAPDOOR_IDS.has(B.WARPED_TRAPDOOR) && TRAPDOOR_IDS.has(B.TRAPDOOR));
+  check('door item places its own halves', doorBlocksFor(I.CRIMSON_DOOR)?.[0] === B.CRIMSON_DOOR_LOWER &&
+    doorBlocksFor(I.WARPED_DOOR)?.[1] === B.WARPED_DOOR_UPPER && doorBlocksFor(I.WOOD_DOOR)?.[0] === B.DOOR_LOWER && !doorBlocksFor(I.STICK));
+  check('door halves drop/pick their item', doorItemFor(B.WARPED_DOOR_UPPER) === I.WARPED_DOOR && pickItemFor(B.CRIMSON_DOOR_UPPER) === I.CRIMSON_DOOR &&
+    pickItemFor(B.DOOR_LOWER) === I.WOOD_DOOR);
+  check('nether doors are fireproof', !def(B.CRIMSON_DOOR_LOWER).fuel && !def(B.WARPED_TRAPDOOR).fuel && !def(I.CRIMSON_DOOR).fuel &&
+    !FLAMMABLE.has(B.CRIMSON_TRAPDOOR) && !FLAMMABLE.has(B.WARPED_DOOR_LOWER));
+  check('nether doors/trapdoors in creative', CREATIVE_ITEMS.includes(I.CRIMSON_DOOR) && CREATIVE_ITEMS.includes(I.WARPED_DOOR) &&
+    CREATIVE_ITEMS.includes(B.CRIMSON_TRAPDOOR) && CREATIVE_ITEMS.includes(B.WARPED_TRAPDOOR) && !CREATIVE_ITEMS.includes(B.CRIMSON_DOOR_LOWER));
   // vines: real blocks, tip on the free end, climbable
   check('weeping vine tip draws on the lowest cell', crossTile(B.WEEPING_VINES, B.AIR, B.WEEPING_VINES) === 'weeping_vines_tip' &&
     crossTile(B.WEEPING_VINES, B.WEEPING_VINES, B.NETHERRACK) === 'weeping_vines');
