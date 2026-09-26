@@ -4140,7 +4140,8 @@ export class EntityManager {
     e.growT = 45;
     e.mesh.scale.setScalar(0.55);
     // babies are mostly head: a big noggin on a small body reads as "young"
-    if (e.limbs?.head) e.limbs.head.scale.setScalar(kind === 'horse' ? 1.25 : 1.6);
+    // (a hoglin's head is already half its length: vanilla barely enlarges it)
+    if (e.limbs?.head) e.limbs.head.scale.setScalar(kind === 'horse' ? 1.25 : kind === 'hoglin' ? 1.15 : 1.6);
     e.box = { w: e.box.w * 0.6, h: e.box.h * 0.6 };
     return e;
   }

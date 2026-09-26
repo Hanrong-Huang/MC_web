@@ -1113,72 +1113,124 @@ export class MobModels {
     return done({ legs, arms, head, ears, weapon, offhand: ingot, legLen: 12 * P });
   }
 
-  /** Hoglin: a hulking 16×14×26 boar with a bristly dorsal mane, a long flat
-   *  head carried low (tilted 50° like vanilla), upturned tusks and flat ears.
-   *  Front legs stand taller than the hind ones. */
+  /** Hoglin (vanilla HoglinModel): a 16×14×26 salmon-hided barrel with a
+   *  ragged dark mane standing up along the front of the spine, a huge 14×6×19
+   *  head carried pitched 50° down (so its top face is the brow you see from
+   *  the front) ending in a pale nose plate with two nostrils, ivory tusks
+   *  rising from the jaw corners, floppy side ears, and tall front legs. */
   private hoglin(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done): Built {
-    const hide = '#c98c6e', hideS = '#b47659';
-    const hair = '#5e3d29', hairS = '#4c3120';
-    const bodyM = this.mat(this.skin('hoglin', hide, hideS, (ctx) => {
-      px(ctx, hair, 0, 0, 8, 2); px(ctx, hairS, 1, 2, 2, 1); px(ctx, hairS, 5, 2, 2, 1); // bristly back
-      px(ctx, '#d9a080', 0, 7, 8, 1);                                                  // pale belly
-    }, 0.16), mats);
+    const hide = '#e2976c', hideS = '#d2895f', belly = '#f2c4a4';
+    const hair = '#4a2e20', hairS = '#3a2318', tip = '#7c5438';
+    const eye = '#1c1210', lid = '#b27458';
+    // barrel: pale belly low on the flanks, the mane's dark roots down the
+    // spine over the shoulders (row 0 of a top face is its front edge)
+    const sideM = this.mat(this.skin('hoglin_side', hide, hideS, (ctx) => {
+      px(ctx, belly, 0, 7, 8, 1);
+    }, 0.1), mats);
+    const topM = this.mat(this.skin('hoglin_top', hide, hideS, (ctx) => {
+      px(ctx, hair, 2, 0, 4, 2); px(ctx, hair, 3, 2, 2, 3);
+      px(ctx, hairS, 3, 1); px(ctx, tip, 5, 0); px(ctx, hairS, 4, 3); px(ctx, tip, 3, 4);
+    }, 0.1), mats);
+    const chestM = this.mat(this.skin('hoglin_chest', hide, hideS, (ctx) => {
+      px(ctx, hair, 2, 0, 4, 1); px(ctx, hairS, 3, 1, 2, 1);
+    }, 0.1), mats);
+    const bellyM = this.mat(this.skin('hoglin_belly', belly, '#e4b499'), mats);
     const maneM = this.mat(this.skin('hoglin_mane', hair, hairS, (ctx) => {
-      for (let x = 0; x < 8; x += 2) px(ctx, '#7a5236', x, 0, 1, 3); // ragged tips
-    }, 0.3), mats);
-    const headM = this.mat(this.skin('hoglin_head', hide, hideS, (ctx) => px(ctx, hair, 0, 7, 8, 1)), mats);
-    // the head rides pitched down, so its top face is what faces forward: the
-    // small dark eyes sit on it near the brow
+      px(ctx, tip, 0, 0, 8, 1); px(ctx, '#5e3d29', 0, 1, 8, 1);
+      px(ctx, tip, 2, 1); px(ctx, tip, 6, 2);
+    }, 0.25), mats);
+    // head: the brow (top face) runs snout end (row 0) to neck (row 7); small
+    // dark eyes sit high on the outer corners, wrapping onto the cheeks
     const browM = this.face('hoglin_brow', hide, hideS, (ctx, closed) => {
-      px(ctx, hair, 0, 0, 8, 1);
-      if (closed) { px(ctx, hideS, 1, 1, 2, 1); px(ctx, hideS, 5, 1, 2, 1); return; }
-      px(ctx, '#f0e6d8', 1, 1); px(ctx, '#1a1010', 2, 1);
-      px(ctx, '#1a1010', 5, 1); px(ctx, '#f0e6d8', 6, 1);
+      px(ctx, '#e8b296', 1, 0, 6, 1);                  // muzzle lightens toward the nose
+      px(ctx, hair, 1, 7, 6, 1); px(ctx, hair, 2, 6, 4, 1); px(ctx, tip, 3, 6); // neck bristles
+      px(ctx, closed ? lid : eye, 0, 5); px(ctx, closed ? lid : eye, 7, 5);
     }, mats, limbs);
-    const snoutF = this.mat(this.skin('hoglin_snout', '#e2aa8e', '#d69c80', (ctx) => {
-      px(ctx, '#f0c2a8', 0, 0, 8, 2);
-      px(ctx, '#4a2020', 1, 3, 2, 3); px(ctx, '#4a2020', 5, 3, 2, 3); // nostrils
+    const cheek = (sx: number): THREE.MeshLambertMaterial => this.face(`hoglin_cheek_${sx}`, hide, hideS, (ctx, closed) => {
+      // +x face: column 0 is the back of the head; -x face: column 7
+      const c = sx > 0 ? 2 : 5;
+      px(ctx, '#c4866a', 0, 7, 8, 1); // jaw line
+      if (closed) { px(ctx, lid, c, 0); return; }
+      px(ctx, eye, c, 0, 1, 2); px(ctx, '#e8dccc', sx > 0 ? c + 1 : c - 1, 0);
+    }, mats, limbs);
+    const jawM = this.mat(this.skin('hoglin_jaw', '#c88a6c', '#b87c60'), mats);
+    const snoutM = this.mat(this.skin('hoglin_snout', '#e6ac92', '#dba086'), mats);
+    const noseSide = this.mat(this.skin('hoglin_nose_s', '#eeb8a0', '#e4ac94'), mats);
+    const noseF = this.mat(this.skin('hoglin_nose', '#f2c2aa', '#eab69e', (ctx) => {
+      px(ctx, '#f8d6c2', 0, 0, 8, 1);
+      px(ctx, '#5a2624', 1, 2, 2, 4); px(ctx, '#5a2624', 5, 2, 2, 4); // nostrils
+      px(ctx, '#7e3a36', 1, 2, 2, 1); px(ctx, '#7e3a36', 5, 2, 2, 1);
     }, 0), mats);
-    const tuskM = this.mat(this.skin('hoglin_tusk', '#efe7cc', '#dcd2b2', (ctx) => px(ctx, '#fffaf0', 0, 0, 8, 2)), mats);
-    const earM = this.mat(this.skin('hoglin_ear', hide, hideS, (ctx) => px(ctx, '#e0a0a0', 2, 2, 4, 4)), mats);
+    const tuskM = this.mat(this.skin('hoglin_tusk', '#f7e8bc', '#ecdcaa', (ctx) => {
+      px(ctx, '#fffae6', 0, 0, 8, 2); px(ctx, '#d9c48e', 0, 7, 8, 1);
+    }, 0.1), mats);
+    const earM = this.mat(this.skin('hoglin_ear', '#c8876a', '#b87a5e', (ctx) => px(ctx, '#e89a98', 2, 2, 4, 4)), mats);
     const legM = this.mat(this.skin('hoglin_leg', hide, hideS, (ctx) => {
-      px(ctx, hair, 0, 0, 8, 2);
-      px(ctx, '#3a2418', 0, 7, 8, 1); // hooves
+      px(ctx, '#4a342a', 0, 6, 8, 2); // hooves
     }), mats);
 
     const trunk = new THREE.Group();
-    trunk.add(this.box(16 * P, 14 * P, 26 * P, bodyM, 0, 17 * P, 1 * P));
-    trunk.add(this.box(2 * P, 7 * P, 19 * P, maneM, 0, 27 * P, 0));       // dorsal mane
-    trunk.add(this.box(1.2 * P, 4 * P, 6 * P, maneM, 0, 23 * P, -13 * P)); // neck ruff
+    trunk.add(this.box(16 * P, 14 * P, 26 * P, [sideM, sideM, topM, bellyM, sideM, chestM], 0, 17 * P, 0));
+    // mane: a crest of bristle tufts from the neck to mid-back, tallest over
+    // the shoulders, with shorter tufts splayed either side of the ridge
+    const crest: [number, number][] = [[-13, 7], [-11, 9], [-9, 10], [-7, 9.5], [-5, 8.5], [-3, 7.5], [-1, 6], [1, 4.5], [3, 3]];
+    crest.forEach(([z, h], i) => {
+      const t = new THREE.Group();
+      t.position.set((i % 2 ? 0.25 : -0.25) * P, 23 * P, z * P);
+      t.rotation.x = i % 2 ? 0.16 : 0.02; // lean back, raggedly
+      t.add(this.box(1.4 * P, h * P, 2.4 * P, maneM, 0, h / 2 * P, 0));
+      trunk.add(t);
+      if (i < 7) {
+        for (const sx of [-1, 1]) {
+          const s = new THREE.Group();
+          s.position.set(sx * 1.2 * P, 23 * P, (z + 1) * P);
+          s.rotation.set(0.1, 0, -sx * 0.3);
+          const sh = h * (i % 2 ? 0.5 : 0.62);
+          s.add(this.box(1.2 * P, sh * P, 2 * P, maneM, 0, sh / 2 * P, 0));
+          trunk.add(s);
+        }
+      }
+    });
     g.add(trunk);
+
     const head = new THREE.Group();
-    head.position.set(0, 20 * P, -12 * P);
+    head.position.set(0, 22 * P, -12 * P);
     const skull = new THREE.Group();
     skull.rotation.x = -0.87;
-    skull.add(this.box(14 * P, 6 * P, 19 * P, [headM, headM, browM, headM, headM, snoutF], 0, 0, -9.5 * P));
+    skull.add(this.box(14 * P, 6 * P, 19 * P, [cheek(1), cheek(-1), browM, jawM, jawM, snoutM], 0, 0, -9.5 * P));
+    // the nose plate stands proud of the snout and tips up a little so its
+    // nostrils face forward rather than at the ground
+    const nose = new THREE.Group();
+    nose.position.set(0, 0.5 * P, -19 * P);
+    nose.rotation.x = 0.3;
+    nose.add(this.box(10 * P, 5 * P, 1.4 * P, this.front(noseSide, noseF), 0, 0, -0.5 * P));
+    skull.add(nose);
+    const ears: THREE.Object3D[] = [];
     for (const sx of [-1, 1]) {
+      // tusks grow up from the jaw corners, splayed outward
       const tusk = new THREE.Group();
-      tusk.position.set(sx * 7.6 * P, 1 * P, -15 * P);
-      tusk.rotation.x = 0.55;       // swept back toward the eyes
-      tusk.rotation.z = -sx * 0.18; // and splayed a touch
-      tusk.add(this.box(2 * P, 9 * P, 2 * P, tuskM, 0, 4 * P, 0));
+      tusk.position.set(sx * 7.4 * P, -2 * P, -13.5 * P);
+      tusk.rotation.set(0.35, 0, -sx * 0.1);
+      tusk.add(this.box(2 * P, 11 * P, 2 * P, tuskM, 0, 4.5 * P, 0));
       skull.add(tusk);
+      // 6×1×4 flaps sticking out sideways, drooping
       const ear = new THREE.Group();
-      ear.position.set(sx * 7 * P, 2 * P, -3 * P);
-      ear.rotation.z = sx * 0.6;
+      ear.position.set(sx * 6.5 * P, 2 * P, -3 * P);
+      ear.rotation.z = -sx * 0.75;
       ear.add(this.box(6 * P, 1 * P, 4 * P, earM, sx * 3 * P, 0, 0));
       skull.add(ear);
+      ears.push(ear);
     }
     head.add(skull);
     g.add(head);
     const legs = [
-      this.leg(6 * P, 14 * P, legM, -4.5 * P, 14 * P, -8 * P),
-      this.leg(6 * P, 14 * P, legM, 4.5 * P, 14 * P, -8 * P),
+      this.leg(6 * P, 14 * P, legM, -4 * P, 14 * P, -8.5 * P),
+      this.leg(6 * P, 14 * P, legM, 4 * P, 14 * P, -8.5 * P),
       this.leg(5 * P, 11 * P, legM, 5 * P, 11 * P, 10 * P),
       this.leg(5 * P, 11 * P, legM, -5 * P, 11 * P, 10 * P),
     ];
     g.add(...legs);
-    return done({ legs, head, body: trunk, legLen: 13 * P });
+    return done({ legs, head, ears, body: trunk, legLen: 12.5 * P });
   }
 
   /** Strider: a boxy 16×14×16 body on two stilt legs, with three rows of
