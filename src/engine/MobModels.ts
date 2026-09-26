@@ -1335,8 +1335,8 @@ export class MobModels {
   private magmaCube(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done, variant: number): Built {
     const s = MAGMA_SIZES[variant] ?? 1;
     const u = s / 16;
-    const crust = ['#3a1a10', '#4a2214', '#301208'];
-    const crack = ['#ff7a1a', '#ffb23a', '#d84a0c'];
+    const crust = ['#34100a', '#46160c', '#280a06'];
+    const crack = ['#ff6a14', '#ffc23a', '#e0400a'];
     // deterministic crack pattern: a few bright veins over the dark crust
     const vein = (x: number, y: number, k: number): string => {
       const h = Math.sin(x * 12.9898 + y * 78.233 + k * 37.719) * 43758.5453;

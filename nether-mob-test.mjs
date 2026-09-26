@@ -72,7 +72,7 @@ await settle(1500);
 
 /** Spawn a row of mobs across the platform (x spacing `gap`), frozen idle,
  *  facing the camera, and frame them from z+`back`. */
-async function lineup(specs, name, { gap = 2.2, back = 6, camY = 1.2, pitch = -0.1, z = 0, post } = {}) {
+async function lineup(specs, name, { gap = 2.2, back = 6, camY = 1.2, pitch = -0.1, z = 0, post, wait = 700 } = {}) {
   await page.evaluate(({ specs, gap, back, camY, pitch, z }) => {
     const g = window.__game, { ox, oy, oz } = window.__arena;
     for (const e of g.entities.entities) if (g.entities.isMob(e)) e.dead = true;
@@ -81,8 +81,8 @@ async function lineup(specs, name, { gap = 2.2, back = 6, camY = 1.2, pitch = -0
       const x = ox + 0.5 - w / 2 + i * gap;
       const m = s.baby ? g.entities.spawnBaby(s.kind, x, oy + (s.dy ?? 0), oz + z + 0.5)
         : g.entities.spawnMob(s.kind, x, oy + (s.dy ?? 0), oz + z + 0.5, s.variant ?? 0);
-      // the camera looks down -z: yaw π faces the mob back at it
-      m.yaw = m.visYaw = Math.PI + (s.yaw ?? 0.35 * (i % 2 ? -1 : 1));
+      // yaw 0 faces +z, back at the camera
+      m.yaw = m.visYaw = s.yaw ?? 0.35 * (i % 2 ? -1 : 1);
       m.convertT = -1e9; // no overworld zombification mid-shoot
       m.state = 'idle'; m.stateTime = 999; m.vel = { x: 0, y: 0, z: 0 };
       m.lookT = 999; m.lookYaw = 0; m.lookPitch = 0; m.watching = false;
@@ -93,8 +93,9 @@ async function lineup(specs, name, { gap = 2.2, back = 6, camY = 1.2, pitch = -0
     p.pos.x = ox + 0.5; p.pos.y = oy + camY; p.pos.z = oz + z + 0.5 + back;
     p.vel.x = p.vel.y = p.vel.z = 0; p.yaw = 0; p.pitch = pitch;
   }, { specs, gap, back, camY, pitch, z });
-  if (post) await page.evaluate(post);
   await settle(700);
+  if (post) await page.evaluate(post);
+  await page.waitForTimeout(wait);
   await page.screenshot({ path: `${DIR}/nether-${name}.png` });
   if (process.env.DEBUG_SHOTS) console.log(name, await page.evaluate(() => {
     const g = window.__game, { ox, oy, oz } = window.__arena, c = g.renderer.camera.position;
@@ -149,7 +150,7 @@ check('strider warm on lava, cold on land', !striderInfo.lavaCold && striderInfo
 
 // magma cube mid-leap: slices spread
 await lineup([{ kind: 'magma_cube', variant: 2, yaw: 0.3 }], 'magma-leap', {
-  back: 6, camY: 1.8, post: () => { const m = window.__row[0]; m.vel.y = 12; m.onGround = false; },
+  back: 6, camY: 1.8, wait: 180, post: () => { const m = window.__row[0]; m.vel.y = 13; m.onGround = false; },
 });
 // survival: hostile AI live (the player is healed each shot)
 await page.evaluate(() => { const p = window.__game.player; p.mode = 'survival'; p.flying = false; });
