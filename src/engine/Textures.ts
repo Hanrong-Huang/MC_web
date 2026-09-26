@@ -3893,3 +3893,149 @@ export function shapedItemGeometry(id: number, atlas: Atlas, size = 1): THREE.Bu
   geo.computeVertexNormals();
   return geo;
 }
+
+// =============================================================================
+// Nether utility pass: netherite block + gear, soul torch / soul lantern, the
+// respawn anchor (charge meter + portal pool), fire charge, blaze powder and
+// the portal compass. Self-contained: reads only the shared pixel toolkit.
+// =============================================================================
+
+const NETHERITE_R = pal(['#1e1b1f', '#2a262b', '#353036', '#403a41', '#4d464d', '#5c545c', '#6d656e']);
+const NETHERITEC: ToolMat = { L: '#7a717c', M: '#4d464d', m: '#352f35', d: '#221e22', ...HANDLE };
+const NETHERITEAC = { O: '#141114', L: '#7a717c', M: '#4d464d', m: '#302b30' };
+const CRYING_R = pal(['#0b0712', '#120b1d', '#190f28', '#211535', '#2c1c46', '#3a2658']);
+const SOUL_FLAME = { hi: '#e8ffff', mid: '#6ff0ff', lo: '#23b4d8', deep: '#1478a0' };
+
+/** Crying-obsidian style base for the anchor: dark glassy rock with violet tears. */
+function cryingPx(seed: number): Px {
+  const f = fbm(seed, [[4, 0.5], [8, 0.3], [16, 0.2]], 2.0);
+  const p = rampFill(new Px(), CRYING_R, f, seed + 1, 0.2);
+  const r = mulberry32(seed + 2);
+  for (let i = 0; i < 5; i++) {
+    const x = (r() * 16) | 0; let y = (r() * 16) | 0;
+    for (let k = 0; k < 3; k++) { p.set(x, y, k === 0 ? '#b25cff' : '#7a2cd8'); y++; }
+  }
+  return p;
+}
+
+Object.assign(TILE_PAINTERS, {
+  netherite_block: (c: Ctx, x: number, y: number) => {
+    // dark bevelled plates with faint smelted streaks, like a block of ingots
+    const p = metalPx(NETHERITE_R, 9101);
+    const r = mulberry32(9102);
+    for (let i = 0; i < 5; i++) {
+      const sx = 2 + ((r() * 11) | 0), sy = 2 + ((r() * 11) | 0);
+      p.set(sx, sy, '#6d656e'); p.set(sx + 1, sy, '#5c545c'); p.set(sx, sy + 1, '#2a262b');
+    }
+    p.put(c, x, y);
+  },
+  soul_torch: (c: Ctx, x: number, y: number) => {
+    // same stick as the torch (the mesher crops columns 7-8), cold blue flame
+    c.clearRect(x, y, 16, 16);
+    for (let py = 8; py < 16; py++) {
+      c.fillStyle = py % 3 === 0 ? '#7a5a2e' : '#a07a44'; c.fillRect(x + 7, y + py, 1, 1);
+      c.fillStyle = py % 3 === 1 ? '#4a3418' : '#6e4f28'; c.fillRect(x + 8, y + py, 1, 1);
+    }
+    c.fillStyle = SOUL_FLAME.mid; c.fillRect(x + 7, y + 6, 2, 2);
+    c.fillStyle = SOUL_FLAME.hi; c.fillRect(x + 7, y + 6, 1, 1);
+    c.fillStyle = SOUL_FLAME.lo; c.fillRect(x + 8, y + 7, 1, 1);
+    c.fillStyle = SOUL_FLAME.deep; c.fillRect(x + 7, y + 8, 2, 1);
+  },
+  soul_lantern: plantTile([
+    '................', '.......oo.......', '......o..o......', '.......oo.......',
+    '......OOOO......', '.....OMMMMO.....', '....OmmmmmmO....', '....OyGGGGyO....',
+    '....OyGWWGyO....', '....OyGWWGyO....', '....OyGGGGyO....', '....OmmmmmmO....',
+    '....OOOOOOOO....', '................', '................', '................',
+  ], { o: '#3b4046', O: '#23262b', M: '#5c636c', m: '#4a5058', y: SOUL_FLAME.lo, G: SOUL_FLAME.mid, W: SOUL_FLAME.hi }),
+  soul_lantern_model: (c: Ctx, x: number, y: number) => {
+    const p = new Px();
+    for (let yy = 0; yy <= 6; yy++) { p.set(7, yy, yy % 3 === 2 ? IRON_DARK[1] : IRON_DARK[3]); p.set(8, yy, yy % 3 === 0 ? IRON_DARK[1] : IRON_DARK[4]); }
+    for (let xx = 6; xx <= 9; xx++) { p.set(xx, 7, IRON_DARK[4]); p.set(xx, 8, IRON_DARK[2]); }
+    for (let xx = 5; xx <= 10; xx++) { p.set(xx, 9, IRON_DARK[3]); p.set(xx, 15, IRON_DARK[2]); }
+    for (let yy = 10; yy <= 14; yy++) {
+      p.set(5, yy, IRON_DARK[1]); p.set(10, yy, IRON_DARK[1]);
+      for (let xx = 6; xx <= 9; xx++) p.set(xx, yy, (xx === 7 || xx === 8) && yy >= 11 && yy <= 13 ? SOUL_FLAME.hi : xx === 6 || xx === 9 ? SOUL_FLAME.lo : SOUL_FLAME.mid);
+    }
+    p.put(c, x, y);
+  },
+  soul_lantern_model_top: (c: Ctx, x: number, y: number) => new Px().fill((xx, yy) => {
+    const e = xx === 5 || xx === 10 || yy === 5 || yy === 10;
+    return e ? IRON_DARK[2] : (xx === 7 || xx === 8) && (yy === 7 || yy === 8) ? IRON_DARK[0] : IRON_DARK[4];
+  }).put(c, x, y),
+  respawn_anchor_bottom: (c: Ctx, x: number, y: number) => cryingPx(9110).put(c, x, y),
+  respawn_anchor_top: (c: Ctx, x: number, y: number) => {
+    // a crying-obsidian rim around a dark, dormant pool
+    const p = cryingPx(9111);
+    for (let yy = 3; yy <= 12; yy++) for (let xx = 3; xx <= 12; xx++) {
+      const edge = xx === 3 || xx === 12 || yy === 3 || yy === 12;
+      p.set(xx, yy, edge ? '#3a2658' : ((xx + yy) & 3) === 0 ? '#1a1024' : '#110a19');
+    }
+    p.put(c, x, y);
+  },
+  respawn_anchor_top_on: (c: Ctx, x: number, y: number) => {
+    // the pool swirls with portal light once charged
+    const p = cryingPx(9111);
+    const ramp = pal(['#4a1090', '#6d24b8', '#8f3ee0', '#b36cf6', '#d8a8ff']);
+    for (let yy = 3; yy <= 12; yy++) for (let xx = 3; xx <= 12; xx++) {
+      const edge = xx === 3 || xx === 12 || yy === 3 || yy === 12;
+      const a = Math.atan2(yy - 7.5, xx - 7.5), d = Math.hypot(xx - 7.5, yy - 7.5);
+      const v = 0.5 + 0.5 * Math.sin(a * 2 + d * 1.3);
+      p.set(xx, yy, edge ? '#8a3ad0' : ramp[clampI(v * 4 + (d < 2 ? 1 : 0), ramp.length)]);
+    }
+    p.put(c, x, y);
+  },
+  ...Object.fromEntries([0, 1, 2, 3, 4].map((charge) => [`respawn_anchor_side_${charge}`, (c: Ctx, x: number, y: number) => {
+    // four glowstone pips in a band across the middle light up with the charge
+    const p = cryingPx(9112);
+    for (let xx = 0; xx < 16; xx++) { p.set(xx, 5, '#3a2658'); p.set(xx, 10, '#0b0712'); }
+    for (let i = 0; i < 4; i++) {
+      const on = i < charge;
+      const px0 = 1 + i * 4;
+      for (let xx = px0; xx < px0 + 2; xx++) for (let yy = 6; yy <= 9; yy++) {
+        p.set(xx, yy, on ? (yy === 6 ? '#fff0a8' : yy === 9 ? '#d88a2a' : '#ffc84a') : (yy === 6 ? '#2c1c46' : '#160d22'));
+      }
+    }
+    p.put(c, x, y);
+  }])),
+});
+
+Object.assign(ITEM_PAINTERS, {
+  netherite_scrap: (c: Ctx) => outlinePx(spritePx([
+    '................', '................', '................', '.....hhh........',
+    '....hLLMhh......', '...hLMMMMMh.....', '...LMMdMMMMh....', '..hMMMMMdMMm....',
+    '..MMdMMMMMMm....', '..hMMMMMdMmm....', '...mMMMMMmm.....', '....mmmmm.......',
+    '................', '................', '................', '................',
+  ], { h: '#6d656e', L: '#8a7f86', M: '#5a4a45', d: '#3a2c28', m: '#2e2320' }), 0.4).put(c, 0, 0),
+  netherite_ingot: (c: Ctx) => pixmap(c, 0, 0, [
+    '................', '................', '................', '................',
+    '................', '....OOOOOOO.....', '...OLLLLLLMO....', '..OLLMMMMMMMO...',
+    '..OLMMMMMMMmO...', '.OMMMMMMMmmO....', '.OMmmmmmmmmO....', '..OOOOOOOOO.....',
+    '................', '................', '................', '................',
+  ], { O: '#121012', M: '#4d464d', m: '#302b30', L: '#7a717c' }),
+  netherite_pickaxe: (c: Ctx) => pickaxePx(NETHERITEC).put(c, 0, 0),
+  netherite_axe: (c: Ctx) => axePx(NETHERITEC).put(c, 0, 0),
+  netherite_shovel: (c: Ctx) => shovelPx(NETHERITEC).put(c, 0, 0),
+  netherite_sword: (c: Ctx) => swordPx(NETHERITEC).put(c, 0, 0),
+  netherite_helmet: (c: Ctx) => pixmap(c, 0, 0, HELMET_MAP, NETHERITEAC),
+  netherite_chest: (c: Ctx) => pixmap(c, 0, 0, CHEST_MAP, NETHERITEAC),
+  netherite_legs: (c: Ctx) => pixmap(c, 0, 0, LEGS_MAP, NETHERITEAC),
+  netherite_boots: (c: Ctx) => pixmap(c, 0, 0, BOOTS_MAP, NETHERITEAC),
+  fire_charge: (c: Ctx) => outlinePx(spritePx([
+    '................', '................', '................', '......kkkk......',
+    '....kkYOkkkk....', '...kYYOOkRkkk...', '...kOOYkRRkkk...', '..kkkOkkRkOkkk..',
+    '..kRkkkkkOOYkk..', '..kRRkkOkYYkkk..', '...kkkOOkkkRk...', '...kkkkkkRRkk...',
+    '....kkkkkkkk....', '......kkkk......', '................', '................',
+  ], { k: '#2a1a14', Y: '#ffd84a', O: '#ff8a1a', R: '#d8401a' }), 0.5).put(c, 0, 0),
+  blaze_powder: (c: Ctx) => outlinePx(spritePx([
+    '................', '................', '................', '................',
+    '.......Y........', '......YOY.......', '....Y.OYO.Y.....', '.....OYYYO......',
+    '...YOYYRYYOY....', '..OYYRRRRYYO....', '..ORRRRRRRRO....', '...OOOOOOOO.....',
+    '................', '................', '................', '................',
+  ], { Y: '#ffe070', O: '#f5a020', R: '#d86818' }), 0.4).put(c, 0, 0),
+  portal_compass: (c: Ctx) => dialPx(pal(['#241536', '#3e2460', '#6a3aa0']), (p) => {
+    for (const [x, y] of [[8, 7], [9, 6], [10, 5]]) p.set(x, y, '#d58cff');
+    p.set(10, 4, '#f4dcff');
+    for (const [x, y] of [[7, 8], [6, 9], [5, 10]]) p.set(x, y, '#5a2488');
+    p.set(7, 7, '#1a0c28'); p.set(8, 8, '#12081e');
+  }).put(c, 0, 0),
+});

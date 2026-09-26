@@ -65,6 +65,17 @@ export const ADVANCEMENTS: AdvancementDef[] = [
   { id: 'warp', label: 'Blink', desc: 'Teleport with a warp pearl', icon: '🌀', requires: ['root'] },
 ];
 
+// Nether utility pass
+ADVANCEMENTS.push(
+  { id: 'nether', label: 'We Need to Go Deeper', desc: 'Build, light and enter a Nether Portal', icon: '🟪', requires: ['root'] },
+  { id: 'subspace', label: 'Subspace Bubble', desc: 'Use the Nether to travel 7 km in the Overworld', icon: '🫧', requires: ['nether'] },
+  { id: 'hidden_depths', label: 'Hidden in the Depths', desc: 'Obtain Ancient Debris', icon: '🪨', requires: ['root'] },
+  { id: 'netherite_upgrade', label: 'Serious Dedication', desc: 'Forge a diamond piece into netherite on an anvil', icon: '⚒️', requires: ['root'] },
+  { id: 'netherite_armor', label: 'Cover Me in Debris', desc: 'Wear a full suit of Netherite armor', icon: '🛡️', requires: ['root'] },
+  { id: 'anchor_full', label: 'Not Quite "Nine" Lives', desc: 'Charge a Respawn Anchor to the maximum', icon: '⚓', requires: ['root'] },
+  { id: 'soul_light', label: 'Cold Flame', desc: 'Craft a soul torch or soul lantern', icon: '🔵', requires: ['root'] },
+);
+
 export class AdvancementTracker {
   private unlocked = new Set<string>();
   /** queued toasts the HUD will display: id + wall-clock time unlocked */

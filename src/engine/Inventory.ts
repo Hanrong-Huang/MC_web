@@ -1,7 +1,7 @@
 // Inventory slots, shaped crafting recipes (2x2 and 3x3), furnace smelting,
 // and chest storage.
 
-import { B, B2, I, def, hasDef, SLAB_KINDS, WOOL_COLORS } from './Blocks';
+import { B, B2, I, def, hasDef, SLAB_KINDS, WOOL_COLORS, registryId } from './Blocks';
 import { MaybeSlot, FurnaceSave, ChestSave } from './Persistence';
 
 export type Slot = MaybeSlot;
@@ -246,6 +246,31 @@ const DECOR_RECIPES: Recipe[] = [
   { shape: [[0, AM, 0], [AM, I.EMERALD, AM], [0, AM, 0]], out: I.WARP_PEARL, n: 2 },
 ];
 
+// --- Nether utility pass: netherite, soul light, anchors, fire charges ----------
+// Other tracks' items are looked up by registry name (0 = not in this build).
+const NETHER_RECIPES: Recipe[] = ((): Recipe[] => {
+  const SC = I.NETHERITE_SCRAP, NI = I.NETHERITE_INGOT, OB = B.OBSIDIAN;
+  const out: Recipe[] = [
+    // four scrap bound with four gold, as in vanilla (laid out as a ring here)
+    { shape: [[SC, AU, SC], [AU, 0, AU], [SC, AU, SC]], out: NI, n: 1 },
+    { shape: [[NI, NI, NI], [NI, NI, NI], [NI, NI, NI]], out: B.NETHERITE_BLOCK, n: 1 },
+    { shape: [[B.NETHERITE_BLOCK]], out: NI, n: 9 },
+    { shape: [[I.COAL], [S], [B.SOUL_SAND]], out: B.SOUL_TORCH, n: 4 },
+    { shape: [[0, FE, 0], [FE, B.SOUL_TORCH, FE], [0, FE, 0]], out: B.SOUL_LANTERN, n: 2 },
+    { shape: [[OB, OB, OB], [B.GLOWSTONE, B.GLOWSTONE, B.GLOWSTONE], [OB, OB, OB]], out: B.RESPAWN_ANCHOR, n: 1 },
+    // without blazes, a pinch of magma lights the charge
+    { shape: [[G, B.MAGMA, I.COAL]], out: I.FIRE_CHARGE, n: 3 },
+    { shape: [[G, I.BLAZE_POWDER, I.COAL]], out: I.FIRE_CHARGE, n: 3 },
+    { shape: [[I.WATER_BOTTLE, I.BLAZE_POWDER]], out: I.POTION_STRENGTH, n: 1 },
+    { shape: [[0, OB, 0], [OB, I.COMPASS, OB], [0, OB, 0]], out: I.PORTAL_COMPASS, n: 1 },
+  ];
+  const soil = registryId('soul_soil');
+  if (soil) out.push({ shape: [[I.COAL], [S], [soil]], out: B.SOUL_TORCH, n: 4 });
+  const rod = registryId('blaze_rod');
+  if (rod) out.push({ shape: [[rod]], out: I.BLAZE_POWDER, n: 2 });
+  return out;
+})();
+
 /** Containers handed back when a recipe uses up their contents (milk -> bucket). */
 export function craftRemainders(out: number): { id: number; count: number }[] {
   return out === B.CAKE ? [{ id: I.BUCKET, count: 3 }] : [];
@@ -347,6 +372,7 @@ const RECIPES: Recipe[] = [
   { shape: [[I.PAPER, I.PAPER], [I.PAPER, LE]], out: I.BOOK, n: 1 },
   { shape: [[P, P, P], [I.BOOK, I.BOOK, I.BOOK], [P, P, P]], out: B.BOOKSHELF, n: 1 },
   ...DECOR_RECIPES,
+  ...NETHER_RECIPES,
 ];
 
 function mirror(shape: number[][]): number[][] {
@@ -428,6 +454,8 @@ const SMELT = new Map<number, number>([
   [B.CLAY, B.TERRACOTTA],
   [B.STONE_BRICKS, B.CRACKED_STONE_BRICKS],
   [B.CACTUS, I.LIME_DYE],
+  // ancient debris (a Nether-biome block, when present) melts down to scrap
+  ...(registryId('ancient_debris') ? [[registryId('ancient_debris'), I.NETHERITE_SCRAP] as [number, number]] : []),
 ]);
 
 export function smeltResult(id: number): number | undefined { return SMELT.get(id); }

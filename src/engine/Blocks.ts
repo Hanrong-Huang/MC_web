@@ -1240,7 +1240,7 @@ export function shapeBoxes(id: number, meta: number, conn: number, open: boolean
       const h = collide ? 1.5 : 1;
       return [alongX ? [0, 0, 7 * P16, 1, h, 9 * P16] : [7 * P16, 0, 0, 9 * P16, h, 1]];
     }
-    case B.LANTERN: return meta === 1
+    case B.LANTERN: case B.SOUL_LANTERN: return meta === 1
       ? [[5 * P16, 1 * P16, 5 * P16, 11 * P16, 10 * P16, 11 * P16]]
       : [[5 * P16, 0, 5 * P16, 11 * P16, 9 * P16, 11 * P16]];
     case B.ANVIL: return (meta & 1) === 0
@@ -1464,6 +1464,7 @@ export function repairMaterial(itemId: number): number {
   if (n.startsWith('iron_') || n === 'shears' || n === 'flint_and_steel') return I.IRON_INGOT;
   if (n.startsWith('golden_')) return I.GOLD_INGOT;
   if (n.startsWith('diamond_')) return I.DIAMOND;
+  if (n.startsWith('netherite_')) return I.NETHERITE_INGOT;
   if (n.startsWith('leather_')) return I.LEATHER;
   if (n === 'glider') return I.FEATHER;
   return 0;
@@ -1556,3 +1557,132 @@ export const CREATIVE_ITEMS: number[] = [
   I.POTION_FIRE_RESISTANCE, I.POTION_STRENGTH, I.POTION_LEAPING, I.POTION_REGENERATION,
   I.EXPERIENCE_BOTTLE, I.MAP, I.RECOVERY_COMPASS, I.GLIDER, I.FIREWORK_ROCKET, I.WARP_PEARL,
 ];
+
+// =============================================================================
+// Nether utility pass: netherite, soul light, the respawn anchor, fire charges
+// and the portal compass (block ids 252-255, item ids 365-389). Self-contained:
+// the enums merge into B / I, and the shared sets/LUTs are extended in place.
+// =============================================================================
+
+export enum B {
+  NETHERITE_BLOCK = 252,
+  /** blue-flamed torch: a dimmer, cold light (wall facing lives in torchFacings) */
+  SOUL_TORCH = 253,
+  /** hanging (meta 1) or standing lantern with a soul flame */
+  SOUL_LANTERN = 254,
+  /** charged with glowstone (meta = charge 0..4); sets a Nether respawn point, explodes elsewhere */
+  RESPAWN_ANCHOR = 255,
+}
+
+export enum I {
+  NETHERITE_SCRAP = 365,
+  NETHERITE_INGOT = 366,
+  NETHERITE_PICK = 367,
+  NETHERITE_AXE = 368,
+  NETHERITE_SHOVEL = 369,
+  NETHERITE_SWORD = 370,
+  NETHERITE_HELMET = 371,
+  NETHERITE_CHEST = 372,
+  NETHERITE_LEGS = 373,
+  NETHERITE_BOOTS = 374,
+  /** lights fires/portals on a block, or is thrown as a small fireball */
+  FIRE_CHARGE = 375,
+  BLAZE_POWDER = 376,
+  /** needle points at the Nether portal you last used in this dimension */
+  PORTAL_COMPASS = 377,
+}
+
+let REG_NAMES: Map<string, number> | null = null;
+/** Item/block id for a registry name (other tracks' blocks are looked up this
+ *  way), or `fallback` when no such name is registered. */
+export function registryId(name: string, fallback = 0): number {
+  if (!REG_NAMES || !REG_NAMES.has(name)) {
+    REG_NAMES = new Map();
+    for (const d of DEFS.values()) if (!REG_NAMES.has(d.name)) REG_NAMES.set(d.name, d.id);
+  }
+  return REG_NAMES.get(name) ?? fallback;
+}
+
+blockDef({
+  id: B.NETHERITE_BLOCK, name: 'netherite_block', label: 'Block of Netherite', hardness: 12, tool: 'pickaxe', minTier: 8, sound: 'stone',
+  faces: { top: 'netherite_block', bottom: 'netherite_block', sides: 'netherite_block' },
+});
+blockDef({
+  id: B.SOUL_TORCH, name: 'soul_torch', label: 'Soul Torch', hardness: 0, sound: 'wood',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'soul_torch', bottom: 'soul_torch', sides: 'soul_torch' },
+});
+blockDef({
+  id: B.SOUL_LANTERN, name: 'soul_lantern', label: 'Soul Lantern', hardness: 1.5, tool: 'pickaxe', sound: 'stone',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'soul_lantern', bottom: 'soul_lantern', sides: 'soul_lantern' },
+});
+blockDef({
+  id: B.RESPAWN_ANCHOR, name: 'respawn_anchor', label: 'Respawn Anchor', hardness: 9, tool: 'pickaxe', minTier: 8, sound: 'stone',
+  faces: { top: 'respawn_anchor_top', bottom: 'respawn_anchor_bottom', sides: 'respawn_anchor_side_0' },
+});
+
+itemDef({ id: I.NETHERITE_SCRAP, name: 'netherite_scrap', label: 'Netherite Scrap', sprite: 'netherite_scrap' });
+itemDef({ id: I.NETHERITE_INGOT, name: 'netherite_ingot', label: 'Netherite Ingot', sprite: 'netherite_ingot' });
+for (const [id, kind, damage] of [
+  [I.NETHERITE_PICK, 'pickaxe', 6], [I.NETHERITE_AXE, 'axe', 10],
+  [I.NETHERITE_SHOVEL, 'shovel', 6], [I.NETHERITE_SWORD, 'sword', 8],
+] as [number, ToolKind, number][]) {
+  itemDef({
+    id, name: `netherite_${kind}`, label: `Netherite ${kind[0].toUpperCase()}${kind.slice(1)}`, sprite: `netherite_${kind}`,
+    stack: 1, toolInfo: { kind, tier: 9, damage, speed: 9 }, durability: 2031,
+  });
+}
+armorDef(I.NETHERITE_HELMET, 'netherite_helmet', 'Netherite Helmet', 'netherite_helmet', ARMOR_HEAD, 3, 407);
+armorDef(I.NETHERITE_CHEST, 'netherite_chestplate', 'Netherite Chestplate', 'netherite_chest', ARMOR_CHEST, 8, 592);
+armorDef(I.NETHERITE_LEGS, 'netherite_leggings', 'Netherite Leggings', 'netherite_legs', ARMOR_LEGS, 6, 555);
+armorDef(I.NETHERITE_BOOTS, 'netherite_boots', 'Netherite Boots', 'netherite_boots', ARMOR_FEET, 3, 481);
+itemDef({ id: I.FIRE_CHARGE, name: 'fire_charge', label: 'Fire Charge', sprite: 'fire_charge' });
+itemDef({ id: I.BLAZE_POWDER, name: 'blaze_powder', label: 'Blaze Powder', sprite: 'blaze_powder' });
+itemDef({ id: I.PORTAL_COMPASS, name: 'portal_compass', label: 'Portal Compass', sprite: 'portal_compass', stack: 1 });
+
+/** Netherite gear (and ancient debris) shrugs off fire: its drops float on lava. */
+export function isFireproof(id: number): boolean {
+  if (!hasDef(id)) return false;
+  const n = def(id).name;
+  return n.startsWith('netherite_') || n === 'ancient_debris';
+}
+/** Diamond piece -> its netherite upgrade (anvil smithing), or 0. */
+export function netheriteUpgrade(id: number): number {
+  switch (id) {
+    case I.DIAMOND_PICK: return I.NETHERITE_PICK;
+    case I.DIAMOND_AXE: return I.NETHERITE_AXE;
+    case I.DIAMOND_SHOVEL: return I.NETHERITE_SHOVEL;
+    case I.DIAMOND_SWORD: return I.NETHERITE_SWORD;
+    case I.DIAMOND_HELMET: return I.NETHERITE_HELMET;
+    case I.DIAMOND_CHEST: return I.NETHERITE_CHEST;
+    case I.DIAMOND_LEGS: return I.NETHERITE_LEGS;
+    case I.DIAMOND_BOOTS: return I.NETHERITE_BOOTS;
+    default: return 0;
+  }
+}
+/** Soul-fire light sources: their block light is tinted a cold cyan. */
+export const SOUL_LIGHTS = new Set<number>([B.SOUL_TORCH, B.SOUL_LANTERN]);
+/** Block-light level (0..15) of an emitter; the respawn anchor glows by charge. */
+export function emitLevel(id: number, meta = 0): number {
+  switch (id) {
+    case B.SOUL_TORCH: return 11;
+    case B.SOUL_LANTERN: return 12;
+    case B.PORTAL: return 11;
+    case B.RESPAWN_ANCHOR: return [0, 6, 9, 12, 15][Math.max(0, Math.min(4, meta))];
+    default: return 15;
+  }
+}
+
+SHAPED.add(B.SOUL_LANTERN); SHAPED.add(B.RESPAWN_ANCHOR);
+META_BLOCKS.add(B.SOUL_LANTERN); META_BLOCKS.add(B.RESPAWN_ANCHOR);
+FLOOR_BLOCKS.add(B.SOUL_TORCH);
+for (const id of [B.NETHERITE_BLOCK, B.RESPAWN_ANCHOR]) { OPAQUE_LUT[id] = 1; OCCLUDE_LUT[id] = 1; }
+PLACEABLE.push(B.NETHERITE_BLOCK, B.SOUL_TORCH, B.SOUL_LANTERN, B.RESPAWN_ANCHOR);
+CREATIVE_ITEMS.push(
+  B.NETHERITE_BLOCK, B.SOUL_TORCH, B.SOUL_LANTERN, B.RESPAWN_ANCHOR,
+  I.NETHERITE_SCRAP, I.NETHERITE_INGOT,
+  I.NETHERITE_PICK, I.NETHERITE_AXE, I.NETHERITE_SHOVEL, I.NETHERITE_SWORD,
+  I.NETHERITE_HELMET, I.NETHERITE_CHEST, I.NETHERITE_LEGS, I.NETHERITE_BOOTS,
+  I.FIRE_CHARGE, I.BLAZE_POWDER, I.PORTAL_COMPASS,
+);
