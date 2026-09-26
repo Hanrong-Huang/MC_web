@@ -92,6 +92,12 @@ When adding a feature, prefer adding/extending a `.mjs` harness and capturing a 
 
 ## Current status (2026-09)
 
+Nether atmosphere / portals / utilities pass (`NetherController.ts` owns the glue; main only forwards):
+- **Portals** are drawn by `PortalFX` (animated swirl sheets; the mesher skips `B.PORTAL`, which is now a glower so `chunk.glowers` finds them). Frames of any size 2x3..21x21 light via `NetherPortal.findFrame` (flint & steel or fire charge → `PlayerDeps.lightPortal`); breaking a frame collapses the sheet (`onBlockChanged` tap). Travel scales 8:1, prefers the remembered partner (`PortalRec.link`, saved in `SaveState.nether`), then remembered portals within 128/16 blocks, then a scan, then builds one on a natural ledge (never over the lava sea). You arrive *inside* the partner; `Player.portalExitPending` keeps it inert until you step out.
+- **Block light has a soul channel**: soul torch/lantern and fire on soul sand/soil flood a second `SOULR` array; cube-face vertices carry the soul share as `FLAG_SOUL` eighths in the torch channel (bits above sway/lava), and the chunk shader mixes `uSoulCol` in. Special emitters (torch/cross/shaped models) don't carry it.
+- **Nether air** (`NetherAtmosphere`): biome weights from `generator.netherBiomeAt` (block-name sampling fallback) blend fog colour/depth, ambient, lava-sea uplight (`uNetherGlow`, faces turned down glow — the roof) and heat haze (`uHeat`) into `Renderer.netherAir`; the same weights drive `NetherFX` particles and `Audio.netherScape` beds/cues + biome-flavoured music (`MusicBiomeKey` has the Nether biomes).
+- Items 365-377: netherite (anvil smithing upgrades diamond gear, fireproof drops float on lava), soul torch/lantern, respawn anchor (charge in `bedFacings` meta, spawn in `NetherController.anchor`), fire charge (`Throwables`), portal compass. `verify-nether-atmos.mjs` covers all of it.
+
 Latest pass — seven-track polish (UI, textures/items, audio, mobs, terrain, rendering/perf, gameplay) plus an item/bow/arrow pass:
 - **Generation runs in `gen-worker.ts`** (sync fallback in node). `WorldGenerator.generate()` must depend only on seed/dimension/chunk position; generated door/bed/wall-torch state goes through `putDoor`/`putBed`/`putTorch` and reaches the world via `generator.drainStates(world)` — anything else won't cross the worker boundary.
 - **Music** lives in `AudioMusic.ts` (seeded composer, menu theme via `setMenuMusic`); `Audio.ts` has separate music/sfx/ambient buses and `setMusicVolume`/`setSoundVolume`.
