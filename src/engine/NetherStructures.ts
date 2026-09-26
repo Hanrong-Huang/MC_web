@@ -19,7 +19,7 @@
 // added by other passes (blackstone, crying obsidian, nether brick fence, …)
 // are looked up by registry name with a fallback to an existing block.
 
-import { B, I, allDefs, OPAQUE_LUT } from './Blocks';
+import { B, I, allDefs, ID_LIMIT, OPAQUE_LUT } from './Blocks';
 import { Chunk, CX, CZ, CY } from './Chunk';
 import { hash2, hash3, mulberry32 } from './Noise';
 import type { WorldGenerator } from './WorldGenerator';
@@ -44,8 +44,8 @@ export function idByName(name: string, fallback: number): number {
     blockNames = new Map();
     for (const d of allDefs()) {
       names.set(d.name, d.id);
-      // chunk storage is a Uint8Array: only real blocks below 256 can be placed
-      if (d.block && d.id > 0 && d.id < 256) blockNames.set(d.name, d.id);
+      // only real blocks (never items) can be placed into chunk storage
+      if (d.block && d.id > 0 && d.id < ID_LIMIT) blockNames.set(d.name, d.id);
     }
   }
   return names.get(name) ?? fallback;

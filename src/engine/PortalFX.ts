@@ -12,7 +12,7 @@ import { CX, CZ } from './Chunk';
 import { portalAxisAt, PortalAxis } from './NetherPortal';
 
 interface PortalWorldView {
-  getChunk(cx: number, cz: number): { cx: number; cz: number; ready: boolean; data: Uint8Array; glowers: Set<number> } | undefined;
+  getChunk(cx: number, cz: number): { cx: number; cz: number; ready: boolean; data: Uint16Array; glowers: Set<number> } | undefined;
   getBlock(x: number, y: number, z: number): number;
 }
 

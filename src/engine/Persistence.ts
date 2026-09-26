@@ -84,32 +84,73 @@ export interface SaveState {
   lastPlayed: number;
 }
 
-// --- RLE codec: stream of [count u16 LE, blockId u8] runs ------------------
+// --- RLE codec ---------------------------------------------------------------
+// v2 (current): a 3-byte header [0, 0, 2], then [count u16 LE, blockId u16 LE]
+// runs. v1 (legacy, from before block ids could pass 255): headerless
+// [count u16 LE, blockId u8] runs. A v1 run never has a zero count, so the
+// leading zero pair tells the two apart per chunk and old saves load unchanged.
 
-export function rleEncode(data: Uint8Array): Uint8Array<ArrayBuffer> {
+const RLE_V2 = 2;
+
+export function rleEncode(data: ArrayLike<number>): Uint8Array<ArrayBuffer> {
+  const n = data.length;
+  // grown on demand: a typical chunk is a few hundred runs
+  let out = new Uint8Array(2048);
+  let o = 0;
+  out[o++] = 0; out[o++] = 0; out[o++] = RLE_V2;
+  let i = 0;
+  while (i < n) {
+    const id = data[i];
+    let run = 1;
+    while (i + run < n && data[i + run] === id && run < 0xffff) run++;
+    if (o + 4 > out.length) { const g = new Uint8Array(out.length * 2); g.set(out); out = g; }
+    out[o++] = run & 0xff; out[o++] = run >> 8;
+    out[o++] = id & 0xff; out[o++] = (id >> 8) & 0xff;
+    i += run;
+  }
+  return out.slice(0, o);
+}
+
+/** True for a chunk blob written by the old u8-id codec. */
+export function rleIsLegacy(buf: Uint8Array): boolean {
+  return !(buf.length >= 3 && buf[0] === 0 && buf[1] === 0 && buf[2] === RLE_V2);
+}
+
+export function rleDecode(buf: Uint8Array, outLen: number): Uint16Array<ArrayBuffer> {
+  const out = new Uint16Array(outLen);
+  let o = 0;
+  if (rleIsLegacy(buf)) {
+    for (let i = 0; i + 3 <= buf.length; i += 3) {
+      const run = buf[i] | (buf[i + 1] << 8);
+      const id = buf[i + 2];
+      if (id !== 0) out.fill(id, o, Math.min(outLen, o + run));
+      o += run;
+      if (o >= outLen) break;
+    }
+    return out;
+  }
+  for (let i = 3; i + 4 <= buf.length; i += 4) {
+    const run = buf[i] | (buf[i + 1] << 8);
+    const id = buf[i + 2] | (buf[i + 3] << 8);
+    if (id !== 0) out.fill(id, o, Math.min(outLen, o + run));
+    o += run;
+    if (o >= outLen) break;
+  }
+  return out;
+}
+
+/** The old v1 encoder (ids truncated to u8): only for tests that fabricate legacy saves. */
+export function rleEncodeLegacy(data: ArrayLike<number>): Uint8Array<ArrayBuffer> {
   const out: number[] = [];
   let i = 0;
   while (i < data.length) {
     const id = data[i];
     let run = 1;
     while (i + run < data.length && data[i + run] === id && run < 0xffff) run++;
-    out.push(run & 0xff, (run >> 8) & 0xff, id);
+    out.push(run & 0xff, (run >> 8) & 0xff, id & 0xff);
     i += run;
   }
   return new Uint8Array(out);
-}
-
-export function rleDecode(buf: Uint8Array, outLen: number): Uint8Array<ArrayBuffer> {
-  const out = new Uint8Array(outLen);
-  let o = 0;
-  for (let i = 0; i + 2 < buf.length + 1 && i + 2 <= buf.length; i += 3) {
-    const run = buf[i] | (buf[i + 1] << 8);
-    const id = buf[i + 2];
-    if (id !== 0) out.fill(id, o, Math.min(outLen, o + run));
-    o += run;
-    if (o >= outLen) break;
-  }
-  return out;
 }
 
 // --- World file export / import ----------------------------------------------

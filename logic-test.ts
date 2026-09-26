@@ -1,5 +1,5 @@
 // Node-side logic tests (no DOM): RLE codec, crafting matcher, furnace, break times.
-import { rleEncode, rleDecode } from './src/engine/Persistence.ts';
+import { rleEncode, rleDecode, rleIsLegacy, rleEncodeLegacy } from './src/engine/Persistence.ts';
 import { matchRecipe, FurnaceState, ChestState, Slot, smeltResult, furnaceSlotFor } from './src/engine/Inventory.ts';
 import {
   B, B2, I, breakTime, canHarvest, attackCooldown, attackStrength, foodSaturation, pickItemFor, def,
@@ -24,6 +24,21 @@ const enc = rleEncode(data);
 const dec = rleDecode(enc, data.length);
 check('RLE roundtrip', dec.length === data.length && dec.every((v, i) => v === data[i]));
 check('RLE compresses', enc.length < data.length / 10);
+// u16 ids: blocks past 255 survive the round trip (and aren't truncated to u8)
+const wide = new Uint16Array(40960);
+for (let i = 0; i < 40960; i++) wide[i] = i < 20000 ? 3 : i < 20010 ? 256 + (i % 5) : i < 30000 ? 1000 : i % 300;
+wide[40959] = 4095;
+const wEnc = rleEncode(wide);
+const wDec = rleDecode(wEnc, wide.length);
+check('RLE u16 roundtrip (ids > 255)', wDec.every((v, i) => v === wide[i]));
+check('RLE v2 is not flagged legacy', !rleIsLegacy(wEnc));
+// old saves: headerless [count u16, id u8] runs still decode
+const old = new Uint8Array([0x88, 0x13, 3, 0x64, 0x00, 7, 0x01, 0x00, 250]); // 5000x stone, 100x planks, 1x crimson roots
+const oDec = rleDecode(old, 5200);
+check('RLE legacy u8 decode', rleIsLegacy(old) && oDec[0] === 3 && oDec[4999] === 3 && oDec[5000] === 7 &&
+  oDec[5099] === 7 && oDec[5100] === 250 && oDec[5101] === 0 && oDec instanceof Uint16Array);
+const lEnc = rleEncodeLegacy(data);
+check('RLE legacy encoder round-trips through the new decoder', rleIsLegacy(lEnc) && rleDecode(lEnc, data.length).every((v, i) => v === data[i]));
 
 // --- crafting ---
 const g4 = (a: number, b: number, c: number, d: number): Slot[] =>

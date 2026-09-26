@@ -95,7 +95,7 @@ export enum B {
   COAL_BLOCK = 96,
   QUARTZ_BLOCK = 95,
   SMOOTH_STONE = 94,
-  // --- building + decoration pass (ids 61, 84-93, 200+; chunk data is u8) ---
+  // --- building + decoration pass (ids 61, 84-93, 200+) ---
   /** carved pumpkin with a candle: a glowing block with a face (meta = facing) */
   JACK_O_LANTERN = 61,
   BRICKS = 84,
@@ -1328,9 +1328,14 @@ export function isOpaque(id: number): boolean { return id !== B.AIR && def(id).o
 export function isLiquid(id: number): boolean { return id === B.WATER || id === B.LAVA; }
 export function occludes(id: number): boolean { return id !== B.AIR && def(id).occludes; }
 
+/** Upper bound (exclusive) on block ids: chunks store u16 ids, and the per-id
+ *  lookup tables below (and the mesher's) are sized to this. Blocks use 1-99,
+ *  200-299 and 1000-4095; items use 100-199 and 300-999. */
+export const ID_LIMIT = 4096;
+
 /** Fast lookup tables for the mesher hot path (avoid per-face def() Map.gets). */
-export const OPAQUE_LUT = new Uint8Array(256);
-export const OCCLUDE_LUT = new Uint8Array(256);
+export const OPAQUE_LUT = new Uint8Array(ID_LIMIT);
+export const OCCLUDE_LUT = new Uint8Array(ID_LIMIT);
 for (const d of DEFS.values()) {
   if (d.block && d.opaque) OPAQUE_LUT[d.id] = 1;
   if (d.id !== B.AIR && d.occludes) OCCLUDE_LUT[d.id] = 1;

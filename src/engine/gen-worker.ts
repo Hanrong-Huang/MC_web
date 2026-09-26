@@ -11,7 +11,7 @@ import { Chunk } from './Chunk';
 export interface GenJob { id: number; cx: number; cz: number; dim: 'overworld' | 'nether'; }
 export interface GenResult {
   id: number; cx: number; cz: number; dim: 'overworld' | 'nether'; ms: number;
-  data: Uint8Array<ArrayBuffer>; heightmap: Uint8Array<ArrayBuffer>; torches: Uint32Array; glowers: Uint32Array;
+  data: Uint16Array<ArrayBuffer>; heightmap: Uint8Array<ArrayBuffer>; torches: Uint32Array; glowers: Uint32Array;
   /** biome tint per column: the worker's column cache is warm, the main one isn't */
   tint: Float32Array;
   doors: [string, DoorState][]; torchFacings: [string, number][]; beds: [string, number][];

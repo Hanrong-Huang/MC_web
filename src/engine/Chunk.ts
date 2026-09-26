@@ -1,4 +1,4 @@
-// Chunk: 16x16x160 column of block ids packed in a flat Uint8Array,
+// Chunk: 16x16x160 column of block ids packed in a flat Uint16Array,
 // plus a heightmap used for the cheap skylight model.
 
 import { B, CROSS_BLOCKS } from './Blocks';
@@ -18,7 +18,10 @@ export function isGlower(id: number): boolean {
 export const CX = 16;
 export const CZ = 16;
 export const CY = 160;
-export const CHUNK_VOLUME = CX * CZ * CY; // 40960 bytes
+export const CHUNK_VOLUME = CX * CZ * CY; // 40960 cells (80 KB of u16 block ids)
+
+/** Per-chunk block-id storage: u16, so block ids may run past 255 (see Blocks.ID_LIMIT). */
+export type BlockData = Uint16Array<ArrayBuffer>;
 
 export function chunkKey(cx: number, cz: number): string {
   return `${cx},${cz}`;
@@ -31,7 +34,7 @@ export function blockIndex(x: number, y: number, z: number): number {
 export class Chunk {
   readonly cx: number;
   readonly cz: number;
-  data = new Uint8Array(CHUNK_VOLUME);
+  data: BlockData = new Uint16Array(CHUNK_VOLUME);
   /** heightmap[z*16+x] = y of first free block above the highest non-air block */
   heightmap = new Uint8Array(CX * CZ);
   /** packed local indices of torch blocks (light sources) */

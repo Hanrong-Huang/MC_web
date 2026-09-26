@@ -103,7 +103,7 @@ const rnd = (a: number, b: number): number => a + Math.random() * (b - a);
 
 interface FXWorld {
   getBlock(x: number, y: number, z: number): number;
-  getChunk(cx: number, cz: number): { cx: number; cz: number; ready: boolean; data: Uint8Array; glowers: Set<number> } | undefined;
+  getChunk(cx: number, cz: number): { cx: number; cz: number; ready: boolean; data: Uint16Array; glowers: Set<number> } | undefined;
 }
 
 export class NetherFX {

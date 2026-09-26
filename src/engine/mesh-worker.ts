@@ -10,7 +10,7 @@ import { CX, CY, chunkKey } from './Chunk';
 
 export interface MeshChunkSnap {
   cx: number; cz: number;
-  data: Uint8Array; heightmap: Uint8Array;
+  data: Uint16Array; heightmap: Uint8Array;
   torches: Uint32Array; glowers: Uint32Array;
 }
 export interface MeshJob {

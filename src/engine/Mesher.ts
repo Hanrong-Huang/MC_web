@@ -8,7 +8,7 @@
 // light model stays 2-channel without another attribute.
 
 import { CX, CZ, CY } from './Chunk';
-import { B, def, hasDef, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel } from './Blocks';
+import { B, def, hasDef, ID_LIMIT, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel } from './Blocks';
 import type { Box } from './Blocks';
 import type { UVRect } from './Textures';
 
@@ -20,7 +20,7 @@ interface ReadMap<T> { get(key: string): T | undefined; }
 export interface MeshChunk {
   cx: number; cz: number;
   ready: boolean;
-  data: Uint8Array;
+  data: Uint16Array;
   heightmap: ArrayLike<number>;
   skyLight(lx: number, y: number, lz: number): number;
   torches: Set<number>;
@@ -143,14 +143,14 @@ function regionIdx(rx: number, rz: number, y: number): number {
 // CY), so the hot face/AO loop is plain array reads instead of closure calls.
 const PW = 18;
 const PH = CY + 2;
-const PAD = new Uint8Array(PW * PW * PH);
+const PAD = new Uint16Array(PW * PW * PH);
 function padIdx(x: number, y: number, z: number): number {
   return ((z + 1) * PW + (x + 1)) * PH + (y + 1);
 }
 
 /** Leaf blocks sway gently in the wind. */
-const LEAF_LUT = new Uint8Array(256);
-for (let id = 1; id < 256; id++) if (hasDef(id) && def(id).name.endsWith('leaves')) LEAF_LUT[id] = 1;
+const LEAF_LUT = new Uint8Array(ID_LIMIT);
+for (let id = 1; id < ID_LIMIT; id++) if (hasDef(id) && def(id).name.endsWith('leaves')) LEAF_LUT[id] = 1;
 
 function faceTile(f: NonNullable<ReturnType<typeof def>['faces']>, face: number): string {
   if (face === 2) return f.top;
@@ -235,7 +235,7 @@ export class GeoBuilder {
 
 // Per-id block kind: 0 = air, 1 = plain cube (opaque / cutout / liquid), 2 =
 // special model (torch, door, bed, plants, ...) handled by its own emitter.
-const KIND = new Int8Array(256).fill(-1);
+const KIND = new Int8Array(ID_LIMIT).fill(-1);
 function kindOf(id: number): number {
   let k = KIND[id];
   if (k < 0) {
@@ -251,8 +251,8 @@ function kindOf(id: number): number {
 
 // per (block, face) atlas rect + biome-tint flag, rebuilt if the atlas changes
 let rectAtlas: MeshAtlas | null = null;
-const FACE_RECT: (UVRect | undefined)[] = new Array(256 * 6);
-const FACE_TINTED = new Uint8Array(256 * 6);
+const FACE_RECT: (UVRect | undefined)[] = new Array(ID_LIMIT * 6);
+const FACE_TINTED = new Uint8Array(ID_LIMIT * 6);
 function faceRect(atlas: MeshAtlas, id: number, face: number): UVRect {
   if (atlas !== rectAtlas) { rectAtlas = atlas; FACE_RECT.fill(undefined); }
   const k = id * 6 + face;
