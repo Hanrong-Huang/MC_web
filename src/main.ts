@@ -27,12 +27,13 @@ import type { GeoArrays, MeshDoor, MeshRedstone } from './engine/Mesher';
 import { chunkGeometryFromArrays } from './engine/Renderer';
 import type { MeshJob, MeshChunkSnap } from './engine/mesh-worker';
 import { chunkKey, CX, CZ } from './engine/Chunk';
-import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, def, hasDef, isSolid, mobLabel } from './engine/Blocks';
+import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, HANGING_PLANTS, def, hasDef, isSolid, mobLabel } from './engine/Blocks';
 import { SHAPED, META_BLOCKS, shapeBoxes, connectsTo, enchantLabel } from './engine/Blocks';
 import { craftRemainders } from './engine/Inventory';
 import { ExperienceOrbs, XpBar } from './engine/Experience';
 import { Throwables } from './engine/Throwables';
 import { Campfires } from './engine/Campfires';
+import { fillNetherChest } from './engine/NetherStructures';
 import { MapOverlay } from './ui/MapOverlay';
 import { Weather } from './engine/Weather';
 import { getControls, setControls } from './engine/ControlsSettings';
@@ -898,7 +899,8 @@ class Game {
         st = kind === 'furnace' ? new FurnaceState() : new ChestState();
         // generated chests roll loot on first open, then become normal chests
         if (kind === 'chest' && this.world.getBlock(x, y, z) === B.CHEST_LOOT) {
-          this.rollLoot(st as ChestState);
+          if (this.world.dimension === 'nether') fillNetherChest((st as ChestState).slots, this.world.generator.seed, x, y, z);
+          else this.rollLoot(st as ChestState);
           this.world.setBlock(x, y, z, B.CHEST);
           this.audio.play('level');
           this.adv.unlock('dungeon');
@@ -1815,6 +1817,11 @@ class Game {
             const below = this.world.getBlock(x, y - 1, z);
             supported = (hasDef(below) && below !== B.AIR && def(below).solid) ||
               (SELF_STACKING.has(id) && below === id);
+            // weeping vines hang from a ceiling (or from more vine)
+            if (!supported && HANGING_PLANTS.has(id)) {
+              const above = this.world.getBlock(x, y + 1, z);
+              supported = above === id || this.world.isSolidAt(x, y + 1, z);
+            }
           }
           if (!supported) {
             this.world.setBlock(x, y, z, B.AIR);

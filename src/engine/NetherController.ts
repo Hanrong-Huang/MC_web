@@ -254,9 +254,15 @@ export class NetherController {
     let built = false;
     if (!rec) {
       const ty = to === 'overworld' ? this.overworldY(t.x, t.z, t.y) : t.y;
-      const site = findPortalSite(world, to, t.x, ty, t.z, 12);
+      let site = findPortalSite(world, to, t.x, ty, t.z, 12);
+      if (!site) {
+        // nothing close (the lava sea, solid rock): look further afield for real ground
+        ensure(t.x, t.z, 2);
+        site = findPortalSite(world, to, t.x, ty, t.z, 30);
+      }
+      // last resort: carve a ledge, well above the Nether's lava sea
       rec = site ? buildPortal(world, site.x, site.y, site.z, site.axis, false)
-        : buildPortal(world, t.x, ty, t.z, 'x', true);
+        : buildPortal(world, t.x, to === 'nether' ? Math.max(ty, 64) : ty, t.z, 'x', true);
       built = true;
     }
     remember(list, rec);

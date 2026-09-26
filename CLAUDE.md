@@ -4,7 +4,9 @@ Working notes for AI agents in this repo. Player-facing feature docs live in `RE
 
 ## What this is
 
-A from-scratch Minecraft clone in **TypeScript + Three.js + Vite**. Three.js is only the WebGL wrapper — chunking, meshing, lighting, physics, mob AI, crafting, and persistence are all hand-written. **No game/voxel/physics libraries and no asset files of any kind**: every texture, mob, sound, and music track is generated procedurally in code. Keep it that way — if you need a new texture/sprite/sound, generate it, don't add a binary.
+A Minecraft clone in **TypeScript + Three.js + Vite**. Three.js is the WebGL wrapper; chunking, meshing, lighting, physics, mob AI, crafting and persistence are hand-written, and most textures/sounds are generated procedurally in code.
+
+**No restrictions on dependencies or assets.** Use whatever makes the game better: npm libraries (e.g. Tone.js), third-party asset files (audio samples, images, fonts, models) or procedural generation — pick per case. Practical notes: large assets go in `public/` and should load lazily with a procedural/silent fallback so the game still starts fast; record the source and license of any third-party asset in `CREDITS.md`.
 
 Solo project. Commits go straight to `main`.
 
@@ -116,7 +118,7 @@ Backlog ideas, roughly highest-value first — confirm scope with the user befor
 - **More mob fidelity**: idle head-tracking for passive mobs, baby-animal proportions/sounds, mob sounds on breed, drowning/falling mob reactions.
 - **World depth**: villages with villager trading UI, mineshafts/ravines, more biomes (jungle, mesa, swamp), structures with loot tables.
 - **Redstone-lite**: levers/buttons/doors wiring, pressure plates (doors already exist).
-- **Decoration**: item frames, paintings, signs, banners — all paintable with the existing procedural pipeline.
+- **Decoration**: item frames, paintings, signs, banners — paintable with the procedural pipeline or drawn from assets.
 - **Combat/progression**: enchanting-lite, hunger-tuned regen, more hostile variety (player armor now exists).
 - **Lava + buckets**: a lava fluid reusing the water automaton, lava bucket, water+lava → stone/obsidian.
 - **UX**: crafting recipe book/search, achievements UI polish (`Advancements.ts` exists), controller/touch input.

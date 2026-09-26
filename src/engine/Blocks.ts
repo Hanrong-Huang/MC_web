@@ -157,6 +157,25 @@ export enum B {
   /** turns plant matter into bone meal (meta = fill level 0..8) */
   COMPOSTER = 236,
   CHISELED_STONE_BRICKS = 237,
+  // --- Nether biome blocks (ids 238-251) ---
+  CRIMSON_NYLIUM = 238,
+  WARPED_NYLIUM = 239,
+  CRIMSON_STEM = 240,
+  WARPED_STEM = 241,
+  NETHER_WART_BLOCK = 242,
+  WARPED_WART_BLOCK = 243,
+  /** glowing fungus lantern */
+  SHROOMLIGHT = 244,
+  BASALT = 245,
+  BLACKSTONE = 246,
+  SOUL_SOIL = 247,
+  NETHER_GOLD_ORE = 248,
+  /** blast-proof; diamond pickaxe */
+  ANCIENT_DEBRIS = 249,
+  /** floor tuft; hanging from a ceiling (nothing solid below) it draws as weeping vines */
+  CRIMSON_ROOTS = 250,
+  /** floor tuft; stacked on itself it draws as twisting vines */
+  WARPED_ROOTS = 251,
 }
 
 export enum I {
@@ -1557,6 +1576,132 @@ export const CREATIVE_ITEMS: number[] = [
   I.POTION_FIRE_RESISTANCE, I.POTION_STRENGTH, I.POTION_LEAPING, I.POTION_REGENERATION,
   I.EXPERIENCE_BOTTLE, I.MAP, I.RECOVERY_COMPASS, I.GLIDER, I.FIREWORK_ROCKET, I.WARP_PEARL,
 ];
+
+// =============================================================================
+// Nether biome blocks: crimson/warped forests (nylium, stems, wart caps,
+// shroomlight, roots + vines), basalt deltas (basalt, blackstone), soul sand
+// valleys (soul soil) and the deep-Nether ores. Registered after the tables
+// above, so the lookup tables and plant sets are patched in here.
+// =============================================================================
+
+blockDef({
+  id: B.CRIMSON_NYLIUM, name: 'crimson_nylium', label: 'Crimson Nylium', hardness: 0.4, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  faces: { top: 'crimson_nylium_top', bottom: 'netherrack', sides: 'crimson_nylium_side' },
+  drop: { id: B.NETHERRACK, min: 1, max: 1 },
+});
+blockDef({
+  id: B.WARPED_NYLIUM, name: 'warped_nylium', label: 'Warped Nylium', hardness: 0.4, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  faces: { top: 'warped_nylium_top', bottom: 'netherrack', sides: 'warped_nylium_side' },
+  drop: { id: B.NETHERRACK, min: 1, max: 1 },
+});
+blockDef({
+  id: B.CRIMSON_STEM, name: 'crimson_stem', label: 'Crimson Stem', hardness: 2, tool: 'axe', sound: 'wood',
+  faces: { top: 'crimson_stem_top', bottom: 'crimson_stem_top', sides: 'crimson_stem_side' },
+});
+blockDef({
+  id: B.WARPED_STEM, name: 'warped_stem', label: 'Warped Stem', hardness: 2, tool: 'axe', sound: 'wood',
+  faces: { top: 'warped_stem_top', bottom: 'warped_stem_top', sides: 'warped_stem_side' },
+});
+blockDef({
+  id: B.NETHER_WART_BLOCK, name: 'nether_wart_block', label: 'Nether Wart Block', hardness: 1, tool: 'hoe', sound: 'grass',
+  faces: { top: 'nether_wart_block', bottom: 'nether_wart_block', sides: 'nether_wart_block' },
+});
+blockDef({
+  id: B.WARPED_WART_BLOCK, name: 'warped_wart_block', label: 'Warped Wart Block', hardness: 1, tool: 'hoe', sound: 'grass',
+  faces: { top: 'warped_wart_block', bottom: 'warped_wart_block', sides: 'warped_wart_block' },
+});
+blockDef({
+  id: B.SHROOMLIGHT, name: 'shroomlight', label: 'Shroomlight', hardness: 1, tool: 'hoe', sound: 'grass',
+  faces: { top: 'shroomlight', bottom: 'shroomlight', sides: 'shroomlight' },
+});
+blockDef({
+  id: B.BASALT, name: 'basalt', label: 'Basalt', hardness: 1.25, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  faces: { top: 'basalt_top', bottom: 'basalt_top', sides: 'basalt_side' },
+});
+blockDef({
+  id: B.BLACKSTONE, name: 'blackstone', label: 'Blackstone', hardness: 1.5, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  faces: { top: 'blackstone_top', bottom: 'blackstone_top', sides: 'blackstone' },
+});
+blockDef({
+  id: B.SOUL_SOIL, name: 'soul_soil', label: 'Soul Soil', hardness: 0.5, tool: 'shovel', sound: 'sand',
+  faces: { top: 'soul_soil', bottom: 'soul_soil', sides: 'soul_soil' },
+});
+blockDef({
+  // drops gold nuggets once they exist (resolved lazily below), else the odd ingot
+  id: B.NETHER_GOLD_ORE, name: 'nether_gold_ore', label: 'Nether Gold Ore', hardness: 3, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  faces: { top: 'nether_gold_ore', bottom: 'nether_gold_ore', sides: 'nether_gold_ore' },
+});
+blockDef({
+  id: B.ANCIENT_DEBRIS, name: 'ancient_debris', label: 'Ancient Debris', hardness: 30, tool: 'pickaxe', minTier: 8, sound: 'stone',
+  faces: { top: 'ancient_debris_top', bottom: 'ancient_debris_top', sides: 'ancient_debris_side' },
+});
+blockDef({
+  id: B.CRIMSON_ROOTS, name: 'crimson_roots', label: 'Crimson Roots', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'crimson_roots', bottom: 'crimson_roots', sides: 'crimson_roots' },
+});
+blockDef({
+  id: B.WARPED_ROOTS, name: 'warped_roots', label: 'Warped Roots', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'warped_roots', bottom: 'warped_roots', sides: 'warped_roots' },
+});
+
+const NETHER_BLOCKS = [
+  B.CRIMSON_NYLIUM, B.WARPED_NYLIUM, B.CRIMSON_STEM, B.WARPED_STEM, B.NETHER_WART_BLOCK, B.WARPED_WART_BLOCK,
+  B.SHROOMLIGHT, B.BASALT, B.BLACKSTONE, B.SOUL_SOIL, B.NETHER_GOLD_ORE, B.ANCIENT_DEBRIS,
+  B.CRIMSON_ROOTS, B.WARPED_ROOTS,
+];
+for (const id of NETHER_BLOCKS) {
+  const d = DEFS.get(id)!;
+  OPAQUE_LUT[id] = d.opaque ? 1 : 0;
+  OCCLUDE_LUT[id] = d.occludes ? 1 : 0;
+}
+CROSS_BLOCKS.add(B.CRIMSON_ROOTS).add(B.WARPED_ROOTS);
+FLOOR_BLOCKS.add(B.CRIMSON_ROOTS).add(B.WARPED_ROOTS);
+SELF_STACKING.add(B.WARPED_ROOTS); // twisting vines climb on themselves
+
+/** Plants that may also hang from the block above (or from more of themselves):
+ *  crimson roots dangling off a ceiling are weeping vines. */
+export const HANGING_PLANTS = new Set<number>([B.CRIMSON_ROOTS]);
+
+/** Blocks explosions can't break. */
+export const BLAST_PROOF = new Set<number>([B.BEDROCK, B.ANCIENT_DEBRIS]);
+
+/** Tile for a crossed-billboard plant given its neighbours below/above: crimson
+ *  roots with nothing solid under them draw as weeping vines, stacked warped
+ *  roots as twisting vines, and fire on soul sand/soil burns blue. */
+export function crossTile(id: number, below: number, above: number): string {
+  if (id === B.FIRE) return below === B.SOUL_SAND || below === B.SOUL_SOIL ? 'soul_fire' : 'fire';
+  if (id === B.CRIMSON_ROOTS && !DEFS.get(below)?.solid) {
+    return below === B.CRIMSON_ROOTS ? 'weeping_vines' : 'weeping_vines_tip';
+  }
+  if (id === B.WARPED_ROOTS && (above === B.WARPED_ROOTS || below === B.WARPED_ROOTS)) {
+    return above === B.WARPED_ROOTS ? 'twisting_vines' : 'twisting_vines_tip';
+  }
+  return DEFS.get(id)!.faces!.sides;
+}
+
+/** Block/item id by registry name (0 if absent) — for content other passes add. */
+export function idByName(name: string): number {
+  for (const d of DEFS.values()) if (d.name === name) return d.id;
+  return 0;
+}
+
+// Nether gold ore: 2-6 gold nuggets once a nugget item is registered (looked
+// up lazily by name); until then it drops itself and smelts to a gold ingot.
+let nuggetId = -1;
+Object.defineProperty(DEFS.get(B.NETHER_GOLD_ORE)!, 'drop', {
+  configurable: true, enumerable: true,
+  get: (): Def['drop'] => {
+    if (nuggetId <= 0) nuggetId = idByName('gold_nugget');
+    return nuggetId ? { id: nuggetId, min: 2, max: 6 } : undefined;
+  },
+});
+
+// creative panel: right after the vanilla Nether blocks
+for (const list of [PLACEABLE, CREATIVE_ITEMS]) {
+  list.splice(list.indexOf(B.NETHER_BRICKS) + 1, 0, ...NETHER_BLOCKS);
+}
 
 // =============================================================================
 // Nether utility pass: netherite, soul light, the respawn anchor, fire charges
