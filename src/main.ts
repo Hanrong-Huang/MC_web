@@ -97,7 +97,8 @@ class Game {
   /** block positions whose supports must be re-checked (sand falls, torches pop) */
   private supportQueue = new Set<string>();
   private autosaveT = 0;
-  private saving = false;
+  /** the save in flight (autosave / Save / Save & Quit), if any */
+  private saving: Promise<boolean> | null = null;
   private weather!: Weather;
   private adv = new AdvancementTracker();
   private survivedNight = false;
@@ -1412,18 +1413,21 @@ class Game {
 
   /** Save without quitting (pause-menu Save button + autosave). */
   async saveGame(): Promise<boolean> {
-    if (this.saving) return true;
-    this.saving = true;
-    if (this.state !== 'loading') this.recordWorldCard();
-    try {
-      await this.app.db.save(this.slot, this.buildSave());
-      return true;
-    } catch (err) {
-      console.error('Save failed', err);
-      return false;
-    } finally {
-      this.saving = false;
-    }
+    // a save already in flight was built from older state (say an autosave
+    // just before Save & Quit): let it land, then write the current state
+    while (this.saving) await this.saving;
+    const run = (async (): Promise<boolean> => {
+      if (this.state !== 'loading') this.recordWorldCard();
+      try {
+        await this.app.db.save(this.slot, this.buildSave());
+        return true;
+      } catch (err) {
+        console.error('Save failed', err);
+        return false;
+      }
+    })();
+    this.saving = run;
+    try { return await run; } finally { if (this.saving === run) this.saving = null; }
   }
 
   private async saveAndQuit(): Promise<void> {
