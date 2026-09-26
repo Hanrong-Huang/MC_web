@@ -8,7 +8,7 @@
 // light model stays 2-channel without another attribute.
 
 import { CX, CZ, CY } from './Chunk';
-import { B, def, hasDef, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, connectsTo } from './Blocks';
+import { B, def, hasDef, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, connectsTo, SOUL_LIGHTS, emitLevel } from './Blocks';
 import type { Box } from './Blocks';
 import type { UVRect } from './Textures';
 
@@ -55,6 +55,9 @@ export interface ChunkMeshData { solid: GeoArrays | null; water: GeoArrays | nul
 /** Vertex flags packed into the torch channel (see header). */
 export const FLAG_SWAY = 2;
 export const FLAG_LAVA = 4;
+/** Soul-light share of the block light, 0..7 steps of this (cube faces only):
+ *  the shader shifts the torch colour toward soul-fire cyan by that much. */
+export const FLAG_SOUL = 8;
 
 // face order: +x, -x, +y, -y, +z, -z
 const FACE_NORMALS = [
@@ -90,6 +93,7 @@ for (let i = 0; i < 16; i++) { const l = i / 15; LIGHT_CURVE[i] = l / ((1 - l) *
 // so each face samples the front layer once instead of re-sampling per corner
 const SKY9 = new Float32Array(9);
 const TORCH9 = new Float32Array(9);
+const SOUL9 = new Float32Array(9);
 const OCC9 = new Uint8Array(9);
 const SOLID9 = new Uint8Array(9);
 
@@ -126,6 +130,7 @@ const RX0 = -15, RX1 = 30;
 const RW = RX1 - RX0 + 1; // 46
 const TORCHR = new Uint8Array(RW * RW * CY);
 const SKYR = new Uint8Array(RW * RW * CY);
+const SOULR = new Uint8Array(RW * RW * CY); // soul-fire share of the block light
 const QLEN = 1 << 17;
 const QUEUE = new Int32Array(QLEN);
 const QMASK = QLEN - 1;
@@ -235,7 +240,7 @@ function kindOf(id: number): number {
   let k = KIND[id];
   if (k < 0) {
     k = id === B.AIR ? 0
-      : (id === B.TORCH || id === B.DOOR_LOWER || id === B.DOOR_UPPER || id === B.LADDER ||
+      : (id === B.TORCH || id === B.SOUL_TORCH || id === B.PORTAL || id === B.DOOR_LOWER || id === B.DOOR_UPPER || id === B.LADDER ||
         id === B.BED || id === B.BED_HEAD || id === B.TRAPDOOR || id === B.PRESSURE_PLATE ||
         id === B.LEVER || id === B.WOODEN_BUTTON || id === B.STONE_BUTTON ||
         id === B.REDSTONE_WIRE || CROSS_BLOCKS.has(id) || SHAPED.has(id)) ? 2 : 1;
@@ -437,22 +442,44 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
   // --- block-light flood fill (torches + glowstone/lit lamps) ----------------
   let hasLights = false;
   for (const c of refs) if (c && (c.torches.size > 0 || c.glowers.size > 0)) { hasLights = true; break; }
+  let hasSoul = false;
   if (hasLights) {
     TORCHR.fill(0);
     qTail = 0;
-    const seed = (c: MeshChunk, packed: number, level: number): void => {
+    const seed = (c: MeshChunk, packed: number, level: number, arr = TORCHR): void => {
       const ox = c.cx * CX - bx, oz = c.cz * CZ - bz;
       const rx = ox + (packed & 15), rz = oz + ((packed >> 4) & 15), ry = packed >> 8;
       if (rx < RX0 || rx > RX1 || rz < RX0 || rz > RX1) return;
       const ri = regionIdx(rx, rz, ry);
-      if (TORCHR[ri] < level) { TORCHR[ri] = level; push(ri); }
+      if (arr[ri] < level) { arr[ri] = level; push(ri); }
+    };
+    /** per-emitter level: soul fire and portals burn dimmer, anchors by charge */
+    const glowLevel = (c: MeshChunk, t: number): number => {
+      const id = c.data[t];
+      if (id === B.RESPAWN_ANCHOR) {
+        const meta = world.bedFacings.get(`${c.cx * CX + (t & 15)},${t >> 8},${c.cz * CZ + ((t >> 4) & 15)}`) ?? 0;
+        return emitLevel(id, meta);
+      }
+      if (SOUL_LIGHTS.has(id)) hasSoul = true;
+      return id === B.PORTAL || SOUL_LIGHTS.has(id) ? emitLevel(id) : GLOW_LEVEL;
     };
     for (const c of refs) {
       if (!c || (c.torches.size === 0 && c.glowers.size === 0)) continue;
       for (const t of c.torches) seed(c, t, TORCH_LEVEL);
-      for (const t of c.glowers) seed(c, t, GLOW_LEVEL); // glowstone/lamp burn a touch brighter
+      for (const t of c.glowers) seed(c, t, glowLevel(c, t)); // glowstone/lamp burn a touch brighter
     }
     floodFill(TORCHR, refs, qTail, 0);
+    if (hasSoul) {
+      // a second fill carrying only the soul flames: where it matches the
+      // combined light, that light is cold blue
+      SOULR.fill(0);
+      qTail = 0;
+      for (const c of refs) {
+        if (!c || c.glowers.size === 0) continue;
+        for (const t of c.glowers) if (SOUL_LIGHTS.has(c.data[t])) seed(c, t, emitLevel(c.data[t]), SOULR);
+      }
+      floodFill(SOULR, refs, qTail, 0);
+    }
   }
 
   const skyAt = (x: number, y: number, z: number): number => {
@@ -481,11 +508,12 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
 
         if (kind === 2) {
 
-        if (id === B.TORCH) {
+        if (id === B.TORCH || id === B.SOUL_TORCH) {
           const facing = world.torchFacings.get(`${bx + x},${y},${bz + z}`);
-          emitTorch(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), facing);
+          emitTorch(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), facing, id === B.SOUL_TORCH ? 'soul_torch' : 'torch');
           continue;
         }
+        if (id === B.PORTAL) continue; // drawn as an animated sheet by PortalFX
         if (id === B.DOOR_LOWER || id === B.DOOR_UPPER) {
           const st = world.doorStateAt(bx + x, y, bz + z);
           const facing = st?.facing ?? 0;
@@ -631,12 +659,13 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
               OCC9[gi] = OCCLUDE_LUT[gid];
               SOLID9[gi] = OPAQUE_LUT[gid];
               // inline skyAt/torchAt: gx/gz are always inside the light region
-              if (gy >= CY) { SKY9[gi] = 1; TORCH9[gi] = 0; }
-              else if (gy < 0) { SKY9[gi] = 0; TORCH9[gi] = 0; }
+              if (gy >= CY) { SKY9[gi] = 1; TORCH9[gi] = 0; SOUL9[gi] = 0; }
+              else if (gy < 0) { SKY9[gi] = 0; TORCH9[gi] = 0; SOUL9[gi] = 0; }
               else {
                 const ri = ((gz - RX0) * RW + (gx - RX0)) * CY + gy;
                 SKY9[gi] = LIGHT_CURVE[SKYR[ri]];
                 TORCH9[gi] = hasLights ? LIGHT_CURVE[TORCHR[ri]] : 0;
+                SOUL9[gi] = hasSoul ? LIGHT_CURVE[SOULR[ri]] : 0;
               }
             }
           }
@@ -681,7 +710,10 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
               target.v(x + px, y + py, z + pz, k * sky, k * torch, wr, wg, kindF, wu, wv);
               continue;
             }
-            target.v(x + px, y + py, z + pz, k * sky, k * torch + flag,
+            // soul-fire share of this corner's block light, in eighths (0..7)
+            let soul = 0;
+            if (hasSoul && !isLava && torch > 0.02) soul = Math.round(Math.min(1, cornerLight(SOUL9, a, b) / torch) * 7);
+            target.v(x + px, y + py, z + pz, k * sky, k * torch + flag + soul * FLAG_SOUL,
               tint[0], tint[1], tint[2],
               a ? rect.u1 : rect.u0,
               b ? rect.v0 : rect.v1); // b=1 is the face top -> image top (flipY=false)
@@ -732,9 +764,9 @@ function emitCross(g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: nu
  *  wall, and offset so its base sits against that wall face. */
 function emitTorch(
   g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number,
-  sky: number, torch: number, facing?: number,
+  sky: number, torch: number, facing?: number, tile = 'torch',
 ): void {
-  const rect = atlas.rect('torch');
+  const rect = atlas.rect(tile);
   const du = rect.u1 - rect.u0, dv = rect.v1 - rect.v0;
   const lo = 7 / 16, hi = 9 / 16, top = 10 / 16;
   const u0 = rect.u0 + 7 / 16 * du, u1 = rect.u0 + 9 / 16 * du;
@@ -1202,8 +1234,17 @@ function shapedParts(id: number, meta: number, conn: number, open: boolean): { p
       for (const b of bs) parts.push({ b: (meta & 1) ? swapXZ(b) : b, t: std });
       break;
     }
-    case B.LANTERN: {
-      const lt = tiles6('lantern_model', 'lantern_model_top', 'lantern_model_top');
+    case B.RESPAWN_ANCHOR: {
+      // crying-obsidian block; the side meter and the top's portal pool light up by charge
+      const c = Math.max(0, Math.min(4, meta));
+      const t = tiles6(`respawn_anchor_side_${c}`, c > 0 ? 'respawn_anchor_top_on' : 'respawn_anchor_top', 'respawn_anchor_bottom');
+      parts.push({ b: [0, 0, 0, 1, 1, 1], t });
+      break;
+    }
+    case B.LANTERN: case B.SOUL_LANTERN: {
+      const lt = id === B.SOUL_LANTERN
+        ? tiles6('soul_lantern_model', 'soul_lantern_model_top', 'soul_lantern_model_top')
+        : tiles6('lantern_model', 'lantern_model_top', 'lantern_model_top');
       const hang = meta === 1;
       const o = hang ? 1 : 0;
       parts.push({ b: bx16(5, o, 5, 11, 7 + o, 11), t: lt, vOff: o * S16, glow: true });

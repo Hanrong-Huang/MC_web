@@ -63,6 +63,7 @@ const SKY_DAY_LIGHT = new THREE.Color(1, 0.98, 0.95);
 const SKY_DUSK_LIGHT = new THREE.Color(1.0, 0.72, 0.52);
 const SKY_NIGHT_LIGHT = new THREE.Color(0.05, 0.06, 0.1);
 const TORCH_LIGHT = new THREE.Color(1.0, 0.78, 0.5);
+const SOUL_LIGHT = new THREE.Color(0.42, 0.86, 1.0);
 const CLOUD_DAY = new THREE.Color(1, 1, 1);
 const CLOUD_DUSK = new THREE.Color(1.0, 0.66, 0.52);
 const CLOUD_NIGHT = new THREE.Color(0.055, 0.06, 0.09);
@@ -327,7 +328,7 @@ void main() {
 // Chunk shader: vertex 'alight' = (sky-lit, torch-lit). Sky light is tinted
 // by the time of day (warm at dusk, blue moonlight at night); torch light is a
 // warm, gently flickering color. The torch channel carries flag bits (+2 sway,
-// +4 lava) that the vertex shader strips.
+// +4 lava, +8 per eighth of soul-fire share) that the vertex shader strips.
 const CHUNK_VERT = /* glsl */ `
 attribute vec2 alight;
 attribute vec3 atint;
@@ -335,11 +336,13 @@ uniform float uTime;
 uniform float uFogNear;
 uniform float uFogFar;
 uniform float uFogVert;
+uniform vec4 uHeat; // Nether heat haze: x = strength, y = lava-sea level
 varying vec2 vLight;
 varying vec3 vTint;
 varying vec2 vUv2;
 varying vec3 vWorld;
 varying float vLava;
+varying float vSoul;
 varying vec4 vFog; // rgb = sky color behind this vertex, a = fog amount
 uniform float uUnder;
 ${WOBBLE_GLSL}
@@ -349,9 +352,11 @@ void main() {
   vTint = atint;
   float flag = floor(alight.y * 0.5);
   vLight = vec2(alight.x, alight.y - flag * 2.0);
-  vLava = step(1.5, flag);
+  float sway = mod(flag, 2.0);
+  vLava = mod(floor(flag * 0.5), 2.0);
+  vSoul = floor(flag * 0.25) / 7.0;
   vec4 wp = modelMatrix * vec4(position, 1.0);
-  if (flag > 0.5 && flag < 1.5) {
+  if (sway > 0.5) {
     // leaves / plant tops sway in the wind (a function of world position, so
     // shared corners move together and never crack apart)
     float ph = wp.x * 0.61 + wp.z * 0.83 + wp.y * 0.29;
@@ -362,9 +367,18 @@ void main() {
   vWorld = wp.xyz;
   gl_Position = projectionMatrix * viewMatrix * wp;
   gl_Position.xy += underwaterWobble(gl_Position, uTime) * uUnder;
+  vec3 toV = wp.xyz - cameraPosition;
+  if (uHeat.x > 0.0) {
+    // heat haze: whatever sits in the hot air over the lava sea ripples a
+    // little once it's a few blocks off (up close it would read as a quake)
+    float band = 1.0 - smoothstep(0.0, 14.0, wp.y - uHeat.y);
+    float far = smoothstep(7.0, 30.0, length(toV));
+    float k = uHeat.x * band * far * step(uHeat.y - 2.0, wp.y);
+    gl_Position.x += sin(uTime * 2.3 + wp.y * 3.1 + wp.x * 0.35) * 0.0045 * k * gl_Position.w;
+    gl_Position.y += sin(uTime * 1.7 + wp.y * 2.3 + wp.z * 0.41) * 0.0028 * k * gl_Position.w;
+  }
   // fog evaluated per vertex (chunk faces are 1 block, so it interpolates
   // cleanly) — keeps the per-pixel cost at a texture fetch + a few MADs
-  vec3 toV = wp.xyz - cameraPosition;
   // cylindrical fog (chunks stream in a horizontal circle); height only counts
   // a little in air so the ground stays visible when flying high
   float dist = max(length(toV.xz), abs(toV.y) * uFogVert);
@@ -386,11 +400,15 @@ uniform vec3 uSkyLight;
 uniform vec3 uTorchCol;
 uniform vec3 uAmbient;
 uniform vec3 uTintMul;
+uniform vec3 uSoulCol;
+uniform vec4 uNetherGlow; // rgb = lava-sea glow colour, a = strength (0 outside the Nether)
+uniform vec4 uHeat;
 varying vec2 vLight;
 varying vec3 vTint;
 varying vec2 vUv2;
 varying vec3 vWorld;
 varying float vLava;
+varying float vSoul;
 varying vec4 vFog;
 uniform float uUnder;
 ${CAUSTIC_GLSL}
@@ -401,7 +419,20 @@ void main() {
   if (uFade < 0.999 && bayer4(gl_FragCoord.xy) >= uFade) discard;
   vec4 tex = texture2D(map, vUv2);
   if (tex.a < uAlphaTest) discard;
-  vec3 light = max(max(vLight.x * uSkyLight, vLight.y * uTorchCol), uAmbient);
+  // block light shifts toward cold cyan by its soul-fire share
+  vec3 torchCol = mix(uTorchCol, uSoulCol, vSoul);
+  vec3 light = max(max(vLight.x * uSkyLight, vLight.y * torchCol), uAmbient);
+  if (uNetherGlow.a > 0.0) {
+    // the lava sea lights the Nether from below: a warm uplight that fades
+    // with height, strongest on faces turned down toward it (so the cavern
+    // roof glows), plus a faint bounce everywhere
+    vec3 fn = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+    float down = clamp(-fn.y, 0.0, 1.0);
+    float h = max(0.0, vWorld.y - uHeat.y);
+    float up = exp(-h * 0.085) * (0.35 + 0.65 * (1.0 - clamp(fn.y, 0.0, 1.0)));
+    float roof = down * (0.25 + 0.75 * smoothstep(20.0, 70.0, h));
+    light += uNetherGlow.rgb * uNetherGlow.a * (up * 0.55 + roof * 0.3);
+  }
   vec3 col = tex.rgb * vTint * light;
   if (vLava > 0.5) {
     // lava glows on its own and slowly churns
@@ -584,7 +615,20 @@ export class Renderer {
     uTintMul: { value: new THREE.Color(1, 1, 1) } as U<THREE.Color>,
     uFogVert: { value: 0.4 } as U<number>,
     uUnder: { value: 0 } as U<number>, // 1 while the eye is under water
-
+    uSoulCol: { value: SOUL_LIGHT.clone() } as U<THREE.Color>,
+    uNetherGlow: { value: new THREE.Vector4(0, 0, 0, 0) } as U<THREE.Vector4>,
+    uHeat: { value: new THREE.Vector4(0, 32, 0, 0) } as U<THREE.Vector4>,
+  };
+  /** Nether air, steered per biome by NetherAtmosphere (main copies it in each frame). */
+  readonly netherAir = {
+    fog: NETHER_FOG.clone(),
+    ambient: new THREE.Color(0.1, 0.065, 0.05),
+    glow: new THREE.Color(1.0, 0.36, 0.1),
+    glowK: 0.5,
+    heat: 1,
+    near: 14,
+    far: 80,
+    lavaY: 32,
   };
   private viewNear = 66;
   private viewFar = 120;
@@ -1132,7 +1176,7 @@ export class Renderer {
     if (!pos) { this.outline.visible = false; return; }
     const id = this.blockAt ? this.blockAt(pos.x, pos.y, pos.z) : B.STONE;
     let x0 = 0, y0 = 0, z0 = 0, x1 = 1, y1 = 1, z1 = 1;
-    if (id === B.TORCH) { x0 = z0 = 0.35; x1 = z1 = 0.65; y1 = 0.8; }
+    if (id === B.TORCH || id === B.SOUL_TORCH) { x0 = z0 = 0.35; x1 = z1 = 0.65; y1 = 0.8; }
     else if (CROSS_BLOCKS.has(id)) { x0 = z0 = 0.12; x1 = z1 = 0.88; y1 = 0.85; }
     else if (id === B.BED || id === B.BED_HEAD) y1 = 0.5625;
     else if (id === B.PRESSURE_PLATE) { x0 = z0 = 0.0625; x1 = z1 = 0.9375; y1 = 0.08; }
@@ -1188,18 +1232,25 @@ export class Renderer {
     // torch light: warm with a subtle flicker
     const flick = 0.96 + 0.025 * Math.sin(elapsed * 9.3) + 0.015 * Math.sin(elapsed * 23.1 + 1.3);
     e.uTorchCol.value.copy(TORCH_LIGHT).multiplyScalar(flick);
+    e.uSoulCol.value.copy(SOUL_LIGHT).multiplyScalar(0.97 + 0.03 * Math.sin(elapsed * 5.1 + 0.7));
 
     if (isNether) {
+      // biome-tinted haze (NetherAtmosphere blends netherAir between biomes)
+      const na = this.netherAir;
       e.uFlat.value = 1;
-      e.uFlatCol.value.copy(NETHER_FOG);
-      e.uZenith.value.copy(NETHER_FOG);
-      e.uHorizon.value.copy(NETHER_FOG);
+      e.uFlatCol.value.copy(na.fog);
+      e.uZenith.value.copy(na.fog);
+      e.uHorizon.value.copy(na.fog);
       e.uGlowAmt.value = 0;
       e.uGlint.value = 0;
-      this.viewNearOverride = 14; this.viewFarOverride = 80;
+      this.viewNearOverride = Math.min(na.near, this.viewNear); this.viewFarOverride = Math.min(na.far, this.viewFar);
       e.uSkyLight.value.setRGB(0.2, 0.2, 0.2);
-      e.uAmbient.value.setRGB(0.1, 0.065, 0.05);
-      this.fog.color.copy(NETHER_FOG);
+      e.uAmbient.value.copy(na.ambient);
+      // the lava sea glows up the cavern and shimmers the air above it
+      const pulse = 0.92 + 0.05 * Math.sin(elapsed * 0.7) + 0.03 * Math.sin(elapsed * 2.3 + 1.1);
+      e.uNetherGlow.value.set(na.glow.r, na.glow.g, na.glow.b, na.glowK * pulse);
+      e.uHeat.value.set(na.heat, na.lavaY, 0, 0);
+      this.fog.color.copy(na.fog);
       this.hemi.intensity = 0.45;
       this.dir.intensity = 0.15;
       this.setHeldLightLevel(0.55);
@@ -1214,6 +1265,8 @@ export class Renderer {
     }
     this.viewNearOverride = -1; this.viewFarOverride = -1;
     e.uFlat.value = 0;
+    e.uNetherGlow.value.w = 0;
+    e.uHeat.value.x = 0;
     this.clouds.visible = true;
 
     // --- sky colors -----------------------------------------------------------
