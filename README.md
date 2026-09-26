@@ -45,8 +45,8 @@ Your worlds are saved in your browser automatically (every 60 s, and when you ch
 - **Catch mobs** with the Mob Catcher: throw the orb, watch it wobble and click, then release the mob as a loyal pet that fights beside you.
 - **Swim** in water that streams downhill and down waterfalls, reflects the sky and splashes when you dive in.
 - **Glide, map and warp**: fly with a glider and fireworks, chart the land with a map and teleport with warp pearls.
-- **Venture to the Nether** through an obsidian portal.
-- **Relax** to music and ambient sound that follow the biome, weather and time of day: cozy rain, howling blizzards, waves, birdsong and echoing caves.
+- **Venture to the Nether** through an obsidian portal of any size. Cross lava oceans in the Nether Wastes, Crimson and Warped Forests, Soul Sand Valley and Basalt Deltas. Raid fortresses and bastions, barter gold with piglins, ride striders over lava, and face blazes, wither skeletons, hoglins and magma cubes. Mine ancient debris for netherite gear, and set your Nether spawn with a respawn anchor.
+- **Relax** to music and ambient sound that follow the biome, weather and time of day: cozy rain, howling blizzards, waves, birdsong and echoing caves. The music is composed live and played on real sampled piano, harp, flute, cello and strings.
 
 ## Run it locally
 
