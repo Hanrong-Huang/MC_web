@@ -145,17 +145,20 @@ async function goNear(x, y, z) {
     const p = window.__game.player;
     p.flying = true; p.vel = { x: 0, y: 0, z: 0 };
     p.pos.x = x; p.pos.y = y; p.pos.z = z;
+    // generate the surroundings synchronously so we don't wait on a backed-up worker queue
+    const cx0 = Math.floor(x / 16), cz0 = Math.floor(z / 16);
+    for (let cx = cx0 - 2; cx <= cx0 + 2; cx++) for (let cz = cz0 - 2; cz <= cz0 + 2; cz++) window.__game.world.ensureChunk(cx, cz);
   }, { x, y, z });
   await page.waitForFunction(({ x, z }) => {
     const g = window.__game;
     const cx0 = Math.floor(x / 16), cz0 = Math.floor(z / 16);
-    for (let cx = cx0 - 3; cx <= cx0 + 3; cx++) for (let cz = cz0 - 3; cz <= cz0 + 3; cz++) {
+    for (let cx = cx0 - 2; cx <= cx0 + 2; cx++) for (let cz = cz0 - 2; cz <= cz0 + 2; cz++) {
       const k = `${cx},${cz}`;
       const c = g.world.chunks.get(k);
-      if (!c || !c.ready || g.world.dirtySet.has(k) || g.meshInFlight.has(k)) return false;
+      if (!c || g.world.dirtySet.has(k) || g.meshInFlight.has(k)) return false;
     }
     return true;
-  }, { x, z }, { timeout: 180000, polling: 300 }).catch(() => console.log('chunk wait timed out'));
+  }, { x, z }, { timeout: 90000, polling: 300 }).catch(() => console.log('chunk wait timed out'));
 }
 
 /** Frame (tx,ty,tz) from an open-air viewpoint roughly `dist` away. */
@@ -213,7 +216,7 @@ if (info.fort) {
   const far = f.nodes.find((n) => n.type === 'spawner');
   if (far) await shootOutside('fortress-spawner-out', far.x, Y + 3, far.z, 22, 1);
   // inside the spawner platform, looking at the cage
-  if (far) await shootFrom('fortress-spawner-in', far.x + 3.5, Y + 4.8, far.z + 3.5, far.x + 0.5, Y + 3.8, far.z + 0.5);
+  if (far) await shootFrom('fortress-spawner-in', far.x + 5.5, Y + 4.2, far.z + 1.5, far.x + 0.5, Y + 3.6, far.z + 0.5);
   const corr = f.edges.find((e) => e.kind === 'corridor' && e.hi - e.lo > 6);
   if (corr) {
     const ex = corr.alongX ? corr.lo + 0.5 : corr.c + 0.5, ez = corr.alongX ? corr.c + 0.5 : corr.lo + 0.5;
