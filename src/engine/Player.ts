@@ -47,15 +47,16 @@ const MOB_IFRAMES = 0.5;
 /** survival pause between finishing one block and starting to dig the next */
 const BREAK_DELAY = 0.25;
 
-/** Timed status effects (golden apples, potions, spoiled food; milk clears them). */
+/** Timed status effects (golden apples, potions, spoiled food, wither skeleton
+ *  cuts; milk clears them). */
 export type EffectId = 'regeneration' | 'absorption' | 'resistance' | 'fire_resistance' | 'hunger'
-  | 'speed' | 'night_vision' | 'water_breathing' | 'strength' | 'jump_boost';
+  | 'speed' | 'night_vision' | 'water_breathing' | 'strength' | 'jump_boost' | 'wither';
 export interface ActiveEffect { amp: number; t: number; total: number }
 export const EFFECT_LABELS: Record<EffectId, string> = {
   regeneration: 'Regeneration', absorption: 'Absorption', resistance: 'Resistance',
   fire_resistance: 'Fire Resistance', hunger: 'Hunger',
   speed: 'Speed', night_vision: 'Night Vision', water_breathing: 'Water Breathing',
-  strength: 'Strength', jump_boost: 'Jump Boost',
+  strength: 'Strength', jump_boost: 'Jump Boost', wither: 'Wither',
 };
 
 /** What each potion does when drunk: an effect (seconds, level) or instant healing. */
@@ -160,6 +161,8 @@ export class Player {
   scoping = false;
   /** seconds left on fire (set by fire/lava, put out by water or rain) */
   fireT = 0;
+  /** who set the player alight ("a Blaze"), for the burn death message */
+  private fireBy = '';
   private burnTickT = 0;
   /** remaining air bubbles (x2 half-bubbles like hearts), 20 = full */
   air = 20;
@@ -185,6 +188,7 @@ export class Player {
   private blockT = 0;
   private shieldKnockT = 0;
   private regenEffT = 0;
+  private witherEffT = 0;
   /** running clock for per-mob hurt immunity */
   private clock = 0;
   private lastHits = new WeakMap<Entity, { t: number; dmg: number }>();
@@ -307,6 +311,16 @@ export class Player {
     this.effects.clear();
     this.absorb = 0;
     this.regenEffT = 0;
+    this.witherEffT = 0;
+  }
+
+  /** Set the player alight for `seconds` (fireballs, blazes, fire, lava);
+   *  Fire Resistance, water and creative mode keep the flames off. `by`
+   *  ("a Blaze") names the attacker if the flames finish the job. */
+  setOnFire(seconds: number, by = ''): void {
+    if (this.mode !== 'survival' || this.dead || this.effects.has('fire_resistance')) return;
+    if (this.fireT <= 0 || by) this.fireBy = by;
+    this.fireT = Math.max(this.fireT, seconds);
   }
 
   /** Active effects, longest-lived first, for the HUD. */
@@ -714,15 +728,14 @@ export class Player {
           }
         }
       }
-      const fireProof = this.effects.has('fire_resistance');
       if (inFire && !inLava) {
         this.lavaT = 0.5;
-        if (!fireProof) this.fireT = Math.max(this.fireT, 8);
+        this.setOnFire(8);
         this.damage(1, undefined, 'Went up in flames');
       }
       if (inLava) {
         this.lavaT = 0.5;
-        if (!fireProof) this.fireT = Math.max(this.fireT, 15);
+        this.setOnFire(15);
         this.damage(3, undefined, 'Tried to swim in lava');
         // rising embers around the player
         const px = this.pos.x, py = this.pos.y + 0.5, pz = this.pos.z;
@@ -741,7 +754,9 @@ export class Player {
       this.burnTickT += dt;
       if (this.burnTickT >= 1) {
         this.burnTickT = 0;
-        if (!this.effects.has('fire_resistance')) this.damage(1, undefined, 'Burned to death');
+        if (!this.effects.has('fire_resistance')) {
+          this.damage(1, undefined, this.fireBy ? `Burnt to a crisp whilst fighting ${this.fireBy}` : 'Burned to death');
+        }
       }
     } else {
       this.burnTickT = 0;
@@ -2476,6 +2491,19 @@ export class Player {
     }
     const hungerFx = this.effects.get('hunger');
     if (hungerFx) this.addExhaustion(0.1 * (hungerFx.amp + 1) * dts);
+    // Wither: a point of damage every 2 s (twice as often per level), and
+    // unlike poison it can kill
+    const wither = this.effects.get('wither');
+    if (wither) {
+      this.witherEffT += dts;
+      // (held while a fresh hit's immunity window would swallow the point)
+      if (this.witherEffT >= 2 / (1 << Math.min(4, wither.amp)) && this.hurtCooldown <= 0) {
+        this.witherEffT = 0;
+        this.damage(1, undefined, 'Withered away');
+      }
+    } else {
+      this.witherEffT = 0;
+    }
 
     // exhaustion drains the hidden saturation buffer before the hunger bar
     while (this.exhaustion >= 4) {
@@ -2520,11 +2548,13 @@ export class Player {
     if (this.mode === 'survival') this.exhaustion += amount;
   }
 
-  damage(amount: number, source?: Entity, cause?: string): void {
-    if (this.mode === 'creative' || this.dead) return;
-    if (this.hurtCooldown > 0) return;
+  /** Hurt the player; true when the blow landed (not creative, not inside the
+   *  hurt-immunity window, not shrugged off by Fire Resistance or a shield). */
+  damage(amount: number, source?: Entity, cause?: string): boolean {
+    if (this.mode === 'creative' || this.dead) return false;
+    if (this.hurtCooldown > 0) return false;
     // Fire Resistance shrugs off lava, magma and fireballs entirely
-    if (this.effects.has('fire_resistance') && cause && /lava|magma|fireball|flames|burn/i.test(cause)) return;
+    if (this.effects.has('fire_resistance') && cause && /lava|magma|fireball|flames|burn/i.test(cause)) return false;
     // a raised shield turns aside melee from the front, projectiles and blasts
     if (this.isBlocking() && this.shieldCovers(source, cause)) {
       this.hurtCooldown = 0.5;
@@ -2533,7 +2563,7 @@ export class Player {
       this.deps.onAdvance?.('shield_block');
       this.deps.audio.play('arrowHit');
       if (source) this.deps.entities.onOwnerHurt(source);
-      return;
+      return false;
     }
     this.hurtCooldown = 0.5;
     if (cause) this.lastDamageCause = cause;
@@ -2580,6 +2610,7 @@ export class Player {
       this.cancelBreaking();
       this.deps.onDeath();
     }
+    return true;
   }
 
   /** Does the raised shield cover this hit? Melee must come from in front;

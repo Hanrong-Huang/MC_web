@@ -2270,6 +2270,26 @@ export class AudioEngine {
         this.tn(e, { dur: 0.16, f: 140 * p, f1: 60, vol: 0.14 });
         break;
       }
+      case 'small_fireball_hit': {
+        // a blaze's fireball splashing out: a bright spitting sizzle, no body
+        this.nz(e, { dur: 0.35, vol: 0.26, type: 'highpass', f: 2400 * p, curve: this.grains(14, 0.8, 1.1, 0.05) });
+        this.nz(e, { dur: 0.18, vol: 0.18, color: 'pink', type: 'bandpass', f: 1100 * p, f1: 2400, q: 1.2, attack: 0.004 });
+        break;
+      }
+      case 'emberghast_shoot': {
+        // the big one leaving: a deep, hollow "fwoomp" under a slow roar
+        this.tn(e, { dur: 0.3, f: 95 * p, f1: 42, vol: 0.3, attack: 0.01 });
+        this.nz(e, { dur: 0.7, vol: 0.3, color: 'brown', type: 'lowpass', f: 900 * p, f1: 260, attack: 0.03 });
+        this.nz(e, { at: 0.05, dur: 0.6, vol: 0.14, color: 'pink', type: 'bandpass', f: 500 * p, f1: 1300, q: 0.9, attack: 0.08 });
+        break;
+      }
+      case 'fireball_hit': {
+        // the big fireball bursting: a muffled thump and a rolling crackle
+        this.tn(e, { dur: 0.22, f: 120 * p, f1: 45, vol: 0.32 });
+        this.nz(e, { dur: 0.5, vol: 0.34, color: 'brown', type: 'lowpass', f: 1200 * p, f1: 200, attack: 0.004 });
+        this.nz(e, { at: 0.05, dur: 0.6, vol: 0.14, type: 'highpass', f: 2600, curve: this.grains(12, 0.9, 1, 0.1) });
+        break;
+      }
       case 'wither_skeleton': {
         // a heavier, lower rattle than the plain skeleton's
         const n = death ? 12 : hurt ? 6 : 5 + ((Math.random() * 4) | 0);

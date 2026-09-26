@@ -163,6 +163,7 @@ class Game {
     this.throwables = new Throwables(this.renderer.scene, this.world, this.atlas, this.entities);
     this.throwables.onWarp = (x, y, z) => this.warpPlayer(x, y, z);
     this.throwables.onIgnite = (x, y, z) => { this.fire.ignite(x, y, z); };
+    this.entities.onIgnite = (x, y, z) => { this.fire.ignite(x, y, z); }; // blaze fireballs
     this.nether = new NetherController({
       world: this.world, player: this.player, renderer: this.renderer, audio: this.audio, entities: this.entities,
       toast: (m) => this.hud.toast(m), unlock: (id) => this.adv.unlock(id), clearBedSpawn: () => { this.spawnPoint = null; },
@@ -1600,7 +1601,8 @@ class Game {
       else if (t && t.id !== B.AIR && def(t.id).hardness >= 0) this.hud.updateCrosshair('target');
       else this.hud.updateCrosshair('idle');
     }
-    this.hud.updateStats(this.player.hp, this.player.hunger, this.player.air, this.player.mode, this.player.inventory.armorPoints());
+    this.hud.updateStats(this.player.hp, this.player.hunger, this.player.air, this.player.mode, this.player.inventory.armorPoints(),
+      this.player.effects.has('wither'));
     this.status.update({
       visible: this.state === 'playing' || this.state === 'container' || this.state === 'paused',
       survival: this.player.mode === 'survival',

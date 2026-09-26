@@ -800,7 +800,7 @@ ${seedLine.textContent}`;
     c.appendChild(countCanvas(n));
   }
 
-  updateStats(hp: number, hunger: number, air: number, mode: GameMode, armor = 0): void {
+  updateStats(hp: number, hunger: number, air: number, mode: GameMode, armor = 0, withered = false): void {
     this.tickFps();
     this.tickSubtitles();
     this.hud.classList.toggle('creative', mode === 'creative');
@@ -838,7 +838,7 @@ ${seedLine.textContent}`;
     }
     this.lastHp = hp;
     const blink = now < this.hurtUntil && Math.floor((this.hurtUntil - now) / 120) % 2 === 0;
-    const key = `${hp}|${hunger}|${air}|${armor}|${blink}`;
+    const key = `${hp}|${hunger}|${air}|${armor}|${blink}|${withered}`;
     if (key === this.lastHearts) return;
     this.lastHearts = key;
     this.armorEl.innerHTML = '';
@@ -851,7 +851,7 @@ ${seedLine.textContent}`;
       for (let i = 0; i < 10; i++) this.armorEl.appendChild(armorIcon(fill(armor - i * 2)));
     }
     for (let i = 0; i < 10; i++) {
-      this.heartsEl.appendChild(heartIcon(fill(hp - i * 2), blink));
+      this.heartsEl.appendChild(heartIcon(fill(hp - i * 2), blink, withered));
       this.hungerEl.appendChild(shankIcon(fill(hunger - i * 2)));
     }
     // air bubbles only while submerged / recovering (popped ones read as empty)

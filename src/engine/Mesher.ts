@@ -139,6 +139,22 @@ function regionIdx(rx: number, rz: number, y: number): number {
   return ((rz - RX0) * RW + (rx - RX0)) * CY + y;
 }
 
+/** Set per chunk: does any soul flame light this chunk's region (SOULR valid)? */
+let soulOn = false;
+/** Full soul share: FLAG_SOUL eighths for light that is entirely soul fire. */
+const SOUL_FULL = 7 * 8;
+/** Soul-fire share of the block light in local cell (x,y,z), as FLAG_SOUL
+ *  eighths ready to add to a vertex's torch channel — the special emitters
+ *  (torches, plants, doors, shaped blocks...) sample their own cell the way
+ *  cube faces sample the cells in front of them. */
+function soulFlagAt(x: number, y: number, z: number): number {
+  if (!soulOn || y < 0 || y >= CY || x < RX0 || x > RX1 || z < RX0 || z > RX1) return 0;
+  const ri = regionIdx(x, z, y);
+  const t = LIGHT_CURVE[TORCHR[ri]];
+  if (t <= 0.02) return 0;
+  return Math.round(Math.min(1, LIGHT_CURVE[SOULR[ri]] / t) * 7) * FLAG_SOUL;
+}
+
 // Padded block copy of the chunk + a 1-block rim (18x18 columns, y from -1 to
 // CY), so the hot face/AO loop is plain array reads instead of closure calls.
 const PW = 18;
@@ -490,6 +506,8 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
     }
   }
 
+  soulOn = hasSoul;
+
   const skyAt = (x: number, y: number, z: number): number => {
     if (y >= CY) return 1;
     if (y < 0 || x < RX0 || x > RX1 || z < RX0 || z > RX1) return 0;
@@ -745,6 +763,8 @@ function emitCross(g: GeoBuilder, atlas: MeshAtlas, tile: string, x: number, y: 
   const rect = atlas.rect(tile);
   const a = 0.146, b = 0.854; // ~ MC's sqrt(2)/2-inset diagonal
   const tr = tint ? tint[0] : 1, tg = tint ? tint[1] : 1, tb = tint ? tint[2] : 1;
+  // a flame is lit by itself: soul fire burns fully cold, plain fire warm
+  const soul = tile === 'soul_fire' ? SOUL_FULL : tile === 'fire' ? 0 : soulFlagAt(x, y, z);
   const planes: [number, number, number, number][] = [
     [a, a, b, b],
     [a, b, b, a],
@@ -760,7 +780,7 @@ function emitCross(g: GeoBuilder, atlas: MeshAtlas, tile: string, x: number, y: 
       for (let i = 0; i < 4; i++) {
         // the top edge sways in the wind (flag stripped by the vertex shader)
         const flag = sway && corners[i][1] > 0 ? FLAG_SWAY : 0;
-        g.v(x + corners[i][0], y + corners[i][1], z + corners[i][2], sky, torch + flag,
+        g.v(x + corners[i][0], y + corners[i][1], z + corners[i][2], sky, torch + flag + soul,
           tr, tg, tb, us[i], vs[i]);
       }
       g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
@@ -797,9 +817,10 @@ function emitTorch(
   const ty = (py: number): number => ay + py * cosL;
   const tz = (pz: number, py: number): number => az + (pz - 0.5) + wallZ * py * sinL;
 
+  // a torch always glows itself, in its own flame's colour
+  const lit = Math.max(torch, 0.9) + (tile === 'soul_torch' ? SOUL_FULL : 0);
   const push = (px: number, py: number, pz: number, u: number, v: number): void => {
-    // a torch always glows itself
-    g.v(x + tx(px, py), y + ty(py), z + tz(pz, py), sky, Math.max(torch, 0.9), 1, 1, 1, u, v);
+    g.v(x + tx(px, py), y + ty(py), z + tz(pz, py), sky, lit, 1, 1, 1, u, v);
   };
   const quads: number[][][] = [
     [[hi, 0, hi], [hi, 0, lo], [hi, top, lo], [hi, top, hi]],   // +x
@@ -904,12 +925,13 @@ function emitDoorPanel(
 ): void {
   const { u0, u1, v0, v1 } = rect;
   const y0 = 0, y1 = 1;
+  const lit = torch + soulFlagAt(bx, by, bz);
   const bot = foot.map(([px, pz]) => [px, y0, pz]);
   const top = foot.map(([px, pz]) => [px, y1, pz]);
   const pushQuad = (corners: number[][], us: number[], vs: number[]): void => {
     const base = g.vertCount;
     for (let i = 0; i < 4; i++) {
-      g.v(bx + corners[i][0], by + corners[i][1], bz + corners[i][2], sky, torch, 1, 1, 1, us[i], vs[i]);
+      g.v(bx + corners[i][0], by + corners[i][1], bz + corners[i][2], sky, lit, 1, 1, 1, us[i], vs[i]);
     }
     g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
   };
@@ -931,6 +953,7 @@ function emitDoorPanel(
 function emitLadder(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number): void {
   const rect = atlas.rect('ladder');
   const off = 2 / 16;
+  const lit = torch + soulFlagAt(x, y, z);
   // emit against all four walls cheaply — the cull rules above already filter,
   // and double-sided chunk material shows it from any side
   const faces: number[][][] = [
@@ -946,7 +969,7 @@ function emitLadder(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: nu
   for (const q of faces) {
     const base = g.vertCount;
     for (let i = 0; i < 4; i++) {
-      g.v(q[i][0], q[i][1], q[i][2], sky, torch, 1, 1, 1,
+      g.v(q[i][0], q[i][1], q[i][2], sky, lit, 1, 1, 1,
         i === 0 || i === 3 ? rect.u0 : rect.u1, i < 2 ? rect.v1 : rect.v0);
     }
     g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
@@ -973,7 +996,7 @@ function emitTrapdoor(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: 
     ];
   }
   for (let i = 0; i < 4; i++) {
-    g.v(corners[i][0], corners[i][1], corners[i][2], sky, torch, 1, 1, 1,
+    g.v(corners[i][0], corners[i][1], corners[i][2], sky, torch + soulFlagAt(x, y, z), 1, 1, 1,
       i === 0 || i === 3 ? rect.u0 : rect.u1, i < 2 ? rect.v1 : rect.v0);
   }
   g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
@@ -984,8 +1007,9 @@ function emitBox(
   x0: number, x1: number, y0: number, y1: number, z0: number, z1: number,
   sky: number, torch: number, tint = [1, 1, 1], topRect: UVRect = rect, topRot = 0
 ): void {
+  const lit = torch + soulFlagAt(x, y, z);
   const push = (px: number, py: number, pz: number, u: number, v: number): void => {
-    g.v(x + px, y + py, z + pz, sky, torch, tint[0], tint[1], tint[2], u, v);
+    g.v(x + px, y + py, z + pz, sky, lit, tint[0], tint[1], tint[2], u, v);
   };
   // Each face pushes its 4 corners in clockwise order as seen from outside the
   // box, so the triangles are wound 0,2,1 / 0,3,2 to face outward. (Winding them
@@ -1152,8 +1176,9 @@ function emitRedstoneWire(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number,
   const rect = atlas.rect('redstone_dust');
   const base = g.vertCount;
   const r = 0.3 + 0.7 * (power / 15);
+  const lit = torch >= power / 15 ? torch + soulFlagAt(x, y, z) : power / 15;
   const push = (px: number, py: number, pz: number, u: number, v: number): void => {
-    g.v(x + px, y + py, z + pz, sky, Math.max(torch, power / 15), r, 0, 0, u, v);
+    g.v(x + px, y + py, z + pz, sky, lit, r, 0, 0, u, v);
   };
   push(0, 0.01, 0, rect.u0, rect.v0);
   push(1, 0.01, 0, rect.u1, rect.v0);
@@ -1337,22 +1362,25 @@ function emitShaped(
   torchAt: (x: number, y: number, z: number) => number,
 ): void {
   const { parts, crosses } = shapedParts(id, meta, conn, open);
-  const ownSky = skyAt(x, y, z), ownTorch = torchAt(x, y, z);
+  const ownSky = skyAt(x, y, z), ownTorch = torchAt(x, y, z), ownSoul = soulFlagAt(x, y, z);
+  // self-lit parts (lantern glass, embers) glow in the block's own flame colour
+  const glowSoul = SOUL_LIGHTS.has(id) ? SOUL_FULL : 0;
   for (const part of parts) {
     const [x0, y0, z0, x1, y1, z1] = part.b;
     const vo = part.vOff ?? 0;
     for (let f = 0; f < 6; f++) {
       const onEdge = f === 0 ? x1 >= 1 : f === 1 ? x0 <= 0 : f === 2 ? y1 >= 1 : f === 3 ? y0 <= 0 : f === 4 ? z1 >= 1 : z0 <= 0;
       const [nx, ny, nz] = SH_NB[f];
-      let sky = ownSky, torch = ownTorch;
+      let sky = ownSky, torch = ownTorch, soul = ownSoul;
       if (onEdge) {
         if (OPAQUE_LUT[get(x + nx, y + ny, z + nz)]) continue;
         sky = Math.max(sky, skyAt(x + nx, y + ny, z + nz));
-        torch = Math.max(torch, torchAt(x + nx, y + ny, z + nz));
+        const nt = torchAt(x + nx, y + ny, z + nz);
+        if (nt > torch) { torch = nt; soul = soulFlagAt(x + nx, y + ny, z + nz); }
       } else if (OPAQUE_LUT[id]) {
         continue; // an opaque shaped block is a full cube: nothing inside
       }
-      if (part.glow) torch = Math.max(torch, 0.85);
+      if (part.glow && torch < 0.85) { torch = 0.85; soul = glowSoul; }
       const k = FACE_SHADE[f];
       const r = atlas.rect(part.t[f]);
       const du = r.u1 - r.u0, dv = r.v1 - r.v0;
@@ -1370,7 +1398,7 @@ function emitShaped(
         // Minecraft's default model UVs: sides map (horizontal, 1 - y), tops map (x, z)
         const u = f === 0 ? 1 - pz : f === 1 ? pz : f === 4 ? px : f === 5 ? 1 - px : px;
         const v = f === 2 || f === 3 ? pz : 1 - (py - vo);
-        g.v(x + px, y + py, z + pz, k * sky, k * torch, 1, 1, 1,
+        g.v(x + px, y + py, z + pz, k * sky, k * torch + soul, 1, 1, 1,
           r.u0 + Math.max(0, Math.min(1, u)) * du, r.v0 + Math.max(0, Math.min(1, v)) * dv);
       }
       g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
@@ -1378,7 +1406,7 @@ function emitShaped(
   }
   for (const cr of crosses) {
     const r = atlas.rect(cr.tile);
-    const torch = cr.glow ? 1 : ownTorch;
+    const torch = cr.glow ? 1 + glowSoul : ownTorch + ownSoul;
     const a = cr.x0, b = cr.x1;
     for (const [px0, pz0, px1, pz1] of [[a, a, b, b], [a, b, b, a]]) {
       for (const flip of [false, true]) {
