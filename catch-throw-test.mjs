@@ -67,7 +67,8 @@ const thrown = await page.evaluate(async () => {
   const zombieGone = z.dead; // captured the moment the orb touched it
   const home = { ...p.pos };
   if (drop) { p.pos.x = drop.pos.x; p.pos.y = drop.pos.y; p.pos.z = drop.pos.z; }
-  await new Promise((r) => setTimeout(r, 1200));
+  // standing on the orb until pickup registers (slow SwiftShader frames need a while)
+  for (let i = 0; i < 40 && !p.inventory.slots.some((s) => s && s.id === 183); i++) await new Promise((r) => setTimeout(r, 100));
   p.pos.x = home.x; p.pos.y = home.y; p.pos.z = home.z;
   p.vel = { x: 0, y: 0, z: 0 };
   const filled = p.inventory.slots.filter((s) => s && s.id === 183);
