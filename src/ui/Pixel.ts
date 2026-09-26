@@ -300,10 +300,15 @@ function statIcon(key: string, map: string[], full: Pal, empty: Pal, fill: Fill,
   return c;
 }
 
-export function heartIcon(fill: Fill, flash = false): HTMLCanvasElement {
-  return statIcon('heart', HEART,
-    { O: '#1a0606', R: '#e3232d', r: '#ff6a6a', W: '#ffd0d0', d: '#a8141c' },
-    { O: '#1a0606', R: '#3a1616', r: '#3a1616', W: '#4a2222', d: '#2c1010' }, fill, 'left', flash);
+export function heartIcon(fill: Fill, flash = false, withered = false): HTMLCanvasElement {
+  // withered: vanilla's black hearts (charcoal body, ashen glint)
+  return withered
+    ? statIcon('heart_wither', HEART,
+      { O: '#050505', R: '#2b2629', r: '#57505a', W: '#a39ca6', d: '#161315' },
+      { O: '#050505', R: '#3a1616', r: '#3a1616', W: '#4a2222', d: '#2c1010' }, fill, 'left', flash)
+    : statIcon('heart', HEART,
+      { O: '#1a0606', R: '#e3232d', r: '#ff6a6a', W: '#ffd0d0', d: '#a8141c' },
+      { O: '#1a0606', R: '#3a1616', r: '#3a1616', W: '#4a2222', d: '#2c1010' }, fill, 'left', flash);
 }
 export function shankIcon(fill: Fill, flash = false): HTMLCanvasElement {
   return statIcon('shank', SHANK,
