@@ -27,7 +27,9 @@ export type SfxName =
   | 'submerge' | 'emerge'
   | 'chestOpen' | 'chestClose' | 'advancement' | 'equip' | 'lavaPop' | 'bubble'
   | 'jump' | 'death' | 'drink' | 'ignite' | 'bell' | 'crackle'
-  | 'orbThrow' | 'orbOpen' | 'orbWobble' | 'orbClick' | 'orbRelease' | 'orbRecall';
+  | 'orbThrow' | 'orbOpen' | 'orbWobble' | 'orbClick' | 'orbRelease' | 'orbRecall'
+  | 'portalTravel' | 'portalLight' | 'portalFizz' | 'anchorCharge' | 'anchorSet' | 'anchorDeplete'
+  | 'fireCharge' | 'smith';
 
 /** Footstep gait: sprinting lands harder and brighter, sneaking barely scuffs. */
 export type Gait = 'walk' | 'sprint' | 'sneak';
@@ -52,7 +54,7 @@ type Mat = 'grass' | 'plant' | 'gravel' | 'sand' | 'snow' | 'wood' | 'stone' | '
   | 'wool' | 'nether' | 'soul' | 'amethyst' | 'none';
 type Act = 'step' | 'hit' | 'break' | 'place';
 
-interface Piece { notes: MNote[]; i: number; t0: number; end: number; out: GainNode; env: string; fading: boolean; name: string; tonic: number; minor: boolean }
+interface Piece { notes: MNote[]; i: number; t0: number; end: number; out: GainNode; env: string; fading: boolean; name: string; tonic: number; minor: boolean; biome?: string }
 /** A continuous ambience loop: sources → (own filters) → lp → gain → pan → amb bus. */
 interface Bed { srcs: AudioScheduledSourceNode[]; g: GainNode; pan: StereoPannerNode; lp: BiquadFilterNode; nodes: AudioNode[]; x: Record<string, AudioNode>; quiet: number } // quiet = ctx time it fell silent (0 = playing)
 /** How rain is heard: out in it, under a canopy, under a roof, or deep inside. */
@@ -78,6 +80,7 @@ const MAT_GAIN: Record<Mat, [number, number]> = {
 const clamp = (v: number, a: number, b: number): number => Math.max(a, Math.min(b, v));
 const rand = (a: number, b: number): number => a + Math.random() * (b - a);
 const chance = (p: number): boolean => Math.random() < p;
+const pick = <T>(a: T[]): T => a[(Math.random() * a.length) | 0];
 
 // ------------------------------------------------------------------------------
 // primitive option bags
@@ -1296,6 +1299,84 @@ export class AudioEngine {
       case 'orbThrow': case 'orbOpen': case 'orbWobble': case 'orbClick': case 'orbRelease': case 'orbRecall':
         this.catcherSfx(e, name);
         break;
+      case 'portalTravel': case 'portalLight': case 'portalFizz': case 'anchorCharge': case 'anchorSet':
+      case 'anchorDeplete': case 'fireCharge': case 'smith':
+        this.netherSfx(e, name);
+        break;
+    }
+  }
+
+  /** Nether-pass one-shots: portal travel/lighting/collapse, the respawn
+   *  anchor, fire charges and netherite smithing. */
+  private netherSfx(e: Ev, name: SfxName): void {
+    switch (name) {
+      case 'portalTravel': {
+        // the vanilla travel "vwoooom": a huge swept whoosh over a falling drone,
+        // with glassy shimmer on top
+        this.nz(e, { dur: 2.6, vol: 0.5, color: 'pink', type: 'bandpass', f: 180, f1: 2600, q: 1.4, attack: 0.9 });
+        this.nz(e, { at: 0.6, dur: 2.2, vol: 0.32, color: 'brown', type: 'lowpass', f: 900, f1: 120, attack: 0.3 });
+        for (const [f, d] of [[110, 0], [164.8, 7], [220.5, -9]] as [number, number][]) {
+          this.tn(e, { dur: 2.8, f: f * 1.5, f1: f * 0.6, glide: 2.6, vol: 0.09, type: 'sawtooth', detune: d, attack: 0.5, lp: 700 });
+        }
+        for (let i = 0; i < 6; i++) this.fm(e, { at: 0.3 + i * 0.22, f: rand(900, 1700), ratio: 2.76, index: 0.8, dur: 1.2, vol: 0.03 });
+        this.duck(0.5, 1.5, 2.5);
+        break;
+      }
+      case 'portalLight': {
+        // a whoomph as the sheet catches, then a rising shimmer that settles into the hum
+        this.nz(e, { dur: 0.7, vol: 0.4, color: 'brown', type: 'lowpass', f: 250, f1: 1200, attack: 0.05 });
+        this.nz(e, { at: 0.05, dur: 1.6, vol: 0.14, color: 'pink', type: 'bandpass', f: 600, f1: 3200, q: 2, attack: 0.3 });
+        [0, 4, 7, 11, 14].forEach((s, i) => this.fm(e, { at: 0.15 + i * 0.09, f: 311 * Math.pow(2, s / 12), ratio: 3.01, index: 0.9, dur: 1.6, vol: 0.05 }));
+        this.tn(e, { at: 0.1, dur: 2.2, f: 55, vol: 0.12, type: 'sawtooth', attack: 0.4, lp: 300 });
+        break;
+      }
+      case 'portalFizz': {
+        // the sheet winks out: a glassy shatter falling away
+        this.nz(e, { dur: 0.5, vol: 0.35, type: 'highpass', f: 2400, curve: this.grains(14, 0.95, 1.1) });
+        for (let i = 0; i < 4; i++) this.fm(e, { at: i * 0.05, f: rand(1200, 2400), ratio: 1.41, index: 1.2, dur: 0.5, vol: 0.05 });
+        this.tn(e, { dur: 0.9, f: 220, f1: 55, vol: 0.12, type: 'triangle', attack: 0.01 });
+        break;
+      }
+      case 'anchorCharge': {
+        // glowstone packed in: a thick thunk and a rising portal chime
+        this.tn(e, { dur: 0.25, f: 120, f1: 60, vol: 0.35, attack: 0.002 });
+        this.nz(e, { dur: 0.2, vol: 0.25, color: 'brown', type: 'lowpass', f: 700 });
+        [0, 5, 10].forEach((s, i) => this.fm(e, { at: 0.08 + i * 0.07, f: 392 * Math.pow(2, s / 12), ratio: 2, index: 1, dur: 1, vol: 0.06 }));
+        this.nz(e, { at: 0.1, dur: 0.9, vol: 0.08, color: 'pink', type: 'bandpass', f: 800, f1: 2400, q: 3, attack: 0.2 });
+        break;
+      }
+      case 'anchorSet': {
+        // spawn set: a deep resonant bell swell
+        for (const [m, v, d] of [[1, 0.14, 2.6], [1.5, 0.08, 2], [2.01, 0.06, 1.6], [0.5, 0.12, 3]] as [number, number, number][]) {
+          this.tn(e, { dur: d, f: 196 * m, vol: v, attack: 0.08 });
+        }
+        this.nz(e, { dur: 1.4, vol: 0.08, color: 'pink', type: 'bandpass', f: 400, f1: 1600, q: 2, attack: 0.4 });
+        break;
+      }
+      case 'anchorDeplete': {
+        // a charge spent: a falling glassy drone
+        this.tn(e, { dur: 1.4, f: 330, f1: 110, glide: 1.2, vol: 0.12, type: 'triangle', attack: 0.05 });
+        this.nz(e, { dur: 1.2, vol: 0.1, color: 'pink', type: 'bandpass', f: 2200, f1: 400, q: 2, attack: 0.1 });
+        break;
+      }
+      case 'fireCharge': {
+        // a blaze's "fwoosh": a breathy flame burst with a hollow pop
+        this.nz(e, { dur: 0.45, vol: 0.45, color: 'pink', type: 'bandpass', f: 500, f1: 1500, q: 0.8, attack: 0.02 });
+        this.nz(e, { dur: 0.35, vol: 0.3, color: 'brown', type: 'lowpass', f: 400, attack: 0.01 });
+        this.tn(e, { dur: 0.12, f: 180, f1: 90, vol: 0.2 });
+        this.nz(e, { at: 0.08, dur: 0.4, vol: 0.12, type: 'bandpass', f: 2600, q: 1, curve: this.grains(10, 0.9, 1.1, 0.1) });
+        break;
+      }
+      case 'smith': {
+        // netherite forged onto diamond: two heavy anvil strikes and a sizzle
+        for (const at of [0, 0.28]) {
+          this.fm(e, { at, f: 1350 * rand(0.97, 1.03), ratio: 2.41, index: 2.2, dur: 0.9, vol: 0.12 });
+          this.tn(e, { at, dur: 0.18, f: 160, f1: 80, vol: 0.3 });
+          this.nz(e, { at, dur: 0.06, vol: 0.3, type: 'bandpass', f: 3000, q: 1 });
+        }
+        this.nz(e, { at: 0.45, dur: 0.9, vol: 0.14, type: 'highpass', f: 3500, curve: this.grains(18, 0.9, 1.2, 0.3) });
+        break;
+      }
     }
   }
 
@@ -2180,6 +2261,7 @@ export class AudioEngine {
     this.piece = {
       notes: c.notes, i: 0, t0: now + 0.2, end: now + 0.2 + c.len + 9, out,
       env: menu ? 'menu' : this.musicCtx, fading: false, name: c.name, tonic: c.tonic, minor: c.minor,
+      biome: menu ? undefined : this.musicBiome(),
     };
     return c.name;
   }
@@ -2639,6 +2721,16 @@ export class AudioEngine {
       if (want === 'nether') this.playStinger('nether', 120);
       if (want === 'surface') this.surfaceSince = now;
     }
+    // crossing into another Nether biome: once it has held a while, the piece
+    // crossfades into one composed for the new biome
+    if (want === 'nether' && this.musicCtx === 'nether') {
+      if (biome !== this.nbWant) { this.nbWant = biome; this.nbSince = now; }
+      const p = this.piece;
+      if (p && !p.fading && p.env === 'nether' && biome && p.biome !== biome && now - this.nbSince > 10) {
+        this.fadePiece(7);
+        this.nextPieceAt = now + rand(4, 7);
+      }
+    }
     // dawn and dusk on the surface
     if ((env === 'day' || env === 'night') && want === 'surface') {
       if (this.dayPart && env !== this.dayPart) this.playStinger(env === 'day' ? 'sunrise' : 'nightfall', 400);
@@ -2682,6 +2774,8 @@ export class AudioEngine {
     }
   }
   private ctxWant = 'surface';
+  private nbWant: string | undefined;
+  private nbSince = 0;
   private ducked = false;
   private ctxSince = 0;
 
@@ -2939,6 +3033,259 @@ export class AudioEngine {
     this.netherBed = null;
   }
 
+  // --- Nether biomes: one bed per biome, levelled by the blended weights so
+  //     walking between them crossfades; plus the portal hum and charge swell
+
+  /** latest Nether biome weights (null outside the Nether) — flavours the cues */
+  private netherW: Record<string, number> | null = null;
+  private soulWindT = 0;
+
+  /** A slow sine LFO wired into `param` (depth in the param's units). */
+  private lfo(bed: Bed, rate: number, depth: number, param: AudioParam, type: OscillatorType = 'sine'): void {
+    const ctx = this.ctx!;
+    const o = ctx.createOscillator();
+    o.type = type;
+    o.frequency.value = rate;
+    const g = ctx.createGain();
+    g.gain.value = depth;
+    o.connect(g).connect(param);
+    o.start(ctx.currentTime + Math.random() * 0.5);
+    bed.srcs.push(o);
+    bed.nodes.push(g);
+  }
+
+  /**
+   * Steer the Nether ambience: `w` = biome weights (null = not in the Nether),
+   * `hum`/`humPan` = the nearest portal's hum (0..1), `charge` = how far the
+   * player is through standing in a portal (0..1). Call a few times a second.
+   */
+  netherScape(w: Record<string, number> | null, hum: number, humPan: number, charge: number): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.amb) return;
+    const quiet = !this.settings.sound || this.musicMode === 'menu';
+    this.netherW = w;
+    const k = (b: string): number => (w && !quiet ? w[b] ?? 0 : 0);
+
+    // crimson forest: a deep, slowly breathing rumble with a growl in it
+    this.bedSet('nCrimson', 0.11 * k('crimson'), { lp: 220, tc: 1.6 }, (into, bed) => {
+      const src = this.loopSrc(this.brown!, 0.35);
+      const bp = this.filt('bandpass', 75, 1.1);
+      const g = ctx.createGain();
+      g.gain.value = 0.7;
+      this.lfo(bed, 0.11, 0.3, g.gain);
+      src.connect(bp).connect(g).connect(into);
+      const growl = ctx.createOscillator();
+      growl.type = 'sawtooth';
+      growl.frequency.value = 41;
+      this.lfo(bed, 0.07, 3, growl.frequency);
+      const glp = this.filt('lowpass', 120, 2);
+      const gg = ctx.createGain();
+      gg.gain.value = 0.05;
+      this.lfo(bed, 0.19, 0.04, gg.gain);
+      growl.connect(glp).connect(gg).connect(into);
+      growl.start();
+      bed.srcs.push(src, growl);
+      bed.nodes.push(bp, g, glp, gg);
+    });
+
+    // warped forest: eerie high tones shimmering against each other
+    this.bedSet('nWarped', 0.028 * k('warped'), { tc: 1.6 }, (into, bed) => {
+      [587.3, 880.9, 1318.5, 1975.5, 2489].forEach((f, i) => {
+        const o = ctx.createOscillator();
+        o.frequency.value = f;
+        this.lfo(bed, 0.05 + i * 0.037, f * 0.006, o.frequency);
+        const g = ctx.createGain();
+        g.gain.value = 0.22 / (1 + i * 0.5);
+        this.lfo(bed, 0.13 + i * 0.071, 0.18 / (1 + i * 0.5), g.gain);
+        o.connect(g).connect(into);
+        o.start(ctx.currentTime + i * 0.3);
+        bed.srcs.push(o);
+        bed.nodes.push(g);
+      });
+      const air = this.loopSrc(this.pink!, 1);
+      const bp = this.filt('bandpass', 3400, 3);
+      const ag = ctx.createGain();
+      ag.gain.value = 0.35;
+      air.connect(bp).connect(ag).connect(into);
+      bed.srcs.push(air);
+      bed.nodes.push(bp, ag);
+    });
+
+    // soul sand valley: a hollow, ghostly wind whose howl wanders
+    const soul = this.bedSet('nSoul', 0.075 * k('soul'), { tc: 1.6 }, (into, bed) => {
+      const src = this.loopSrc(this.pink!, 0.8);
+      for (const [key, f, q] of [['a', 420, 9], ['b', 760, 11]] as [string, number, number][]) {
+        const bp = this.filt('bandpass', f, q);
+        const g = ctx.createGain();
+        g.gain.value = key === 'a' ? 1 : 0.6;
+        src.connect(bp).connect(g).connect(into);
+        bed.nodes.push(bp, g);
+        bed.x[key] = bp;
+      }
+      const low = this.filt('lowpass', 160);
+      const lg = ctx.createGain();
+      lg.gain.value = 0.35;
+      src.connect(low).connect(lg).connect(into);
+      bed.srcs.push(src);
+      bed.nodes.push(low, lg);
+    });
+    if (soul) {
+      this.soulWindT -= 0.2;
+      if (this.soulWindT <= 0) {
+        this.soulWindT = rand(1.5, 4);
+        (soul.x.a as BiquadFilterNode).frequency.setTargetAtTime(rand(300, 620), ctx.currentTime, 1.4);
+        (soul.x.b as BiquadFilterNode).frequency.setTargetAtTime(rand(560, 1100), ctx.currentTime, 1.8);
+      }
+    }
+
+    // basalt deltas: a heavy low rumble; the crackle comes as grains below
+    this.bedSet('nBasalt', 0.09 * k('basalt'), { lp: 130, tc: 1.6 }, (into, bed) => {
+      const src = this.loopSrc(this.brown!, 0.5);
+      src.connect(into);
+      bed.srcs.push(src);
+    });
+    if (k('basalt') > 0.05 && chance(0.4 * k('basalt'))) {
+      const e = this.open('amb', (SFX_GAIN.crackle ?? 1) * 0.3 * k('basalt'), { pan: rand(-0.9, 0.9) });
+      if (e) { this.buildSfx(e, 'crackle'); this.seal(e); }
+    }
+
+    // nether wastes: the low furnace roar
+    this.bedSet('nWastes', 0.08 * k('wastes'), { lp: 260, tc: 1.6 }, (into, bed) => {
+      const src = this.loopSrc(this.brown!, 0.7);
+      const g = ctx.createGain();
+      g.gain.value = 0.8;
+      this.lfo(bed, 0.06, 0.25, g.gain);
+      src.connect(g).connect(into);
+      bed.srcs.push(src);
+      bed.nodes.push(g);
+    });
+
+    // portal hum: a detuned low drone with a breathy whoosh riding on it
+    this.bedSet('portalHum', quiet ? 0 : 0.085 * hum, { pan: humPan * 0.8, lp: 900, tc: 0.4 }, (into, bed) => {
+      for (const [f, d, v] of [[55, 0, 0.5], [55.7, 0, 0.45], [110.4, 5, 0.3], [164.9, -6, 0.12]] as [number, number, number][]) {
+        const o = ctx.createOscillator();
+        o.type = 'sawtooth';
+        o.frequency.value = f;
+        o.detune.value = d;
+        const g = ctx.createGain();
+        g.gain.value = v;
+        o.connect(g).connect(into);
+        o.start();
+        bed.srcs.push(o);
+        bed.nodes.push(g);
+      }
+      const n = this.loopSrc(this.pink!, 1);
+      const bp = this.filt('bandpass', 520, 2.5);
+      this.lfo(bed, 0.23, 260, bp.frequency);
+      const ng = ctx.createGain();
+      ng.gain.value = 0.9;
+      this.lfo(bed, 0.4, 0.4, ng.gain);
+      n.connect(bp).connect(ng).connect(into);
+      bed.srcs.push(n);
+      bed.nodes.push(bp, ng);
+    });
+
+    // standing in a portal: a rising, whirling swell (it peaks as you're taken)
+    const c = quiet ? 0 : Math.pow(charge, 1.3);
+    const ch = this.bedSet('portalCharge', 0.16 * c, { lp: 300 + 3200 * c, tc: 0.25 }, (into, bed) => {
+      const n = this.loopSrc(this.pink!, 1);
+      const bp = this.filt('bandpass', 700, 1.6);
+      this.lfo(bed, 3.1, 300, bp.frequency);
+      n.connect(bp).connect(into);
+      const o = ctx.createOscillator();
+      o.type = 'triangle';
+      o.frequency.value = 110;
+      const og = ctx.createGain();
+      og.gain.value = 0.25;
+      this.lfo(bed, 5.5, 0.12, og.gain);
+      o.connect(og).connect(into);
+      o.start();
+      bed.srcs.push(n, o);
+      bed.nodes.push(bp, og);
+      bed.x.osc = o;
+    });
+    if (ch) (ch.x.osc as OscillatorNode).frequency.setTargetAtTime(110 + 330 * c, ctx.currentTime, 0.3);
+    this.reapBeds(ctx.currentTime);
+  }
+
+  /** Stepping into a portal: the vanilla trigger sound's first breath. */
+  portalTrigger(): void {
+    this.ensure();
+    const e = this.open('sfx', 0.9);
+    if (!e) return;
+    this.nz(e, { dur: 1.4, vol: 0.28, color: 'pink', type: 'bandpass', f: 300, f1: 1400, q: 2.2, attack: 0.5 });
+    this.tn(e, { dur: 1.5, f: 82, f1: 110, vol: 0.12, type: 'sawtooth', attack: 0.4, lp: 400 });
+    this.seal(e);
+  }
+
+  /** Dominant Nether biome from the last netherScape weights. */
+  private netherBiome(): string {
+    const w = this.netherW;
+    if (!w) return 'wastes';
+    let best = 'wastes', bw = -1;
+    for (const [b, v] of Object.entries(w)) if (v > bw) { bw = v; best = b; }
+    return best;
+  }
+
+  /** Crimson: a deep beast-like growl somewhere in the stems. */
+  private crimsonGrowl(): void {
+    const e = this.open('amb', rand(0.4, 0.8), { pan: rand(-0.8, 0.8) });
+    if (!e) return;
+    const p = rand(0.85, 1.15);
+    this.vox(e, {
+      dur: rand(1.2, 2), vol: 0.26, pitch: [62 * p, 78 * p, 70 * p, 55 * p], attack: 0.25,
+      formants: [[[380, 320], 5, 1], [[760, 640], 6, 0.5], [[1900], 8, 0.12]], rough: [22, 90], breath: 0.3, direct: 0.3,
+    });
+    this.nz(e, { dur: 1.8, vol: 0.12, color: 'brown', type: 'lowpass', f: 200, attack: 0.4 });
+    this.seal(e);
+  }
+
+  /** Warped: a far glassy chime pair, or a slow reversed swell. */
+  private warpedChime(): void {
+    const e = this.open('amb', rand(0.35, 0.7), { pan: rand(-0.9, 0.9) });
+    if (!e) return;
+    if (chance(0.55)) {
+      const f = pick([659.3, 739.9, 830.6, 987.8]);
+      this.fm(e, { f, ratio: 3.5, index: 0.6, dur: 3.2, vol: 0.06, attack: 0.02 });
+      this.fm(e, { at: rand(0.3, 0.7), f: f * pick([1.26, 1.335, 1.414]), ratio: 3.5, index: 0.5, dur: 3, vol: 0.045 });
+    } else {
+      this.nz(e, { dur: 2.2, vol: 0.12, color: 'pink', type: 'bandpass', f: 1800, f1: 600, q: 4, attack: 1.9 });
+      this.tn(e, { dur: 2.3, f: rand(300, 420), f1: rand(600, 900), glide: 2.2, vol: 0.04, attack: 1.8 });
+    }
+    this.seal(e);
+  }
+
+  /** Soul sand valley: whispers, or a ghostly moan drifting past. */
+  private soulWhisper(): void {
+    const e = this.open('amb', rand(0.3, 0.6), { pan: rand(-1, 1) });
+    if (!e) return;
+    if (chance(0.6)) {
+      let at = 0;
+      const n = 3 + ((Math.random() * 5) | 0);
+      for (let i = 0; i < n; i++) {
+        this.nz(e, { at, dur: rand(0.12, 0.3), vol: 0.07, color: 'white', type: 'bandpass', f: rand(1800, 4200), q: rand(3, 7), attack: 0.03 });
+        at += rand(0.12, 0.35);
+      }
+    } else {
+      const f = rand(300, 420);
+      this.vox(e, {
+        dur: rand(1.8, 2.8), vol: 0.1, pitch: [f, f * 1.12, f * 0.9, f * 0.7], type: 'triangle', attack: 0.5,
+        formants: [[[400, 700, 350], 5, 1], [[900, 1100], 6, 0.4]], vib: [4, 30], breath: 0.5, direct: 0.2,
+      });
+    }
+    this.seal(e);
+  }
+
+  /** Basalt deltas: a distant boom rolling through the ash. */
+  private basaltBoom(): void {
+    const e = this.open('amb', rand(0.5, 0.9), { pan: rand(-0.8, 0.8) });
+    if (!e) return;
+    this.tn(e, { dur: 1.6, f: 58, f1: 30, vol: 0.28, attack: 0.01 });
+    this.nz(e, { dur: rand(2.5, 3.5), vol: 0.24, color: 'brown', type: 'lowpass', f: 320, f1: 70, attack: 0.02 });
+    this.nz(e, { at: 0.2, dur: 1.2, vol: 0.06, color: 'pink', type: 'bandpass', f: 1400, curve: this.grains(12, 0.9, 1.3) });
+    this.seal(e);
+  }
+
   /** A soft heartbeat that emerges and quickens as health drops — survival
    *  tension — over a low, slowly-beating dissonant drone. hpFrac is
    *  health/maxHealth; silent above 30%. Call every frame. */
@@ -3134,6 +3481,13 @@ export class AudioEngine {
   /** Nether ambience: lava pops, a far roar, or a ghostly wail. */
   private netherCue(): void {
     const r = Math.random();
+    // each biome has its own voice; the wastes keep the classic mix below
+    switch (this.netherBiome()) {
+      case 'crimson': if (r < 0.55) { this.crimsonGrowl(); return; } break;
+      case 'warped': if (r < 0.7) { this.warpedChime(); return; } break;
+      case 'soul': if (r < 0.75) { this.soulWhisper(); return; } break;
+      case 'basalt': if (r < 0.6) { this.basaltBoom(); return; } break;
+    }
     if (r < 0.45) {
       const e = this.open('amb', rand(0.4, 0.9), { pan: rand(-0.8, 0.8) });
       if (!e) return;

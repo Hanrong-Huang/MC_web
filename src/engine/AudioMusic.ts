@@ -8,7 +8,9 @@
 export type MusicEnv = 'day' | 'night' | 'cave' | 'nether' | 'menu' | 'underwater' | 'creative';
 export type MusicBiomeKey =
   'plains' | 'forest' | 'desert' | 'snow' | 'taiga' | 'swamp' | 'mountains' | 'jungle'
-  | 'ocean' | 'beach' | 'village' | 'peak';
+  | 'ocean' | 'beach' | 'village' | 'peak'
+  // Nether biomes (only meaningful with env 'nether')
+  | 'crimson' | 'warped' | 'soul' | 'basalt' | 'wastes';
 
 export type Inst = 'piano' | 'epiano' | 'bell' | 'celesta' | 'pad' | 'bass' | 'drone'
   | 'harp' | 'musicbox' | 'flute' | 'ocarina' | 'strings' | 'cello' | 'tom';
@@ -133,7 +135,14 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
     mode = title ? 'ionian' : weighted(r, [['ionian', 5], ['lydian', 1]]);
   } else if (env === 'nether') {
     style = 'nether';
-    mode = weighted(r, [['phrygian', 2], ['phrygianDom', 2], ['aeolian', 1]]);
+    // each Nether biome leans on its own colour: crimson's harsh phrygian
+    // dominant, the warped forest's floating dorian/lydian unease, the soul
+    // valley's bare aeolian, the deltas' dark phrygian
+    mode = biome === 'crimson' ? weighted(r, [['phrygianDom', 3], ['phrygian', 1]])
+      : biome === 'warped' ? weighted(r, [['dorian', 2], ['lydian', 1], ['phrygian', 1]])
+        : biome === 'soul' ? weighted(r, [['aeolian', 3], ['dorian', 1]])
+          : biome === 'basalt' ? weighted(r, [['phrygian', 3], ['aeolian', 1]])
+            : weighted(r, [['phrygian', 2], ['phrygianDom', 2], ['aeolian', 1]]);
   } else if (env === 'cave') {
     style = weighted<Style>(r, [['cave', 5], ['ambient', 1], ['elegy', 1]]);
     mode = weighted(r, [['aeolian', 2], ['phrygian', 2], ['dorian', 1]]);
@@ -472,19 +481,44 @@ export function compose(env: MusicEnv, biome: MusicBiomeKey | undefined, seed: n
         break;
       }
       case 'nether': {
+        const nb = biome;
         if (b === 0) {
-          add(0, 'drone', dm(0) - 12, 0.65, nBars * bar + 2);
+          add(0, 'drone', dm(0) - 12, nb === 'soul' ? 0.45 : 0.65, nBars * bar + 2);
           add(0, 'drone', dm(0) - 24 + 7, 0.3, nBars * bar + 2);
         }
-        if (b % 2 === 0 && r() < 0.65) {
+        // low piano octaves — sparse and hollow in the soul valley
+        if (b % 2 === 0 && r() < (nb === 'soul' ? 0.3 : nb === 'warped' ? 0.45 : 0.65)) {
           add(tb, 'piano', bassM(root) - 12, 0.6, bar * 2);
           add(tb + 0.02, 'piano', bassM(root), 0.45, bar * 2);
         }
         if (b % 4 === 0) {
-          for (const m of [dm(root), dm(root + 1), dm(root + 4)]) add(tb, 'pad', m, 0.42, bar * 4.1);
-          if (r() < 0.5) add(tb + bar, 'cello', bassM(root + 1), 0.4, bar * 1.5);
+          const pad: Inst = nb === 'warped' || nb === 'soul' ? 'strings' : 'pad';
+          for (const m of [dm(root), dm(root + 1), dm(root + 4)]) add(tb, pad, m, nb === 'warped' ? 0.34 : 0.42, bar * 4.1);
+          if (r() < (nb === 'crimson' ? 0.8 : 0.5)) add(tb + bar, 'cello', bassM(root + 1), 0.4, bar * 1.5);
         }
-        if (r() < 0.15) {
+        if (nb === 'crimson' || nb === 'basalt') {
+          // war drums in the red forest, far thunder in the deltas
+          if (b % 2 === 1 && r() < (nb === 'basalt' ? 0.45 : 0.6)) {
+            add(tb, 'tom', bassM(root) - 12, nb === 'basalt' ? 0.5 : 0.42, 1);
+            if (nb === 'crimson' && r() < 0.6) add(tb + beat * 1.5, 'tom', bassM(root) - 12, 0.3, 1);
+          }
+        }
+        if (nb === 'warped') {
+          // eerie shimmer: celesta tritones hanging in the teal air
+          for (let bt = 0; bt < meter; bt++) {
+            if (r() > 0.14) continue;
+            const m = dm(root + pick(r, [9, 11, 14])) + 12;
+            add(tb + bt * beat, 'celesta', m, 0.24, 4, (r() - 0.5) * 0.9);
+            if (r() < 0.5) add(tb + bt * beat + beat * 0.5, 'celesta', m + 6, 0.16, 4, (r() - 0.5) * 0.9);
+          }
+        }
+        if (nb === 'soul' && b % 4 === 2 && r() < 0.55) {
+          // a lone ghostly ocarina sigh drifting down
+          const m = dm(root + pick(r, [7, 9])) ;
+          add(tb, 'ocarina', m, 0.3, beat * 2.5, (r() - 0.5) * 0.6);
+          add(tb + beat * 2, 'ocarina', m - 1, 0.24, beat * 3, (r() - 0.5) * 0.6);
+        }
+        if (r() < (nb === 'warped' ? 0.06 : 0.15)) {
           const m = dm(root + 14);
           add(tb + beat, 'bell', m, 0.2, 4, 0.4);
           add(tb + beat * 2.5, 'bell', m + 6, 0.16, 4, -0.4);
