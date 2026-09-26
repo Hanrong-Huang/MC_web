@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { Atlas, extrudeSpriteGeometry, shapedItemGeometry, hasShapedItemModel, BLOCK_SPRITE_ICONS } from './Textures';
 import type { ChunkMeshData, GeoArrays } from './Mesher';
-import { B, def, hasDef, spriteNameFor, I, CROSS_BLOCKS } from './Blocks';
+import { B, def, hasDef, spriteNameFor, I, CROSS_BLOCKS, TRAPDOOR_IDS } from './Blocks';
 import { buildOrbRig, disposeOrb, fitFigurine, ORB_GLOW, ORB_IDLE_GLOW, OrbRig } from './CatcherOrb';
 import { MobModels } from './MobModels';
 import type { MobKind } from './EntityManager';
@@ -1181,7 +1181,7 @@ export class Renderer {
     else if (id === B.BED || id === B.BED_HEAD) y1 = 0.5625;
     else if (id === B.PRESSURE_PLATE) { x0 = z0 = 0.0625; x1 = z1 = 0.9375; y1 = 0.08; }
     else if (id === B.REDSTONE_WIRE) y1 = 0.06;
-    else if (id === B.TRAPDOOR) y0 = 0.8125;
+    else if (TRAPDOOR_IDS.has(id)) y0 = 0.8125;
     const shaped = this.outlineShape?.(pos.x, pos.y, pos.z);
     if (shaped) [x0, y0, z0, x1, y1, z1] = shaped;
     const e = 0.003;

@@ -191,6 +191,13 @@ export enum B {
   /** open/facing live in world.doorStates, like the oak gate */
   CRIMSON_FENCE_GATE = 266,
   WARPED_FENCE_GATE = 267,
+  // --- Nether-wood doors + trapdoors (ids 268-273; see DOOR_KINDS) ---
+  CRIMSON_DOOR_LOWER = 268,
+  CRIMSON_DOOR_UPPER = 269,
+  WARPED_DOOR_LOWER = 270,
+  WARPED_DOOR_UPPER = 271,
+  CRIMSON_TRAPDOOR = 272,
+  WARPED_TRAPDOOR = 273,
 }
 
 export enum I {
@@ -343,6 +350,9 @@ export enum I {
   GOLD_NUGGET = 353,
   GHAST_TEAR = 354,
   WITHER_SKULL = 355,
+  // Nether-wood door items (390-391): place the matching door halves
+  CRIMSON_DOOR = 390,
+  WARPED_DOOR = 391,
 }
 
 /** Wearable-armor slot index: 0 head, 1 chest, 2 legs, 3 feet. */
@@ -1556,11 +1566,11 @@ export function foodSaturation(id: number): number {
 
 /** The item a "pick block" (middle click) on this block should grab, or 0. */
 export function pickItemFor(blockId: number): number {
+  if (DOOR_IDS.has(blockId)) return doorItemFor(blockId);
   switch (blockId) {
     case B.AIR: case B.WATER: case B.LAVA: case B.PORTAL: case B.PISTON_HEAD: return 0;
     case B.FURNACE_LIT: return B.FURNACE;
     case B.CHEST_LOOT: return B.CHEST;
-    case B.DOOR_LOWER: case B.DOOR_UPPER: return I.WOOD_DOOR;
     case B.BED_HEAD: return B.BED;
     case B.REDSTONE_WIRE: return I.REDSTONE;
     case B.REDSTONE_LAMP_LIT: return B.REDSTONE_LAMP;
@@ -1729,12 +1739,64 @@ blockDef({
   faces: { top: 'twisting_vines_tip', bottom: 'twisting_vines_tip', sides: 'twisting_vines_tip' },
 });
 
+// Nether-wood doors + trapdoors: the oak models and behaviour in crimson /
+// warped, fireproof (no fuel value, never catches). Door open/facing/hinge
+// state lives in world.doorStates exactly like the oak door's.
+for (const [lower, upper, trap, item, stem, label] of [
+  [B.CRIMSON_DOOR_LOWER, B.CRIMSON_DOOR_UPPER, B.CRIMSON_TRAPDOOR, I.CRIMSON_DOOR, 'crimson', 'Crimson'],
+  [B.WARPED_DOOR_LOWER, B.WARPED_DOOR_UPPER, B.WARPED_TRAPDOOR, I.WARPED_DOOR, 'warped', 'Warped'],
+] as [number, number, number, number, string, string][]) {
+  const planks = `${stem}_planks`;
+  blockDef({
+    id: lower, name: `${stem}_door_bottom`, label: `${label} Door`, hardness: 1, tool: 'axe', sound: 'wood',
+    solid: false, opaque: false, occludes: false, drop: { id: item, min: 1, max: 1 },
+    faces: { top: planks, bottom: planks, sides: `${stem}_door_lower`, front: `${stem}_door_lower` },
+  });
+  blockDef({
+    id: upper, name: `${stem}_door_top`, label: `${label} Door`, hardness: 1, tool: 'axe', sound: 'wood',
+    solid: false, opaque: false, occludes: false, drop: null,
+    faces: { top: planks, bottom: planks, sides: `${stem}_door_upper`, front: `${stem}_door_upper` },
+  });
+  blockDef({
+    id: trap, name: `${stem}_trapdoor`, label: `${label} Trapdoor`, hardness: 1, tool: 'axe', sound: 'wood',
+    solid: false, opaque: false, occludes: false,
+    faces: { top: `${stem}_trapdoor`, bottom: `${stem}_trapdoor`, sides: `${stem}_trapdoor` },
+  });
+  itemDef({ id: item, name: `${stem}_door`, label: `${label} Door`, sprite: `${stem}_door` });
+}
+
+/** Every door kind: [lower half, upper half, door item]. Door code keys off
+ *  these sets (never B.DOOR_LOWER alone) so every wood behaves the same. */
+export const DOOR_KINDS: [number, number, number][] = [
+  [B.DOOR_LOWER, B.DOOR_UPPER, I.WOOD_DOOR],
+  [B.CRIMSON_DOOR_LOWER, B.CRIMSON_DOOR_UPPER, I.CRIMSON_DOOR],
+  [B.WARPED_DOOR_LOWER, B.WARPED_DOOR_UPPER, I.WARPED_DOOR],
+];
+export const DOOR_LOWERS = new Set<number>(DOOR_KINDS.map((k) => k[0]));
+export const DOOR_UPPERS = new Set<number>(DOOR_KINDS.map((k) => k[1]));
+/** Both halves of every door. */
+export const DOOR_IDS = new Set<number>([...DOOR_LOWERS, ...DOOR_UPPERS]);
+/** Door items (what the player holds to place a door). */
+export const DOOR_ITEMS = new Set<number>(DOOR_KINDS.map((k) => k[2]));
+/** Every trapdoor (open state in world.doorStates, keyed by its own cell). */
+export const TRAPDOOR_IDS = new Set<number>([B.TRAPDOOR, B.CRIMSON_TRAPDOOR, B.WARPED_TRAPDOOR]);
+/** The [lower, upper] halves a door item places, or null. */
+export function doorBlocksFor(item: number): [number, number] | null {
+  const k = DOOR_KINDS.find((d) => d[2] === item);
+  return k ? [k[0], k[1]] : null;
+}
+/** The door item a door half drops / picks as, or 0. */
+export function doorItemFor(block: number): number {
+  return DOOR_KINDS.find((d) => d[0] === block || d[1] === block)?.[2] ?? 0;
+}
+
 const NETHER_BLOCKS = [
   B.CRIMSON_NYLIUM, B.WARPED_NYLIUM, B.CRIMSON_STEM, B.WARPED_STEM, B.NETHER_WART_BLOCK, B.WARPED_WART_BLOCK,
   B.SHROOMLIGHT, B.BASALT, B.BLACKSTONE, B.SOUL_SOIL, B.NETHER_GOLD_ORE, B.ANCIENT_DEBRIS,
   B.CRIMSON_ROOTS, B.WARPED_ROOTS, B.WEEPING_VINES, B.TWISTING_VINES,
   B.CRIMSON_PLANKS, B.CRIMSON_SLAB, B.CRIMSON_STAIRS, B.CRIMSON_FENCE, B.CRIMSON_FENCE_GATE,
   B.WARPED_PLANKS, B.WARPED_SLAB, B.WARPED_STAIRS, B.WARPED_FENCE, B.WARPED_FENCE_GATE,
+  B.CRIMSON_TRAPDOOR, B.WARPED_TRAPDOOR,
 ];
 for (const id of NETHER_BLOCKS) {
   const d = DEFS.get(id)!;
@@ -1790,6 +1852,7 @@ Object.defineProperty(DEFS.get(B.NETHER_GOLD_ORE)!, 'drop', {
 for (const list of [PLACEABLE, CREATIVE_ITEMS]) {
   list.splice(list.indexOf(B.NETHER_BRICKS) + 1, 0, ...NETHER_BLOCKS);
 }
+CREATIVE_ITEMS.splice(CREATIVE_ITEMS.indexOf(I.WOOD_DOOR) + 1, 0, I.CRIMSON_DOOR, I.WARPED_DOOR);
 
 // =============================================================================
 // Nether utility pass: netherite, soul light, the respawn anchor, fire charges

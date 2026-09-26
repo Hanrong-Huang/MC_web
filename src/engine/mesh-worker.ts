@@ -5,7 +5,7 @@
 
 import { buildChunkGeometry } from './Mesher';
 import type { MeshWorld, MeshChunk, MeshDoor, MeshRedstone, GeoArrays } from './Mesher';
-import { B } from './Blocks';
+import { B, DOOR_LOWERS, DOOR_UPPERS } from './Blocks';
 import { CX, CY, chunkKey } from './Chunk';
 
 export interface MeshChunkSnap {
@@ -73,8 +73,8 @@ function makeWorld(job: MeshJob): MeshWorld {
       const here = doorStates.get(`${wx},${y},${wz}`);
       if (here) return here;
       const id = getBlock(wx, y, wz);
-      if (id === B.DOOR_UPPER) return doorStates.get(`${wx},${y - 1},${wz}`);
-      if (id === B.DOOR_LOWER) return doorStates.get(`${wx},${y + 1},${wz}`);
+      if (DOOR_UPPERS.has(id)) return doorStates.get(`${wx},${y - 1},${wz}`);
+      if (DOOR_LOWERS.has(id)) return doorStates.get(`${wx},${y + 1},${wz}`);
       return undefined;
     },
     doorStates, torchFacings, bedFacings, redstoneStates, redstonePower,

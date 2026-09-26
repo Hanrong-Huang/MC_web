@@ -29,6 +29,7 @@ import type { MeshJob, MeshChunkSnap } from './engine/mesh-worker';
 import { chunkKey, CX, CY, CZ } from './engine/Chunk';
 import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, HANGING_PLANTS, def, hasDef, isSolid, mobLabel } from './engine/Blocks';
 import { SHAPED, META_BLOCKS, FENCE_IDS, GATE_IDS, VINE_BLOCKS, vineDrops, shapeBoxes, connectsTo, enchantLabel } from './engine/Blocks';
+import { DOOR_IDS, DOOR_UPPERS, TRAPDOOR_IDS } from './engine/Blocks';
 import { craftRemainders } from './engine/Inventory';
 import { ExperienceOrbs, XpBar } from './engine/Experience';
 import { Throwables } from './engine/Throwables';
@@ -241,7 +242,7 @@ class Game {
         B.REDSTONE_WIRE, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
         B.PRESSURE_PLATE, B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT,
         B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD,
-        B.DOOR_LOWER, B.DOOR_UPPER, B.TRAPDOOR
+        ...DOOR_IDS, ...TRAPDOOR_IDS
       ]);
       const isRedstoneRelated = (bx: number, by: number, bz: number) => {
         if (REDSTONE_IDS.has(this.world.getBlock(bx, by, bz))) return true;
@@ -2354,12 +2355,12 @@ class Game {
         } else if (!powered && extended) {
           this.retractPiston(rx, ry, rz);
         }
-      } else if (rid === B.DOOR_LOWER || rid === B.DOOR_UPPER || rid === B.TRAPDOOR) {
+      } else if (DOOR_IDS.has(rid) || TRAPDOOR_IDS.has(rid)) {
         // Power any block of the door: check the lower half and both halves so a
         // plate beside either the foot or head of the door still drives it.
-        const ly = rid === B.DOOR_UPPER ? ry - 1 : ry;
+        const ly = DOOR_UPPERS.has(rid) ? ry - 1 : ry;
         const lx = rx, lz = rz;
-        const isTrap = rid === B.TRAPDOOR;
+        const isTrap = TRAPDOOR_IDS.has(rid);
         const dkey = isTrap ? `${rx},${ry},${rz}` : `${lx},${ly},${lz}`;
         const st = this.world.doorStates.get(dkey);
         if (st) {

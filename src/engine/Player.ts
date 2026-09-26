@@ -23,6 +23,7 @@ import type { RayHit } from './World';
 import { mouseLookSens } from './ControlsSettings';
 import type { PlayerSave } from './Persistence';
 import { netheriteUpgrade, GATE_IDS, CLIMBABLE, HANGING_PLANTS, VINE_BLOCKS, vineDrops } from './Blocks';
+import { DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, doorBlocksFor, doorItemFor } from './Blocks';
 import { PORTAL_TIME_CREATIVE, PORTAL_TIME_SURVIVAL } from './NetherPortal';
 
 export type GameMode = 'survival' | 'creative';
@@ -1113,15 +1114,15 @@ export class Player {
 
     // doors: removing one half removes the other; drop a single door item
     let doorDrop = false;
-    if (id === B.DOOR_LOWER) {
-      world.setBlock(x, y + 1, z, B.AIR);
+    if (DOOR_LOWERS.has(id)) {
+      if (DOOR_UPPERS.has(world.getBlock(x, y + 1, z))) world.setBlock(x, y + 1, z, B.AIR);
       world.doorStates.delete(`${x},${y},${z}`);
       doorDrop = true;
-    } else if (id === B.DOOR_UPPER) {
-      world.setBlock(x, y - 1, z, B.AIR);
+    } else if (DOOR_UPPERS.has(id)) {
+      if (DOOR_LOWERS.has(world.getBlock(x, y - 1, z))) world.setBlock(x, y - 1, z, B.AIR);
       world.doorStates.delete(`${x},${y - 1},${z}`);
       doorDrop = true;
-    } else if (id === B.TRAPDOOR) {
+    } else if (TRAPDOOR_IDS.has(id)) {
       world.doorStates.delete(`${x},${y},${z}`);
     }
 
@@ -1161,7 +1162,7 @@ export class Player {
     }
 
     if (doorDrop && withDrops && this.mode === 'survival') {
-      entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, I.WOOD_DOOR, 1);
+      entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, doorItemFor(id), 1);
       return;
     }
     if (bedDrop) {
@@ -2007,11 +2008,11 @@ export class Player {
         return;
       }
       // doors + trapdoors toggle on use
-      if (t.id === B.DOOR_LOWER || t.id === B.DOOR_UPPER || t.id === B.TRAPDOOR) {
-        const wasOpen = t.id === B.TRAPDOOR
+      if (DOOR_IDS.has(t.id) || TRAPDOOR_IDS.has(t.id)) {
+        const wasOpen = TRAPDOOR_IDS.has(t.id)
           ? world.isTrapdoorOpen(t.x, t.y, t.z)
           : !!world.doorStateAt(t.x, t.y, t.z)?.open;
-        if (world.toggleDoor(t.x, t.y, t.z) || t.id === B.TRAPDOOR) {
+        if (world.toggleDoor(t.x, t.y, t.z) || TRAPDOOR_IDS.has(t.id)) {
           this.placeCooldown = 0.3;
           this.deps.renderer.triggerSwing();
           audio.play(wasOpen ? 'doorClose' : 'doorOpen');
@@ -2130,7 +2131,8 @@ export class Player {
     if (!this.target || !held) return;
 
     // door item: place a 2-tall door; broad face points back toward the player
-    if (held.id === I.WOOD_DOOR) {
+    const doorHalves = doorBlocksFor(held.id);
+    if (doorHalves) {
       const px = this.target.x + this.target.nx;
       const py = this.target.y + this.target.ny;
       const pz = this.target.z + this.target.nz;
@@ -2148,12 +2150,12 @@ export class Player {
       // mirror an adjacent same-facing door so the two form a double door
       const along = facing % 2 === 0 ? [[1, 0], [-1, 0]] : [[0, 1], [0, -1]];
       for (const [dx, dz] of along) {
-        if (world.getBlock(px + dx, py, pz + dz) !== B.DOOR_LOWER) continue;
+        if (!DOOR_LOWERS.has(world.getBlock(px + dx, py, pz + dz))) continue;
         const ns = world.doorStates.get(`${px + dx},${py},${pz + dz}`);
         if (ns && ns.facing === facing) { hingeRight = !ns.hingeRight; break; }
       }
-      world.setBlock(px, py, pz, B.DOOR_LOWER);
-      world.setBlock(px, py + 1, pz, B.DOOR_UPPER);
+      world.setBlock(px, py, pz, doorHalves[0]);
+      world.setBlock(px, py + 1, pz, doorHalves[1]);
       world.doorStates.set(`${px},${py},${pz}`, { facing, open: false, hingeRight, swing: 0 });
       // reflect an already-powered plate/lever beside the freshly placed door
       this.deps.onRedstoneUpdate(px, py, pz);
@@ -2269,7 +2271,7 @@ export class Player {
       if (!isSolid(world.getBlock(ax, ay, az))) return;
     }
     // trapdoors need solid ground or a solid neighbor to hinge on
-    if (placeId === B.TRAPDOOR) {
+    if (TRAPDOOR_IDS.has(placeId)) {
       if (!isSolid(world.getBlock(px, py - 1, pz)) &&
         !isSolid(world.getBlock(px - 1, py, pz)) && !isSolid(world.getBlock(px + 1, py, pz)) &&
         !isSolid(world.getBlock(px, py, pz - 1)) && !isSolid(world.getBlock(px, py, pz + 1))) return;

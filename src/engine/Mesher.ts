@@ -8,7 +8,7 @@
 // light model stays 2-channel without another attribute.
 
 import { CX, CZ, CY } from './Chunk';
-import { B, def, hasDef, ID_LIMIT, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, FENCE_IDS, GATE_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel } from './Blocks';
+import { B, def, hasDef, ID_LIMIT, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, FENCE_IDS, GATE_IDS, DOOR_IDS, TRAPDOOR_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel } from './Blocks';
 import type { Box } from './Blocks';
 import type { UVRect } from './Textures';
 
@@ -256,8 +256,8 @@ function kindOf(id: number): number {
   let k = KIND[id];
   if (k < 0) {
     k = id === B.AIR ? 0
-      : (id === B.TORCH || id === B.SOUL_TORCH || id === B.PORTAL || id === B.DOOR_LOWER || id === B.DOOR_UPPER || id === B.LADDER ||
-        id === B.BED || id === B.BED_HEAD || id === B.TRAPDOOR || id === B.PRESSURE_PLATE ||
+      : (id === B.TORCH || id === B.SOUL_TORCH || id === B.PORTAL || DOOR_IDS.has(id) || id === B.LADDER ||
+        id === B.BED || id === B.BED_HEAD || TRAPDOOR_IDS.has(id) || id === B.PRESSURE_PLATE ||
         id === B.LEVER || id === B.WOODEN_BUTTON || id === B.STONE_BUTTON ||
         id === B.REDSTONE_WIRE || CROSS_BLOCKS.has(id) || SHAPED.has(id)) ? 2 : 1;
     KIND[id] = k;
@@ -540,7 +540,7 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           continue;
         }
         if (id === B.PORTAL) continue; // drawn as an animated sheet by PortalFX
-        if (id === B.DOOR_LOWER || id === B.DOOR_UPPER) {
+        if (DOOR_IDS.has(id)) {
           const st = world.doorStateAt(bx + x, y, bz + z);
           const facing = st?.facing ?? 0;
           const hingeRight = !!st?.hingeRight;
@@ -557,9 +557,9 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           emitBed(solid, atlas, x, y, z, id === B.BED_HEAD, facing, skyAt(x, y, z), torchAt(x, y, z));
           continue;
         }
-        if (id === B.TRAPDOOR) {
+        if (TRAPDOOR_IDS.has(id)) {
           const open = !!world.doorStates.get(`${bx + x},${y},${bz + z}`)?.open;
-          emitTrapdoor(solid, atlas, x, y, z, open, skyAt(x, y, z), torchAt(x, y, z));
+          emitTrapdoor(solid, atlas, id, x, y, z, open, skyAt(x, y, z), torchAt(x, y, z));
           continue;
         }
         if (id === B.PRESSURE_PLATE) {
@@ -910,7 +910,7 @@ function emitDoor(
   g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: number, z: number,
   facing: number, hingeRight: boolean, swing: number, sky: number, torch: number,
 ): void {
-  const rect = atlas.rect(id === B.DOOR_UPPER ? 'door_upper' : 'door_lower');
+  const rect = atlas.rect(def(id).faces!.sides); // door_lower / door_upper per wood
   const t = 2 / 16;
   const foot = doorSwingFootprint(facing, hingeRight, swing, t);
   emitDoorPanel(g, x, y, z, foot, rect, sky, torch);
@@ -976,30 +976,32 @@ function emitLadder(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: nu
   }
 }
 
-/** Trapdoor: flat panel flush with the floor when closed, upright when open. */
-function emitTrapdoor(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, open: boolean, sky: number, torch: number): void {
-  const rect = atlas.rect('trapdoor');
-  const thick = 3 / 16;
-  const base = g.vertCount;
-  let corners: number[][];
-  if (open) {
-    // standing upright along +z edge
-    corners = [
-      [x + 0, y + 0, z + 1 - thick], [x + 1, y + 0, z + 1 - thick],
-      [x + 1, y + 1, z + 1 - thick], [x + 0, y + 1, z + 1 - thick],
-    ];
-  } else {
-    // flush with the cell top
-    corners = [
-      [x + 0, y + 1 - thick, z + 0], [x + 1, y + 1 - thick, z + 0],
-      [x + 1, y + 1 - thick, z + 1], [x + 0, y + 1 - thick, z + 1],
-    ];
-  }
-  for (let i = 0; i < 4; i++) {
-    g.v(corners[i][0], corners[i][1], corners[i][2], sky, torch + soulFlagAt(x, y, z), 1, 1, 1,
-      i === 0 || i === 3 ? rect.u0 : rect.u1, i < 2 ? rect.v1 : rect.v0);
-  }
-  g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
+/** Trapdoor: a 3/16-thick hatch flush with the cell top when closed, upright
+ *  against the +z edge when open. It is a real six-sided slab (the solid pass
+ *  culls back faces, so the old single quad vanished from one side — a closed
+ *  hatch was invisible from above): the broad faces carry the whole tile (its
+ *  holes alpha-test through), the thin edges a 3px strip of the frame. */
+function emitTrapdoor(g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: number, z: number, open: boolean, sky: number, torch: number): void {
+  const rect = atlas.rect(def(id).faces!.top); // oak 'trapdoor' / '<wood>_trapdoor'
+  const t = 3 / 16;
+  const lit = torch + soulFlagAt(x, y, z);
+  const hStrip: UVRect = { ...rect, v1: rect.v0 + (rect.v1 - rect.v0) * t };
+  const vStrip: UVRect = { ...rect, u1: rect.u0 + (rect.u1 - rect.u0) * t };
+  const [x0, x1, y0, y1, z0, z1] = open ? [0, 1, 0, 1, 1 - t, 1] : [0, 1, 1 - t, 1, 0, 1];
+  // corners counter-clockwise seen from outside: bottom-left, bottom-right, top-right, top-left
+  const face = (c: number[][], r: UVRect): void => {
+    const b = g.vertCount;
+    const uv = [[r.u0, r.v1], [r.u1, r.v1], [r.u1, r.v0], [r.u0, r.v0]];
+    for (let i = 0; i < 4; i++) g.v(x + c[i][0], y + c[i][1], z + c[i][2], sky, lit, 1, 1, 1, uv[i][0], uv[i][1]);
+    g.tri2(b, b + 1, b + 2, b, b + 2, b + 3);
+  };
+  const flatY = open ? hStrip : rect, flatZ = open ? rect : hStrip, sideX = open ? vStrip : hStrip;
+  face([[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]], flatY); // +y
+  face([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], flatY); // -y
+  face([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], flatZ); // +z
+  face([[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], flatZ); // -z
+  face([[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], sideX); // +x
+  face([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], sideX); // -x
 }
 
 function emitBox(

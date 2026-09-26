@@ -3,7 +3,7 @@
 
 import { Chunk, chunkKey, CX, CZ, CY, isGlower } from './Chunk';
 import { WorldGenerator } from './WorldGenerator';
-import { B, isSolid, def, hasDef } from './Blocks';
+import { B, isSolid, def, hasDef, DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS } from './Blocks';
 import { BlockEntity } from './Inventory';
 import { rleDecode, rleEncode, rleIsLegacy } from './Persistence';
 import type { GenResult } from './gen-worker';
@@ -257,7 +257,7 @@ export class World {
       B.PRESSURE_PLATE, B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT,
       B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD,
       // doors/trapdoors are redstone sinks: tracked so power can open/close them
-      B.DOOR_LOWER, B.DOOR_UPPER, B.TRAPDOOR
+      ...DOOR_IDS, ...TRAPDOOR_IDS
     ]);
     const posKey = `${wx},${wy},${wz}`;
     if (REDSTONE_IDS.has(oldId)) {
@@ -318,8 +318,8 @@ export class World {
     const here = this.doorStates.get(`${x},${y},${z}`);
     if (here) return here;
     const id = this.getBlock(x, y, z);
-    if (id === B.DOOR_UPPER) return this.doorStates.get(`${x},${y - 1},${z}`);
-    if (id === B.DOOR_LOWER) return this.doorStates.get(`${x},${y + 1},${z}`);
+    if (DOOR_UPPERS.has(id)) return this.doorStates.get(`${x},${y - 1},${z}`);
+    if (DOOR_LOWERS.has(id)) return this.doorStates.get(`${x},${y + 1},${z}`);
     return undefined;
   }
 
@@ -327,7 +327,7 @@ export class World {
   toggleDoor(x: number, y: number, z: number): boolean {
     let id = this.getBlock(x, y, z);
     // trapdoor: keyed by its own position
-    if (id === B.TRAPDOOR) {
+    if (TRAPDOOR_IDS.has(id)) {
       const key = `${x},${y},${z}`;
       const st = this.doorStates.get(key) ?? { facing: 0 as DoorFacing, open: false };
       st.open = !st.open;
@@ -337,8 +337,8 @@ export class World {
     }
     // tall door: lower half holds the state
     let ly = y;
-    if (id === B.DOOR_UPPER) { ly = y - 1; id = this.getBlock(x, ly, z); }
-    if (id !== B.DOOR_LOWER) return false;
+    if (DOOR_UPPERS.has(id)) { ly = y - 1; id = this.getBlock(x, ly, z); }
+    if (!DOOR_LOWERS.has(id)) return false;
     const key = `${x},${ly},${z}`;
     const st = this.doorStates.get(key) ?? { facing: 0 as DoorFacing, open: false, swing: 0 };
     st.open = !st.open;
@@ -362,7 +362,7 @@ export class World {
     const along = st.facing % 2 === 0 ? [[1, 0], [-1, 0]] : [[0, 1], [0, -1]];
     for (const [dx, dz] of along) {
       const nx = lx + dx, nz = lz + dz;
-      if (this.getBlock(nx, ly, nz) !== B.DOOR_LOWER) continue;
+      if (!DOOR_LOWERS.has(this.getBlock(nx, ly, nz))) continue;
       const ns = this.doorStates.get(`${nx},${ly},${nz}`);
       if (ns && ns.facing === st.facing && !!ns.hingeRight !== !!st.hingeRight) {
         return { key: `${nx},${ly},${nz}`, x: nx, z: nz, st: ns };
@@ -377,7 +377,7 @@ export class World {
     let changed = false;
     for (const [key, st] of this.doorStates) {
       const [wx, wy, wz] = key.split(',').map(Number);
-      if (this.getBlock(wx, wy, wz) !== B.DOOR_LOWER) continue;
+      if (!DOOR_LOWERS.has(this.getBlock(wx, wy, wz))) continue;
       const target = st.open ? 1 : 0;
       const cur = st.swing ?? target;
       if (Math.abs(cur - target) < 0.001) {
@@ -395,7 +395,7 @@ export class World {
 
   /** Open state for any door/trapdoor block (false when not a door). */
   isTrapdoorOpen(x: number, y: number, z: number): boolean {
-    if (this.getBlock(x, y, z) !== B.TRAPDOOR) return false;
+    if (!TRAPDOOR_IDS.has(this.getBlock(x, y, z))) return false;
     return this.doorStates.get(`${x},${y},${z}`)?.open ?? false;
   }
 
@@ -916,7 +916,7 @@ export class World {
       B.PRESSURE_PLATE, B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT,
       B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD,
       // doors/trapdoors are redstone sinks: tracked so power can open/close them
-      B.DOOR_LOWER, B.DOOR_UPPER, B.TRAPDOOR
+      ...DOOR_IDS, ...TRAPDOOR_IDS
     ]);
     const bx = chunk.cx * CX, bz = chunk.cz * CZ;
     for (let y = 0; y < CY; y++) {

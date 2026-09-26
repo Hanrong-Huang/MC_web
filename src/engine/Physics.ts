@@ -5,7 +5,7 @@
 // ledge up to STEP_HEIGHT (a slab or a stair) without jumping.
 
 import { World } from './World';
-import { B, def, hasDef, SHAPED, FENCE_IDS, GATE_IDS, shapeBoxes, connectsTo } from './Blocks';
+import { B, def, hasDef, SHAPED, FENCE_IDS, GATE_IDS, DOOR_IDS, shapeBoxes, connectsTo } from './Blocks';
 import type { Box } from './Blocks';
 
 export interface Vec3 { x: number; y: number; z: number }
@@ -47,7 +47,7 @@ function cellBoxes(world: World, x: number, y: number, z: number): Box[] {
   }
   if (hasDef(id) && def(id).solid) return FULL;
   // doors block while closed
-  if (id === B.DOOR_LOWER || id === B.DOOR_UPPER) return world.isDoorClosed(x, y, z) ? FULL : NONE;
+  if (DOOR_IDS.has(id)) return world.isDoorClosed(x, y, z) ? FULL : NONE;
   return NONE;
 }
 

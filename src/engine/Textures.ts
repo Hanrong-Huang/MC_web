@@ -4365,6 +4365,110 @@ for (const stem of ['crimson', 'warped']) {
   ICON_SHAPES[`${stem}_fence_gate`] = ICON_SHAPES.oak_fence_gate;
 }
 
+// Nether-wood doors + trapdoors. Doors run their boards vertically (the oak
+// door's are horizontal) and are cut through like vanilla's: crimson with rows
+// of small square holes, warped with a framed window. Clear pixels are real
+// holes — the chunk material alpha-tests, as with the oak trapdoor's hatches.
+interface NetherWood { ramp: RGB[]; seam: RGB; frame: string; lit: string; dark: string; vein: string; seed: number }
+const NETHER_WOOD: Record<'crimson' | 'warped', NetherWood> = {
+  crimson: {
+    ramp: pal(['#4f2438', '#5e2b43', '#6a344b', '#763b55', '#82425e', '#8f4b69']), seam: hex('#3a1929'),
+    frame: '#3a1929', lit: '#a45a7c', dark: '#2a0f1c', vein: '#c0527e', seed: 8692,
+  },
+  warped: {
+    ramp: pal(['#1d4b48', '#235a55', '#2a6962', '#30776f', '#39877d', '#43978b']), seam: hex('#153835'),
+    frame: '#153835', lit: '#58ad9f', dark: '#0c2422', vein: '#3fd0b4', seed: 8694,
+  },
+};
+
+/** Punch a bevelled hole: clear the cells, shade the rim (dark above/left, lit below/right). */
+function punchHole(p: Px, x0: number, y0: number, w: number, h: number, w8: NetherWood): void {
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) p.clear(x0 + i, y0 + j);
+  for (let i = -1; i <= w; i++) { p.set(x0 + i, y0 - 1, w8.dark); p.set(x0 + i, y0 + h, w8.lit); }
+  for (let j = 0; j < h; j++) { p.set(x0 - 1, y0 + j, w8.dark); p.set(x0 + w, y0 + j, w8.lit); }
+}
+
+function netherDoorPx(stem: 'crimson' | 'warped', upper: boolean): Px {
+  const w8 = NETHER_WOOD[stem];
+  const boards = planksPx(w8.ramp, w8.seam, w8.seed + (upper ? 1 : 0));
+  const p = new Px().fill((x, y) => boards.get(y, x)); // vertical boards
+  for (let j = 0; j < 16; j++) { p.set(0, j, w8.frame); p.set(15, j, w8.frame); p.set(1, j, w8.lit); p.set(14, j, w8.dark); }
+  if (upper) {
+    for (let i = 0; i < 16; i++) p.set(i, 0, w8.frame);
+    if (stem === 'crimson') {
+      for (const hy of [3, 7]) for (const hx of [4, 7, 10]) punchHole(p, hx, hy, 2, 2, w8);
+    } else {
+      // tall window split by a cross mullion
+      punchHole(p, 4, 3, 8, 7, w8);
+      for (let j = 3; j < 10; j++) { p.set(7, j, w8.frame); p.set(8, j, w8.lit); }
+      for (let i = 4; i < 12; i++) { p.set(i, 6, w8.frame); }
+    }
+    for (let i = 3; i <= 12; i++) p.set(i, 12, w8.dark); // rail between the panels
+  } else {
+    for (let i = 0; i < 16; i++) p.set(i, 15, w8.frame);
+    // raised panel with a glowing vein, and a dark iron handle at waist height
+    for (let j = 3; j <= 12; j++) for (let i = 3; i <= 12; i++) {
+      if (j === 3 || i === 3) p.set(i, j, w8.lit); else if (j === 12 || i === 12) p.set(i, j, w8.dark);
+    }
+    for (const [vx, vy] of stem === 'crimson' ? [[5, 5], [6, 6], [6, 7], [7, 8], [8, 8], [9, 9]] : [[9, 5], [8, 6], [8, 7], [7, 8], [6, 9], [6, 10]]) p.set(vx, vy, w8.vein);
+    p.set(12, 0, '#6a6a70'); p.set(12, 1, '#3a3a40'); p.set(11, 1, '#1a1a1e'); p.set(13, 1, '#1a1a1e');
+  }
+  return p;
+}
+
+function netherTrapdoorPx(stem: 'crimson' | 'warped'): Px {
+  const w8 = NETHER_WOOD[stem];
+  const p = planksPx(w8.ramp, w8.seam, w8.seed + 2);
+  for (let i = 0; i < 16; i++) { p.set(i, 0, w8.frame); p.set(0, i, w8.frame); p.set(i, 15, w8.frame); p.set(15, i, w8.frame); }
+  if (stem === 'crimson') {
+    for (const hy of [4, 10]) for (const hx of [3, 7, 11]) punchHole(p, hx, hy, 2, 2, w8);
+  } else {
+    punchHole(p, 4, 4, 8, 8, w8);
+    for (let k = 4; k < 12; k++) { p.set(7, k, w8.frame); p.set(8, k, w8.lit); p.set(k, 7, w8.frame); p.set(k, 8, w8.lit); }
+  }
+  for (const [bx, by] of [[1, 1], [14, 1], [1, 14], [14, 14]]) p.set(bx, by, '#2a2a30');
+  return p;
+}
+
+/** Door item icon: a front-on door with the wood's holes / window. */
+function netherDoorSprite(stem: 'crimson' | 'warped'): (c: Ctx) => void {
+  const w8 = NETHER_WOOD[stem];
+  const top = stem === 'crimson'
+    ? ['OFPPPPPPFO', 'OFPkPPkPFO', 'OFPPPPPPFO', 'OFPkPPkPFO', 'OFPPPPPPFO']
+    : ['OFPPPPPPFO', 'OFkkFkkPFO', 'OFkkFkkPFO', 'OFFFFFFPFO', 'OFkkFkkPFO'];
+  const rows = [
+    'OOOOOOOOOO', 'OFFFFFFFFO', ...top, 'OFFFFFFFFO',
+    'OFPPPPPPFO', 'OFPvPPPPFO', 'OFPPvPPHFO', 'OFPPPvPPFO', 'OFPPPPPPFO', 'OFPPPPPPFO', 'OFFFFFFFFO', 'OOOOOOOOOO',
+  ].map((r) => `...${r}...`);
+  const colors = stem === 'crimson'
+    ? { O: w8.dark, F: '#6a344b', P: '#8f4b69', k: '#120610', v: w8.vein, H: '#c8c8cc' }
+    : { O: w8.dark, F: '#2a6962', P: '#43978b', k: '#061614', v: w8.vein, H: '#c8c8cc' };
+  return (c) => pixmap(c, 0, 0, rows, colors);
+}
+
+Object.assign(TILE_PAINTERS, {
+  crimson_door_lower: (c: Ctx, x: number, y: number) => netherDoorPx('crimson', false).put(c, x, y),
+  crimson_door_upper: (c: Ctx, x: number, y: number) => netherDoorPx('crimson', true).put(c, x, y),
+  warped_door_lower: (c: Ctx, x: number, y: number) => netherDoorPx('warped', false).put(c, x, y),
+  warped_door_upper: (c: Ctx, x: number, y: number) => netherDoorPx('warped', true).put(c, x, y),
+  crimson_trapdoor: (c: Ctx, x: number, y: number) => netherTrapdoorPx('crimson').put(c, x, y),
+  warped_trapdoor: (c: Ctx, x: number, y: number) => netherTrapdoorPx('warped').put(c, x, y),
+});
+Object.assign(ITEM_PAINTERS, {
+  crimson_door: netherDoorSprite('crimson'),
+  warped_door: netherDoorSprite('warped'),
+});
+Object.assign(PACK_MAP, {
+  crimson_door_lower: { paths: ['block/crimson_door_bottom'], kind: 'tile' },
+  crimson_door_upper: { paths: ['block/crimson_door_top'], kind: 'tile' },
+  warped_door_lower: { paths: ['block/warped_door_bottom'], kind: 'tile' },
+  warped_door_upper: { paths: ['block/warped_door_top'], kind: 'tile' },
+  crimson_trapdoor: { paths: ['block/crimson_trapdoor'], kind: 'tile' },
+  warped_trapdoor: { paths: ['block/warped_trapdoor'], kind: 'tile' },
+  crimson_door: { paths: ['item/crimson_door'], kind: 'item' },
+  warped_door: { paths: ['item/warped_door'], kind: 'item' },
+} satisfies Record<string, PackEntry>);
+
 // =============================================================================
 // Nether utility pass: netherite block + gear, soul torch / soul lantern, the
 // respawn anchor (charge meter + portal pool), fire charge, blaze powder and
