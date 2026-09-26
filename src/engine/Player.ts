@@ -749,9 +749,11 @@ export class Player {
 
     // portal detection
     let inPortal = false;
+    let scanned = false;
     if (this.portalCooldown > 0) {
       this.portalCooldown -= dt;
     } else {
+      scanned = true;
       const hw = BOX.w / 2;
       const x0 = Math.floor(this.pos.x - hw), x1 = Math.floor(this.pos.x + hw);
       const y0 = Math.floor(this.pos.y), y1 = Math.floor(this.pos.y + BOX.h);
@@ -768,7 +770,7 @@ export class Player {
     // having just arrived inside a portal, you must step out before it can
     // take you back (vanilla); until then standing in it does nothing
     if (inPortal && this.portalExitPending) inPortal = false;
-    else if (!inPortal && this.portalCooldown <= 0) this.portalExitPending = false;
+    else if (!inPortal && scanned) this.portalExitPending = false;
     if (inPortal) {
       this.portalTimer += dt;
       if (this.portalTimer >= (this.mode === 'creative' ? PORTAL_TIME_CREATIVE : PORTAL_TIME_SURVIVAL)) {

@@ -219,6 +219,8 @@ export class NetherController {
       }
     }
     if (src) remember(this.portals[from], src);
+    const same = (a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): boolean => a.x === b.x && a.y === b.y && a.z === b.z;
+    const srcRec = src ? this.portals[from].find((o) => same(o, src!)) : undefined;
     if (from === 'overworld') this.owEntry = { x: p.x, z: p.z };
 
     const t = scaleToDim(to, p.x, p.y, p.z);
@@ -237,6 +239,13 @@ export class NetherController {
     const list = this.portals[to];
     const radius = to === 'overworld' ? 128 : 16;
     let rec: PortalRec | null = null;
+    // 0. the portal this one was paired with on an earlier trip (round trips
+    //    always come home, even when the partner was built far from 1/8 coords)
+    if (srcRec?.link) {
+      const l = srcRec.link;
+      ensure(l.x, l.z);
+      if (world.getBlock(l.x, l.y, l.z) === B.PORTAL) rec = list.find((o) => same(o, l)) ?? portalSheet(world, l.x, l.y, l.z)?.rec ?? null;
+    }
     for (let tries = 0; tries < 6 && !rec; tries++) {
       const cand = nearestRec(list, t.x, t.y, t.z, radius);
       if (!cand) break;
@@ -265,6 +274,7 @@ export class NetherController {
         : buildPortal(world, t.x, to === 'nether' ? Math.max(ty, 64) : ty, t.z, 'x', true);
       built = true;
     }
+    if (srcRec) { srcRec.link = { x: rec.x, y: rec.y, z: rec.z }; rec.link = { x: srcRec.x, y: srcRec.y, z: srcRec.z }; }
     remember(list, rec);
 
     // stand in the middle of the sheet, facing out of it toward open air

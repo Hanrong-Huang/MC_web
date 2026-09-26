@@ -12,7 +12,11 @@ export type Dim = 'overworld' | 'nether';
 export type PortalAxis = 'x' | 'z';
 
 /** A portal's interior: bottom-left cell, extent along its axis, height. */
-export interface PortalRec { x: number; y: number; z: number; axis: PortalAxis; w: number; h: number }
+export interface PortalRec {
+  x: number; y: number; z: number; axis: PortalAxis; w: number; h: number;
+  /** the partner portal it was last travelled to (bottom-left cell, other dimension) */
+  link?: { x: number; y: number; z: number };
+}
 
 export interface PortalWorld {
   getBlock(x: number, y: number, z: number): number;
@@ -261,7 +265,8 @@ export function nearestRec(list: PortalRec[], x: number, y: number, z: number, r
 /** Remember a portal (replacing any record for the same sheet). */
 export function remember(list: PortalRec[], r: PortalRec): void {
   const i = list.findIndex((o) => o.x === r.x && o.y === r.y && o.z === r.z);
+  const link = r.link ?? (i >= 0 ? list[i].link : undefined);
   if (i >= 0) list.splice(i, 1);
-  list.push({ ...r });
+  list.push({ ...r, ...(link ? { link: { ...link } } : {}) });
   if (list.length > 64) list.shift();
 }

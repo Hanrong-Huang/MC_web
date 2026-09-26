@@ -70,7 +70,7 @@ export class NetherOverlay {
     }
     if (!this.shown) this.swirl.style.display = 'block';
     this.shown = a;
-    this.swirl.style.opacity = String(Math.min(1, a * 1.15));
+    this.swirl.style.opacity = String(Math.min(0.85, a * 1.1)); // the world stays faintly visible through it
     const d = this.img.data;
     const t = this.t;
     const reach = 1.25 - a * 1.1; // radius where the swirl starts (closes in as a rises)
