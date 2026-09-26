@@ -39,7 +39,8 @@ const check = (name, ok, info = '') => { console.log(`${ok ? 'PASS' : 'FAIL'} ${
 const arena = await page.evaluate(() => {
   const g = window.__game, p = g.player, B = window.__B, w = g.world;
   g.entities.mobsEnabled = false;
-  g.dayTime = 0.3;
+  g.dayTime = 0.25;
+  p.inventory.slots[0] = null; p.inventory.selected = 0; g.onInventoryChange();
   const ox = Math.floor(p.pos.x), oy = 108, oz = Math.floor(p.pos.z);
   for (let dx = -12; dx <= 12; dx++) {
     for (let dz = -10; dz <= 10; dz++) {
@@ -64,7 +65,7 @@ const settle = async (ms = 600) => {
       }
     }
     return true;
-  }, null, { timeout: 120000, polling: 250 }).catch(() => console.log('mesh wait timed out'));
+  }, null, { timeout: 20000, polling: 250 }).catch(() => console.log('mesh wait timed out'));
   await page.waitForTimeout(ms);
 };
 await settle(1500);
@@ -80,7 +81,9 @@ async function lineup(specs, name, { gap = 2.2, back = 6, camY = 1.2, pitch = -0
       const x = ox + 0.5 - w / 2 + i * gap;
       const m = s.baby ? g.entities.spawnBaby(s.kind, x, oy + (s.dy ?? 0), oz + z + 0.5)
         : g.entities.spawnMob(s.kind, x, oy + (s.dy ?? 0), oz + z + 0.5, s.variant ?? 0);
-      m.yaw = m.visYaw = s.yaw ?? 0.35 * (i % 2 ? -1 : 1);
+      // the camera looks down -z: yaw π faces the mob back at it
+      m.yaw = m.visYaw = Math.PI + (s.yaw ?? 0.35 * (i % 2 ? -1 : 1));
+      m.convertT = -1e9; // no overworld zombification mid-shoot
       m.state = 'idle'; m.stateTime = 999; m.vel = { x: 0, y: 0, z: 0 };
       m.lookT = 999; m.lookYaw = 0; m.lookPitch = 0; m.watching = false;
       return m;
@@ -156,6 +159,12 @@ await lineup([{ kind: 'piglin', variant: 1, yaw: 0 }, { kind: 'blaze', dy: 1, ya
     for (const m of [pg, bz]) { m.stateTime = 0; m.state = 'chase'; }
     bz.shootCooldown = 0;
     window.__game.player.hp = 20;
+    const em = window.__game.entities;
+    window.__shots = 0;
+    for (const f of ['shootArrow', 'spawnBlazeCharge']) {
+      const orig = em[f].bind(em);
+      em[f] = (...a) => { window.__shots++; return orig(...a); };
+    }
   },
 });
 await page.waitForTimeout(1300);
@@ -163,13 +172,14 @@ await page.screenshot({ path: `${DIR}/nether-volley.png` });
 const shots = await page.evaluate(() => {
   const g = window.__game;
   const arrows = g.entities.entities.filter((e) => e.kind === 'arrow');
-  return { n: arrows.length, fire: arrows.filter((a) => a.owner === 'emberghast').length, hp: g.player.hp };
+  return { n: window.__shots, flying: arrows.length, hp: g.player.hp };
 });
 check('blaze + crossbow piglin shoot in survival', shots.n > 0, JSON.stringify(shots));
-await lineup([{ kind: 'hoglin', yaw: 0 }], 'hoglin-toss', {
-  back: 4.5, camY: 0.6, pitch: 0.12, post: () => { window.__row[0].swingT = 0.25; window.__game.player.hp = 20; },
-});
+await page.evaluate(() => { window.__game.player.hp = 20; });
 await page.evaluate(() => { const p = window.__game.player; p.mode = 'creative'; p.hp = 20; });
+await lineup([{ kind: 'hoglin', yaw: 0.5 }], 'hoglin-toss', {
+  back: 4.5, camY: 0.6, pitch: 0.05, post: () => { window.__row[0].swingT = 0.3; },
+});
 
 // --- behaviour asserts -------------------------------------------------------------
 const beh = await page.evaluate(async () => {

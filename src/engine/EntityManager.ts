@@ -2088,14 +2088,14 @@ export class EntityManager {
     // molten mobs: a blaze burns bright (brighter still while charging a
     // volley); a magma cube's cracks throb and its core blazes
     let ember = -1;
-    if (!hurt && e.kind === 'blaze') ember = 0.42 + 0.08 * Math.sin(e.age * 7) + (e.chargeT > 0 || e.burst > 0 ? 0.3 : 0);
-    if (!hurt && e.kind === 'magma_cube') ember = 0.22 + 0.08 * Math.sin(e.age * 3.2 + e.variant);
+    if (!hurt && e.kind === 'blaze') ember = 0.3 + 0.06 * Math.sin(e.age * 7) + (e.chargeT > 0 || e.burst > 0 ? 0.3 : 0);
+    if (!hurt && e.kind === 'magma_cube') ember = 0.05 + 0.025 * Math.sin(e.age * 3.2 + e.variant);
     // hurt = vanilla's red overlay: tint the albedo as well as glowing a little
     const gb = hurt ? MOB_EXPOSURE * 0.5 : MOB_EXPOSURE;
     for (const m of e.materials) {
       m.color.setRGB(MOB_EXPOSURE, gb, gb);
       if (ember >= 0) {
-        const k = m.userData.ember ? ember * (m.userData.core ? 3 : 1) : 0.03;
+        const k = m.userData.ember ? (m.userData.core ? Math.min(1, ember * 14) : ember) : 0.03;
         m.emissive.setRGB(k, k * (m.userData.core ? 0.55 : 0.42), k * 0.05);
       } else if (netherGlow && !m.userData.ember) m.emissive.setRGB(er * 0.22, eg * 0.22, eb);
       else m.emissive.setRGB(er, eg, eb);
