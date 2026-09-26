@@ -91,6 +91,7 @@ async function titleRun(block) {
   page.on('pageerror', (e) => errors.push('PAGEERROR: ' + e.message));
   if (block) await page.route('**/audio/**', (r) => r.fulfill({ status: 404, body: 'nope' }));
   await page.goto(`http://localhost:${PORT}/`);
+  await page.waitForFunction(() => window.__audio, null, { timeout: 120000 });
   await page.waitForTimeout(800);
   await page.mouse.click(10, 10); // user gesture: unlocks audio
   const st = await page.evaluate(async () => {
