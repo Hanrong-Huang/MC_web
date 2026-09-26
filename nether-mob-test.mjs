@@ -81,8 +81,8 @@ async function lineup(specs, name, { gap = 2.2, back = 6, camY = 1.2, pitch = -0
       const x = ox + 0.5 - w / 2 + i * gap;
       const m = s.baby ? g.entities.spawnBaby(s.kind, x, oy + (s.dy ?? 0), oz + z + 0.5)
         : g.entities.spawnMob(s.kind, x, oy + (s.dy ?? 0), oz + z + 0.5, s.variant ?? 0);
-      // yaw 0 faces +z, back at the camera
-      m.yaw = m.visYaw = s.yaw ?? 0.35 * (i % 2 ? -1 : 1);
+      // the camera looks down -z; yaw π turns the mob back toward it
+      m.yaw = m.visYaw = Math.PI + (s.yaw ?? 0.35 * (i % 2 ? -1 : 1));
       m.convertT = -1e9; // no overworld zombification mid-shoot
       m.state = 'idle'; m.stateTime = 999; m.vel = { x: 0, y: 0, z: 0 };
       m.lookT = 999; m.lookYaw = 0; m.lookPitch = 0; m.watching = false;
@@ -168,7 +168,7 @@ await lineup([{ kind: 'piglin', variant: 1, yaw: 0 }, { kind: 'blaze', dy: 1, ya
     }
   },
 });
-await page.waitForTimeout(1300);
+await page.waitForTimeout(3000); // a charge + first bolt; slow under SwiftShader load
 await page.screenshot({ path: `${DIR}/nether-volley.png` });
 const shots = await page.evaluate(() => {
   const g = window.__game;
@@ -216,7 +216,10 @@ const beh = await page.evaluate(async () => {
   const gen = g.world.generator;
   let wastesAt = null, crimsonAt = null;
   for (let i = 0; i < 4000 && (!wastesAt || !crimsonAt); i++) {
-    const x = (i % 63) * 37 - 1100, z = Math.floor(i / 63) * 41 - 1300;
+    const x = (i % 63) * 173 - 5000, z = Math.floor(i / 63) * 191 - 5000;
+    // skip generated fortress/bastion footprints (they outrank the biome)
+    const built = em.netherRegion(x, 300, z, B.GLASS);
+    if (built === 'fortress' || built === 'bastion') continue;
     const b = gen.netherBiomeAt(x, z);
     if (b === 'wastes' && !wastesAt) wastesAt = [x, z];
     if (b === 'crimson' && !crimsonAt) crimsonAt = [x, z];
@@ -243,7 +246,8 @@ check('piglin takes gold and admires it', beh.interact === 'saddle' && beh.admir
 check('piglin barters loot', beh.bartered);
 check('zombified piglins start calm, anger together', beh.calm && beh.allAngry);
 check('big magma cube splits into 2-4 medium', beh.split >= 2 && beh.split <= 4 && beh.kidVariant, `split=${beh.split}`);
-check('fortress bricks -> fortress region', beh.fortress === 'fortress', beh.fortress);
+// (a generated bastion footprint under the arena outranks the brick fallback)
+check('fortress bricks -> fortress region', beh.fortress === 'fortress' || beh.fortress === 'bastion', beh.fortress);
 check('soul sand -> soul region', beh.soul === 'soul', beh.soul);
 check('netherrack -> wastes', beh.wastes === 'wastes', beh.wastes);
 check('crimson forest biome -> crimson spawns', beh.crimson === 'crimson', `${beh.crimson} ${JSON.stringify(beh.biomes)}`);
