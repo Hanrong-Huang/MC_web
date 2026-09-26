@@ -6,21 +6,29 @@
 import * as THREE from 'three';
 import { World } from './World';
 import { moveEntity, inWater, rayAABB, Vec3, MoveResult } from './Physics';
-import { B, I, def, hasDef, CROSS_BLOCKS, spriteNameFor, CAPTURABLE, mobLabel, BLAST_PROOF } from './Blocks';
+import { B, I, def, hasDef, allDefs, CROSS_BLOCKS, spriteNameFor, CAPTURABLE, mobLabel, BLAST_PROOF } from './Blocks';
 import { isFireproof } from './Blocks';
 import { Atlas, extrudeSpriteGeometry, shapedItemGeometry, BLOCK_SPRITE_ICONS } from './Textures';
 import { AudioEngine } from './Audio';
 import { SEA_LEVEL } from './WorldGenerator';
+import { netherStructureAt } from './NetherStructures';
 import type { Player } from './Player';
-import { MobModels, LimbSet, MOB_EXPOSURE, rollVariant } from './MobModels';
+import { MobModels, LimbSet, MOB_EXPOSURE, MAGMA_SIZES, rollVariant } from './MobModels';
 import { buildOrbRig, setOrbOpen, disposeOrb, orbGlowTexture, orbStarTexture, ORB_GLOW, ORB_IDLE_GLOW, OrbRig } from './CatcherOrb';
+
+// capture-orb glow for the nether mobs (button, inner light, beams)
+Object.assign(ORB_GLOW, {
+  piglin: 0xf7cf45, zombified_piglin: 0x9ccf6a, hoglin: 0xe0906a,
+  blaze: 0xffc030, wither_skeleton: 0x8a8a9a, magma_cube: 0xff6a18,
+});
 
 export type MobKind =
   | 'pig' | 'chicken' | 'sheep' | 'cow'
   | 'zombie' | 'skeleton' | 'spider' | 'creeper'
   | 'wolf' | 'villager' | 'phantom' | 'horse' | 'cat'
   | 'cinderling' | 'ashstalker' | 'emberghast'
-  | 'rabbit' | 'bat';
+  | 'rabbit' | 'bat'
+  | 'piglin' | 'zombified_piglin' | 'hoglin' | 'strider' | 'blaze' | 'wither_skeleton' | 'magma_cube';
 export type EntityKind = 'drop' | MobKind | 'arrow' | 'tnt' | 'falling' | 'particle' | 'bobber' | 'catcher' | 'orbfx';
 
 const MOB_KINDS = new Set<EntityKind>([
@@ -29,9 +37,67 @@ const MOB_KINDS = new Set<EntityKind>([
   'wolf', 'villager', 'phantom', 'horse', 'cat',
   'cinderling', 'ashstalker', 'emberghast',
   'rabbit', 'bat',
+  'piglin', 'zombified_piglin', 'hoglin', 'strider', 'blaze', 'wither_skeleton', 'magma_cube',
 ]);
-/** Nether-only hostile mobs. */
-const NETHER_MOBS: MobKind[] = ['cinderling', 'ashstalker', 'emberghast'];
+
+/** Nether regions a spawn attempt can land in. */
+type NetherRegion = 'wastes' | 'crimson' | 'warped' | 'soul' | 'basalt' | 'fortress' | 'bastion';
+/** Per-region spawn tables: [kind, weight, min pack, max pack] (vanilla-ish). */
+const NETHER_TABLES: Record<NetherRegion, [MobKind, number, number, number][]> = {
+  wastes: [['zombified_piglin', 40, 2, 4], ['cinderling', 16, 1, 2], ['piglin', 10, 1, 3],
+    ['ashstalker', 8, 1, 1], ['magma_cube', 6, 1, 2], ['emberghast', 5, 1, 1]],
+  crimson: [['hoglin', 30, 2, 4], ['piglin', 25, 2, 4], ['zombified_piglin', 6, 1, 2], ['cinderling', 5, 1, 1]],
+  warped: [['cinderling', 5, 1, 1], ['ashstalker', 4, 1, 1], ['strider', 1, 1, 1]],
+  soul: [['skeleton', 30, 2, 4], ['emberghast', 12, 1, 1], ['ashstalker', 6, 1, 2], ['wither_skeleton', 4, 1, 1]],
+  basalt: [['magma_cube', 40, 1, 3], ['emberghast', 8, 1, 1], ['cinderling', 5, 1, 1]],
+  // bastion remnants: piglin strongholds with hoglin stables
+  bastion: [['piglin', 40, 2, 4], ['hoglin', 8, 1, 2], ['magma_cube', 3, 1, 1]],
+  fortress: [['blaze', 20, 1, 3], ['wither_skeleton', 16, 1, 3], ['zombified_piglin', 5, 1, 2],
+    ['magma_cube', 4, 1, 1], ['skeleton', 3, 1, 1]],
+};
+const GOLD_ARMOR = new Set<number>([I.GOLD_HELMET, I.GOLD_CHEST, I.GOLD_LEGS, I.GOLD_BOOTS]);
+
+let NAME_IDS: Map<string, number> | null = null;
+/** Registry id by name, for blocks/items other modules add (crimson fungus,
+ *  blackstone ...): the fallback (-1) when this build doesn't have it. */
+function idByName(name: string, fallback = -1): number {
+  if (!NAME_IDS) {
+    NAME_IDS = new Map();
+    for (const d of allDefs()) NAME_IDS.set(d.name, d.id);
+  }
+  return NAME_IDS.get(name) ?? fallback;
+}
+/** First registered id among the names (or -1). */
+function firstId(...names: string[]): number {
+  for (const n of names) { const id = idByName(n); if (id >= 0) return id; }
+  return -1;
+}
+let BRICK_IDS: Set<number> | null = null;
+/** Every nether-brick flavoured block: fortresses are built from them. */
+function brickIds(): Set<number> {
+  if (!BRICK_IDS) {
+    BRICK_IDS = new Set([B.NETHER_BRICKS]);
+    for (const d of allDefs()) if (d.block && d.name.includes('nether_brick')) BRICK_IDS.add(d.id);
+  }
+  return BRICK_IDS;
+}
+/** Nether region implied by the block a mob would stand on. */
+function regionOfBlock(name: string): NetherRegion {
+  if (name.startsWith('crimson') || name === 'nether_wart_block') return 'crimson';
+  if (name.startsWith('warped')) return 'warped';
+  if (name === 'soul_sand' || name === 'soul_soil') return 'soul';
+  if (name.includes('basalt') || name.includes('blackstone') || name === 'magma') return 'basalt';
+  return 'wastes';
+}
+/** Nether region from a biome label (the generator's netherBiomeAt, when present). */
+function regionOfBiome(label: string): NetherRegion {
+  const l = label.toLowerCase();
+  if (l.includes('crimson')) return 'crimson';
+  if (l.includes('warped')) return 'warped';
+  if (l.includes('soul')) return 'soul';
+  if (l.includes('basalt') || l.includes('delta')) return 'basalt';
+  return 'wastes';
+}
 const JUMP_V = Math.sqrt(2 * 32 * 1.25); // same 1.25-block hop as the player
 const GRAVITY = 32;
 
@@ -95,9 +161,34 @@ const MOB_STATS: Record<MobKind, MobStats> = {
   // ambient critters: a skittish hopping rabbit and a cave bat
   rabbit: { box: { w: 0.4, h: 0.5 }, hp: 3, speed: 2.3, hostile: false },
   bat: { box: { w: 0.5, h: 0.5 }, hp: 6, speed: 2.4, hostile: false },
+  // nether denizens (vanilla sizes; magma cubes scale with their size variant)
+  piglin: { box: { w: 0.6, h: 1.95 }, hp: 16, speed: 2.3, hostile: true },
+  zombified_piglin: { box: { w: 0.6, h: 1.95 }, hp: 20, speed: 1.9, hostile: true },
+  hoglin: { box: { w: 1.3, h: 1.4 }, hp: 40, speed: 2.1, hostile: true },
+  strider: { box: { w: 0.9, h: 1.7 }, hp: 20, speed: 1.4, hostile: false },
+  blaze: { box: { w: 0.6, h: 1.8 }, hp: 20, speed: 2.0, hostile: true },
+  wither_skeleton: { box: { w: 0.7, h: 2.4 }, hp: 20, speed: 2.5, hostile: true },
+  magma_cube: { box: { w: 1.04, h: 1.04 }, hp: 4, speed: 2.2, hostile: true },
 };
 /** Melee mobs that deal contact damage while chasing. */
-const MELEE_MOBS = new Set<MobKind>(['zombie', 'spider', 'cinderling', 'ashstalker']);
+const MELEE_MOBS = new Set<MobKind>(['zombie', 'spider', 'cinderling', 'ashstalker',
+  'piglin', 'zombified_piglin', 'hoglin', 'wither_skeleton', 'magma_cube']);
+/** Contact hit [damage, reach, cooldown] per melee mob (zombie-ish default). */
+const MELEE: Partial<Record<MobKind, [number, number, number]>> = {
+  spider: [2, 1.4, 1], cinderling: [2, 1.1, 0.7], ashstalker: [4, 1.3, 1],
+  piglin: [5, 1.3, 1], zombified_piglin: [5, 1.3, 1], hoglin: [6, 1.7, 1.3],
+  wither_skeleton: [5, 1.5, 1],
+};
+
+/** Hitbox + health for a mob of this kind/variant (magma cubes by size). */
+function mobBody(kind: MobKind, variant: number): { box: { w: number; h: number }; hp: number } {
+  const st = MOB_STATS[kind];
+  if (kind === 'magma_cube') {
+    const s = MAGMA_SIZES[variant] ?? 1;
+    return { box: { w: 0.52 * s, h: 0.52 * s }, hp: s * s };
+  }
+  return { box: { ...st.box }, hp: st.hp };
+}
 
 export class Entity {
   kind: EntityKind;
@@ -210,6 +301,21 @@ export class Entity {
   corpse = false;
   /** thrown-catcher / capture-effect state ('catcher' and 'orbfx' kinds) */
   orb: OrbState | null = null;
+  // nether mob fields
+  /** piglin: seconds left admiring a gold ingot before bartering it */
+  admireT = 0;
+  /** piglin: a dropped gold ingot it is heading for */
+  lure: Entity | null = null;
+  /** seconds left in a weapon swing / head toss (render + hit timing) */
+  swingT = 0;
+  /** blaze: seconds left charging a volley; magma cube: landing squash */
+  chargeT = 0;
+  /** blaze: fireballs left in the current volley */
+  burst = 0;
+  /** strider: off the lava (purple, shivering, slow) */
+  cold = false;
+  /** piglin out of the Nether: seconds shaking before it zombifies */
+  convertT = 0;
 
   constructor(kind: EntityKind, pos: Vec3, box: { w: number; h: number }, mesh: THREE.Group) {
     this.kind = kind;
@@ -242,6 +348,9 @@ export class EntityManager {
   private arrowSprite: HTMLCanvasElement | null = null;
   private spawnTick = 0;
   mobsEnabled = true;
+  /** seconds of wither left on the player (wither skeleton hits) */
+  witherT = 0;
+  private witherTick = 0;
 
   constructor(scene: THREE.Scene, world: World, atlas: Atlas, audio: AudioEngine) {
     this.scene = scene;
@@ -277,9 +386,10 @@ export class EntityManager {
     // on the mob's own axes
     mesh.rotation.order = 'YXZ';
     const stats = MOB_STATS[kind];
-    const e = new Entity(kind, { x, y, z }, { ...stats.box }, mesh);
+    const body = mobBody(kind, variant);
+    const e = new Entity(kind, { x, y, z }, body.box, mesh);
     e.limbs = limbs;
-    e.hp = stats.hp;
+    e.hp = body.hp;
     e.moveSpeed = stats.speed;
     e.materials = mats;
     e.variant = variant;
@@ -291,7 +401,7 @@ export class EntityManager {
     mesh.rotation.y = e.yaw;
     // soft contact shadow under grounded mobs (flyers get none)
     if (kind !== 'phantom' && kind !== 'emberghast' && kind !== 'bat') {
-      e.shadow = this.makeShadow(stats.box.w);
+      e.shadow = this.makeShadow(Math.min(1.6, body.box.w));
       mesh.add(e.shadow);
     }
     this.entities.push(e);
@@ -1752,9 +1862,10 @@ export class EntityManager {
     e.attackCooldown = Math.max(0, e.attackCooldown - dt);
     e.hurtFlash = Math.max(0, e.hurtFlash - dt);
     e.angryT = Math.max(0, e.angryT - dt);
+    e.swingT = Math.max(0, e.swingT - dt);
 
     // captured flyers escort their owner instead of hunting them
-    if ((e.kind === 'phantom' || e.kind === 'emberghast') && this.isPet(e)) {
+    if ((e.kind === 'phantom' || e.kind === 'emberghast' || e.kind === 'blaze') && this.isPet(e)) {
       this.updateFlyingPet(e, dt);
       return;
     }
@@ -1763,6 +1874,8 @@ export class EntityManager {
     // emberghast: floats at range and spits fireballs
     if (e.kind === 'emberghast') { this.updateEmberghast(e, dt); return; }
     if (e.kind === 'bat') { this.updateBat(e, dt); return; }
+    // blaze: hovers, spins its rods and looses fireball volleys
+    if (e.kind === 'blaze') { this.updateBlaze(e, dt); return; }
     // a ridden horse is driven by the player (see Player.updateRiding)
     if (e.ridden) return;
 
@@ -1784,6 +1897,7 @@ export class EntityManager {
       if (this.isPet(e) && e.target && !e.target.dead && this.isMob(e.target)
         && !e.target.tamed && !e.sitting) {
         this.petChase(e, dt);
+        if (e.kind === 'magma_cube' && this.magmaHop(e, dt, true)) { e._wishX = 0; e._wishZ = 0; }
         const res2 = this.applyGroundMove(e, dt, e._wishX, e._wishZ, e.moveSpeed * 1.6);
         if ((res2.hitX || res2.hitZ) && e.onGround && (e._wishX !== 0 || e._wishZ !== 0)) e.vel.y = JUMP_V;
         this.animateMob(e, dt, p);
@@ -1806,6 +1920,7 @@ export class EntityManager {
       if (e.kind === 'wolf') this.wWolfCombat(e, dt); // cats don't fight
       else if (this.isPet(e)) this.petCombat(e, dt);
       const fspeed = e.moveSpeed * (distToPlayer > 8 ? 2.2 : 1);
+      if (e.kind === 'magma_cube' && (wishX !== 0 || wishZ !== 0) && this.magmaHop(e, dt, false)) { wishX = 0; wishZ = 0; }
       const res = this.applyGroundMove(e, dt, wishX, wishZ, fspeed);
       if ((res.hitX || res.hitZ) && e.onGround && (wishX !== 0 || wishZ !== 0)) e.vel.y = JUMP_V;
       this.animateMob(e, dt, p);
@@ -1854,6 +1969,10 @@ export class EntityManager {
         // keep bow range: retreat when close, hold at mid range
         if (d < 6) dir = -1;
         else if (d < 13) dir = 0;
+      } else if (e.kind === 'piglin' && (e.variant & 1)) {
+        // crossbow piglins hold a firing line a little closer in
+        if (d < 4) dir = -1;
+        else if (d < 9) dir = 0;
       }
       wishX = (dx / d) * dir;
       wishZ = (dz / d) * dir;
@@ -1871,12 +1990,21 @@ export class EntityManager {
         return;
       }
     }
-    // a grazing sheep stands still with its head in the grass
-    if (e.grazeT > 0) { wishX = 0; wishZ = 0; }
+    // a grazing sheep stands still with its head in the grass; an admiring
+    // piglin stands turning its gold over
+    if (e.grazeT > 0 || e.admireT > 0) { wishX = 0; wishZ = 0; }
 
     const angryWolf = e.kind === 'wolf' && e.angryT > 0 && e.state === 'chase';
-    const speed = lured ? e.moveSpeed * 1.4
+    let speed = lured ? e.moveSpeed * 1.4
       : e.state === 'flee' ? e.moveSpeed * 2.2 : angryWolf ? e.moveSpeed * 2.4 : e.moveSpeed;
+    // nether gaits: provoked zombified piglins and hunting hoglins charge;
+    // a strider off the lava shuffles; magma cubes cover ground mid-leap
+    if (e.state === 'chase' && (e.kind === 'zombified_piglin' || e.kind === 'hoglin')) speed *= 1.35;
+    if (e.kind === 'strider' && e.cold) speed *= 0.5;
+    if (e.kind === 'magma_cube') {
+      speed *= 1 + (MAGMA_SIZES[e.variant] ?? 1) * 0.15;
+      if ((wishX !== 0 || wishZ !== 0) && this.magmaHop(e, dt, e.state === 'chase')) { wishX = 0; wishZ = 0; }
+    }
     // rabbits bound: they only cover ground mid-hop, pausing between leaps
     if (e.kind === 'rabbit' && (wishX !== 0 || wishZ !== 0)) {
       e.shootCooldown -= dt;
@@ -1887,7 +2015,17 @@ export class EntityManager {
         } else { wishX = 0; wishZ = 0; }
       }
     }
+    const airborne = !e.onGround;
     const res = this.applyGroundMove(e, dt, wishX, wishZ, speed);
+    // a magma cube lands with a squash and a wet slap
+    if (e.kind === 'magma_cube') {
+      e.chargeT = Math.max(0, e.chargeT - dt);
+      if (airborne && e.onGround) {
+        e.chargeT = 0.28;
+        const d = Math.hypot(p.pos.x - e.pos.x, p.pos.z - e.pos.z);
+        if (d < 20) this.audio.mobSound('magma_cube', (1 - d / 20) * 0.8, 'idle');
+      }
+    }
     // hop single-block barriers; spiders just climb straight up walls
     if ((res.hitX || res.hitZ) && (wishX !== 0 || wishZ !== 0)) {
       if (e.kind === 'spider') e.vel.y = Math.max(e.vel.y, 3.2);
@@ -1897,20 +2035,32 @@ export class EntityManager {
     if (e.kind === 'chicken' && !e.onGround && e.vel.y < -2.2) e.vel.y = -2.2;
 
     // melee contact attacks — on the pet it is fighting, else on the player
-    if ((MELEE_MOBS.has(e.kind as MobKind) || angryWolf) && e.attackCooldown <= 0 && e.state === 'chase'
+    // (crossbow piglins shoot instead; babies only play)
+    const shooter = e.kind === 'piglin' && (e.variant & 1) !== 0;
+    if ((MELEE_MOBS.has(e.kind as MobKind) || angryWolf) && !shooter && !e.baby && e.attackCooldown <= 0 && e.state === 'chase'
       && (foe || !p.dead)) {
       const dx = qx - e.pos.x, dz = qz - e.pos.z;
       const dy = qy - e.pos.y;
-      const reach = e.kind === 'spider' ? 1.4 : e.kind === 'ashstalker' ? 1.3 : 1.1;
-      const dmg = e.kind === 'spider' ? 2 : e.kind === 'cinderling' ? 2
-        : e.kind === 'ashstalker' ? 4 : 3;
+      let [dmg, reach, cd] = MELEE[e.kind as MobKind] ?? [3, 1.1, 1];
+      if (e.kind === 'magma_cube') {
+        // cube size sets both its reach and its bite
+        const sz = MAGMA_SIZES[e.variant] ?? 1;
+        dmg = sz === 1 ? 3 : sz === 2 ? 4 : 6; reach = e.box.w * 0.5 + 0.55; cd = 0.8;
+      }
       if (Math.hypot(dx, dz) < reach + (foe ? foe.box.w * 0.5 : 0) && Math.abs(dy) < 2) {
-        e.attackCooldown = e.kind === 'cinderling' ? 0.7 : 1;
+        e.attackCooldown = cd;
+        e.swingT = e.kind === 'hoglin' ? 0.45 : 0.3;
         if (foe) {
           this.hurt(foe, dmg, dx, dz, e);
         } else if (p.mode === 'survival') {
           p.damage(dmg, e, `Slain by ${mobLabel(e.kind as string)}`);
-          p.applyKnockback(dx, dz, e.kind === 'ashstalker' ? 7 : 5);
+          p.applyKnockback(dx, dz, e.kind === 'ashstalker' ? 7 : e.kind === 'hoglin' ? 11 : 5);
+          // a hoglin tosses you skyward with its tusks; wither skeletons wither
+          if (e.kind === 'hoglin') p.vel.y = Math.max(p.vel.y, 9.5);
+          if (e.kind === 'wither_skeleton') this.witherT = Math.max(this.witherT, 10);
+        }
+        if (e.kind === 'hoglin' || e.kind === 'piglin' || e.kind === 'zombified_piglin') {
+          this.audio.mobSound(e.kind, 0.7, 'idle');
         }
       }
     }
@@ -1949,11 +2099,19 @@ export class EntityManager {
       const pulse = 0.34 + 0.14 * Math.sin(e.age * 4 + (e.kind === 'ashstalker' ? 1 : 0));
       er = pulse; eg = pulse * 0.4; eb = 0.02;
     }
+    // molten mobs: a blaze burns bright (brighter still while charging a
+    // volley); a magma cube's cracks throb and its core blazes
+    let ember = -1;
+    if (!hurt && e.kind === 'blaze') ember = 0.3 + 0.06 * Math.sin(e.age * 7) + (e.chargeT > 0 || e.burst > 0 ? 0.3 : 0);
+    if (!hurt && e.kind === 'magma_cube') ember = 0.05 + 0.025 * Math.sin(e.age * 3.2 + e.variant);
     // hurt = vanilla's red overlay: tint the albedo as well as glowing a little
     const gb = hurt ? MOB_EXPOSURE * 0.5 : MOB_EXPOSURE;
     for (const m of e.materials) {
       m.color.setRGB(MOB_EXPOSURE, gb, gb);
-      if (netherGlow && !m.userData.ember) m.emissive.setRGB(er * 0.22, eg * 0.22, eb);
+      if (ember >= 0) {
+        const k = m.userData.ember ? (m.userData.core ? Math.min(1, ember * 14) : ember) : 0.03;
+        m.emissive.setRGB(k, k * (m.userData.core ? 0.55 : 0.42), k * 0.05);
+      } else if (netherGlow && !m.userData.ember) m.emissive.setRGB(er * 0.22, eg * 0.22, eb);
       else m.emissive.setRGB(er, eg, eb);
     }
   }
@@ -1975,6 +2133,8 @@ export class EntityManager {
     const lx = e.kbX * c - e.kbZ * s, lz = e.kbX * s + e.kbZ * c;
     m.rotation.x = lz * k;
     m.rotation.z = -lx * k;
+    // a piglin stranded out of the Nether trembles as it zombifies
+    if (e.convertT > 0) m.rotation.z += Math.sin(e.age * 47) * 0.05 * Math.min(1, e.convertT / 3);
     // airborne: the shadow stays on the ground below and fades with height
     const sh = e.shadow;
     if (sh) {
@@ -1998,6 +2158,7 @@ export class EntityManager {
     const y = Math.floor(e.pos.y + 0.05);
     for (let dy = 0; dy >= -4; dy--) {
       const id = this.world.getBlock(x, y + dy, z);
+      if (id === B.LAVA && e.kind === 'strider') return dy < -3; // lava is a strider's floor
       if (id === B.WATER || id === B.LAVA || id === B.CACTUS) return true;
       if (id !== B.AIR && hasDef(id) && def(id).solid) return dy < -3; // floor found
     }
@@ -2018,8 +2179,29 @@ export class EntityManager {
       if (e.vel.y < -70) e.vel.y = -70;
     }
     const res = moveEntity(this.world, e.pos, e.vel, dt, e.box);
+    // striders walk on lava: its surface is a floor, and one that sank bobs up
+    if (e.kind === 'strider') {
+      const x = Math.floor(e.pos.x), z = Math.floor(e.pos.z), fy = Math.floor(e.pos.y - 0.02);
+      if (this.world.getBlock(x, fy, z) === B.LAVA) {
+        if (this.world.getBlock(x, fy + 1, z) === B.LAVA) e.vel.y = Math.max(e.vel.y, 4);
+        else if (e.vel.y <= 0) { e.pos.y = fy + 1; e.vel.y = 0; res.onGround = true; }
+      }
+    }
     e.onGround = res.onGround;
     return res;
+  }
+
+  /** Magma cubes (like slimes) only cover ground in leaps: sit, then spring
+   *  (higher when hunting, bigger cubes higher still). Returns true while it
+   *  is sitting between hops (the caller zeroes its steering). */
+  private magmaHop(e: Entity, dt: number, hunting: boolean): boolean {
+    e.shootCooldown -= dt;
+    if (!e.onGround) return false;
+    if (e.shootCooldown > 0) return true;
+    const sz = MAGMA_SIZES[e.variant] ?? 1;
+    e.vel.y = hunting ? 8.5 + sz * 1.2 : 6.5 + sz * 0.4;
+    e.shootCooldown = hunting ? 0.5 + Math.random() * 0.6 : 1.2 + Math.random() * 1.6;
+    return false;
   }
 
   /** Shared mob animation: stride-matched walk cycle, head tracking + idle
@@ -2087,10 +2269,32 @@ export class EntityManager {
       // lunge them down on a hit; skeletons raise the bow only while aiming
       const aiming = e.kind === 'skeleton' && e.state === 'chase';
       const lunge = e.kind === 'zombie' ? Math.max(0, e.attackCooldown - 0.7) / 0.3 : 0;
+      // nether bipeds: arms 1 (right) wields, 0 (left) holds the admired gold
+      const armed = e.kind === 'piglin' || e.kind === 'zombified_piglin' || e.kind === 'wither_skeleton';
+      const xbow = e.kind === 'piglin' && (e.variant & 1) !== 0;
+      const slash = e.swingT > 0 ? Math.sin((1 - e.swingT / 0.3) * Math.PI) : 0;
       for (let i = 0; i < limbs.arms.length; i++) {
         const arm = limbs.arms[i];
         let tx: number, ty = 0;
-        if (e.kind === 'zombie') {
+        if (armed) {
+          const walk = (i % 2 === 0 ? -swing : swing) * 0.9 + Math.sin(e.age * 1.1 + i * 2) * 0.04;
+          const hunting = e.state === 'chase';
+          if (e.kind === 'zombified_piglin' && hunting) {
+            // a provoked zombified piglin reaches out like any zombie
+            tx = Math.PI / 2 - 0.1 + Math.sin(e.age * 1.3 + i) * 0.06;
+          } else if (xbow && hunting) {
+            // crossbow levelled: the left hand reaches across to steady the stock
+            tx = Math.PI / 2 - (i === 0 ? 0.2 : 0);
+            ty = i === 0 ? -0.55 : 0.05;
+          } else if (i === 0 && e.admireT > 0) {
+            // hold the gold up to the snout and turn it over
+            tx = 1.15 + Math.sin(e.age * 2.4) * 0.08; ty = -0.45;
+          } else {
+            tx = walk + (i === 1 && hunting ? 0.45 : 0);
+          }
+          // a sword chop: raise, then hack down across the body
+          if (i === 1 && slash > 0) { tx += slash * 1.3; ty -= slash * 0.35; }
+        } else if (e.kind === 'zombie') {
           tx = Math.PI / 2 - 0.08 + Math.sin(e.age * 1.3 + i) * 0.06 - lunge * 0.55;
         } else if (aiming) {
           tx = Math.PI / 2 - (i === 0 ? 0.08 : 0);
@@ -2105,6 +2309,58 @@ export class EntityManager {
       }
       // keep the bow upright whether the arm hangs or aims
       if (limbs.bow && limbs.arms[1]) limbs.bow.rotation.x = limbs.arms[1].rotation.x - Math.PI / 2;
+      if (limbs.offhand) limbs.offhand.visible = e.admireT > 0;
+      // a crossbow shows its bolt once cocked, ready for the next shot
+      if (xbow && limbs.weapon) {
+        const bolt = limbs.weapon.getObjectByName('bolt');
+        if (bolt) bolt.visible = e.state === 'chase' && e.shootCooldown < 1.4;
+      }
+    }
+
+    // blaze rods: three rings wheel round the core in alternating directions
+    // (faster while it charges) and each rod bobs on its own beat
+    if (limbs.rods) {
+      const fast = e.chargeT > 0 || e.burst > 0 ? 2.6 : 1;
+      for (let i = 0; i < limbs.rods.length; i++) {
+        const ring = limbs.rods[i];
+        ring.rotation.y += dt * (i % 2 ? -1.7 : 1.25) * fast;
+        for (let j = 0; j < ring.children.length; j++) {
+          ring.children[j].position.y = Math.sin(e.age * 2.6 + j * 1.9 + i * 0.8) * 0.07;
+        }
+      }
+    }
+    // magma cube: the slices spring apart mid-leap (the molten core shows
+    // between them) and the whole cube squashes on landing
+    if (limbs.slices && limbs.body) {
+      const u = (MAGMA_SIZES[e.variant] ?? 1) / 16;
+      const want = e.onGround ? 0 : Math.min(1.4, 0.3 + Math.abs(e.vel.y) * 0.1) * u;
+      const b = limbs.body;
+      const gap = (b.userData.gap as number | undefined) ?? 0;
+      const g2 = gap + (want - gap) * Math.min(1, 12 * dt);
+      b.userData.gap = g2;
+      for (let i = 0; i < limbs.slices.length; i++) {
+        const sl = limbs.slices[i];
+        sl.position.y = (sl.userData.baseY as number) + i * g2;
+      }
+      const sq = e.chargeT > 0 ? Math.sin((e.chargeT / 0.28) * Math.PI) : 0;
+      b.scale.set(1 + sq * 0.22, 1 - sq * 0.3, 1 + sq * 0.22);
+    }
+    // strider: warm red on lava, purple and shivering off it; bristles waggle
+    if (limbs.chill) {
+      for (const c of limbs.chill) {
+        const want = e.cold ? c.cold : c.warm;
+        if (c.mat.map !== want) c.mat.map = want;
+      }
+      if (limbs.body) limbs.body.rotation.z = e.cold ? Math.sin(e.age * 38) * 0.035 : 0;
+    }
+    if (limbs.hair) {
+      for (let i = 0; i < limbs.hair.length; i++) {
+        const h = limbs.hair[i];
+        const side = h.userData.side as number;
+        const droop = e.cold ? -side * 0.35 : 0;
+        h.rotation.z = (h.userData.baseZ as number) + droop
+          + side * (Math.sin(e.walkCycle * 1.5 + i) * 0.18 * e.limbAmt + Math.sin(e.age * 2.2 + i * 1.3) * 0.05);
+      }
     }
 
     // chicken wings flap hard while airborne (it flutters down) and give the
@@ -2159,6 +2415,10 @@ export class EntityManager {
         // a chicken with nothing to look at pecks at the ground
         tx = -(Math.max(0, Math.sin(e.age * 7)) ** 3) * 1.1;
       }
+      // an admiring piglin studies the gold in its left hand
+      if (e.admireT > 0) { tx = -0.55 + Math.sin(e.age * 1.7) * 0.06; ty = 0.3; }
+      // a hoglin's attack is an upward head toss
+      if (e.kind === 'hoglin' && e.swingT > 0) tx = Math.sin((1 - e.swingT / 0.45) * Math.PI) * 0.95;
       const k = Math.min(1, (watch ? 6 : 3) * dt);
       head.rotation.x += (tx - head.rotation.x) * k;
       head.rotation.y += (ty - head.rotation.y) * k;
@@ -2260,6 +2520,9 @@ export class EntityManager {
     if (kind === 'ashstalker') return 4;
     if (kind === 'phantom') return 3;
     if (kind === 'emberghast') return 4;
+    if (kind === 'hoglin') return 6;
+    if (kind === 'piglin' || kind === 'zombified_piglin' || kind === 'wither_skeleton') return 5;
+    if (kind === 'magma_cube') return 4;
     return 3;
   }
 
@@ -2292,7 +2555,7 @@ export class EntityManager {
 
     // escort slot: hover above and slightly behind the owner; in combat, close
     // on the target (the ghast keeps a shooting stand-off)
-    const standoff = e.kind === 'emberghast' ? 6 : 0.8;
+    const standoff = e.kind === 'emberghast' ? 6 : e.kind === 'blaze' ? 4.5 : 0.8;
     const ax = t ? t.pos.x : p.pos.x, az = t ? t.pos.z : p.pos.z;
     const ay = t ? t.pos.y + t.box.h * 0.6 + 1.2 : p.pos.y + 3.4 + Math.sin(e.age * 1.2) * 0.4;
     const dx = ax - e.pos.x, dz = az - e.pos.z;
@@ -2316,7 +2579,11 @@ export class EntityManager {
     e.yaw = Math.atan2(-dx, -dz);
 
     if (t && e.attackCooldown <= 0) {
-      if (e.kind === 'emberghast' && distH < 16) {
+      if (e.kind === 'blaze' && distH < 14) {
+        e.attackCooldown = 1.3;
+        this.spawnBlazeCharge(e.pos.x, e.pos.y + 1.2, e.pos.z,
+          t.pos.x - e.pos.x, (t.pos.y + t.box.h * 0.5) - (e.pos.y + 1.2), t.pos.z - e.pos.z, 'petghast');
+      } else if (e.kind === 'emberghast' && distH < 16) {
         e.attackCooldown = 2.4;
         this.spawnFireball(e.pos.x, e.pos.y, e.pos.z,
           t.pos.x - e.pos.x, (t.pos.y + t.box.h * 0.5) - e.pos.y, t.pos.z - e.pos.z, 'petghast');
@@ -2326,14 +2593,141 @@ export class EntityManager {
         this.hurt(t, this.petDamage(e.kind as MobKind), dx, dz, e);
       }
     }
-    // wing flap
+    // wing flap (a blaze spins its rods instead)
     if (e.limbs) {
       for (let i = 0; i < e.limbs.legs.length; i++) {
         e.limbs.legs[i].rotation.z = (i % 2 === 0 ? 1 : -1) * (Math.sin(e.age * 12) * 0.4 - 0.2);
       }
+      if (e.limbs.rods) e.limbs.rods.forEach((r, i) => { r.rotation.y += dt * (i % 2 ? -1.7 : 1.25); });
     }
     e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
     e.mesh.rotation.y = e.yaw;
+  }
+
+  /** Blaze: drifts a couple of blocks off the ground (lower, bobbing, while
+   *  idle), closes to a firing range when it has a quarry, and fights in
+   *  volleys — a one-second flare-up with smoke, then three small fireballs a
+   *  third of a second apart, then a rest. Collides with blocks; wreathed in
+   *  embers and smoke. */
+  private updateBlaze(e: Entity, dt: number): void {
+    const p = this.player!;
+    this.tintMob(e);
+    const foe = e.foe && !e.foe.dead ? e.foe : null;
+    const hunting = e.state === 'chase';
+    const tx = foe ? foe.pos.x : p.pos.x, tz = foe ? foe.pos.z : p.pos.z;
+    const ty = foe ? foe.pos.y + foe.box.h * 0.5 : p.pos.y + 1.2;
+    const dx = tx - e.pos.x, dz = tz - e.pos.z;
+    const d = Math.hypot(dx, dz) || 1;
+    // floor below (within 8 blocks) to hover over
+    const bx = Math.floor(e.pos.x), bz = Math.floor(e.pos.z);
+    let ground = Math.floor(e.pos.y);
+    for (let i = 0; i < 8 && !this.world.isSolidAt(bx, ground - 1, bz); i++) ground--;
+    let wishX = 0, wishZ = 0, wantY: number;
+    if (hunting) {
+      const radial = d > 10 ? 1 : d < 5 ? -1 : 0;
+      const side = Math.sin(e.age * 0.7) * 0.5; // weave sideways
+      wishX = (dx / d) * radial - (dz / d) * side;
+      wishZ = (dz / d) * radial + (dx / d) * side;
+      wantY = Math.max(ground + 1.2, ty + 0.8 + Math.sin(e.age * 1.4) * 0.6);
+      e.yaw = Math.atan2(-dx, -dz);
+    } else {
+      if (e.state === 'wander') { wishX = -Math.sin(e.yaw) * 0.6; wishZ = -Math.cos(e.yaw) * 0.6; }
+      wantY = ground + 1.3 + Math.sin(e.age * 1.3) * 0.45;
+    }
+    const k = Math.min(1, 3 * dt);
+    e.vel.x += (wishX * e.moveSpeed - e.vel.x) * k;
+    e.vel.z += (wishZ * e.moveSpeed - e.vel.z) * k;
+    e.vel.y += ((wantY - e.pos.y) * 1.4 - e.vel.y) * Math.min(1, 2.5 * dt);
+    const res = moveEntity(this.world, e.pos, e.vel, dt, e.box);
+    e.onGround = res.onGround;
+    if ((res.hitX || res.hitZ) && !hunting) e.yaw += Math.PI * (0.5 + Math.random());
+
+    // volley cycle
+    const armed = hunting && d < 16 && (foe !== null || (!p.dead && p.mode === 'survival'));
+    if (armed) {
+      e.shootCooldown -= dt;
+      if (e.burst > 0) {
+        if (e.shootCooldown <= 0) {
+          const ex = e.pos.x, ey = e.pos.y + 1.3, ez = e.pos.z;
+          const dist3 = Math.hypot(tx - ex, ty - ey, tz - ez) || 1;
+          if (!this.world.raycast(ex, ey, ez, (tx - ex) / dist3, (ty - ey) / dist3, (tz - ez) / dist3, dist3)) {
+            const spread = () => (Math.random() - 0.5) * 0.12 * dist3;
+            this.spawnBlazeCharge(ex, ey, ez, tx - ex + spread(), ty - ey + spread() * 0.5, tz - ez + spread());
+          }
+          e.burst--;
+          e.shootCooldown = e.burst > 0 ? 0.3 : 3 + Math.random() * 2;
+        }
+      } else if (e.shootCooldown <= 0 && e.chargeT <= 0) {
+        e.chargeT = 1;
+        this.audio.mobSound('blaze', Math.max(0.2, 1 - d / 24), 'idle');
+      }
+      if (e.chargeT > 0) {
+        e.chargeT -= dt;
+        if (Math.random() < dt * 14) this.spawnSmoke(e.pos.x + (Math.random() - 0.5) * 0.7, e.pos.y + 0.4 + Math.random() * 1.2, e.pos.z + (Math.random() - 0.5) * 0.7, 1);
+        if (e.chargeT <= 0) { e.burst = 3; e.shootCooldown = 0; }
+      }
+      // brushing against a blaze scorches (and ignites)
+      if (!foe && e.attackCooldown <= 0 && Math.hypot(p.pos.x - e.pos.x, p.pos.z - e.pos.z) < 0.9
+        && Math.abs(p.pos.y - e.pos.y) < 1.6) {
+        e.attackCooldown = 1;
+        p.damage(4, e, 'Burned by a Blaze');
+        p.fireT = Math.max(p.fireT, 4);
+        p.applyKnockback(p.pos.x - e.pos.x, p.pos.z - e.pos.z, 4);
+      }
+    } else {
+      e.chargeT = 0; e.burst = 0;
+      e.shootCooldown = Math.max(e.shootCooldown, 1);
+    }
+    // embers + a smoky core
+    if (Math.random() < dt * 9) {
+      this.spawnTorchFlame(e.pos.x + (Math.random() - 0.5) * 0.8, e.pos.y + 0.2 + Math.random() * 1.2, e.pos.z + (Math.random() - 0.5) * 0.8);
+    }
+    if (Math.random() < dt * 2) this.spawnSmoke(e.pos.x, e.pos.y + 0.5 + Math.random() * 0.6, e.pos.z, 1);
+    this.animateMob(e, dt, p);
+    this.placeMob(e, dt);
+  }
+
+  /** A blaze's small fireball: flies flat and fast, 5 damage, sets the
+   *  player alight on a hit (burst handled by the shared projectile code). */
+  spawnBlazeCharge(x: number, y: number, z: number, dx: number, dy: number, dz: number,
+    owner: 'emberghast' | 'petghast' = 'emberghast'): void {
+    const mesh = new THREE.Group();
+    mesh.add(new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.2), new THREE.MeshBasicMaterial({ color: 0xffe070 })));
+    mesh.add(new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.34),
+      new THREE.MeshBasicMaterial({ color: 0xff7a18, transparent: true, opacity: 0.5 })));
+    const len = Math.hypot(dx, dy, dz) || 1;
+    const speed = 13;
+    const e = new Entity('arrow', { x, y, z }, { w: 0.2, h: 0.2 }, mesh);
+    e.vel = { x: (dx / len) * speed, y: (dy / len) * speed, z: (dz / len) * speed };
+    e.owner = owner;
+    e.dmg = 5;
+    this.entities.push(e);
+    this.scene.add(mesh);
+    const p = this.player;
+    const dist = p ? Math.hypot(p.pos.x - x, p.pos.z - z) : 0;
+    this.audio.mobSound('blaze_shoot', Math.max(0.15, 1 - dist / 28), 'idle');
+  }
+
+  /** The player is withering (a wither skeleton's cut): 1 damage every
+   *  2 seconds with dark wisps, until it runs out. */
+  private tickWither(): void {
+    const p = this.player;
+    if (!p || this.witherT <= 0) return;
+    if (p.dead) { this.witherT = 0; return; }
+    this.witherT -= 0.05;
+    this.witherTick += 0.05;
+    if (this.witherTick >= 2) {
+      this.witherTick = 0;
+      if (p.mode === 'survival') p.damage(1, undefined, 'Withered away');
+    }
+    if (Math.random() < 0.35) {
+      this.spriteParticles('wither', (ctx) => {
+        ctx.fillStyle = 'rgba(20,16,20,0.9)';
+        ctx.fillRect(2, 1, 4, 6); ctx.fillRect(1, 2, 6, 4);
+        ctx.fillStyle = 'rgba(60,50,60,0.9)'; ctx.fillRect(2, 2, 2, 2);
+      }, 1, p.pos.x + (Math.random() - 0.5) * 0.8, p.pos.y + 0.2 + Math.random(), p.pos.z + (Math.random() - 0.5) * 0.8,
+      0.3, 0.2, 0.6, 0.8, -1);
+    }
   }
 
   /** Captured pet: steer toward its locked target and bite when in reach. */
@@ -2551,10 +2945,14 @@ export class EntityManager {
   tick(isNight: boolean): void {
     const p = this.player;
     if (!p) return;
+    this.tickWither();
 
     for (const e of this.entities) {
       if (!this.isMob(e)) continue;
       const stats = MOB_STATS[e.kind as MobKind];
+      if (e.dead) continue;
+      this.tickNether(e);
+      if (e.dead) continue;
       // captured pets slowly auto-heal back to full (unless killed outright)
       if (this.isPet(e)) {
         e.attackCooldown = Math.max(0, e.attackCooldown - 0.05);
@@ -2592,7 +2990,7 @@ export class EntityManager {
           if (sky >= 0.95 && !inWater(this.world, e.pos, e.box)) e.burnT = Math.max(e.burnT, 3);
         }
         const dark = this.world.skyLight(Math.floor(e.pos.x), Math.floor(e.pos.y + 1), Math.floor(e.pos.z)) < 0.7;
-        const aggressive = e.kind === 'spider' ? (isNight || dark || e.angryT > 0) : true;
+        const aggressive = this.wantsPlayer(e, isNight, dark);
         // a pet that has engaged this mob becomes its quarry (they brawl while
         // the owner keeps their distance); dropped when it dies or runs off
         if (e.foe && (e.foe.dead || !this.isPet(e.foe)
@@ -2641,6 +3039,28 @@ export class EntityManager {
                 22, 3);
             }
           }
+        }
+        // crossbow piglins: cock (bolt shows), then loose a bolt when in range
+        if (e.kind === 'piglin' && (e.variant & 1) && e.state === 'chase' && !e.baby) {
+          const aim = e.foe && !e.foe.dead ? e.foe : null;
+          const aimD = aim ? foeD : d;
+          if (aimD > 2.5 && aimD < 16) {
+            e.shootCooldown -= 0.05;
+            if (e.shootCooldown <= 0) {
+              const ex = e.pos.x, ey = e.pos.y + 1.45, ez = e.pos.z;
+              const tx = aim ? aim.pos.x : p.pos.x;
+              const ty = aim ? aim.pos.y + aim.box.h * 0.6 : p.pos.y + 1.4;
+              const tz = aim ? aim.pos.z : p.pos.z;
+              const dist3 = Math.hypot(tx - ex, ty - ey, tz - ez);
+              if (!this.world.raycast(ex, ey, ez, (tx - ex) / dist3, (ty - ey) / dist3, (tz - ez) / dist3, dist3)) {
+                e.shootCooldown = 2.4 + Math.random() * 0.8;
+                const spread = () => (Math.random() - 0.5) * 0.04;
+                this.shootArrow('skeleton', ex, ey, ez,
+                  (tx - ex) / dist3 + spread(), (ty - ey) / dist3 + 0.02 * dist3 / 15 + spread(), (tz - ez) / dist3 + spread(),
+                  28, 4);
+              } else e.shootCooldown = 0.4;
+            }
+          } else if (e.shootCooldown < 1.5) e.shootCooldown = 1.5;
         }
       }
 
@@ -2723,13 +3143,198 @@ export class EntityManager {
         }
       }
 
-      if (d > 72 && !e.tamed && !e.ridden) e.dead = true;
+      if (d > 72 && !e.tamed && !e.ridden) { e.dead = true; this.clearFoe(e); }
     }
 
     // spawn attempts once per second
     if (++this.spawnTick >= 20) {
       this.spawnTick = 0;
       this.trySpawns(isNight);
+    }
+  }
+
+  // --- nether mob behaviour (20 Hz) ------------------------------------------------
+
+  /** Does a wild hostile want the player right now? Spiders only in the dark;
+   *  piglins unless the player wears gold (or angered them); zombified
+   *  piglins only once provoked; babies and busy piglins never. */
+  private wantsPlayer(e: Entity, isNight: boolean, dark: boolean): boolean {
+    switch (e.kind) {
+      case 'spider': return isNight || dark || e.angryT > 0;
+      case 'piglin': return !e.baby && e.admireT <= 0 && !e.lure && (e.angryT > 0 || !this.wearsGold());
+      case 'zombified_piglin': return e.angryT > 0;
+      case 'hoglin': return !e.baby;
+      default: return true;
+    }
+  }
+
+  /** Any piece of golden armor on the player (piglins leave them be). */
+  private wearsGold(): boolean {
+    const inv = this.player?.inventory;
+    return !!inv && inv.armor.some((s) => s !== null && GOLD_ARMOR.has(s.id));
+  }
+
+  /** Per-mob nether behaviour: piglin gold greed + bartering + overworld
+   *  zombification, hoglins shying from warped fungus and portals, striders
+   *  going cold off the lava and heading back to it. */
+  private tickNether(e: Entity): void {
+    switch (e.kind) {
+      case 'piglin': this.tickPiglin(e); break;
+      case 'hoglin':
+        if (!e.tamed && Math.random() < 0.05) this.hoglinRepel(e);
+        break;
+      case 'strider': this.tickStrider(e); break;
+    }
+  }
+
+  private tickPiglin(e: Entity): void {
+    if (e.tamed) return;
+    // out of the Nether a piglin shakes for 15 s, then turns zombified
+    if (this.world.dimension !== 'nether') {
+      e.convertT += 0.05;
+      if (e.convertT >= 15) { this.zombify(e); return; }
+    } else e.convertT = 0;
+    if (e.admireT > 0) {
+      e.admireT -= 0.05;
+      if (Math.random() < 0.02) this.audio.mobSound('piglin_admire', this.voiceVol(e), 'idle');
+      if (e.admireT <= 0) this.barter(e);
+      return;
+    }
+    // a gold ingot on the ground: go and get it (babies too, and even mid-fight)
+    const l = e.lure;
+    if (l && (l.dead || l.itemId !== I.GOLD_INGOT)) e.lure = null;
+    if (!e.lure && Math.random() < 0.25) {
+      let best: Entity | null = null, bestD = 64;
+      for (const o of this.entities) {
+        if (o.kind !== 'drop' || o.dead || o.itemId !== I.GOLD_INGOT || o.age < 0.8) continue;
+        const dd = (o.pos.x - e.pos.x) ** 2 + (o.pos.z - e.pos.z) ** 2;
+        if (dd < bestD && Math.abs(o.pos.y - e.pos.y) < 3) { bestD = dd; best = o; }
+      }
+      e.lure = best;
+    }
+    if (e.lure) {
+      const o = e.lure;
+      const dx = o.pos.x - e.pos.x, dz = o.pos.z - e.pos.z;
+      if (Math.hypot(dx, dz) < 1.2 && Math.abs(o.pos.y - e.pos.y) < 1.5) {
+        if (--o.count <= 0) o.dead = true;
+        this.audio.play('pop');
+        e.lure = null;
+        if (e.baby) return; // babies just run off with it
+        this.startAdmire(e);
+        return;
+      }
+      e.state = 'wander';
+      e.stateTime = 1;
+      e.yaw = Math.atan2(-dx, -dz);
+    }
+  }
+
+  /** A piglin takes a gold ingot and turns it over for six seconds. */
+  private startAdmire(e: Entity): void {
+    e.admireT = 6;
+    e.state = 'idle';
+    e.stateTime = 6;
+    e.lure = null;
+    e.vel.x = 0; e.vel.z = 0;
+    this.audio.mobSound('piglin_admire', Math.max(0.4, this.voiceVol(e)), 'idle');
+  }
+
+  /** Done admiring: the piglin tosses a piece of its barter loot toward the
+   *  player (vanilla weights; other modules' blocks by registry name). */
+  private barter(e: Entity): void {
+    const table: [number, number, number, number][] = [
+      [I.POTION_FIRE_RESISTANCE, 8, 1, 1], [I.WATER_BOTTLE, 10, 1, 1], [I.IRON_BOOTS, 8, 1, 1],
+      [I.WARP_PEARL, 10, 2, 4], [I.STRING, 20, 3, 9], [I.QUARTZ, 20, 5, 12],
+      [B.OBSIDIAN, 40, 1, 1], [idByName('crying_obsidian', B.OBSIDIAN), 40, 1, 3],
+      [idByName('fire_charge'), 40, 1, 1], [I.LEATHER, 40, 2, 4], [B.SOUL_SAND, 40, 2, 8],
+      [I.NETHER_BRICK, 40, 2, 8], [I.ARROW, 40, 6, 12], [B.GRAVEL, 40, 8, 16],
+      [idByName('blackstone', B.NETHERRACK), 40, 8, 16],
+    ];
+    const rows = table.filter((r) => r[0] >= 0);
+    let r = Math.random() * rows.reduce((s, x) => s + x[1], 0);
+    let pick = rows[0];
+    for (const row of rows) { r -= row[1]; if (r <= 0) { pick = row; break; } }
+    const [id, , min, max] = pick;
+    const n = min + Math.floor(Math.random() * (max - min + 1));
+    const hx = e.pos.x - Math.cos(e.yaw) * 0.35, hz = e.pos.z + Math.sin(e.yaw) * 0.35;
+    const drop = this.spawnDrop(hx, e.pos.y + 1.1, hz, id, n);
+    const p = this.player;
+    if (p) {
+      const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z, len = Math.hypot(dx, dz) || 1;
+      drop.vel = { x: (dx / len) * 3.2, y: 3.6, z: (dz / len) * 3.2 };
+      e.yaw = Math.atan2(-dx, -dz);
+    }
+    e.swingT = 0.3;
+    this.audio.mobSound('piglin', this.voiceVol(e), 'idle');
+  }
+
+  /** A piglin out of its home dimension turns into a zombified piglin. */
+  private zombify(e: Entity): void {
+    e.dead = true;
+    this.clearFoe(e);
+    const z = e.baby ? this.spawnBaby('zombified_piglin', e.pos.x, e.pos.y, e.pos.z)
+      : this.spawnMob('zombified_piglin', e.pos.x, e.pos.y, e.pos.z);
+    z.yaw = z.visYaw = e.yaw;
+    this.spawnSmoke(e.pos.x, e.pos.y + 1, e.pos.z, 8);
+    this.audio.mobSound('zombified_piglin', this.voiceVol(e), 'hurt');
+  }
+
+  /** Hoglins give warped fungus (and nether portals) a wide berth. */
+  private hoglinRepel(e: Entity): void {
+    const fungus = firstId('warped_fungus', 'warped_roots');
+    const x0 = Math.floor(e.pos.x), y0 = Math.floor(e.pos.y), z0 = Math.floor(e.pos.z);
+    for (let dy = -1; dy <= 2; dy++) {
+      for (let dz = -6; dz <= 6; dz++) {
+        for (let dx = -6; dx <= 6; dx++) {
+          const id = this.world.getBlock(x0 + dx, y0 + dy, z0 + dz);
+          if (id !== B.PORTAL && (fungus < 0 || id !== fungus)) continue;
+          e.state = 'flee';
+          e.stateTime = 2.5;
+          e.yaw = Math.atan2(dx, dz); // straight away from it
+          return;
+        }
+      }
+    }
+  }
+
+  /** Striders: cold off the lava; a cold strider picks a heading back to it. */
+  private tickStrider(e: Entity): void {
+    const x = Math.floor(e.pos.x), z = Math.floor(e.pos.z);
+    const fy = Math.floor(e.pos.y - 0.05);
+    e.cold = this.world.getBlock(x, fy, z) !== B.LAVA && this.world.getBlock(x, fy + 1, z) !== B.LAVA;
+    if (!e.cold || e.ridden || e.state === 'flee' || e.stateTime > 0 || Math.random() > 0.5) return;
+    for (let i = 0; i < 16; i++) {
+      const a = Math.random() * Math.PI * 2, r = 2 + Math.random() * 10;
+      const lx = Math.floor(e.pos.x + Math.cos(a) * r), lz = Math.floor(e.pos.z + Math.sin(a) * r);
+      for (let dy = 0; dy >= -3; dy--) {
+        if (this.world.getBlock(lx, fy + dy, lz) !== B.LAVA) continue;
+        e.state = 'wander';
+        e.stateTime = 2 + r / 2;
+        e.yaw = Math.atan2(-(lx + 0.5 - e.pos.x), -(lz + 0.5 - e.pos.z));
+        return;
+      }
+    }
+  }
+
+  /** Distance-attenuated voice volume for a mob. */
+  private voiceVol(e: Entity): number {
+    const p = this.player;
+    if (!p) return 0.5;
+    return Math.max(0, 1 - Math.hypot(p.pos.x - e.pos.x, p.pos.z - e.pos.z) / 24) * 0.9;
+  }
+
+  /** Wake a piglin (or a zombified piglin horde) against the player: every
+   *  one of its kind nearby turns hostile, clouding over angrily. */
+  private provoke(e: Entity): void {
+    const r = e.kind === 'zombified_piglin' ? 24 : 16;
+    for (const o of this.entities) {
+      if (o.kind !== e.kind || o.tamed || o.dead) continue;
+      if (o !== e && Math.hypot(o.pos.x - e.pos.x, o.pos.z - e.pos.z) > r) continue;
+      if (o.angryT <= 0) this.spawnAngry(o.pos.x, o.pos.y + o.box.h + 0.2, o.pos.z);
+      o.angryT = 30;
+      o.admireT = 0;
+      o.lure = null;
+      if (o.limbs?.offhand) o.limbs.offhand.visible = false;
     }
   }
 
@@ -2884,31 +3489,13 @@ export class EntityManager {
       this.spawnMob(kinds[Math.floor(Math.random() * kinds.length)], wx + 0.5, wy, wz + 0.5);
     };
 
-    // Nether: only nether mobs spawn here (in air pockets on netherrack/solid
-    // ground near the player's altitude), and the overworld spawns are skipped.
+    // Nether: only nether mobs spawn here, by region (fortress bricks, the
+    // ground block or the generator's nether biome), and the overworld spawns
+    // are skipped. It stays populated in both modes (its mobs can't hurt a
+    // creative player anyway) — two attempts per tick so pockets fill reliably.
     if (this.world.dimension === 'nether') {
-      // the nether stays populated in both modes (its mobs can't hurt a creative
-      // player anyway) — two attempts per tick so air pockets fill more reliably
-      if (hostile < 18 && Math.random() < 0.8) {
-        for (let attempt = 0; attempt < 2; attempt++) {
-          const ang = Math.random() * Math.PI * 2;
-          const r = 12 + Math.random() * 22;
-          const wx = Math.floor(p.pos.x + Math.cos(ang) * r);
-          const wz = Math.floor(p.pos.z + Math.sin(ang) * r);
-          const chunk = this.world.getChunk(Math.floor(wx / 16), Math.floor(wz / 16));
-          if (!chunk || !chunk.ready) continue;
-          const py = Math.floor(p.pos.y);
-          for (let tries = 0; tries < 10; tries++) {
-            const wy = py - 10 + Math.floor(Math.random() * 22);
-            if (wy < 5 || wy > 150) continue;
-            if (this.world.getBlock(wx, wy, wz) !== B.AIR) continue;
-            if (this.world.getBlock(wx, wy + 1, wz) !== B.AIR) continue;
-            if (!this.world.isSolidAt(wx, wy - 1, wz)) continue;
-            const kind = Math.random() < 0.62 ? NETHER_MOBS[0] : NETHER_MOBS[1];
-            this.spawnMob(kind, wx + 0.5, wy, wz + 0.5);
-            break;
-          }
-        }
+      if (hostile + passive < 24 && Math.random() < 0.8) {
+        for (let attempt = 0; attempt < 2; attempt++) this.netherSpawn();
       }
       return;
     }
@@ -2940,6 +3527,97 @@ export class EntityManager {
     if (this.player!.mode === 'survival' && hostile < 10) {
       if (isNight && Math.random() < 0.7) surfaceSpawn(['zombie', 'skeleton', 'spider', 'creeper'], 14, 32);
       if (Math.random() < 0.5) caveSpawn();
+    }
+  }
+
+  /** One nether spawn attempt: a standing spot (or a lava surface, for
+   *  striders) near the player's altitude, 12-36 blocks out. */
+  private netherSpawn(): void {
+    const p = this.player!;
+    const ang = Math.random() * Math.PI * 2;
+    const r = 12 + Math.random() * 24;
+    const wx = Math.floor(p.pos.x + Math.cos(ang) * r);
+    const wz = Math.floor(p.pos.z + Math.sin(ang) * r);
+    const chunk = this.world.getChunk(Math.floor(wx / 16), Math.floor(wz / 16));
+    if (!chunk || !chunk.ready) return;
+    const py = Math.floor(p.pos.y);
+    for (let tries = 0; tries < 12; tries++) {
+      const wy = py - 12 + Math.floor(Math.random() * 26);
+      if (wy < 5 || wy > 150) continue;
+      if (this.world.getBlock(wx, wy, wz) !== B.AIR || this.world.getBlock(wx, wy + 1, wz) !== B.AIR) continue;
+      const below = this.world.getBlock(wx, wy - 1, wz);
+      if (below === B.LAVA) {
+        // lava seas: striders wander the surface
+        if (Math.random() < 0.3) this.spawnPack('strider', wx, wy, wz, 1, 2);
+        return;
+      }
+      if (!this.world.isSolidAt(wx, wy - 1, wz)) continue;
+      const region = this.netherRegion(wx, wy, wz, below);
+      if (region === 'warped' && Math.random() < 0.75) return; // the warped forest is eerily empty
+      const table = NETHER_TABLES[region];
+      let roll = Math.random() * table.reduce((s, t) => s + t[1], 0);
+      let pick = table[0];
+      for (const t of table) { roll -= t[1]; if (roll <= 0) { pick = t; break; } }
+      this.spawnPack(pick[0], wx, wy, wz, pick[2], pick[3]);
+      return;
+    }
+  }
+
+  /** Which nether region a spot belongs to: fortress bricks nearby win, then
+   *  the ground block, then the generator's nether biome if it has one. */
+  private netherRegion(wx: number, wy: number, wz: number, ground: number): NetherRegion {
+    // generated structures: inside a fortress's or bastion's footprint
+    const built = netherStructureAt(this.world.generator.seed, wx, wz);
+    if (built === 'fortress' || built === 'bastion') return built;
+    // hand-built (or older-world) fortresses: nether bricks all around
+    const bricks = brickIds();
+    let n = 0;
+    for (let dy = -3; dy <= 4; dy++) {
+      for (let dz = -5; dz <= 5; dz++) {
+        for (let dx = -5; dx <= 5; dx++) {
+          if (bricks.has(this.world.getBlock(wx + dx, wy + dy, wz + dz)) && ++n >= 4) return 'fortress';
+        }
+      }
+    }
+    // the generator's nether biome, then the ground block (player-placed
+    // nylium/soul sand/basalt pockets, or terrain from before the biomes)
+    const biome = regionOfBiome(String(this.world.generator.netherBiomeAt(wx, wz)));
+    if (biome !== 'wastes') return biome;
+    return regionOfBlock(hasDef(ground) ? def(ground).name : '');
+  }
+
+  /** Spawn a pack of `kind` around (wx,wy,wz): each member needs a clear
+   *  2-high spot within 2 blocks of the anchor height; flyers need open air.
+   *  Some piglins and hoglins arrive as babies. */
+  private spawnPack(kind: MobKind, wx: number, wy: number, wz: number, min: number, max: number): void {
+    const n = min + Math.floor(Math.random() * (max - min + 1));
+    const air = (x: number, y: number, z: number): boolean => this.world.getBlock(x, y, z) === B.AIR;
+    for (let i = 0; i < n; i++) {
+      const gx = i === 0 ? wx : wx + Math.round((Math.random() - 0.5) * 6);
+      const gz = i === 0 ? wz : wz + Math.round((Math.random() - 0.5) * 6);
+      let gy = -1;
+      for (const dy of [0, 1, -1, 2, -2]) {
+        const y = wy + dy;
+        if (!air(gx, y, gz) || !air(gx, y + 1, gz)) continue;
+        const under = this.world.getBlock(gx, y - 1, gz);
+        if (kind === 'strider' ? under === B.LAVA : this.world.isSolidAt(gx, y - 1, gz)) { gy = y; break; }
+      }
+      if (gy < 0) continue;
+      if (kind === 'emberghast') {
+        // a ghast needs a real cavern: a clear 3×3×3 pocket above the floor
+        let open = true;
+        for (let y = gy + 2; y <= gy + 4 && open; y++) {
+          for (let z = gz - 1; z <= gz + 1 && open; z++) for (let x = gx - 1; x <= gx + 1; x++) if (!air(x, y, z)) { open = false; break; }
+        }
+        if (!open) continue;
+        this.spawnMob(kind, gx + 0.5, gy + 3, gz + 0.5);
+        continue;
+      }
+      if (kind === 'wither_skeleton' && !air(gx, gy + 2, gz)) continue; // 2.4 tall
+      const baby = (kind === 'piglin' && Math.random() < 0.2) || (kind === 'hoglin' && Math.random() < 0.15);
+      const y = kind === 'blaze' ? gy + 0.5 : gy;
+      if (baby) this.spawnBaby(kind, gx + 0.5, y, gz + 0.5);
+      else this.spawnMob(kind, gx + 0.5, y, gz + 0.5);
     }
   }
 
@@ -3035,10 +3713,15 @@ export class EntityManager {
         o.state = 'chase';
         o.sitting = false;
       }
-    } else if (!MOB_STATS[e.kind as MobKind].hostile) {
+    } else if (!MOB_STATS[e.kind as MobKind].hostile || e.baby) {
       e.state = 'flee';
       e.stateTime = 5;
       e.yaw = Math.atan2(-kbX, -kbZ); // run along the knockback direction
+    }
+    // strike a piglin or a zombified piglin and its whole crowd turns on you
+    if ((e.kind === 'piglin' || e.kind === 'zombified_piglin') && !e.tamed && !this.isPet(e)
+      && (attacker === this.player || (attacker !== undefined && this.isMob(attacker as Entity) && (attacker as Entity).tamed))) {
+      this.provoke(e);
     }
     // owner (or an owned pet) hit this mob -> all idle pets lock onto it
     const byOwner = attacker === this.player
@@ -3065,6 +3748,18 @@ export class EntityManager {
     const wasPet = this.isPet(e);
     e.dead = true;
     this.dropLoot(e);
+    // a slain magma cube bursts into two to four of the next size down
+    if (e.kind === 'magma_cube' && e.variant > 0) {
+      const n = 2 + Math.floor(Math.random() * 3);
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2 + Math.random();
+        const c = this.spawnMob('magma_cube', e.pos.x + Math.cos(a) * e.box.w * 0.25, e.pos.y + 0.2,
+          e.pos.z + Math.sin(a) * e.box.w * 0.25, e.variant - 1);
+        c.vel = { x: Math.cos(a) * 2.5, y: 5, z: Math.sin(a) * 2.5 };
+        c.shootCooldown = 0.6 + Math.random() * 0.6;
+        if (e.tamed) { c.tamed = true; c.ownerName = e.ownerName; }
+      }
+    }
     this.clearFoe(e);
     e.corpse = true;
     e.mesh.traverse((o) => { if (o.userData.shadow) o.visible = false; });
@@ -3101,7 +3796,28 @@ export class EntityManager {
       case 'phantom': at(I.ROTTEN_FLESH, 0, 1); break;
       case 'cinderling': at(I.QUARTZ, 0, 1); at(I.COAL, 0, 1); break;
       case 'ashstalker': at(I.COAL, 1, 2); at(I.BONE, 0, 1); break;
-      case 'emberghast': at(I.QUARTZ, 1, 2); at(B.GLOWSTONE, 0, 1); break;
+      case 'emberghast': at(I.QUARTZ, 1, 2); at(B.GLOWSTONE, 0, 1); at(I.GHAST_TEAR, 0, 1); break;
+      // nether denizens (vanilla tables; babies drop nothing)
+      case 'piglin':
+        if (e.baby) break;
+        if (!(e.variant & 1) && Math.random() < 0.085) at(I.GOLD_SWORD, 1, 1);
+        if ((e.variant & 2) && Math.random() < 0.085) at(I.GOLD_HELMET, 1, 1);
+        break;
+      case 'zombified_piglin':
+        if (e.baby) break;
+        at(I.ROTTEN_FLESH, 0, 1); at(I.GOLD_NUGGET, 0, 1);
+        if (Math.random() < 0.025) at(I.GOLD_INGOT, 1, 1);
+        if (Math.random() < 0.085) at(I.GOLD_SWORD, 1, 1);
+        break;
+      case 'hoglin': if (!e.baby) { at(I.PORKCHOP, 2, 4); at(I.LEATHER, 0, 1); } break;
+      case 'strider': if (!e.baby) at(I.STRING, 2, 5); if (e.saddled) at(I.SADDLE, 1, 1); break;
+      case 'blaze': at(I.BLAZE_ROD, 0, 1); break;
+      case 'wither_skeleton':
+        at(I.COAL, 0, 1); at(I.BONE, 0, 2);
+        if (Math.random() < 0.025) at(I.WITHER_SKULL, 1, 1);
+        if (Math.random() < 0.085) at(I.STONE_SWORD, 1, 1);
+        break;
+      case 'magma_cube': if (e.variant > 0) at(I.MAGMA_CREAM, 0, 1); break;
       case 'rabbit': at(I.LEATHER, 0, 1); break; // rabbit hide
       case 'bat': break;
       default: break;
@@ -3158,6 +3874,16 @@ export class EntityManager {
     }
     // shears (whenever the item registry has them) clip a sheep's fleece for
     // 1-3 wool; it grows back after the sheep grazes
+    // hand a piglin gold: it admires it, then barters something back
+    if (e.kind === 'piglin' && heldId === I.GOLD_INGOT && !e.baby && e.admireT <= 0 && !e.tamed) {
+      this.startAdmire(e);
+      return 'saddle'; // consumes the ingot, same feedback as fitting tack
+    }
+    // striders take a saddle, then carry you across the lava
+    if (e.kind === 'strider' && !e.baby) {
+      if (heldId === I.SADDLE && !e.saddled) { this.saddleStrider(e); return 'saddle'; }
+      if (e.saddled && !this.canBreed(e, heldId)) return 'mount';
+    }
     const shears = (I as unknown as Record<string, number | undefined>).SHEARS;
     if (e.kind === 'sheep' && shears !== undefined && heldId === shears && !e.sheared && !e.baby) {
       e.sheared = true;
@@ -3210,17 +3936,26 @@ export class EntityManager {
     return null;
   }
 
+  /** Breeding food: the fixed table, plus the nether fungi (registered by the
+   *  nether-biome blocks, so looked up by name) for hoglins and striders. */
+  private foodsFor(kind: MobKind): number[] | undefined {
+    if (kind === 'hoglin') { const id = firstId('crimson_fungus', 'crimson_roots'); return id >= 0 ? [id] : undefined; }
+    if (kind === 'strider') { const id = firstId('warped_fungus', 'warped_roots'); return id >= 0 ? [id] : undefined; }
+    return BREED_FOOD[kind];
+  }
+
   /** Does the player's held item tempt this animal into following? */
   private isLureFood(kind: MobKind, heldId: number): boolean {
     if (!heldId) return false;
-    const foods = LURE_FOOD[kind];
+    const foods = kind === 'strider' || kind === 'hoglin' ? this.foodsFor(kind)
+      : kind === 'piglin' ? [I.GOLD_INGOT] : LURE_FOOD[kind];
     return !!foods && foods.includes(heldId);
   }
 
   /** Is this animal a breedable adult and is `heldId` its food? */
   private canBreed(e: Entity, heldId: number): boolean {
     if (e.baby || e.loveT > 0 || e.breedCooldown > 0) return false;
-    const foods = BREED_FOOD[e.kind as MobKind];
+    const foods = this.foodsFor(e.kind as MobKind);
     if (!foods || !foods.includes(heldId)) return false;
     if (BREED_NEEDS_TAME.has(e.kind as MobKind) && !e.tamed) return false;
     return true;
@@ -3245,6 +3980,39 @@ export class EntityManager {
     box(0.68, 0.62, 0.1, dark, 0, 1.1, 0.02);       // girth strap
     for (const sx of [-1, 1]) box(0.04, 0.1, 0.1, metal, sx * 0.36, 0.86, 0.02); // stirrups
     this.spawnHearts(e.pos.x, e.pos.y + 1.6, e.pos.z);
+  }
+
+  /** Saddle a strider: a leather seat strapped on its back. It needs no
+   *  taming (tamed with no owner: kept from despawning, never a pet). */
+  private saddleStrider(e: Entity): void {
+    e.saddled = true;
+    e.tamed = true;
+    e.ownerName = null;
+    const host = e.limbs?.body ?? e.mesh;
+    const leather = new THREE.MeshLambertMaterial({ color: 0x6a4526 });
+    const dark = new THREE.MeshLambertMaterial({ color: 0x3a2614 });
+    const metal = new THREE.MeshLambertMaterial({ color: 0xb8b8c0 });
+    const box = (w: number, h: number, d: number, m: THREE.Material, x: number, y: number, z: number): void => {
+      const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+      b.position.set(x, y, z);
+      host.add(b);
+    };
+    box(0.62, 0.08, 0.66, leather, 0, 1.9, 0.05);   // seat pad
+    box(0.3, 0.12, 0.1, dark, 0, 1.98, -0.24);      // pommel
+    box(0.3, 0.1, 0.08, dark, 0, 1.97, 0.34);       // cantle
+    box(1.04, 0.5, 0.1, dark, 0, 1.66, 0.05);       // girth strap
+    for (const sx of [-1, 1]) box(0.05, 0.1, 0.1, metal, sx * 0.53, 1.42, 0.05); // stirrups
+    this.spawnHearts(e.pos.x, e.pos.y + 2, e.pos.z);
+  }
+
+  /** Can the player ride this mob (horse, or a saddled strider)? */
+  isMount(e: Entity): boolean {
+    return e.kind === 'horse' || (e.kind === 'strider' && e.saddled);
+  }
+
+  /** Rider seat height above the mount's feet. */
+  mountSeat(e: Entity): number {
+    return e.kind === 'strider' ? 1.62 * e.mesh.scale.y : 0.9;
   }
 
   /** Fit iron barding on a tamed horse (visual + damage-resist flag). */
@@ -3324,13 +4092,15 @@ export class EntityManager {
     const len = Math.hypot(wishX, wishZ);
     if (len > 1) { wishX /= len; wishZ /= len; }
     if (len > 0.01) e.yaw = lookYaw;
-    const speed = e.moveSpeed * (fwd > 0 ? 2.4 : 1.5) * (e.saddled ? 1.18 : 1); // saddle = faster gallop
+    const speed = e.kind === 'strider'
+      ? e.moveSpeed * (fwd > 0 ? 1.9 : 1.2) * (e.cold ? 0.45 : 1) // a strider plods; lava is its road
+      : e.moveSpeed * (fwd > 0 ? 2.4 : 1.5) * (e.saddled ? 1.18 : 1); // saddle = faster gallop
     const res = this.applyGroundMove(e, dt, wishX, wishZ, speed);
     if (jump && e.onGround) e.vel.y = JUMP_V * 1.15;
     else if ((res.hitX || res.hitZ) && e.onGround && (wishX !== 0 || wishZ !== 0)) e.vel.y = JUMP_V;
     this.animateMob(e, dt, p);
     // hoofbeats while galloping on the ground
-    if (e.onGround && Math.hypot(e.vel.x, e.vel.z) > 1.5) {
+    if (e.kind === 'horse' && e.onGround && Math.hypot(e.vel.x, e.vel.z) > 1.5) {
       e.restT -= dt;
       if (e.restT <= 0) { e.restT = 0.3; this.audio.play('hoof'); }
     }

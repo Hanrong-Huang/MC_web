@@ -16,7 +16,8 @@
 // bus has a voice cap so a TNT chain or a mob crowd can't swamp the CPU.
 
 import { SoundClass, def, hasDef } from './Blocks';
-import { compose, fragment, stinger, mtof, MNote, TITLE_SEED, MusicEnv, MusicBiomeKey, StingerKind } from './AudioMusic';
+import { compose, fragment, stinger, mtof, MNote, TITLE_SEED, MusicEnv, MusicBiomeKey, StingerKind, Inst } from './AudioMusic';
+import type { SampleBank, SampledInst } from './AudioSamples';
 import { probeScape, Scape, ScapeWorld, ScapePlayer, ScapeMob, ScapeWeather } from './AudioScape';
 
 export type SfxName =
@@ -54,7 +55,9 @@ type Mat = 'grass' | 'plant' | 'gravel' | 'sand' | 'snow' | 'wood' | 'stone' | '
   | 'wool' | 'nether' | 'soul' | 'amethyst' | 'none';
 type Act = 'step' | 'hit' | 'break' | 'place';
 
-interface Piece { notes: MNote[]; i: number; t0: number; end: number; out: GainNode; env: string; fading: boolean; name: string; tonic: number; minor: boolean; biome?: string }
+interface Piece { notes: MNote[]; i: number; t0: number; end: number; out: GainNode; env: string; fading: boolean; name: string; tonic: number; minor: boolean; sampled: ReadonlySet<Inst>; biome?: string }
+/** No sampled instruments (synth voices only). */
+const NONE: ReadonlySet<Inst> = new Set();
 /** A continuous ambience loop: sources → (own filters) → lp → gain → pan → amb bus. */
 interface Bed { srcs: AudioScheduledSourceNode[]; g: GainNode; pan: StereoPannerNode; lp: BiquadFilterNode; nodes: AudioNode[]; x: Record<string, AudioNode>; quiet: number } // quiet = ctx time it fell silent (0 = playing)
 /** How rain is heard: out in it, under a canopy, under a roof, or deep inside. */
@@ -136,6 +139,11 @@ export class AudioEngine {
   // held so the effect graph isn't garbage-collected mid-session
   private fx: AudioNode[] = [];
   private pumpTimer = 0;
+  // sampled instruments (AudioSamples.ts, lazily imported with Tone.js)
+  private samples: SampleBank | null = null;
+  private samplesAt = -1;       // ctx time sample loading was requested (-1 = never)
+  private samplesLoad: Promise<void> | null = null;
+  private samplesDone = false;
 
   // generative music state
   private musicMode: 'menu' | 'game' = 'game';
@@ -423,6 +431,10 @@ export class AudioEngine {
         this.pumpTimer = window.setInterval(this.pump, 120);
         // build the rain texture ahead of time, off the critical path
         window.setTimeout(() => { if (!this.rainBuf && this.ctx) this.rainBuf = this.makeRain(); }, 4000);
+        // real instrument samples for the music: fetched in the background
+        // once the context exists (a user gesture made it), synth until then
+        this.samplesAt = ctx.currentTime;
+        window.setTimeout(() => { void this.loadSamples(); }, 250);
       }
       this.nextPieceAt = ctx.currentTime + (this.musicMode === 'menu' ? 0.6 : 6);
       return true;
@@ -432,13 +444,34 @@ export class AudioEngine {
     }
   }
 
+  /** Load the sampled music instruments (Tone.js + public/audio). Called by
+   *  itself on a live context; harnesses call it on an offline one. Resolves
+   *  to the instruments that ended up sampled. */
+  async loadSamples(only?: readonly SampledInst[]): Promise<string[]> {
+    const ctx = this.ctx;
+    if (!ctx) return [];
+    this.samplesLoad ??= (async () => {
+      try {
+        const { SampleBank } = await import('./AudioSamples');
+        const bank = new SampleBank(ctx, 'audio/') // relative to the page, like the build's base './';
+        this.samples = bank;
+        await bank.load(only);
+      } catch { /* offline / blocked: the synth voices carry on */ }
+      this.samplesDone = true;
+    })();
+    await this.samplesLoad;
+    return [...(this.samples?.ready() ?? [])];
+  }
+
   /** Voice / scheduler counters (for harnesses and debugging). */
-  debugStats(): { live: Record<Pool, number>; peak: Record<Pool, number>; piece: string | null; rain: string; nether: boolean; beds: Record<string, number>; threat: number; fading: number } {
+  debugStats(): { live: Record<Pool, number>; peak: Record<Pool, number>; piece: string | null; rain: string; nether: boolean; beds: Record<string, number>; threat: number; fading: number; samples: Record<string, string> | null; sampledNotes: number; sampleVoices: number } {
     const beds: Record<string, number> = {};
     for (const [k, b] of this.beds) beds[k] = +b.g.gain.value.toFixed(4);
     return {
       live: { ...this.live }, peak: { ...this.livePeak }, piece: this.piece?.name ?? null, rain: this.rainState,
       nether: !!this.netherBed, beds, threat: +this.threat.toFixed(2), fading: this.old.length,
+      samples: this.samples?.status() ?? null, sampledNotes: this.samples?.played ?? 0,
+      sampleVoices: this.samples && this.ctx ? this.samples.voices(this.ctx.currentTime) : 0,
     };
   }
 
@@ -2140,8 +2173,126 @@ export class AudioEngine {
         this.nz(e, { dur: 0.6, vol: 0.06, type: 'bandpass', f: 2200, q: 1.2, attack: 0.1 });
         break;
       }
+      default: this.netherVoice(e, kind, hurt, death, p, dl);
     }
     this.seal(e);
+  }
+
+  /** Nether denizens: piglin grunts (and an admiring "hmm?"), zombified
+   *  groan-snorts, hoglin growls, the strider's warbling trill, the blaze's
+   *  crackling breath and fire-charge whoosh, the wither skeleton's heavy
+   *  rattle and the magma cube's wet squelch. */
+  private netherVoice(e: Ev, kind: string, hurt: boolean, death: boolean, p: number, dl: number): void {
+    switch (kind) {
+      case 'piglin':
+      case 'zombified_piglin': {
+        const z = kind === 'zombified_piglin';
+        if (hurt || death) {
+          // an indignant squeal (a rasping one when rotten)
+          this.vox(e, {
+            dur: 0.32 * dl, vol: 0.3, pitch: death ? [340 * p, 300 * p, 140 * p] : [300 * p, 420 * p, 280 * p], attack: 0.01,
+            formants: [[[750, 600], 4, 1], [[1700], 6, 0.5], [[2800], 8, 0.15]], rough: z ? [45, 120] : [35, 60], breath: z ? 0.35 : 0.12,
+          });
+        } else {
+          // gruff snorting grunts: "hrrmph ... hmph"
+          const n = 1 + ((Math.random() * 3) | 0);
+          for (let i = 0; i < n; i++) {
+            const f = (z ? 92 : 124) * p * rand(0.92, 1.08);
+            this.vox(e, {
+              at: i * rand(0.2, 0.3), dur: rand(0.14, 0.24), vol: 0.32, pitch: [f, f * 1.15, f * 0.85], attack: 0.012, release: 0.06,
+              formants: [[[520, 440], 4, 1], [[1250, 1100], 6, 0.5], [[2500], 8, 0.15]],
+              rough: z ? [40, 120] : [30, 70], breath: z ? 0.32 : 0.18, direct: 0.3,
+            });
+          }
+          if (z && chance(0.5)) this.nz(e, { at: n * 0.24, dur: 0.3, vol: 0.12, color: 'pink', type: 'bandpass', f: 700, q: 1.2, attack: 0.03 });
+        }
+        break;
+      }
+      case 'piglin_admire': {
+        // a pleased, curious rising "hmm-hm?" with a snort
+        this.vox(e, {
+          dur: 0.55, vol: 0.3, pitch: [120 * p, 128 * p, 165 * p, 190 * p], attack: 0.03,
+          formants: [[[420, 480], 4, 1], [[1050], 6, 0.45], [[2400], 8, 0.15]], vib: [6, 10], rough: [30, 40], breath: 0.12, direct: 0.35,
+        });
+        this.nz(e, { at: 0.6, dur: 0.14, vol: 0.18, color: 'pink', type: 'bandpass', f: 900, q: 1.1, attack: 0.01 });
+        break;
+      }
+      case 'hoglin': {
+        if (hurt || death) {
+          this.vox(e, {
+            dur: 0.4 * dl, vol: 0.34, pitch: death ? [210 * p, 180 * p, 70 * p] : [170 * p, 230 * p, 140 * p], attack: 0.015,
+            formants: [[[600, 520], 4, 1], [[1400], 6, 0.5]], rough: [30, 140], breath: 0.3, direct: 0.35,
+          });
+        } else {
+          // a deep, wet growl and a snort through the snout
+          this.vox(e, {
+            dur: rand(0.5, 0.8), vol: 0.36, pitch: [68 * p, 82 * p, 60 * p], attack: 0.05,
+            formants: [[[380, 320], 5, 1], [[780], 6, 0.5], [[2000], 8, 0.12]], rough: [24, 140], breath: 0.3, direct: 0.45,
+          });
+          this.nz(e, { at: rand(0.4, 0.7), dur: 0.22, vol: 0.3, color: 'pink', type: 'bandpass', f: 650, f1: 420, q: 1.3, curve: this.grains(8, 0.5, 1, 0.4) });
+        }
+        break;
+      }
+      case 'strider': {
+        // a warbling, bird-like trill (a sharp squeak when hurt)
+        if (hurt || death) {
+          this.vox(e, { dur: 0.25 * dl, vol: 0.24, pitch: [900 * p, 1300 * p, death ? 500 * p : 800 * p], type: 'triangle',
+            formants: [[[1200], 4, 1], [[2600], 6, 0.4]], rough: [40, 40], breath: 0.1 });
+        } else {
+          const n = 1 + ((Math.random() * 2) | 0);
+          for (let i = 0; i < n; i++) {
+            this.vox(e, { at: i * 0.32, dur: rand(0.22, 0.34), vol: 0.2, pitch: [560 * p, 760 * p, 620 * p], type: 'triangle',
+              attack: 0.02, formants: [[[900, 1250], 4, 1], [[2400], 6, 0.35]], vib: [24, 110] });
+          }
+        }
+        break;
+      }
+      case 'blaze': {
+        if (hurt || death) {
+          // a hollow metallic clank over a gasp of flame
+          this.tn(e, { dur: 0.3 * dl, f: 880 * p, f1: 560 * p, vol: 0.12, type: 'triangle' });
+          this.tn(e, { dur: 0.25 * dl, f: 1320 * p, f1: 900 * p, vol: 0.05, type: 'square', lp: 2400 });
+          this.nz(e, { dur: 0.4 * dl, vol: 0.22, type: 'bandpass', f: 1400, f1: 500, q: 0.8, attack: 0.01 });
+        } else {
+          // crackling, rasping breath: in ... and out
+          for (const [at, f0, f1] of [[0, 520, 900], [0.55, 950, 420]] as [number, number, number][]) {
+            this.nz(e, { at, dur: 0.5, vol: 0.2, color: 'pink', type: 'bandpass', f: f0 * p, f1: f1 * p, q: 1.4, attack: 0.18 });
+          }
+          this.nz(e, { dur: 1.1, vol: 0.12, type: 'highpass', f: 2600, curve: this.grains(18, 0.9, 1, 0.1) });
+          this.tn(e, { dur: 1, f: 150 * p, f1: 120 * p, vol: 0.03, type: 'sawtooth', lp: 500, attack: 0.2 });
+        }
+        break;
+      }
+      case 'blaze_shoot': {
+        // a fire charge leaving: a roaring whoosh with a low thump
+        this.nz(e, { dur: 0.4, vol: 0.34, type: 'bandpass', f: 1600 * p, f1: 380, q: 0.7, attack: 0.008 });
+        this.nz(e, { dur: 0.3, vol: 0.12, type: 'highpass', f: 3000, curve: this.grains(10, 0.85, 1.2) });
+        this.tn(e, { dur: 0.16, f: 140 * p, f1: 60, vol: 0.14 });
+        break;
+      }
+      case 'wither_skeleton': {
+        // a heavier, lower rattle than the plain skeleton's
+        const n = death ? 12 : hurt ? 6 : 5 + ((Math.random() * 4) | 0);
+        let at = 0;
+        for (let i = 0; i < n; i++) {
+          const f = rand(650, 1300) * p * (death ? 1 - i / (n * 2) : 1);
+          this.nz(e, { at, dur: 0.04, vol: 0.38, type: 'bandpass', f, q: 7 });
+          this.tn(e, { at, dur: 0.05, f: f * 0.4, f1: f * 0.35, vol: 0.06, type: 'triangle' });
+          at += rand(0.05, 0.09) * (death ? 1.3 : 1);
+        }
+        this.vox(e, { dur: 0.5 * dl, vol: 0.08, pitch: [70 * p, 64 * p], formants: [[[400], 4, 1]], rough: [30, 90], breath: 0.3 });
+        break;
+      }
+      case 'magma_cube': {
+        // a wet, molten squelch (bigger when hurt) with a few popping bubbles
+        const k = hurt || death ? 1.3 : 1;
+        this.nz(e, { dur: 0.2 * dl, vol: 0.32 * k, color: 'brown', type: 'lowpass', f: 700 * p, f1: 180, attack: 0.004 });
+        this.nz(e, { dur: 0.16, vol: 0.12, type: 'bandpass', f: 1300 * p, f1: 600, q: 2, attack: 0.004 });
+        this.tn(e, { dur: 0.14, f: 110 * p * k, f1: 55, vol: 0.12 });
+        this.bubbles(e, death ? 5 : 2, 0.3, 0.04);
+        break;
+      }
+    }
   }
 
   // ==========================================================================
@@ -2182,7 +2333,7 @@ export class AudioEngine {
       const n = p.notes[p.i++];
       const at = p.t0 + n.t;
       if (at < now - 0.08) continue; // tab was throttled — drop, don't pile up
-      this.note(n, Math.max(at, now + 0.01), p.out);
+      this.note(n, Math.max(at, now + 0.01), p.out, p.sampled);
     }
   }
 
@@ -2191,7 +2342,7 @@ export class AudioEngine {
     // pieces fading under a crossfade keep playing (quieter and quieter) until done
     if (this.old.length) {
       this.old = this.old.filter((q) => {
-        if (now > q.end) { q.out.disconnect(); return false; }
+        if (now > q.end) { q.out.disconnect(); this.samples?.drop(q.out); return false; }
         this.schedule(q, now, Math.min(now + ahead, q.end - 0.3));
         return true;
       });
@@ -2202,6 +2353,7 @@ export class AudioEngine {
       this.schedule(p, now, now + ahead);
       if (now > p.end) {
         p.out.disconnect();
+        this.samples?.drop(p.out);
         this.piece = null;
         // a natural ending earns a silence
         this.nextPieceAt = now + (this.musicMode === 'menu' ? rand(5, 10) : this.scape?.creative ? rand(25, 60) : rand(35, 90));
@@ -2210,7 +2362,10 @@ export class AudioEngine {
     }
     if (!this.settings.music || this.settings.musicVol <= 0) return;
     const live = this.musicMode === 'menu' || now - this.envAt < 4;
-    if (live && now >= this.nextPieceAt) this.startPiece(now);
+    // give the piano samples a few seconds to arrive so the title theme opens
+    // on the real instrument (the synth takes over if they don't)
+    const waiting = this.samplesAt >= 0 && !this.samplesDone && this.samples?.pending('piano') !== false && now - this.samplesAt < 6;
+    if (live && now >= this.nextPieceAt && !waiting) this.startPiece(now);
   }
 
   /** What the music should be about right now. */
@@ -2261,6 +2416,7 @@ export class AudioEngine {
     this.piece = {
       notes: c.notes, i: 0, t0: now + 0.2, end: now + 0.2 + c.len + 9, out,
       env: menu ? 'menu' : this.musicCtx, fading: false, name: c.name, tonic: c.tonic, minor: c.minor,
+      sampled: this.samples?.ready() ?? NONE,
       biome: menu ? undefined : this.musicBiome(),
     };
     return c.name;
@@ -2292,7 +2448,8 @@ export class AudioEngine {
     this.lastAt.set('sting', now);
     const c = stinger(kind, (Math.random() * 2 ** 31) | 0, this.piece?.tonic);
     const t0 = now + 0.15;
-    for (const n of c.notes) this.note(n, t0 + n.t, this.musicBus);
+    const sampled = this.samples?.ready() ?? NONE;
+    for (const n of c.notes) this.note(n, t0 + n.t, this.musicBus, sampled);
     const p = this.piece;
     if (p) {
       const g = p.out.gain;
@@ -2346,10 +2503,12 @@ export class AudioEngine {
     }
   }
 
-  /** Instantiate one scored note on its instrument. */
-  private note(n: MNote, at: number, to: AudioNode): void {
+  /** Instantiate one scored note on its instrument: the sampled voice when the
+   *  piece has it, else the synth. The combat layer stays synth by design. */
+  private note(n: MNote, at: number, to: AudioNode, sampled: ReadonlySet<Inst> = NONE): void {
     const f = mtof(n.m);
     const pan = n.p ?? clamp((n.m - 62) / 60, -0.3, 0.3);
+    if (sampled.has(n.i) && this.samples?.play(n.i as SampledInst, at, n.m, n.v, n.d, n.i === 'strings' ? pan * 0.5 : pan, to)) return;
     switch (n.i) {
       case 'piano': this.piano(at, f, n.v, n.d, to, pan); break;
       case 'epiano': this.epiano(at, f, n.v, n.d, to, pan); break;
@@ -2784,7 +2943,8 @@ export class AudioEngine {
     if (!ctx || !this.musicBus) return;
     const c = fragment(env, (Math.random() * 2 ** 31) | 0);
     const t0 = ctx.currentTime + 0.1;
-    for (const n of c.notes) this.note(n, t0 + n.t, this.musicBus);
+    const sampled = this.samples?.ready() ?? NONE;
+    for (const n of c.notes) this.note(n, t0 + n.t, this.musicBus, sampled);
   }
 
   /** Probe the world around the player a few times a second and steer every

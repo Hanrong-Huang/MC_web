@@ -266,8 +266,11 @@ const NETHER_RECIPES: Recipe[] = ((): Recipe[] => {
   ];
   const soil = registryId('soul_soil');
   if (soil) out.push({ shape: [[I.COAL], [S], [soil]], out: B.SOUL_TORCH, n: 4 });
-  const rod = registryId('blaze_rod');
-  if (rod) out.push({ shape: [[rod]], out: I.BLAZE_POWDER, n: 2 });
+  // blaze rods grind to powder; nuggets pack into ingots and back
+  out.push({ shape: [[I.BLAZE_ROD]], out: I.BLAZE_POWDER, n: 2 });
+  const GN = I.GOLD_NUGGET;
+  out.push({ shape: [[GN, GN, GN], [GN, GN, GN], [GN, GN, GN]], out: AU, n: 1 });
+  out.push({ shape: [[AU]], out: GN, n: 9 });
   return out;
 })();
 

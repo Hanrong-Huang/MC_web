@@ -3895,6 +3895,100 @@ export function shapedItemGeometry(id: number, atlas: Atlas, size = 1): THREE.Bu
 }
 
 // =============================================================================
+// Nether mob drops + capture-orb faces for the nether mobs
+// ======================================================================
+Object.assign(ITEM_PAINTERS, {
+  // a glowing rod: bright core stripe, deep-orange shade, pale-gold flecks
+  blaze_rod: (c: Ctx) => outlinePx(diagPx((a, cc) => {
+    if (a < -11 || a > 11) return null;
+    if (cc === 15) return (a + 20) % 5 === 0 ? 'W' : 'L';
+    if (cc === 16) return (a + 20) % 4 === 1 ? 'M' : 'm';
+    if (cc === 14 && (a + 20) % 6 === 2) return 'L';
+    return null;
+  }, { W: '#fff6c0', L: '#ffd23c', M: '#f59c18', m: '#c86a0e' }), 0.35).put(c, 0, 0),
+  // a heap of glittering orange-gold dust
+  blaze_powder: (c: Ctx) => outlinePx(spritePx([
+    '................', '................', '................', '................',
+    '................', '.......w........', '......LyL.......', '.....LyMyL..y...',
+    '....yLMMMLy.....', '..y.LMMmMMLy....', '...LMMmMmMML....', '..LMmMMMMmMML...',
+    '..MmmMmMMmmmM...', '...mmmmmmmmm....', '................', '................',
+  ], { w: '#fffbe0', y: '#ffe680', L: '#ffc638', M: '#f29416', m: '#c4600c' }), 0.35).put(c, 0, 0),
+  // an orange glob with a darker molten swirl through it
+  magma_cream: (c: Ctx) => outlinePx(spritePx([
+    '................', '................', '................', '.....hhhh.......',
+    '....hOOOOOo.....', '...hOOrrrOOo....', '...OOrOOOrOo....', '..hOrOyyOrOOo...',
+    '..OOrOyyOrOOo...', '..OOOrrrrOOoo...', '...OOOOOOOoo....', '...oOOOOooo.....',
+    '.....ooooo......', '................', '................', '................',
+  ], { h: '#ffc070', O: '#f08a28', o: '#c45a14', r: '#a8300c', y: '#ffe060' }), 0.35).put(c, 0, 0),
+  // a small lumpy gold nugget cluster
+  gold_nugget: (c: Ctx) => outlinePx(spritePx([
+    '................', '................', '................', '................',
+    '................', '................', '.......hh.......', '......hGGg......',
+    '....hhGGGgg.....', '...hGGGgGGg.....', '...GGgGGGgg.....', '....ggg.gg......',
+    '................', '................', '................', '................',
+  ], { h: '#fff4a8', G: '#f7cf45', g: '#c8961e' }), 0.32).put(c, 0, 0),
+  // a pale, faintly luminous teardrop
+  ghast_tear: (c: Ctx) => outlinePx(spritePx([
+    '................', '................', '.......w........', '.......w........',
+    '......wWs.......', '......WWs.......', '.....wWWWs......', '.....WWWWs......',
+    '....wWWWWWs.....', '....WhWWWWs.....', '....WhWWWss.....', '....sWWWWss.....',
+    '.....sWWss......', '......sss.......', '................', '................',
+  ], { w: '#ffffff', W: '#e6f2f4', h: '#ffffff', s: '#a8c8d0' }), 0.4).put(c, 0, 0),
+  // the wither skeleton's soot-black skull
+  wither_skull: (c: Ctx) => outlinePx(spritePx([
+    '................', '................', '....hhhhhhhh....', '...hSSSSSSSSs...',
+    '...SSSSSSSSSs...', '...SSSSSSSSSs...', '...SeeSSSeeSs...', '...SeeSSSeeSs...',
+    '...SSSSnnSSSs...', '...sSSSnnSSss...', '....StStStSs....', '....tStStSts....',
+    '.....ssssss.....', '................', '................', '................',
+  ], { h: '#5a5a5a', S: '#3a3a3a', s: '#262626', e: '#070707', n: '#121212', t: '#6a6a6a' }), 0.5).put(c, 0, 0),
+  mob_catcher_filled_piglin: (c: Ctx) => filledCatcher(c, 'piglin'),
+  mob_catcher_filled_zombified_piglin: (c: Ctx) => filledCatcher(c, 'zombified_piglin'),
+  mob_catcher_filled_hoglin: (c: Ctx) => filledCatcher(c, 'hoglin'),
+  mob_catcher_filled_blaze: (c: Ctx) => filledCatcher(c, 'blaze'),
+  mob_catcher_filled_wither_skeleton: (c: Ctx) => filledCatcher(c, 'wither_skeleton'),
+  mob_catcher_filled_magma_cube: (c: Ctx) => filledCatcher(c, 'magma_cube'),
+});
+
+Object.assign(ORB_OCCUPANTS, {
+  // pink face under floppy ears: dark brows, a broad snout and two tusks
+  piglin: {
+    rows: ['hPPPPh', 'PbPPbP', 'PkPPkP', 'PSSSSP', 'tSnnSt', 'PPPPPP'],
+    pal: { P: '#e8a690', h: '#c8786a', b: '#7a4034', k: '#1c1414', S: '#f2b8a4', n: '#7a3434', t: '#f2ead0' },
+    haze: '#f7cf45',
+  },
+  // half the face rotted back to bare skull, green blotches, one empty socket
+  zombified_piglin: {
+    rows: ['BBPGPh', 'BBPbbP', 'BkPPkP', 'BBSSSP', 'tSnnSt', 'BBPGPP'],
+    pal: { P: '#e0a494', h: '#c8786a', b: '#7a4034', k: '#1a1512', S: '#e8b0a0', n: '#7a3434', t: '#f2ead0', B: '#e8e2d0', G: '#7ea45a' },
+    haze: '#9ccf6a',
+  },
+  // bristly brow, beady eyes, a broad pale snout between upturned tusks
+  hoglin: {
+    rows: ['.hhhhhh.', 'tHHHHHHt', 'tHkHHkHt', '.HHHHHH.', '.SSSSSS.', '.SnSSnS.'],
+    pal: { H: '#c98c6e', h: '#5e3d29', k: '#1a1010', S: '#e2aa8e', n: '#4a2020', t: '#efe7cc' },
+    haze: '#e0906a',
+  },
+  // a burning yellow head ringed by rods
+  blaze: {
+    rows: ['r.YYYY.r', 'rYYYYYYr', '.YkYYkY.', 'rYYYYYYr', 'r.YmmY.r', '..r..r..'],
+    pal: { Y: '#f4c434', k: '#2a1204', m: '#6a3208', r: '#f09a1c' },
+    haze: '#ffc030',
+  },
+  // the plain skull, in soot
+  wither_skeleton: {
+    rows: ['sSSSSs', 'SSSSSS', 'eeSSee', 'SSnnSS', 'tStStS', '.ssss.'],
+    pal: { S: '#3a3a3a', s: '#262626', e: '#070707', n: '#141414', t: '#6a6a6a' },
+    haze: '#8a8a9a',
+  },
+  // cracked crust glowing through, two burning eyes
+  magma_cube: {
+    rows: ['CcCCcC', 'CCCcCC', 'eyCCye', 'CCcCCC', 'cCCCcC', 'CCCCCC'],
+    pal: { C: '#3a1a10', c: '#ff7a1a', e: '#ff4a12', y: '#ffe066' },
+    haze: '#ff6a18',
+  },
+});
+
+// =============================================================================
 // Nether biome tiles: nylium, fungus stems + wart caps, shroomlight, basalt,
 // blackstone, soul soil, nether gold ore, ancient debris, roots and vines, and
 // blue soul fire (fire burning on soul sand/soil, picked by the mesher).
@@ -4393,12 +4487,6 @@ Object.assign(ITEM_PAINTERS, {
     '..kRkkkkkOOYkk..', '..kRRkkOkYYkkk..', '...kkkOOkkkRk...', '...kkkkkkRRkk...',
     '....kkkkkkkk....', '......kkkk......', '................', '................',
   ], { k: '#2a1a14', Y: '#ffd84a', O: '#ff8a1a', R: '#d8401a' }), 0.5).put(c, 0, 0),
-  blaze_powder: (c: Ctx) => outlinePx(spritePx([
-    '................', '................', '................', '................',
-    '.......Y........', '......YOY.......', '....Y.OYO.Y.....', '.....OYYYO......',
-    '...YOYYRYYOY....', '..OYYRRRRYYO....', '..ORRRRRRRRO....', '...OOOOOOOO.....',
-    '................', '................', '................', '................',
-  ], { Y: '#ffe070', O: '#f5a020', R: '#d86818' }), 0.4).put(c, 0, 0),
   portal_compass: (c: Ctx) => dialPx(pal(['#241536', '#3e2460', '#6a3aa0']), (p) => {
     for (const [x, y] of [[8, 7], [9, 6], [10, 5]]) p.set(x, y, '#d58cff');
     p.set(10, 4, '#f4dcff');
