@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { World } from './World';
 import { moveEntity, inWater, rayAABB, Vec3, MoveResult } from './Physics';
 import { B, I, def, hasDef, CROSS_BLOCKS, spriteNameFor, CAPTURABLE, mobLabel } from './Blocks';
+import { isFireproof } from './Blocks';
 import { Atlas, extrudeSpriteGeometry, shapedItemGeometry, BLOCK_SPRITE_ICONS } from './Textures';
 import { AudioEngine } from './Audio';
 import { SEA_LEVEL } from './WorldGenerator';
@@ -1528,6 +1529,16 @@ export class EntityManager {
       e.vel.y -= GRAVITY * 0.55 * dt;
     }
     if (inWater(this.world, e.pos, e.box)) e.vel.y = Math.max(e.vel.y, 1.2);
+    // lava: netherite (and ancient debris) bobs on it, anything else burns up
+    if (this.world.getBlock(Math.floor(e.pos.x), Math.floor(e.pos.y + 0.1), Math.floor(e.pos.z)) === B.LAVA) {
+      if (isFireproof(e.itemId)) e.vel.y = Math.max(e.vel.y, 1.5);
+      else if ((e.burnT += dt) > 0.5) {
+        e.dead = true;
+        this.audio.play('lavaPop');
+        this.spawnSmoke(e.pos.x, e.pos.y + 0.3, e.pos.z, 3);
+        return;
+      }
+    }
     e.vel.x *= 1 - Math.min(1, 6 * dt);
     e.vel.z *= 1 - Math.min(1, 6 * dt);
     moveEntity(this.world, e.pos, e.vel, dt, e.box);
@@ -3563,7 +3574,7 @@ export class EntityManager {
       // cake, flower pot, campfire: tumble as their item sprite
       const sprite = this.atlas.sprite(d.name);
       if (sprite) g.add(new THREE.Mesh(extrudeSpriteGeometry(sprite, 0.34), new THREE.MeshLambertMaterial({ vertexColors: true })));
-    } else if (d.block && (CROSS_BLOCKS.has(itemId) || itemId === B.TORCH || itemId === B.LANTERN)) {
+    } else if (d.block && (CROSS_BLOCKS.has(itemId) || itemId === B.TORCH || itemId === B.LANTERN || itemId === B.SOUL_TORCH || itemId === B.SOUL_LANTERN)) {
       // plants and torches drop as flat sprites of their tile
       const tex = new THREE.CanvasTexture(this.atlas.tileCanvas(d.faces!.sides));
       tex.magFilter = THREE.NearestFilter;

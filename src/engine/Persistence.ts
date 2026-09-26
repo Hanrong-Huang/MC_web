@@ -79,6 +79,8 @@ export interface SaveState {
   fires?: { k: string; t: number }[];
   /** food cooking on campfires: "dimension|x,y,z" -> up to 4 raw items + seconds cooked */
   campfires?: { k: string; items: number[]; t: number[] }[];
+  /** Nether pass: remembered portals per dimension, the respawn-anchor spawn */
+  nether?: import('./NetherController').NetherSave;
   lastPlayed: number;
 }
 

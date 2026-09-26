@@ -39,6 +39,7 @@ import { getControls, setControls } from './engine/ControlsSettings';
 import { AdvancementTracker } from './engine/Advancements';
 import { FireSystem } from './engine/Fire';
 import { waterFX } from './engine/WaterFX';
+import { NetherController } from './engine/NetherController';
 import type { Entity } from './engine/EntityManager';
 
 const DAY_LENGTH = 1200; // 20 real minutes
@@ -129,6 +130,8 @@ class Game {
   private throwables!: Throwables;
   /** food cooking on campfires */
   private campfires = new Campfires();
+  /** Nether pass: biome air, portal sheets + travel, respawn anchor, portal compass */
+  private nether!: NetherController;
   private campfireHurtT = 0;
   /** explorer map + recovery compass overlays */
   private mapOverlay: MapOverlay;
@@ -158,6 +161,11 @@ class Game {
     this.xpOrbs = new ExperienceOrbs(this.renderer.scene, this.world);
     this.throwables = new Throwables(this.renderer.scene, this.world, this.atlas, this.entities);
     this.throwables.onWarp = (x, y, z) => this.warpPlayer(x, y, z);
+    this.throwables.onIgnite = (x, y, z) => { this.fire.ignite(x, y, z); };
+    this.nether = new NetherController({
+      world: this.world, player: this.player, renderer: this.renderer, audio: this.audio, entities: this.entities,
+      toast: (m) => this.hud.toast(m), unlock: (id) => this.adv.unlock(id), clearBedSpawn: () => { this.spawnPoint = null; },
+    }, app.root);
     // outline hugs slabs, stairs, fences and other shaped blocks
     this.renderer.outlineShape = (x, y, z) => this.outlineBoxFor(x, y, z);
     // thrown catchers resolve inside the entity update, away from the input path
@@ -197,6 +205,7 @@ class Game {
 
     this.world.onChunkRemoved = (key) => this.renderer.removeChunk(key);
     this.world.onBlockChanged = (x, y, z, _oldId, newId) => {
+      this.nether.onBlockChanged(x, y, z, _oldId, newId); // broken frames collapse their portal
       // a removed block exposes whatever sat on it; a placed gravity block may drop
       if (newId === B.AIR) {
         this.supportQueue.add(`${x},${y + 1},${z}`);
@@ -296,6 +305,8 @@ class Game {
         return ok;
       },
       throwItem: (id, x, y, z, dx, dy, dz) => this.throwables.throw(id, x, y, z, dx, dy, dz),
+      lightPortal: (x, y, z) => this.nether.tryLight(x, y, z),
+      useAnchor: (x, y, z, held) => this.nether.useAnchor(x, y, z, held, this.player.mode === 'creative'),
     });
 
     if (save) {
@@ -307,6 +318,7 @@ class Game {
       if (save.advancements) this.adv.load(save.advancements);
       this.fire.load(save.fires);
       this.campfires.load(save.campfires);
+      this.nether.load(save.nether);
 
       const ow = this.world.dimData.overworld;
       for (const [k, v] of Object.entries(save.world ?? {})) ow.savedChunks.set(k, v);
@@ -410,6 +422,7 @@ class Game {
       if (id === I.MAP) this.adv.unlock('cartographer');
       if (id === B.CAKE) this.adv.unlock('bake_cake');
       if (id === B.LANTERN || id === B.JACK_O_LANTERN) this.adv.unlock('lantern');
+      if (id === B.SOUL_TORCH || id === B.SOUL_LANTERN) this.adv.unlock('soul_light');
       if (hasDef(id) && def(id).name.endsWith('_wool') && id !== B.WOOL) this.adv.unlock('dye');
       // containers handed back by the recipe (the cake's milk buckets)
       for (const r of craftRemainders(id)) {
@@ -1009,6 +1022,7 @@ class Game {
     const newSpawn = { x: spawnFoot.x + 0.5, y: y + 1, z: spawnFoot.z + 0.5 };
     const spawnChanged = !prev || prev.x !== newSpawn.x || prev.y !== newSpawn.y || prev.z !== newSpawn.z;
     this.spawnPoint = newSpawn;
+    this.nether.clearAnchor(); // one spawn point: the bed replaces an anchor
     this.adv.unlock('bed');
     // sleep window: dusk (0.52) until just before dawn (0.98), or any time in a
     // thunderstorm — mirrors Minecraft's 12542..23459 tick window
@@ -1182,7 +1196,16 @@ class Game {
     this.input.exitLock();
     this.hud.showDeath(
       () => {
-        // dying always returns you to the Overworld (the Nether is a one-way
+        // a charged respawn anchor brings you back in the Nether
+        const anchorSpot = this.nether.respawnAtAnchor();
+        if (anchorSpot) {
+          this.player.respawn(anchorSpot);
+          this.hud.hideDeath();
+          this.state = 'playing';
+          this.input.requestLock();
+          return;
+        }
+        // otherwise dying returns you to the Overworld (the Nether is a one-way
         // trip on death, like Minecraft)
         if (this.world.dimension !== 'overworld') {
           this.world.switchDimension('overworld');
@@ -1218,99 +1241,9 @@ class Game {
     );
   }
 
+  /** Portal travel: linking, landing and the transition live in NetherController. */
   private teleportPlayerDimension(): void {
-    const currentDim = this.world.dimension;
-    const targetDim = currentDim === 'overworld' ? 'nether' : 'overworld';
-    
-    let tx = this.player.pos.x;
-    let tz = this.player.pos.z;
-    if (targetDim === 'nether') {
-      tx /= 8;
-      tz /= 8;
-    } else {
-      tx *= 8;
-      tz *= 8;
-    }
-    tx = Math.floor(tx);
-    tz = Math.floor(tz);
-    
-    let ty = targetDim === 'nether' ? 42 : 68;
-    
-    this.audio.play('explode');
-    this.world.switchDimension(targetDim);
-    // switchDimension clears all chunks; force-generate the landing area now so
-    // the portal search sees real terrain and the platform's setBlock calls land
-    // on ready chunks (otherwise the player free-falls into ungenerated space).
-    const tcx = Math.floor(tx / CX), tcz = Math.floor(tz / CZ);
-    for (let dcz = -1; dcz <= 1; dcz++) {
-      for (let dcx = -1; dcx <= 1; dcx++) this.world.ensureChunk(tcx + dcx, tcz + dcz);
-    }
-
-    let foundPortal = false;
-    outerSearch:
-    for (let dy = -6; dy <= 6; dy++) {
-      for (let dz = -6; dz <= 6; dz++) {
-        for (let dx = -6; dx <= 6; dx++) {
-          if (this.world.getBlock(tx + dx, ty + dy, tz + dz) === B.PORTAL) {
-            tx += dx;
-            ty += dy;
-            tz += dz;
-            foundPortal = true;
-            break outerSearch;
-          }
-        }
-      }
-    }
-    
-    if (!foundPortal) {
-      const px = Math.floor(tx);
-      const py = Math.floor(ty);
-      const pz = Math.floor(tz);
-      
-      for (let dx = -1; dx <= 2; dx++) {
-        this.world.setBlock(px + dx, py - 1, pz, B.OBSIDIAN);
-        this.world.setBlock(px + dx, py + 4, pz, B.OBSIDIAN);
-      }
-      for (let dy = 0; dy <= 3; dy++) {
-        this.world.setBlock(px - 1, py + dy, pz, B.OBSIDIAN);
-        this.world.setBlock(px + 2, py + dy, pz, B.OBSIDIAN);
-      }
-      for (let dy = 0; dy <= 3; dy++) {
-        this.world.setBlock(px, py + dy, pz, B.PORTAL);
-        this.world.setBlock(px + 1, py + dy, pz, B.PORTAL);
-      }
-      
-      for (let dx = -2; dx <= 3; dx++) {
-        for (let dz = -2; dz <= 2; dz++) {
-          const bid = this.world.getBlock(px + dx, py - 2, pz + dz);
-          if (bid === B.AIR || bid === B.LAVA || bid === B.WATER) {
-            this.world.setBlock(px + dx, py - 2, pz + dz, targetDim === 'nether' ? B.NETHERRACK : B.STONE);
-          }
-        }
-      }
-    }
-    
-    // Stand the player one block in front (+z) of the portal on a cleared,
-    // solid floor — never *inside* a portal block, or they'd bounce straight
-    // back once the cooldown expires. Portals in this game are constant-z.
-    const sx = Math.floor(tx), sy = Math.floor(ty), sz = Math.floor(tz) + 1;
-    const ground = targetDim === 'nether' ? B.NETHERRACK : B.STONE;
-    for (let dx = 0; dx <= 1; dx++) {
-      for (let dy = 0; dy <= 1; dy++) this.world.setBlock(sx + dx, sy + dy, sz, B.AIR);
-      const below = this.world.getBlock(sx + dx, sy - 1, sz);
-      if (below === B.AIR || below === B.LAVA || below === B.WATER) {
-        this.world.setBlock(sx + dx, sy - 1, sz, ground);
-      }
-    }
-    this.player.pos = { x: sx + 0.5, y: sy + 0.5, z: sz + 0.5 };
-    this.player.vel = { x: 0, y: 0, z: 0 };
-    this.player.portalCooldown = 4.0; // grace period to step away from the portal
-
-    if (targetDim === 'nether') {
-      this.adv.unlock('thunder');
-    }
-    
-    this.hud.toast(`Entered the ${targetDim === 'nether' ? 'Nether map' : 'Overworld'}`);
+    this.nether.travel();
   }
 
   private dropPlayerInventory(pos: { x: number; y: number; z: number }): void {
@@ -1359,6 +1292,8 @@ class Game {
     const worn = this.player.inventory.armor;
     if (worn.some((a) => a)) this.adv.unlock('suit_up');
     if (worn.some((a) => a && def(a.id).name.startsWith('diamond_'))) this.adv.unlock('diamond_armor');
+    if (worn.every((a) => a && def(a.id).name.startsWith('netherite_'))) this.adv.unlock('netherite_armor');
+    if (this.player.inventory.slots.some((s) => s && hasDef(s.id) && def(s.id).name === 'ancient_debris')) this.adv.unlock('hidden_depths');
     this.renderer.setHeldItem(this.player.heldId(), this.player.heldMob());
     // item-name popup when the hotbar selection (or its item) changes
     const sel = this.player.inventory.selected;
@@ -1466,6 +1401,7 @@ class Game {
       advancements: this.adv.serialize(),
       ...(this.fire.count > 0 ? { fires: this.fire.serialize() } : {}),
       campfires: this.campfires.serialize(),
+      nether: this.nether.serialize(),
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
       lastPlayed: Date.now(),
     };
@@ -1566,7 +1502,7 @@ class Game {
       else env = Math.sin(this.dayTime * Math.PI * 2) < -0.06 ? 'night' : 'day';
       // the surface biome (already computed above for weather) flavours the
       // generative music as you cross terrains
-      this.audio.ambientTick(dt, env, this.world.dimension === 'nether' ? undefined : biome);
+      this.audio.ambientTick(dt, env, this.world.dimension === 'nether' ? this.nether.musicBiome() : biome);
 
       // muffle the mix while the head is under; play a splash on crossing the surface
       const uw = this.player.underwaterEye();
@@ -1611,6 +1547,7 @@ class Game {
       cam.position.set(this.player.pos.x, this.player.pos.y + this.player.eyeHeight() + bobY, this.player.pos.z);
       cam.rotation.set(this.player.pitch, this.player.yaw, 0);
       if (this.introT < INTRO_TIME) this.applyIntroSweep(cam, dt);
+      cam.rotation.z += this.nether.cameraRoll(); // portal nausea
     }
     // damage screen shake: a decaying random offset while shakeT counts down
     if (this.player.shakeT > 0) {
@@ -1622,6 +1559,7 @@ class Game {
     }
     const baseFov = this.hud.settings.fov;
     let targetFov = this.player.sprinting ? baseFov + 10.5 : baseFov;
+    targetFov += this.nether.fovOffset();
     targetFov -= 12 * Math.min(1, this.player.bowCharge / 0.9); // bow-draw zoom
     // spyglass: a hard 10x-ish zoom with the hand tucked away
     const scoping = this.player.scoping && this.state === 'playing';
@@ -1642,8 +1580,9 @@ class Game {
       this.weather.flashAmount(),
       this.world.dimension === 'nether',
     );
-    this.hud.setPortalFade(this.player.portalTimer / 1.5);
-    this.hud.setNetherTint(this.world.dimension === 'nether');
+    // biome haze, particles, portal sheets + swirl + hum, compass (the old
+    // flat portal fade and red tint are superseded by NetherController)
+    this.nether.update(dt, this.elapsed, this.state === 'playing' || this.state === 'container' || this.state === 'paused');
     this.renderer.setBowCharge(Math.min(1, this.player.bowCharge / 0.9));
     this.renderer.setEating(this.player.eating);
     this.renderer.setBlocking(this.player.blocking && this.state === 'playing');
@@ -1866,7 +1805,7 @@ class Game {
         } else if (FLOOR_BLOCKS.has(id)) {
           // wall torches are held by the block behind them; everything else
           // (incl. floor torches) needs solid support directly below
-          const facing = id === B.TORCH ? this.world.torchFacings.get(key) : undefined;
+          const facing = id === B.TORCH || id === B.SOUL_TORCH ? this.world.torchFacings.get(key) : undefined;
           let supported: boolean;
           if (facing !== undefined) {
             const wx = facing === 0 ? x - 1 : facing === 1 ? x + 1 : x;
@@ -1886,12 +1825,12 @@ class Game {
               this.entities.spawnDrop(x + 0.5, y + 0.3, z + 0.5, drop.id, drop.min);
             }
           }
-        } else if (id === B.LANTERN) {
+        } else if (id === B.LANTERN || id === B.SOUL_LANTERN) {
           // a hanging lantern needs its ceiling, a standing one its floor
           const hang = this.world.bedFacings.get(key) === 1;
           if (!this.world.isSolidAt(x, hang ? y + 1 : y - 1, z)) {
             this.world.setBlock(x, y, z, B.AIR);
-            this.entities.spawnDrop(x + 0.5, y + 0.3, z + 0.5, B.LANTERN, 1);
+            this.entities.spawnDrop(x + 0.5, y + 0.3, z + 0.5, id, 1);
           }
         } else if (id === B.GRASS) {
           const above = this.world.getBlock(x, y + 1, z);
@@ -1988,16 +1927,7 @@ class Game {
   /** Light ambient life: torch embers and night fireflies near the player. */
   private emitAmbientParticles(): void {
     const p = this.player.pos;
-    // nether: drifting ember sparks fill the air for a hellish ambience
-    if (this.world.dimension === 'nether') {
-      for (let i = 0; i < 2; i++) {
-        if (Math.random() > 0.6) continue;
-        const ex = p.x + (Math.random() - 0.5) * 16;
-        const ez = p.z + (Math.random() - 0.5) * 16;
-        const ey = p.y + 0.5 + (Math.random() - 0.5) * 6;
-        this.entities.spawnTorchFlame(ex, ey, ez);
-      }
-    }
+    // (Nether embers, spores, ash and wisps come from NetherFX)
     const pcx = Math.floor(p.x / CX), pcz = Math.floor(p.z / CZ);
     for (let dz = -1; dz <= 1; dz++) {
       for (let dx = -1; dx <= 1; dx++) {
@@ -2576,6 +2506,7 @@ class Game {
     this.entities.clear();
     this.xpOrbs.clear();
     this.throwables.clear();
+    this.nether.dispose();
     this.xpBar.dispose();
     this.mapOverlay.dispose();
     this.weather.dispose();

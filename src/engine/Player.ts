@@ -22,6 +22,8 @@ import type { Entity } from './EntityManager';
 import type { RayHit } from './World';
 import { mouseLookSens } from './ControlsSettings';
 import type { PlayerSave } from './Persistence';
+import { netheriteUpgrade } from './Blocks';
+import { PORTAL_TIME_CREATIVE, PORTAL_TIME_SURVIVAL } from './NetherPortal';
 
 export type GameMode = 'survival' | 'creative';
 
@@ -125,6 +127,10 @@ export interface PlayerDeps {
   cookOnCampfire?: (x: number, y: number, z: number, itemId: number) => boolean;
   /** throw a warp pearl / snowball along a direction */
   throwItem?: (itemId: number, x: number, y: number, z: number, dx: number, dy: number, dz: number) => void;
+  /** light an obsidian frame around this air cell into a portal; false if there's none */
+  lightPortal?: (x: number, y: number, z: number) => boolean;
+  /** right-click on a respawn anchor (charge / set spawn / explode); true if used */
+  useAnchor?: (x: number, y: number, z: number, heldId: number) => boolean;
 }
 
 export class Player {
@@ -211,6 +217,8 @@ export class Player {
 
   portalTimer = 0;
   portalCooldown = 0;
+  /** arrived inside a portal: it stays inert until the player steps out */
+  portalExitPending = false;
 
   /** experience level + progress (0..1) toward the next one */
   xpLevel = 0;
@@ -757,9 +765,13 @@ export class Player {
       }
     }
 
+    // having just arrived inside a portal, you must step out before it can
+    // take you back (vanilla); until then standing in it does nothing
+    if (inPortal && this.portalExitPending) inPortal = false;
+    else if (!inPortal && this.portalCooldown <= 0) this.portalExitPending = false;
     if (inPortal) {
       this.portalTimer += dt;
-      if (this.portalTimer >= 1.5) {
+      if (this.portalTimer >= (this.mode === 'creative' ? PORTAL_TIME_CREATIVE : PORTAL_TIME_SURVIVAL)) {
         this.portalTimer = 0;
         this.portalCooldown = 4.0;
         if (this.deps.onTeleport) this.deps.onTeleport();
@@ -1069,7 +1081,7 @@ export class Player {
     const { world, entities, audio } = this.deps;
     const id = world.getBlock(x, y, z);
     if (id === B.AIR || def(id).hardness < 0) return;
-    if (id === B.TORCH) world.torchFacings.delete(`${x},${y},${z}`);
+    if (id === B.TORCH || id === B.SOUL_TORCH) world.torchFacings.delete(`${x},${y},${z}`);
 
     // container contents spill out
     const beKey = `${x},${y},${z}`;
@@ -1501,7 +1513,7 @@ export class Player {
       }
       case B.ANVIL:
         this.placeCooldown = 0.4;
-        this.repairHeld(x, y, z);
+        if (!this.upgradeHeld(x, y, z)) this.repairHeld(x, y, z);
         return true;
       case B.ENCHANTING_TABLE:
         this.placeCooldown = 0.5;
@@ -1509,6 +1521,37 @@ export class Player {
         return true;
     }
     return false;
+  }
+
+  /**
+   * Anvil smithing: a diamond tool/armor piece held with a netherite ingot in
+   * the pack is forged into its netherite form. Wear and enchantments carry
+   * over (the wear in points, so the tougher piece comes out fresher).
+   */
+  private upgradeHeld(x: number, y: number, z: number): boolean {
+    const { audio, entities, toast } = this.deps;
+    const s = this.inventory.getSelected();
+    const to = s ? netheriteUpgrade(s.id) : 0;
+    if (!s || !to) return false;
+    if (this.mode === 'survival' && this.inventory.count(I.NETHERITE_INGOT) < 1) {
+      if ((s.dur ?? def(s.id).durability) === def(s.id).durability) {
+        toast(`Bring a Netherite Ingot to forge this ${def(s.id).label} into netherite`);
+        return true;
+      }
+      return false; // no ingot: fall through to mending
+    }
+    const fromMax = def(s.id).durability ?? 0, toMax = def(to).durability ?? fromMax;
+    const worn = fromMax - (s.dur ?? fromMax);
+    if (this.mode === 'survival') this.inventory.removeOne(I.NETHERITE_INGOT);
+    s.id = to;
+    if (worn > 0) s.dur = Math.max(1, toMax - worn); else delete s.dur;
+    audio.play('smith');
+    for (let i = 0; i < 4; i++) entities.spawnCritParticles(x + 0.5, y + 1.1 + i * 0.1, z + 0.5);
+    this.deps.renderer.triggerSwing();
+    toast(`Forged a ${def(to).label}`);
+    this.deps.onAdvance?.('netherite_upgrade');
+    this.inventory.onChange();
+    return true;
   }
 
   /** Anvil: mend the held tool/armor by a quarter with one unit of its material + a level. */
@@ -1936,6 +1979,11 @@ export class Player {
         this.deps.igniteTnt(t.x, t.y, t.z);
         return;
       }
+      if (t.id === B.RESPAWN_ANCHOR && this.placeCooldown <= 0 && this.deps.useAnchor?.(t.x, t.y, t.z, held?.id ?? 0)) {
+        this.placeCooldown = 0.35;
+        this.deps.renderer.triggerSwing();
+        return;
+      }
       // doors + trapdoors toggle on use
       if (t.id === B.DOOR_LOWER || t.id === B.DOOR_UPPER || t.id === B.TRAPDOOR) {
         const wasOpen = t.id === B.TRAPDOOR
@@ -1968,8 +2016,9 @@ export class Player {
       this.placeCooldown = 0.3;
       this.deps.renderer.triggerSwing();
       const t = this.target;
-      if (this.tryIgnitePortal(t.x + t.nx, t.y + t.ny, t.z + t.nz)) {
-        audio.play('fuse');
+      const lx = t.x + t.nx, ly = t.y + t.ny, lz = t.z + t.nz;
+      if (this.deps.lightPortal ? this.deps.lightPortal(lx, ly, lz) : this.tryIgnitePortal(lx, ly, lz)) {
+        audio.play('ignite');
         this.damageHeldTool();
         return;
       }
@@ -1985,6 +2034,32 @@ export class Player {
         this.damageHeldTool();
       } else {
         audio.play('fail');
+      }
+      return;
+    }
+
+    // fire charge: on a block it lights portals, TNT and fires like flint &
+    // steel (one charge each); with nothing in reach it's hurled as a fireball
+    if (held?.id === I.FIRE_CHARGE && this.placeCooldown <= 0) {
+      this.placeCooldown = 0.35;
+      this.deps.renderer.triggerSwing();
+      if (this.target) {
+        const t = this.target;
+        const lx = t.x + t.nx, ly = t.y + t.ny, lz = t.z + t.nz;
+        let used = false;
+        if (this.deps.lightPortal ? this.deps.lightPortal(lx, ly, lz) : this.tryIgnitePortal(lx, ly, lz)) used = true;
+        else if (t.id === B.TNT) { this.deps.igniteTnt(t.x, t.y, t.z); used = true; }
+        else if (this.deps.ignite?.(lx, ly, lz)) used = true;
+        audio.play(used ? 'fireCharge' : 'fail');
+        if (used && this.mode === 'survival') this.inventory.consumeSelected();
+        return;
+      }
+      if (this.deps.throwItem) {
+        const d = this.lookDir();
+        const ey = this.pos.y + this.eyeHeight();
+        this.deps.throwItem(I.FIRE_CHARGE, this.pos.x + d.x * 0.5, ey + d.y * 0.5 - 0.1, this.pos.z + d.z * 0.5, d.x, d.y, d.z);
+        audio.play('fireCharge');
+        if (this.mode === 'survival') this.inventory.consumeSelected();
       }
       return;
     }
@@ -2123,7 +2198,7 @@ export class Player {
     else if (held.id === B.GLASS_PANE) meta = facing % 2;
     else if (held.id === B.ANVIL || held.id === B.CAMPFIRE) meta = facing & 1;
     else if (held.id === B.JACK_O_LANTERN) meta = [4, 0, 5, 1][facing];
-    else if (held.id === B.LANTERN) {
+    else if (held.id === B.LANTERN || held.id === B.SOUL_LANTERN) {
       // hangs from a ceiling (clicked underside), otherwise stands on the floor
       const floor = isSolid(world.getBlock(px, py - 1, pz)), ceil = isSolid(world.getBlock(px, py + 1, pz));
       if (this.target.ny === -1 ? !ceil : !floor && !ceil) return;
@@ -2131,7 +2206,7 @@ export class Player {
     }
 
     // torch: attach to a floor (clicked top face) or to a block wall (side face)
-    if (held.id === B.TORCH) {
+    if (held.id === B.TORCH || held.id === B.SOUL_TORCH) {
       const { nx, ny, nz } = this.target;
       if (ny === 1 && isSolid(world.getBlock(px, py - 1, pz))) {
         world.torchFacings.delete(`${px},${py},${pz}`); // floor torch
@@ -2141,7 +2216,7 @@ export class Player {
       } else {
         return; // no valid surface (e.g. a ceiling)
       }
-      if (world.setBlock(px, py, pz, B.TORCH)) {
+      if (world.setBlock(px, py, pz, held.id)) {
         this.placeCooldown = 0.22;
         this.deps.renderer.triggerSwing();
         audio.dig('wood', 0.7);
@@ -2458,6 +2533,10 @@ export class Player {
     const ap = this.inventory.armorPoints();
     if (ap > 0) {
       amount = Math.max(0, Math.round(amount * (1 - Math.min(20, ap) * 0.04)));
+      // netherite toughness: each worn piece turns aside a further 4%
+      let neth = 0;
+      for (const s of this.inventory.armor) if (s && def(s.id).name.startsWith('netherite_')) neth++;
+      if (neth) amount = Math.max(0, Math.round(amount * (1 - neth * 0.04)));
       this.damageArmor();
     }
     // Protection: each level on each worn piece shaves another 4% (cap 80%)
