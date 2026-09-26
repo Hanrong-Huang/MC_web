@@ -25,6 +25,7 @@ import type { PlayerSave } from './Persistence';
 import { netheriteUpgrade, GATE_IDS, SHAPED, CLIMBABLE, HANGING_PLANTS, VINE_BLOCKS, vineDrops } from './Blocks';
 import { DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, REDSTONE_ONLY_DOORS, doorBlocksFor, doorItemFor } from './Blocks';
 import { PORTAL_TIME_CREATIVE, PORTAL_TIME_SURVIVAL } from './NetherPortal';
+import { buttonTicks } from './Redstone';
 
 export type GameMode = 'survival' | 'creative';
 
@@ -117,6 +118,8 @@ export interface PlayerDeps {
   onDeath: () => void;
   onTeleport: () => void;
   onRedstoneUpdate: (x: number, y: number, z: number) => void;
+  /** right-click a repeater (delay) / note block (tune); true when used */
+  useRedstone?: (x: number, y: number, z: number, id: number) => boolean;
   /** brief on-screen message (tool warnings, etc.) */
   toast: (msg: string) => void;
   /** a gameplay milestone happened (advancement id) */
@@ -1975,6 +1978,13 @@ export class Player {
         this.deps.useBed(t.x, t.y, t.z);
         return;
       }
+      // repeaters cycle their delay, note blocks step their pitch (sneak to place against them)
+      if ((t.id === B.REPEATER || t.id === B.NOTE_BLOCK) && !this.sneaking && this.placeCooldown <= 0 &&
+        this.deps.useRedstone?.(t.x, t.y, t.z, t.id)) {
+        this.placeCooldown = 0.25;
+        this.deps.renderer.triggerSwing();
+        return;
+      }
       if (t.id === B.LEVER) {
         const key = `${t.x},${t.y},${t.z}`;
         const state = world.redstoneStates.get(key) ?? { active: false };
@@ -1992,7 +2002,7 @@ export class Player {
         const state = world.redstoneStates.get(key) ?? { active: false };
         if (!state.active) {
           state.active = true;
-          state.ticksLeft = 20;
+          state.ticksLeft = buttonTicks(t.id); // stone 1 s, wood 1.5 s
           world.redstoneStates.set(key, state);
           this.placeCooldown = 0.25;
           this.deps.renderer.triggerSwing();
@@ -2224,7 +2234,7 @@ export class Player {
     }
 
     // torch: attach to a floor (clicked top face) or to a block wall (side face)
-    if (held.id === B.TORCH || held.id === B.SOUL_TORCH) {
+    if (held.id === B.TORCH || held.id === B.SOUL_TORCH || held.id === B.REDSTONE_TORCH) {
       const { nx, ny, nz } = this.target;
       if (ny === 1 && isSolid(world.getBlock(px, py - 1, pz))) {
         world.torchFacings.delete(`${px},${py},${pz}`); // floor torch
@@ -2259,6 +2269,13 @@ export class Player {
       const supported = isSolid(below) || (SELF_STACKING.has(placeId) && below === placeId);
       if (!supported) return;
     }
+    // levers and buttons hang on the face they were placed against
+    if (placeId === B.LEVER || placeId === B.WOODEN_BUTTON || placeId === B.STONE_BUTTON) {
+      if (!isSolid(world.getBlock(this.target.x, this.target.y, this.target.z))) return;
+    }
+    // a repeater points away from the player; its state must exist before the
+    // block does so the engine reads the right facing when it first evaluates it
+    if (placeId === B.REPEATER) world.redstoneStates.set(`${px},${py},${pz}`, { active: false, facing, delay: 1 });
     // ladders must attach to a solid block on the targeted face
     if (placeId === B.LADDER) {
       const ax = this.target.x, ay = this.target.y, az = this.target.z;

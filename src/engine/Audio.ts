@@ -23,7 +23,7 @@ import { probeScape, Scape, ScapeWorld, ScapePlayer, ScapeMob, ScapeWeather } fr
 export type SfxName =
   | 'pop' | 'hurt' | 'hit' | 'eat' | 'burp' | 'click' | 'select' | 'fail' | 'craft' | 'level'
   | 'doorOpen' | 'doorClose' | 'plateOn' | 'plateOff'
-  | 'ironDoorOpen' | 'ironDoorClose'
+  | 'ironDoorOpen' | 'ironDoorClose' | 'fizz'
   | 'explode' | 'bow' | 'snap' | 'fuse' | 'arrowHit' | 'whoosh' | 'lowdur'
   | 'thunder' | 'rain' | 'splash' | 'hoof' | 'mount'
   | 'submerge' | 'emerge'
@@ -59,6 +59,8 @@ type Act = 'step' | 'hit' | 'break' | 'place';
 interface Piece { notes: MNote[]; i: number; t0: number; end: number; out: GainNode; env: string; fading: boolean; name: string; tonic: number; minor: boolean; sampled: ReadonlySet<Inst>; biome?: string }
 /** No sampled instruments (synth voices only). */
 const NONE: ReadonlySet<Inst> = new Set();
+/** voices the sample bank can play (the rest are always synthesized) */
+const SAMPLED: ReadonlySet<Inst> = new Set<Inst>(['piano', 'harp', 'flute', 'cello', 'strings']);
 /** A continuous ambience loop: sources → (own filters) → lp → gain → pan → amb bus. */
 interface Bed { srcs: AudioScheduledSourceNode[]; g: GainNode; pan: StereoPannerNode; lp: BiquadFilterNode; nodes: AudioNode[]; x: Record<string, AudioNode>; quiet: number } // quiet = ctx time it fell silent (0 = playing)
 /** How rain is heard: out in it, under a canopy, under a roof, or deep inside. */
@@ -1001,6 +1003,49 @@ export class AudioEngine {
   // one-shot effects
   // ==========================================================================
 
+  /** Note block: its instrument (picked by the block beneath) at pitch step
+   *  0..24, F#3 up two octaves like vanilla. Harp/flute use the sample bank
+   *  when it has loaded; everything else is synthesized. vol scales by distance. */
+  noteBlock(inst: string, pitch: number, vol = 1): void {
+    this.ensure();
+    const ctx = this.ctx, to = this.sfx;
+    if (!ctx || !to || vol <= 0.01) return;
+    const at = ctx.currentTime + 0.01;
+    const m = 54 + clamp(Math.round(pitch), 0, 24), v = 0.5 * clamp(vol, 0, 1.2);
+    const sampled = this.samples ? SAMPLED : NONE;
+    const n = (i: Inst, mm: number, d: number, vv = v): void => this.note({ t: 0, i, m: mm, v: vv, d, p: 0 }, at, to, sampled);
+    switch (inst) {
+      case 'bass': n('bass', m - 24, 0.45, v * 1.3); break;
+      case 'basedrum': n('tom', m - 18, 0.3, v * 1.4); break;
+      case 'bell': n('bell', m + 24, 1.2, v * 0.8); break;
+      case 'flute': n('flute', m + 12, 0.45); break;
+      case 'chime': n('celesta', m + 24, 1.4, v * 0.8); break;
+      case 'guitar': n('epiano', m - 12, 0.5); break;
+      case 'xylophone': n('musicbox', m + 24, 0.3); break;
+      case 'iron_xylophone': n('celesta', m, 0.4); break;
+      case 'cow_bell': n('bell', m + 12, 0.3, v * 0.7); break;
+      case 'didgeridoo': n('drone', m - 24, 0.7, v * 1.3); break;
+      case 'banjo': n('harp', m, 0.25); break;
+      case 'pling': n('epiano', m, 0.8); break;
+      case 'snare': case 'hat': case 'bit': {
+        const e = this.open('sfx', v);
+        if (!e) return;
+        const k = Math.pow(2, (m - 66) / 12);
+        if (inst === 'snare') {
+          this.nz(e, { dur: 0.16, vol: 0.55, type: 'bandpass', f: 1500 * k, q: 0.9 });
+          this.tn(e, { dur: 0.07, f: 190 * k, f1: 150 * k, vol: 0.2 });
+        } else if (inst === 'hat') {
+          this.nz(e, { dur: 0.05, vol: 0.45, type: 'highpass', f: 5200 * k });
+        } else {
+          this.tn(e, { dur: 0.22, f: 440 * k, vol: 0.14, type: 'square', attack: 0.002 });
+        }
+        this.seal(e);
+        break;
+      }
+      default: n('harp', m, 0.8);
+    }
+  }
+
   /** Play a named effect; vol (0..1) scales it, e.g. for distance. */
   play(name: SfxName, vol = 1): void {
     this.ensure();
@@ -1126,6 +1171,12 @@ export class AudioEngine {
         this.creak(e, 0, 0.14, rand(95, 110), rand(60, 75), 0.05);
         this.knock(e, 0.12, 190, 0.6, 0.16);
         this.nz(e, { at: 0.12, dur: 0.12, vol: 0.25, color: 'brown', type: 'lowpass', f: 300 });
+        break;
+      }
+      case 'fizz': {
+        // a redstone torch burning out: a hiss with a falling whistle
+        this.nz(e, { dur: 0.4, vol: 0.35, type: 'highpass', f: 2600, attack: 0.01 });
+        this.tn(e, { dur: 0.16, f: 1500, f1: 700, glide: 0.14, vol: 0.05 });
         break;
       }
       case 'ironDoorOpen': {

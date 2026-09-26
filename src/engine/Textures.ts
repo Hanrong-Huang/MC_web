@@ -4534,6 +4534,72 @@ Object.assign(PACK_MAP, {
   iron_door: { paths: ['item/iron_door'], kind: 'item' },
 } satisfies Record<string, PackEntry>);
 
+// Redstone parts: torch (lit / burnt out), block of redstone, repeater top
+// (dust line + arrow, dim / lit), note block, and the repeater's hotbar sprite.
+function redstoneTorchTile(lit: boolean): (c: Ctx, x: number, y: number) => void {
+  return (c, x, y) => {
+    // same stick as the torch (the mesher crops columns 7-8 from row 6 down)
+    c.clearRect(x, y, 16, 16);
+    for (let py = 8; py < 16; py++) {
+      c.fillStyle = py % 3 === 0 ? '#7a5a2e' : '#a07a44'; c.fillRect(x + 7, y + py, 1, 1);
+      c.fillStyle = py % 3 === 1 ? '#4a3418' : '#6e4f28'; c.fillRect(x + 8, y + py, 1, 1);
+    }
+    const [hi, mid, lo, deep] = lit ? ['#ffd0c0', '#ff4a2e', '#d01a0c', '#8a0c06'] : ['#8a3a30', '#5e1a12', '#44120c', '#2e0a06'];
+    c.fillStyle = mid; c.fillRect(x + 7, y + 6, 2, 2);
+    c.fillStyle = hi; c.fillRect(x + 7, y + 6, 1, 1);
+    c.fillStyle = lo; c.fillRect(x + 8, y + 7, 1, 1);
+    c.fillStyle = deep; c.fillRect(x + 7, y + 8, 2, 1);
+    if (lit) { // a faint halo, only visible on the flat icon
+      c.fillStyle = 'rgba(255,90,60,0.45)';
+      c.fillRect(x + 6, y + 6, 1, 2); c.fillRect(x + 9, y + 6, 1, 2); c.fillRect(x + 7, y + 5, 2, 1);
+    }
+  };
+}
+
+function repeaterTopPx(lit: boolean): Px {
+  const p = new Px().fill((xx, yy) => ((xx * 7 + yy * 13) % 11 === 0 ? '#9c9c9c' : (xx + yy) % 5 === 0 ? '#b2b2b2' : '#a8a8a8'));
+  for (let i = 0; i < 16; i++) { p.set(i, 0, '#c4c4c4'); p.set(0, i, '#c4c4c4'); p.set(i, 15, '#7c7c7c'); p.set(15, i, '#7c7c7c'); }
+  const line = lit ? ['#ff3a20', '#ff8060'] : ['#6a1a12', '#8a2a1e'];
+  for (let j = 2; j <= 13; j++) { p.set(7, j, line[0]); p.set(8, j, line[j % 3 === 0 ? 1 : 0]); }
+  // arrowhead at the output (top) edge
+  p.set(6, 3, line[0]); p.set(9, 3, line[0]); p.set(5, 4, line[0]); p.set(10, 4, line[0]);
+  return p;
+}
+
+Object.assign(TILE_PAINTERS, {
+  redstone_torch: redstoneTorchTile(true),
+  redstone_torch_off: redstoneTorchTile(false),
+  redstone_block: (c: Ctx, x: number, y: number) =>
+    metalPx(pal(['#4e0804', '#6c0e08', '#8e140c', '#b01c10', '#cc2616', '#e8442c', '#ff7a5c']), 7401).put(c, x, y),
+  repeater: (c: Ctx, x: number, y: number) => repeaterTopPx(false).put(c, x, y),
+  repeater_on: (c: Ctx, x: number, y: number) => repeaterTopPx(true).put(c, x, y),
+  note_block: (c: Ctx, x: number, y: number) => {
+    const p = planksPx(pal(['#4a2c1a', '#56341f', '#613b24', '#6c4329', '#784b2f']), hex('#2c180c'), 7402);
+    for (let i = 0; i < 16; i++) { p.set(i, 0, '#2c180c'); p.set(0, i, '#2c180c'); p.set(i, 15, '#24140a'); p.set(15, i, '#24140a'); }
+    // a speaker grille of dark slots
+    for (const gy of [4, 7, 10]) for (let i = 4; i <= 11; i++) if (i !== 7 && i !== 8) p.set(i, gy, '#1c0e06');
+    p.put(c, x, y);
+  },
+});
+Object.assign(ITEM_PAINTERS, {
+  repeater: (c: Ctx) => pixmap(c, 0, 0, [
+    '................', '................', '................', '.....r....r.....',
+    '....rRr..rRr....', '.....r....r.....', '.....w....w.....', '.....w....w.....',
+    '..ssssssssssss..', '.sTTTTTTTTTTTTs.', '.sTddddddddddTs.', '.sTTTTTTTTTTTTs.',
+    '.SSSSSSSSSSSSSS.', '.QQQQQQQQQQQQQQ.', '................', '................',
+  ], { r: '#b3120a', R: '#ff5a3c', w: '#8a6a40', s: '#9a9a9a', T: '#c4c4c4', d: '#a01810', S: '#8a8a8a', Q: '#6a6a6a' }),
+});
+BLOCK_SPRITE_ICONS.add('repeater');
+ICON_BOXES.stone_pressure_plate = ICON_BOXES.pressure_plate;
+Object.assign(PACK_MAP, {
+  redstone_torch: { paths: ['block/redstone_torch'], kind: 'tile' },
+  redstone_torch_off: { paths: ['block/redstone_torch_off'], kind: 'tile' },
+  redstone_block: { paths: ['block/redstone_block'], kind: 'tile' },
+  repeater: { paths: ['block/repeater'], kind: 'tile' },
+  repeater_on: { paths: ['block/repeater_on'], kind: 'tile' },
+  note_block: { paths: ['block/note_block'], kind: 'tile' },
+} satisfies Record<string, PackEntry>);
+
 // =============================================================================
 // Nether utility pass: netherite block + gear, soul torch / soul lantern, the
 // respawn anchor (charge meter + portal pool), fire charge, blaze powder and

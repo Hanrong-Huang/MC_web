@@ -8,7 +8,7 @@
 // light model stays 2-channel without another attribute.
 
 import { CX, CZ, CY } from './Chunk';
-import { B, def, hasDef, ID_LIMIT, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, FENCE_IDS, GATE_IDS, DOOR_IDS, TRAPDOOR_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel, doorFootprints, DOOR_THICK, trapdoorBox } from './Blocks';
+import { B, def, hasDef, ID_LIMIT, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, FENCE_IDS, GATE_IDS, DOOR_IDS, TRAPDOOR_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel, doorFootprints, DOOR_THICK, trapdoorBox, dustShape, H4 } from './Blocks';
 import type { Box } from './Blocks';
 import type { UVRect } from './Textures';
 
@@ -27,7 +27,7 @@ export interface MeshChunk {
   glowers: Set<number>;
 }
 export interface MeshDoor { facing: number; hingeRight?: boolean; swing?: number; open?: boolean; top?: boolean; }
-export interface MeshRedstone { active?: boolean; facing?: number; }
+export interface MeshRedstone { active?: boolean; facing?: number; delay?: number; }
 export interface MeshWorld {
   getChunk(cx: number, cz: number): MeshChunk | undefined;
   getBlockForMesh(wx: number, wy: number, wz: number): number;
@@ -269,6 +269,7 @@ function kindOf(id: number): number {
       : (id === B.TORCH || id === B.SOUL_TORCH || id === B.PORTAL || DOOR_IDS.has(id) || id === B.LADDER ||
         id === B.BED || id === B.BED_HEAD || TRAPDOOR_IDS.has(id) || id === B.PRESSURE_PLATE ||
         id === B.LEVER || id === B.WOODEN_BUTTON || id === B.STONE_BUTTON ||
+        id === B.REDSTONE_TORCH || id === B.REDSTONE_TORCH_OFF || id === B.REPEATER || id === B.STONE_PRESSURE_PLATE ||
         id === B.REDSTONE_WIRE || CROSS_BLOCKS.has(id) || SHAPED.has(id)) ? 2 : 1;
     KIND[id] = k;
   }
@@ -494,7 +495,7 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
         const meta = world.bedFacings.get(`${c.cx * CX + (t & 15)},${t >> 8},${c.cz * CZ + ((t >> 4) & 15)}`) ?? 0;
         return emitLevel(id, meta);
       }
-      return id === B.PORTAL ? emitLevel(id) : GLOW_LEVEL;
+      return id === B.PORTAL || id === B.REDSTONE_TORCH ? emitLevel(id) : GLOW_LEVEL;
     };
     for (const c of refs) {
       if (!c || (c.torches.size === 0 && c.glowers.size === 0)) continue;
@@ -546,9 +547,9 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
 
         if (kind === 2) {
 
-        if (id === B.TORCH || id === B.SOUL_TORCH) {
+        if (id === B.TORCH || id === B.SOUL_TORCH || id === B.REDSTONE_TORCH || id === B.REDSTONE_TORCH_OFF) {
           const facing = world.torchFacings.get(`${bx + x},${y},${bz + z}`);
-          emitTorch(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), facing, id === B.SOUL_TORCH ? 'soul_torch' : 'torch');
+          emitTorch(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), facing, def(id).faces!.sides);
           continue;
         }
         if (id === B.PORTAL) continue; // drawn as an animated sheet by PortalFX
@@ -574,10 +575,15 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           emitTrapdoor(solid, atlas, id, x, y, z, st?.facing ?? 0, !!st?.open, !!st?.top, skyAt(x, y, z), torchAt(x, y, z));
           continue;
         }
-        if (id === B.PRESSURE_PLATE) {
+        if (id === B.PRESSURE_PLATE || id === B.STONE_PRESSURE_PLATE) {
           const state = world.redstoneStates.get(`${bx + x},${y},${bz + z}`);
           const active = !!state?.active;
-          emitPressurePlate(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), active);
+          emitPressurePlate(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), active, id === B.STONE_PRESSURE_PLATE ? 'stone' : 'planks');
+          continue;
+        }
+        if (id === B.REPEATER) {
+          const st = world.redstoneStates.get(`${bx + x},${y},${bz + z}`);
+          emitRepeater(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), st?.facing ?? 0, st?.delay ?? 1, !!st?.active);
           continue;
         }
         if (id === B.LEVER) {
@@ -596,7 +602,8 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
         }
         if (id === B.REDSTONE_WIRE) {
           const power = world.redstonePower.get(`${bx + x},${y},${bz + z}`) ?? 0;
-          emitRedstoneWire(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), power);
+          const shape = dustShape(get, (a, b, c) => world.redstoneStates.get(`${bx + a},${b},${bz + c}`)?.facing, x, y, z);
+          emitRedstoneWire(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), power, shape.mask, shape.up);
           continue;
         }
         if (SHAPED.has(id)) {
@@ -833,8 +840,9 @@ function emitTorch(
   const ty = (py: number): number => ay + py * cosL;
   const tz = (pz: number, py: number): number => az + (pz - 0.5) + wallZ * py * sinL;
 
-  // a torch always glows itself, in its own flame's colour
-  const lit = Math.max(torch, 0.9) + (tile === 'soul_torch' ? SOUL_FULL : 0);
+  // a torch always glows itself, in its own flame's colour (a spent redstone torch doesn't)
+  const lit = (tile === 'redstone_torch_off' ? torch : Math.max(torch, tile === 'redstone_torch' ? 0.75 : 0.9)) +
+    (tile === 'soul_torch' ? SOUL_FULL : 0);
   const push = (px: number, py: number, pz: number, u: number, v: number): void => {
     g.v(x + tx(px, py), y + ty(py), z + tz(pz, py), sky, lit, 1, 1, 1, u, v);
   };
@@ -1058,8 +1066,8 @@ function emitBox(
   quad(base);
 }
 
-function emitPressurePlate(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean): void {
-  const rect = atlas.rect('planks');
+function emitPressurePlate(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean, tile = 'planks'): void {
+  const rect = atlas.rect(tile);
   const h = active ? 0.03 : 0.08;
   emitBox(g, rect, x, y, z, 0.0625, 0.9375, 0, h, 0.0625, 0.9375, sky, torch);
 }
@@ -1155,19 +1163,87 @@ function emitButton(g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: n
   emitBox(g, rect, x, y, z, x0, x1, y0, y1, z0, z1, sky, torch);
 }
 
-function emitRedstoneWire(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number, power: number): void {
+/** Redstone dust: a centre dot plus an arm toward each connection (a lone
+ *  arm runs straight across, like vanilla), and a strip up the side of any
+ *  block it climbs. Tinted by power through the red channel; UVs crop the
+ *  cross-shaped dust tile to the same spans. */
+function emitRedstoneWire(
+  g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number,
+  sky: number, torch: number, power: number, mask: number, up: number,
+): void {
   const rect = atlas.rect('redstone_dust');
-  const base = g.vertCount;
+  const du = rect.u1 - rect.u0, dv = rect.v1 - rect.v0;
+  const U = (a: number): number => rect.u0 + du * a, V = (b: number): number => rect.v0 + dv * b;
   const r = 0.3 + 0.7 * (power / 15);
   const lit = torch >= power / 15 ? torch + soulFlagAt(x, y, z) : power / 15;
   const push = (px: number, py: number, pz: number, u: number, v: number): void => {
     g.v(x + px, y + py, z + pz, sky, lit, r, 0, 0, u, v);
   };
-  push(0, 0.01, 0, rect.u0, rect.v0);
-  push(1, 0.01, 0, rect.u1, rect.v0);
-  push(1, 0.01, 1, rect.u1, rect.v1);
-  push(0, 0.01, 1, rect.u0, rect.v1);
-  g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
+  const flat = (a0: number, b0: number, a1: number, b1: number): void => {
+    const base = g.vertCount;
+    // counter-clockwise seen from above (the old single quad faced down and
+    // the solid pass culled it: dust never showed from above)
+    push(a0, 0.01, b0, U(a0), V(b0));
+    push(a0, 0.01, b1, U(a0), V(b1));
+    push(a1, 0.01, b1, U(a1), V(b1));
+    push(a1, 0.01, b0, U(a1), V(b0));
+    g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
+  };
+  const w0 = 5 / 16, w1 = 11 / 16;
+  let m = mask;
+  if (m && (m & (m - 1)) === 0) m |= 1 << ((Math.log2(m) + 2) % 4); // a lone arm runs straight through
+  flat(w0, w0, w1, w1);
+  if (m & 1) flat(w0, 0, w1, w0); // -z
+  if (m & 4) flat(w0, w1, w1, 1); // +z
+  if (m & 2) flat(0, w0, w0, w1); // -x
+  if (m & 8) flat(w1, w0, 1, w1); // +x
+  // climbing the side of a block: a strip on its face, seen from both sides
+  for (let i = 0; i < 4; i++) {
+    if (!(up & (1 << i))) continue;
+    const [hx, hz] = H4[i];
+    const e = 0.99;
+    const c: number[][] = hx !== 0
+      ? [[hx > 0 ? e : 1 - e, 0, w0], [hx > 0 ? e : 1 - e, 0, w1], [hx > 0 ? e : 1 - e, 1, w1], [hx > 0 ? e : 1 - e, 1, w0]]
+      : [[w0, 0, hz > 0 ? e : 1 - e], [w1, 0, hz > 0 ? e : 1 - e], [w1, 1, hz > 0 ? e : 1 - e], [w0, 1, hz > 0 ? e : 1 - e]];
+    const uv = [[U(w0), rect.v1], [U(w1), rect.v1], [U(w1), rect.v0], [U(w0), rect.v0]];
+    const base = g.vertCount;
+    for (let k = 0; k < 4; k++) push(c[k][0], c[k][1], c[k][2], uv[k][0], uv[k][1]);
+    g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
+    g.tri2(base, base + 2, base + 1, base, base + 3, base + 2);
+  }
+}
+
+/** Repeater: a 2/16 stone slab with the arrow on top (turned to face its
+ *  output), a fixed front torch and a rear torch that slides back one step per
+ *  tick of delay. The torches glow while it is powered. */
+function emitRepeater(
+  g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number,
+  sky: number, torch: number, facing: number, delay: number, active: boolean,
+): void {
+  const side = atlas.rect('smooth_stone_slab_side');
+  const top = atlas.rect(active ? 'repeater_on' : 'repeater');
+  emitBox(g, side, x, y, z, 0, 1, 0, 2 / 16, 0, 1, sky, torch, [1, 1, 1], top, facing & 3);
+  const t = atlas.rect(active ? 'redstone_torch' : 'redstone_torch_off');
+  const du = t.u1 - t.u0, dv = t.v1 - t.v0;
+  const head: UVRect = { u0: t.u0 + du * 7 / 16, u1: t.u0 + du * 9 / 16, v0: t.v0 + dv * 6 / 16, v1: t.v0 + dv * 12 / 16 };
+  const glow = active ? Math.max(torch, 0.75) : torch;
+  // local frame: the output edge at lz = 0, x across
+  const place = (lx0: number, lz0: number, lx1: number, lz1: number): number[] => {
+    const pts = [[lx0, lz0], [lx1, lz1]].map(([lx, lz]) => {
+      switch (facing & 3) {
+        case 0: return [lx, lz];         // output -z
+        case 2: return [1 - lx, 1 - lz]; // output +z
+        case 1: return [lz, 1 - lx];     // output -x
+        default: return [1 - lz, lx];    // output +x
+      }
+    });
+    return [Math.min(pts[0][0], pts[1][0]), Math.max(pts[0][0], pts[1][0]), Math.min(pts[0][1], pts[1][1]), Math.max(pts[0][1], pts[1][1])];
+  };
+  const d = Math.max(1, Math.min(4, delay));
+  for (const [z0, z1] of [[2 / 16, 4 / 16], [(4 + 2 * d) / 16, (6 + 2 * d) / 16]]) {
+    const [bx0, bx1, bz0, bz1] = place(7 / 16, z0, 9 / 16, z1);
+    emitBox(g, head, x, y, z, bx0, bx1, 2 / 16, 7 / 16, bz0, bz1, sky, glow);
+  }
 }
 
 // =============================================================================

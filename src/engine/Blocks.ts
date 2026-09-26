@@ -202,6 +202,16 @@ export enum B {
   IRON_DOOR_LOWER = 274,
   IRON_DOOR_UPPER = 275,
   IRON_TRAPDOOR = 276,
+  // --- redstone components (280-285; engine in Redstone.ts) ---
+  /** lit (light 7); a wall torch's facing lives in torchFacings like the torch's */
+  REDSTONE_TORCH = 280,
+  REDSTONE_TORCH_OFF = 281,
+  REDSTONE_BLOCK = 282,
+  /** facing (0..3, output side) / delay (1..4) / active live in redstoneStates */
+  REPEATER = 283,
+  STONE_PRESSURE_PLATE = 284,
+  /** pitch (0..24) lives in redstoneStates */
+  NOTE_BLOCK = 285,
 }
 
 export enum I {
@@ -952,7 +962,7 @@ blockDef({
 blockDef({
   id: B.REDSTONE_WIRE, name: 'redstone_dust', label: 'Redstone Dust', hardness: 0, sound: 'stone',
   faces: { top: 'redstone_dust', bottom: 'redstone_dust', sides: 'redstone_dust' },
-  solid: false, opaque: false, occludes: false
+  solid: false, opaque: false, occludes: false, drop: { id: I.REDSTONE, min: 1, max: 1 }
 });
 blockDef({
   id: B.REDSTONE_LAMP, name: 'redstone_lamp', label: 'Redstone Lamp', hardness: 0.3, sound: 'glass',
@@ -986,7 +996,7 @@ blockDef({
   faces: { top: 'piston_top_sticky', bottom: 'piston_bottom', sides: 'piston_side' }
 });
 blockDef({
-  id: B.PRESSURE_PLATE, name: 'pressure_plate', label: 'Pressure Plate', hardness: 0.5, sound: 'wood',
+  id: B.PRESSURE_PLATE, name: 'pressure_plate', label: 'Oak Pressure Plate', hardness: 0.5, sound: 'wood',
   faces: { top: 'planks', bottom: 'planks', sides: 'planks' },
   solid: false, opaque: false, occludes: false
 });
@@ -1438,7 +1448,7 @@ export const FLOOR_BLOCKS = new Set<number>([
   B.CARROT_0, B.CARROT_1, B.CARROT_2,
   B.POTATO_0, B.POTATO_1, B.POTATO_2,
   B.BEETROOT_0, B.BEETROOT_1, B.BEETROOT_2,
-  B.REDSTONE_WIRE, B.PRESSURE_PLATE, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
+  B.REDSTONE_WIRE, B.PRESSURE_PLATE,
   B.CORNFLOWER, B.ALLIUM, B.OXEYE_DAISY, B.BROWN_MUSHROOM, B.RED_MUSHROOM,
   B.PUMPKIN_STEM, B.MELON_STEM, B.CAKE, B.FLOWER_POT,
 ]);
@@ -1579,6 +1589,7 @@ export function pickItemFor(blockId: number): number {
     case B.BED_HEAD: return B.BED;
     case B.REDSTONE_WIRE: return I.REDSTONE;
     case B.REDSTONE_LAMP_LIT: return B.REDSTONE_LAMP;
+    case B.REDSTONE_TORCH_OFF: return B.REDSTONE_TORCH;
     case B.WHEAT_0: case B.WHEAT_1: case B.WHEAT_2: return I.SEEDS;
     case B.CARROT_0: case B.CARROT_1: case B.CARROT_2: return I.CARROT;
     case B.POTATO_0: case B.POTATO_1: case B.POTATO_2: return I.POTATO;
@@ -2058,6 +2069,7 @@ export function emitLevel(id: number, meta = 0): number {
     case B.SOUL_TORCH: return 11;
     case B.SOUL_LANTERN: return 12;
     case B.PORTAL: return 11;
+    case B.REDSTONE_TORCH: return 7;
     case B.RESPAWN_ANCHOR: return [0, 6, 9, 12, 15][Math.max(0, Math.min(4, meta))];
     default: return 15;
   }
@@ -2075,3 +2087,97 @@ CREATIVE_ITEMS.push(
   I.NETHERITE_HELMET, I.NETHERITE_CHEST, I.NETHERITE_LEGS, I.NETHERITE_BOOTS,
   I.FIRE_CHARGE, I.PORTAL_COMPASS,
 );
+
+// =============================================================================
+// Redstone pass (block ids 280-285): redstone torch, block of redstone,
+// repeater, stone pressure plate, note block. Rules live in Redstone.ts; the
+// shapes shared with the mesher (dust connections) live here.
+// =============================================================================
+
+blockDef({
+  id: B.REDSTONE_TORCH, name: 'redstone_torch', label: 'Redstone Torch', hardness: 0, sound: 'wood',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'redstone_torch', bottom: 'redstone_torch', sides: 'redstone_torch' },
+});
+blockDef({
+  id: B.REDSTONE_TORCH_OFF, name: 'redstone_torch_off', label: 'Redstone Torch', hardness: 0, sound: 'wood',
+  solid: false, opaque: false, occludes: false, drop: { id: B.REDSTONE_TORCH, min: 1, max: 1 },
+  faces: { top: 'redstone_torch_off', bottom: 'redstone_torch_off', sides: 'redstone_torch_off' },
+});
+blockDef({
+  id: B.REDSTONE_BLOCK, name: 'redstone_block', label: 'Block of Redstone', hardness: 5, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  faces: { top: 'redstone_block', bottom: 'redstone_block', sides: 'redstone_block' },
+});
+blockDef({
+  id: B.REPEATER, name: 'repeater', label: 'Redstone Repeater', hardness: 0, sound: 'stone',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'repeater', bottom: 'smooth_stone', sides: 'smooth_stone_slab_side' },
+});
+blockDef({
+  id: B.STONE_PRESSURE_PLATE, name: 'stone_pressure_plate', label: 'Stone Pressure Plate', hardness: 0.5, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'stone', bottom: 'stone', sides: 'stone' },
+});
+blockDef({
+  id: B.NOTE_BLOCK, name: 'note_block', label: 'Note Block', hardness: 0.8, tool: 'axe', sound: 'wood', fuel: 15,
+  faces: { top: 'note_block', bottom: 'note_block', sides: 'note_block' },
+});
+for (const id of [B.REDSTONE_BLOCK, B.NOTE_BLOCK]) { OPAQUE_LUT[id] = 1; OCCLUDE_LUT[id] = 1; }
+FLOOR_BLOCKS.add(B.REDSTONE_TORCH).add(B.REDSTONE_TORCH_OFF).add(B.REPEATER).add(B.STONE_PRESSURE_PLATE);
+for (const list of [PLACEABLE, CREATIVE_ITEMS]) {
+  list.splice(list.indexOf(B.PRESSURE_PLATE) + 1, 0, B.STONE_PRESSURE_PLATE);
+  list.splice(list.indexOf(B.STONE_BUTTON) + 1, 0, B.REDSTONE_TORCH, B.REPEATER, B.REDSTONE_BLOCK, B.NOTE_BLOCK);
+}
+
+export const PLATE_IDS = new Set<number>([B.PRESSURE_PLATE, B.STONE_PRESSURE_PLATE]);
+export const BUTTON_IDS = new Set<number>([B.WOODEN_BUTTON, B.STONE_BUTTON]);
+export const REDSTONE_TORCHES = new Set<number>([B.REDSTONE_TORCH, B.REDSTONE_TORCH_OFF]);
+/** Everything the redstone engine tracks (World.redstoneBlocks): parts, and
+ *  the blocks they drive (doors/trapdoors are sinks). */
+export const REDSTONE_IDS = new Set<number>([
+  B.REDSTONE_WIRE, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON, B.PRESSURE_PLATE, B.STONE_PRESSURE_PLATE,
+  B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT, B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD,
+  B.REDSTONE_TORCH, B.REDSTONE_TORCH_OFF, B.REDSTONE_BLOCK, B.REPEATER, B.NOTE_BLOCK,
+  ...DOOR_IDS, ...TRAPDOOR_IDS,
+]);
+/** Parts dust visibly joins up with (besides more dust and a repeater's ends). */
+const DUST_JOINS = new Set<number>([
+  B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON, B.PRESSURE_PLATE, B.STONE_PRESSURE_PLATE,
+  B.REDSTONE_TORCH, B.REDSTONE_TORCH_OFF, B.REDSTONE_BLOCK,
+]);
+/** Horizontal steps by facing code (0=-z, 1=-x, 2=+z, 3=+x). */
+export const H4: readonly [number, number][] = [[0, -1], [-1, 0], [0, 1], [1, 0]];
+
+/** Full opaque blocks carry redstone power (vanilla "conductors"): glass,
+ *  slabs, leaves and the like don't. */
+export function conducts(id: number): boolean {
+  return id !== B.AIR && hasDef(id) && def(id).solid && def(id).opaque && !SHAPED.has(id);
+}
+
+/** Which ways dust at (x, y, z) runs: `mask` bit i = toward H4[i] (same level,
+ *  or up/down a block step); `up` bit i = it climbs the side of that block. */
+export function dustShape(
+  get: (x: number, y: number, z: number) => number,
+  repeaterFacing: (x: number, y: number, z: number) => number | undefined,
+  x: number, y: number, z: number,
+): { mask: number; up: number } {
+  let mask = 0, up = 0;
+  const capped = conducts(get(x, y + 1, z)); // a block on top stops dust climbing out
+  for (let i = 0; i < 4; i++) {
+    const nx = x + H4[i][0], nz = z + H4[i][1];
+    const n = get(nx, y, nz);
+    if (n === B.REDSTONE_WIRE || DUST_JOINS.has(n) ||
+      (n === B.REPEATER && ((repeaterFacing(nx, y, nz) ?? 0) & 1) === (i & 1))) { mask |= 1 << i; continue; }
+    if (!capped && conducts(n) && get(nx, y + 1, nz) === B.REDSTONE_WIRE) { mask |= 1 << i; up |= 1 << i; continue; }
+    if (!conducts(n) && get(nx, y - 1, nz) === B.REDSTONE_WIRE) mask |= 1 << i;
+  }
+  return { mask, up };
+}
+
+/** The sides dust powers: its connections, a lone arm runs straight through,
+ *  and an unconnected dot powers all four sides. */
+export function dustPowerMask(mask: number): number {
+  if (mask === 0) return 15;
+  if ((mask & (mask - 1)) === 0) { const i = Math.log2(mask); return mask | (1 << ((i + 2) % 4)); }
+  return mask;
+}

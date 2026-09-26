@@ -332,6 +332,12 @@ const RECIPES: Recipe[] = [
   { shape: [[C]], out: B.STONE_BUTTON, n: 1 },
   { shape: [[P, P, P], [C, FE, C], [C, I.REDSTONE, C]], out: B.PISTON, n: 1 },
   { shape: [[B.SAPLING], [B.PISTON]], out: B.STICKY_PISTON, n: 1 },
+  { shape: [[B.STONE, B.STONE]], out: B.STONE_PRESSURE_PLATE, n: 1 },
+  { shape: [[I.REDSTONE], [S]], out: B.REDSTONE_TORCH, n: 1 },
+  { shape: [[B.REDSTONE_TORCH, I.REDSTONE, B.REDSTONE_TORCH], [B.STONE, B.STONE, B.STONE]], out: B.REPEATER, n: 1 },
+  { shape: [[I.REDSTONE, I.REDSTONE, I.REDSTONE], [I.REDSTONE, I.REDSTONE, I.REDSTONE], [I.REDSTONE, I.REDSTONE, I.REDSTONE]], out: B.REDSTONE_BLOCK, n: 1 },
+  { shape: [[B.REDSTONE_BLOCK]], out: I.REDSTONE, n: 9 },
+  { shape: [[P, P, P], [P, I.REDSTONE, P], [P, P, P]], out: B.NOTE_BLOCK, n: 1 },
   // light + utility
   { shape: [[I.COAL], [S]], out: B.TORCH, n: 4 },
   { shape: [[G, SA, G], [SA, G, SA], [G, SA, G]], out: B.TNT, n: 1 },

@@ -29,7 +29,7 @@ import type { MeshJob, MeshChunkSnap } from './engine/mesh-worker';
 import { chunkKey, CX, CY, CZ } from './engine/Chunk';
 import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, HANGING_PLANTS, def, hasDef, isSolid, mobLabel } from './engine/Blocks';
 import { SHAPED, META_BLOCKS, FENCE_IDS, GATE_IDS, VINE_BLOCKS, vineDrops, shapeBoxes, connectsTo, enchantLabel } from './engine/Blocks';
-import { DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, REDSTONE_ONLY_DOORS, doorItemFor } from './engine/Blocks';
+import { DOOR_LOWERS, DOOR_UPPERS, doorItemFor } from './engine/Blocks';
 import { craftRemainders } from './engine/Inventory';
 import { ExperienceOrbs, XpBar } from './engine/Experience';
 import { Throwables } from './engine/Throwables';
@@ -43,14 +43,12 @@ import { FireSystem } from './engine/Fire';
 import { waterFX } from './engine/WaterFX';
 import { NetherController } from './engine/NetherController';
 import type { Entity } from './engine/EntityManager';
+import { Redstone } from './engine/Redstone';
 
 const DAY_LENGTH = 1200; // 20 real minutes
 const SAVE_VERSION = 2;
 const AUTOSAVE_SECONDS = 60;
 const INTRO_TIME = 1.9; // camera sweep from above into the player's eyes after loading
-// pressure plates stay powered this many 20 Hz ticks after the last step-off,
-// so walking across one doesn't flicker the plate (and slam wired doors)
-const PLATE_RELEASE_TICKS = 8;
 
 type GameUIState = 'loading' | 'playing' | 'paused' | 'container' | 'dead' | 'sleeping';
 
@@ -62,6 +60,9 @@ class Game {
   private player = new Player();
   private input: Input;
   private entities: EntityManager;
+  private redstone!: Redstone;
+  /** dimension the redstone tick queue belongs to */
+  private redstoneDim = '';
   private hud: HUD;
   private audio: AudioEngine;
   private atlas: Atlas;
@@ -198,6 +199,29 @@ class Game {
         return biome === 'snow' || biome === 'taiga';
       },
     });
+    this.redstone = new Redstone(this.world, {
+      extendPiston: (x, y, z) => this.extendPiston(x, y, z),
+      retractPiston: (x, y, z) => this.retractPiston(x, y, z),
+      isPistonExtended: (x, y, z) => this.isPistonExtended(x, y, z),
+      pistonFront: (x, y, z) => this.getFacingVector(this.world.pistonFacings.get(`${x},${y},${z}`) ?? 2),
+      igniteTnt: (x, y, z) => { this.world.setBlock(x, y, z, B.AIR); this.entities.spawnTnt(x, y, z); },
+      plateOccupied: (x, y, z, mobsOnly) => {
+        const p = this.player.pos;
+        const playerOn = !this.player.dead && p.x + 0.3 > x && p.x - 0.3 < x + 1 && p.y + 1.8 > y && p.y < y + 0.5 &&
+          p.z + 0.3 > z && p.z - 0.3 < z + 1;
+        return playerOn || this.entities.anyEntityOnBlock(x, y, z, mobsOnly);
+      },
+      sound: (name, x, y, z) => {
+        const d = Math.hypot(x + 0.5 - this.player.pos.x, y + 0.5 - this.player.pos.y, z + 0.5 - this.player.pos.z);
+        if (d < 24) this.audio.play(name, Math.min(1, 1.25 - d / 24));
+      },
+      note: (x, y, z, inst, pitch) => {
+        const d = Math.hypot(x + 0.5 - this.player.pos.x, y + 0.5 - this.player.pos.y, z + 0.5 - this.player.pos.z);
+        if (d < 48) this.audio.noteBlock(inst, pitch, Math.min(1, 1.2 - d / 48));
+        this.entities.spawnNote(x + 0.5, y + 1.15, z + 0.5, pitch);
+      },
+      smoke: (x, y, z) => this.entities.spawnSmoke(x + 0.5, y + 0.7, z + 0.5, 4),
+    });
     this.fire = new FireSystem(this.world, {
       rainingAt: (x, y, z) => this.isRainingOn(x, y, z),
       igniteTnt: (x, y, z) => this.entities.spawnTnt(x, y, z),
@@ -239,19 +263,6 @@ class Game {
         }
       }
 
-      const REDSTONE_IDS = new Set<number>([
-        B.REDSTONE_WIRE, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON,
-        B.PRESSURE_PLATE, B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT,
-        B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD,
-        ...DOOR_IDS, ...TRAPDOOR_IDS
-      ]);
-      const isRedstoneRelated = (bx: number, by: number, bz: number) => {
-        if (REDSTONE_IDS.has(this.world.getBlock(bx, by, bz))) return true;
-        for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
-          if (REDSTONE_IDS.has(this.world.getBlock(bx + dx, by + dy, bz + dz))) return true;
-        }
-        return false;
-      };
       if ((_oldId === B.PISTON || _oldId === B.STICKY_PISTON) && newId === B.AIR) {
         const facing = this.world.pistonFacings.get(`${x},${y},${z}`);
         if (facing !== undefined) {
@@ -262,15 +273,14 @@ class Game {
         }
       }
 
-      if (isRedstoneRelated(x, y, z)) {
-        this.triggerRedstoneUpdate(x, y, z);
-      }
+      this.redstone.blockChanged(x, y, z, _oldId, newId);
     };
 
     this.player.init({
       world: this.world,
       input: this.input,
       onRedstoneUpdate: (x, y, z) => this.triggerRedstoneUpdate(x, y, z),
+      useRedstone: (x, y, z, id) => this.redstone.use(x, y, z, id),
       renderer: this.renderer,
       entities: this.entities,
       audio: this.audio,
@@ -673,7 +683,11 @@ class Game {
     };
 
     this.input.onMouseDown = (button) => {
-      if (button === 0) this.player.onLeftClick();
+      if (button === 0) {
+        this.player.onLeftClick();
+        const t = this.player.target;
+        if (t && t.id === B.NOTE_BLOCK && this.state === 'playing' && this.input.active) this.redstone.playNote(t.x, t.y, t.z);
+      }
       // middle click: pick block
       if (button === 1 && this.state === 'playing' && this.input.active) this.player.pickBlock();
     };
@@ -1752,60 +1766,9 @@ class Game {
       }
     }
 
-    // redstone ticks: buttons tick down, pressure plates check collision
-    let redstoneDirty = false;
-    for (const [key, state] of this.world.redstoneStates) {
-      if (state.ticksLeft !== undefined && state.ticksLeft > 0) {
-        state.ticksLeft--;
-        if (state.ticksLeft === 0) {
-          state.active = false;
-          redstoneDirty = true;
-          const [bx, by, bz] = key.split(',').map(Number);
-          this.audio.play('click');
-          this.world.markDirty(Math.floor(bx / 16), Math.floor(bz / 16));
-        }
-      }
-    }
-
-    for (const key of this.world.redstoneBlocks) {
-      const [bx, by, bz] = key.split(',').map(Number);
-      const bid = this.world.getBlock(bx, by, bz);
-      if (bid === B.PRESSURE_PLATE) {
-        const playerPos = this.player.pos;
-        const playerOn = (
-          playerPos.x + 0.3 > bx && playerPos.x - 0.3 < bx + 1 &&
-          playerPos.y + 1.8 > by && playerPos.y < by + 0.5 &&
-          playerPos.z + 0.3 > bz && playerPos.z - 0.3 < bz + 1
-        );
-        const occupied = playerOn || this.entities.anyEntityOnBlock(bx, by, bz);
-        const state = this.world.redstoneStates.get(key) ?? { active: false };
-        if (occupied) {
-          // press immediately; refresh the release timer while anything stays on
-          state.releaseT = PLATE_RELEASE_TICKS;
-          if (!state.active) {
-            state.active = true;
-            this.audio.play('plateOn');
-            redstoneDirty = true;
-            this.world.markDirty(Math.floor(bx / 16), Math.floor(bz / 16));
-          }
-          this.world.redstoneStates.set(key, state);
-        } else if (state.active) {
-          // linger briefly after step-off so walking across doesn't slam doors
-          state.releaseT = (state.releaseT ?? 0) - 1;
-          if (state.releaseT <= 0) {
-            state.active = false;
-            this.audio.play('plateOff');
-            redstoneDirty = true;
-            this.world.markDirty(Math.floor(bx / 16), Math.floor(bz / 16));
-          }
-          this.world.redstoneStates.set(key, state);
-        }
-      }
-    }
-
-    if (redstoneDirty) {
-      this.triggerRedstoneUpdate(0, 0, 0);
-    }
+    // redstone: buttons spring back, plates sense, torch/repeater delays fire
+    if (this.world.dimension !== this.redstoneDim) { this.redstone.reset(); this.redstoneDim = this.world.dimension; }
+    this.redstone.tick();
 
     // support checks: sand/gravel fall, unsupported plants/torches pop off
     if (this.supportQueue.size > 0) {
@@ -1819,6 +1782,18 @@ class Game {
           if (below === B.AIR || below === B.WATER) {
             this.world.setBlock(x, y, z, B.AIR);
             this.entities.spawnFallingBlock(x, y, z, id);
+          }
+        } else if (this.redstone.supported(x, y, z, id) !== null) {
+          // levers/buttons hang on their face; plates, dust, repeaters and
+          // redstone torches on their floor or wall
+          if (!this.redstone.supported(x, y, z, id)) {
+            this.world.setBlock(x, y, z, B.AIR);
+            this.world.torchFacings.delete(key);
+            const d = def(id);
+            if (d.drop !== null) {
+              const drop = d.drop ?? { id, min: 1, max: 1 };
+              this.entities.spawnDrop(x + 0.5, y + 0.3, z + 0.5, drop.id, drop.min);
+            }
           }
         } else if (FLOOR_BLOCKS.has(id)) {
           // wall torches are held by the block behind them; everything else
@@ -2302,114 +2277,13 @@ class Game {
     ]);
   }
 
+  /** Re-solve redstone around (x, y, z) (dev/test hook; the engine also runs itself). */
   triggerRedstoneUpdate(x: number, y: number, z: number): void {
-    this.world.redstonePower.clear();
-    const queue: [number, number, number, number][] = [];
-
-    for (const [key, state] of this.world.redstoneStates) {
-      if (state.active) {
-        const [sx, sy, sz] = key.split(',').map(Number);
-        const bid = this.world.getBlock(sx, sy, sz);
-        if (bid === B.LEVER || bid === B.WOODEN_BUTTON || bid === B.STONE_BUTTON || bid === B.PRESSURE_PLATE) {
-          queue.push([sx, sy, sz, 15]);
-          this.world.redstonePower.set(key, 15);
-        }
-      }
-    }
-
-    while (queue.length > 0) {
-      const [cx, cy, cz, power] = queue.shift()!;
-      if (power <= 0) continue;
-
-      for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
-        const nx = cx + dx, ny = cy + dy, nz = cz + dz;
-        const nkey = `${nx},${ny},${nz}`;
-        const nid = this.world.getBlock(nx, ny, nz);
-
-        if (nid === B.REDSTONE_WIRE) {
-          const newPower = power - 1;
-          if (newPower > (this.world.redstonePower.get(nkey) ?? 0)) {
-            this.world.redstonePower.set(nkey, newPower);
-            queue.push([nx, ny, nz, newPower]);
-          }
-        }
-      }
-
-      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const ux = cx + dx, uy = cy + 1, uz = cz + dz;
-        const ukey = `${ux},${uy},${uz}`;
-        if (this.world.getBlock(ux, uy, uz) === B.REDSTONE_WIRE) {
-          const newPower = power - 1;
-          if (newPower > (this.world.redstonePower.get(ukey) ?? 0)) {
-            this.world.redstonePower.set(ukey, newPower);
-            queue.push([ux, uy, uz, newPower]);
-          }
-        }
-
-        const dxCoord = cx + dx, dyCoord = cy - 1, dzCoord = cz + dz;
-        const dkey = `${dxCoord},${dyCoord},${dzCoord}`;
-        if (this.world.getBlock(dxCoord, dyCoord, dzCoord) === B.REDSTONE_WIRE) {
-          const newPower = power - 1;
-          if (newPower > (this.world.redstonePower.get(dkey) ?? 0)) {
-            this.world.redstonePower.set(dkey, newPower);
-            queue.push([dxCoord, dyCoord, dzCoord, newPower]);
-          }
-        }
-      }
-    }
-
-    const remeshChunks = new Set<string>();
-    for (const key of this.world.redstoneBlocks) {
-      const [rx, ry, rz] = key.split(',').map(Number);
-      const rid = this.world.getBlock(rx, ry, rz);
-
-      if (rid === B.REDSTONE_LAMP || rid === B.REDSTONE_LAMP_LIT) {
-        const powered = this.isPowered(rx, ry, rz);
-        const targetId = powered ? B.REDSTONE_LAMP_LIT : B.REDSTONE_LAMP;
-        if (rid !== targetId) {
-          this.world.setBlock(rx, ry, rz, targetId);
-          remeshChunks.add(chunkKey(Math.floor(rx / 16), Math.floor(rz / 16)));
-        }
-      } else if (rid === B.PISTON || rid === B.STICKY_PISTON) {
-        const powered = this.isPowered(rx, ry, rz);
-        const extended = this.isPistonExtended(rx, ry, rz);
-        if (powered && !extended) {
-          this.extendPiston(rx, ry, rz);
-        } else if (!powered && extended) {
-          this.retractPiston(rx, ry, rz);
-        }
-      } else if (DOOR_IDS.has(rid) || TRAPDOOR_IDS.has(rid)) {
-        // power either half of a door (a plate beside its foot or head drives it)
-        const ly = DOOR_UPPERS.has(rid) ? ry - 1 : ry;
-        const powered = TRAPDOOR_IDS.has(rid)
-          ? this.isPowered(rx, ry, rz)
-          : this.isPowered(rx, ly, rz) || this.isPowered(rx, ly + 1, rz);
-        const moved = this.world.applyDoorPower(rx, ry, rz, powered);
-        if (moved) {
-          const iron = REDSTONE_ONLY_DOORS.has(rid);
-          this.audio.play(moved === 'open' ? (iron ? 'ironDoorOpen' : 'doorOpen') : (iron ? 'ironDoorClose' : 'doorClose'));
-        }
-      } else if (rid === B.REDSTONE_WIRE) {
-        this.world.markDirty(Math.floor(rx / 16), Math.floor(rz / 16));
-      }
-    }
+    this.redstone.update(x, y, z);
   }
 
   isPowered(x: number, y: number, z: number): boolean {
-    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
-      const nx = x + dx, ny = y + dy, nz = z + dz;
-      const nkey = `${nx},${ny},${nz}`;
-      const nid = this.world.getBlock(nx, ny, nz);
-      if (nid === B.REDSTONE_WIRE) {
-        const p = this.world.redstonePower.get(nkey) ?? 0;
-        if (p > 0) return true;
-      }
-      if (nid === B.LEVER || nid === B.WOODEN_BUTTON || nid === B.STONE_BUTTON || nid === B.PRESSURE_PLATE) {
-        const state = this.world.redstoneStates.get(nkey);
-        if (state && state.active) return true;
-      }
-    }
-    return false;
+    return this.redstone.powered(x, y, z);
   }
 
   isPistonExtended(x: number, y: number, z: number): boolean {

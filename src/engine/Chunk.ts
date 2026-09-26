@@ -5,14 +5,16 @@ import { B, CROSS_BLOCKS } from './Blocks';
 
 /** Blocks that don't attenuate skylight (ignored by the heightmap). */
 function lightTransparent(id: number): boolean {
-  return id === B.AIR || id === B.TORCH || id === B.SOUL_TORCH || id === B.GLASS || CROSS_BLOCKS.has(id);
+  return id === B.AIR || id === B.TORCH || id === B.SOUL_TORCH || id === B.REDSTONE_TORCH || id === B.REDSTONE_TORCH_OFF ||
+    id === B.GLASS || CROSS_BLOCKS.has(id);
 }
 
 /** Full-block light emitters that feed the block-light flood-fill (alongside torches). */
 export function isGlower(id: number): boolean {
   return id === B.GLOWSTONE || id === B.REDSTONE_LAMP_LIT || id === B.MAGMA || id === B.FIRE ||
     id === B.LANTERN || id === B.JACK_O_LANTERN || id === B.CAMPFIRE || id === B.SHROOMLIGHT ||
-    id === B.SOUL_TORCH || id === B.SOUL_LANTERN || id === B.RESPAWN_ANCHOR || id === B.PORTAL;
+    id === B.SOUL_TORCH || id === B.SOUL_LANTERN || id === B.RESPAWN_ANCHOR || id === B.PORTAL ||
+    id === B.REDSTONE_TORCH;
 }
 
 export const CX = 16;

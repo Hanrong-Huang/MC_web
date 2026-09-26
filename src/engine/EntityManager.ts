@@ -3940,9 +3940,11 @@ export class EntityManager {
   /** Mobs OR dropped items overlapping a block — used by pressure plates, which
    *  (like wooden plates) are tripped by entities resting on them, not just by
    *  the player. */
-  anyEntityOnBlock(bx: number, by: number, bz: number): boolean {
+  /** Is anything standing on the plate cell? mobsOnly (stone plates) skips
+   *  dropped items and arrows, which still press an oak plate. */
+  anyEntityOnBlock(bx: number, by: number, bz: number, mobsOnly = false): boolean {
     for (const e of this.entities) {
-      if (!this.isMob(e) && e.kind !== 'drop') continue;
+      if (!this.isMob(e) && (mobsOnly || (e.kind !== 'drop' && e.kind !== 'arrow'))) continue;
       const hw = e.box.w / 2;
       if (e.pos.x + hw > bx && e.pos.x - hw < bx + 1 &&
         e.pos.y + e.box.h > by && e.pos.y < by + 0.5 &&
@@ -4259,6 +4261,18 @@ export class EntityManager {
       this.entities.push(e);
       this.scene.add(mesh);
     }
+  }
+
+  /** A music note rising off a note block, coloured by pitch like vanilla
+   *  (green at the bottom, round through blue and red, green again at the top). */
+  spawnNote(x: number, y: number, z: number, pitch: number): void {
+    const hue = ((0.33 - (pitch / 24)) % 1 + 1) % 1;
+    const bucket = Math.round(hue * 24);
+    this.spriteParticles(`note${bucket}`, (ctx) => {
+      ctx.fillStyle = `hsl(${(bucket / 24) * 360}, 90%, 58%)`;
+      ctx.fillRect(4, 0, 1, 6); ctx.fillRect(5, 0, 2, 1); ctx.fillRect(6, 1, 1, 1); // stem + flag
+      ctx.fillRect(2, 5, 3, 2); ctx.fillRect(1, 6, 1, 1); ctx.fillRect(2, 7, 2, 1); // head
+    }, 1, x, y, z, 0.1, 0.3, 0.9, 0.9, -0.2);
   }
 
   /** Angry storm-cloud puffs over a mob that has turned on the player. */
