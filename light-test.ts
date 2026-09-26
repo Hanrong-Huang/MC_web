@@ -78,5 +78,34 @@ let anyLit = 0;
 for (let i = 0; i < L2.length / 2; i++) if (lit(L2, i) > 0.05) anyLit++;
 check('light removed with torch', anyLit === baseAny);
 
+// soul light reaches the special emitters too: a soul lantern beside a flower,
+// a slab and a plain torch tints their vertices (FLAG_SOUL eighths above the
+// sway/lava bits: soul share = floor(L / 8) / 7)
+const soulShare = (v: number): number => Math.floor(v / 8) / 7;
+world.setBlock(8, h, 8, B.SOUL_LANTERN);
+world.setBlock(9, h, 8, B.POPPY);
+world.setBlock(8, h, 9, B.STONE_SLAB);
+world.setBlock(7, h, 8, B.TORCH);
+const geo3 = buildChunkGeometry(world, chunk, mockAtlas);
+const P3 = geo3.solid!.positions, L3 = geo3.solid!.lights;
+const inCell = (i: number, cx: number, cz: number, y0 = 0, y1 = 1): boolean =>
+  P3[i * 3] >= cx - 0.001 && P3[i * 3] <= cx + 1.001 && P3[i * 3 + 2] >= cz - 0.001 && P3[i * 3 + 2] <= cz + 1.001
+  && P3[i * 3 + 1] >= h + y0 - 0.001 && P3[i * 3 + 1] <= h + y1 + 0.001;
+let flowerSoul = 0, slabSoul = 0, lanternSoul = 0, torchSoul = 1;
+for (let i = 0; i < P3.length / 3; i++) {
+  const s = soulShare(L3[i * 2 + 1]);
+  // the poppy's cross quads sit strictly inside its cell (x 9.146..9.854)
+  if (P3[i * 3] > 9.1 && P3[i * 3] < 9.9 && P3[i * 3 + 2] > 8.1 && P3[i * 3 + 2] < 8.9 && inCell(i, 9, 8)) flowerSoul = Math.max(flowerSoul, s);
+  if (inCell(i, 8, 9, 0, 0.5) && P3[i * 3 + 1] > h + 0.4) slabSoul = Math.max(slabSoul, s);
+  if (P3[i * 3] > 8.3 && P3[i * 3] < 8.7 && P3[i * 3 + 2] > 8.3 && P3[i * 3 + 2] < 8.7 && inCell(i, 8, 8)) lanternSoul = Math.max(lanternSoul, s);
+  // plain torch column: 7/16..9/16 of its cell
+  if (P3[i * 3] > 7.4 && P3[i * 3] < 7.6 && P3[i * 3 + 2] > 8.4 && P3[i * 3 + 2] < 8.6 && inCell(i, 7, 8)) torchSoul = Math.min(torchSoul, s);
+}
+console.log(`  soul share: flower ${flowerSoul.toFixed(2)} slab ${slabSoul.toFixed(2)} lantern ${lanternSoul.toFixed(2)} torch ${torchSoul.toFixed(2)}`);
+check('flower beside a soul lantern carries soul light', flowerSoul > 0.3);
+check('slab beside a soul lantern carries soul light', slabSoul > 0.3);
+check('soul lantern glows fully soul', lanternSoul > 0.99);
+check('a plain torch keeps its warm flame', torchSoul === 0);
+
 console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');
 process.exit(failures ? 1 : 0);
