@@ -13,15 +13,22 @@
 // - A torch turns off when the block it hangs on is powered (1 redstone tick
 //   later; it burns out if flipped 8 times within 3 s). A repeater copies its
 //   back input to its front after 1-4 redstone ticks and always outputs 15.
+// - Power has levels (0..15). A comparator passes its back signal on (compare
+//   mode: only while it's at least the strongest side input; subtract mode:
+//   back minus side), reading a container's fill level instead when there is
+//   one behind it (also through one solid block). An observer fires a 1-tick
+//   pulse out of its back whenever the block it faces changes; a daylight
+//   detector outputs the sun's strength (or the night's, inverted).
 //
 // Updates are local: a change re-solves only the dust network(s) within two
 // blocks of it and re-evaluates the components near what changed, instead of
 // the old whole-world recompute. Torch/repeater delays run on a 20 Hz tick queue.
 
 import {
-  B, def, hasDef, H4, conducts, dustShape, dustPowerMask, PLATE_IDS, BUTTON_IDS, REDSTONE_TORCHES,
-  DOOR_IDS, DOOR_UPPERS, TRAPDOOR_IDS, REDSTONE_ONLY_DOORS,
+  B, def, hasDef, H4, D6, conducts, dustShape, dustPowerMask, PLATE_IDS, BUTTON_IDS, REDSTONE_TORCHES,
+  DOOR_IDS, DOOR_UPPERS, TRAPDOOR_IDS, REDSTONE_ONLY_DOORS, REDSTONE_IDS,
 } from './Blocks';
+import type { Slot } from './Inventory';
 import type { World, RedstoneState } from './World';
 import type { SfxName } from './Audio';
 
@@ -40,9 +47,10 @@ export interface RedstoneHooks {
   sound(name: SfxName, x: number, y: number, z: number): void;
   note(x: number, y: number, z: number, inst: NoteInst, pitch: number): void;
   smoke(x: number, y: number, z: number): void;
+  /** raw daylight at a detector: 0 (night / roofed over) .. 15 (open sky at noon) */
+  sunlight(x: number, y: number, z: number): number;
 }
 
-const D6: readonly [number, number, number][] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
 /** lever/button facing (0..5, from the clicked face) -> the block it hangs on */
 const ATTACH: readonly [number, number, number][] = [[0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1], [1, 0, 0], [-1, 0, 0]];
 /** wall torch facing (torchFacings 0..3) -> its wall */
@@ -54,8 +62,15 @@ for (let dy = -2; dy <= 2; dy++) for (let dz = -2; dz <= 2; dz++) for (let dx = 
 }
 const COMPONENTS = new Set<number>([
   B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT, B.PISTON, B.STICKY_PISTON, B.NOTE_BLOCK, B.TNT,
-  B.REDSTONE_TORCH, B.REDSTONE_TORCH_OFF, B.REPEATER, ...DOOR_IDS, ...TRAPDOOR_IDS,
+  B.REDSTONE_TORCH, B.REDSTONE_TORCH_OFF, B.REPEATER, B.COMPARATOR, ...DOOR_IDS, ...TRAPDOOR_IDS,
 ]);
+/** what a comparator takes as a side input (blocks, even powered ones, don't count) */
+const SIDE_SOURCES = new Set<number>([
+  B.REDSTONE_WIRE, B.REPEATER, B.COMPARATOR, B.REDSTONE_BLOCK, B.REDSTONE_TORCH, B.LEVER, B.WOODEN_BUTTON,
+  B.STONE_BUTTON, B.PRESSURE_PLATE, B.STONE_PRESSURE_PLATE, B.OBSERVER, B.DAYLIGHT_DETECTOR,
+]);
+/** respawn anchor charge 0..4 -> comparator level */
+const ANCHOR_LEVEL = [0, 3, 7, 11, 15];
 /** oak plate linger after the last thing steps off (vanilla ~1 s) */
 const PLATE_RELEASE = 20;
 const BURNOUT_WINDOW = 60, BURNOUT_FLIPS = 8, BURNOUT_TICKS = 160;
@@ -110,18 +125,32 @@ export class Redstone {
 
   /** Something redstone-relevant changed at (x, y, z): re-solve around it now. */
   update(x: number, y: number, z: number): void {
+    this.observe(x, y, z);
     this.dirty.add(key(x, y, z));
     if (!this.flushing) this.flush();
+  }
+
+  /** The block or state at (x, y, z) changed: observers facing it fire. */
+  observe(x: number, y: number, z: number): void {
+    const w = this.world;
+    for (let f = 0; f < 6; f++) {
+      const ox = x - D6[f][0], oy = y - D6[f][1], oz = z - D6[f][2];
+      if (w.getBlock(ox, oy, oz) !== B.OBSERVER) continue;
+      const ok = key(ox, oy, oz);
+      const st = w.redstoneStates.get(ok);
+      if ((st?.facing ?? 0) !== f || st?.active || this.sched.has(ok)) continue;
+      this.schedule(ok, 2); // fires one redstone tick later
+    }
   }
 
   /** World edit hook: react when the block or a neighbour is part of a circuit
    *  (placing a block can cut or carry power; breaking one can drop parts). */
   blockChanged(x: number, y: number, z: number, oldId: number, newId: number): void {
     const RS = this.world.redstoneBlocks;
-    let near = RS.has(key(x, y, z)) || COMPONENTS.has(oldId) || COMPONENTS.has(newId) ||
-      oldId === B.REDSTONE_WIRE || oldId === B.REDSTONE_BLOCK || PLATE_IDS.has(oldId) || BUTTON_IDS.has(oldId) || oldId === B.LEVER;
+    let near = REDSTONE_IDS.has(oldId) || REDSTONE_IDS.has(newId) || COMPONENTS.has(oldId) || COMPONENTS.has(newId);
     if (!near) for (const [dx, dy, dz] of D6) if (RS.has(key(x + dx, y + dy, z + dz))) { near = true; break; }
     if (near) this.update(x, y, z);
+    if (newId === B.DAYLIGHT_DETECTOR) this.readDaylight(x, y, z);
   }
 
   /** Right-click on a part the engine owns. Returns true when it was used. */
@@ -133,6 +162,7 @@ export class Redstone {
       this.world.redstoneStates.set(k, st);
       this.world.markDirty(Math.floor(x / 16), Math.floor(z / 16));
       this.hooks.sound('click', x, y, z);
+      this.observe(x, y, z);
       return true;
     }
     if (id === B.NOTE_BLOCK) {
@@ -140,6 +170,24 @@ export class Redstone {
       st.pitch = ((st.pitch ?? 0) + 1) % 25;
       this.world.redstoneStates.set(k, st);
       this.playNote(x, y, z);
+      this.observe(x, y, z);
+      return true;
+    }
+    if (id === B.COMPARATOR) {
+      const st = this.state(k);
+      st.sub = !st.sub;
+      this.world.redstoneStates.set(k, st);
+      this.world.markDirty(Math.floor(x / 16), Math.floor(z / 16));
+      this.hooks.sound('click', x, y, z);
+      this.update(x, y, z);
+      return true;
+    }
+    if (id === B.DAYLIGHT_DETECTOR) {
+      const inv = this.world.bedFacings.get(k) === 1;
+      this.world.bedFacings.set(k, inv ? 0 : 1);
+      this.world.markDirty(Math.floor(x / 16), Math.floor(z / 16));
+      this.hooks.sound('click', x, y, z);
+      this.readDaylight(x, y, z);
       return true;
     }
     return false;
@@ -166,6 +214,7 @@ export class Redstone {
       this.hooks.sound('click', x, y, z);
       w.markDirty(Math.floor(x / 16), Math.floor(z / 16));
       this.dirty.add(k);
+      this.observe(x, y, z);
     }
     for (const k of w.plateBlocks) {
       const [x, y, z] = unkey(k);
@@ -181,6 +230,7 @@ export class Redstone {
           this.hooks.sound('plateOn', x, y, z);
           w.markDirty(Math.floor(x / 16), Math.floor(z / 16));
           this.dirty.add(k);
+          this.observe(x, y, z);
         }
         w.redstoneStates.set(k, s);
       } else if (st?.active) {
@@ -190,7 +240,18 @@ export class Redstone {
           this.hooks.sound('plateOff', x, y, z);
           w.markDirty(Math.floor(x / 16), Math.floor(z / 16));
           this.dirty.add(k);
+          this.observe(x, y, z);
         }
+      }
+    }
+    // comparators re-read their containers every other tick, detectors the sky every second
+    if (w.pollBlocks.size) {
+      const sun = this.tickNo % 20 === 0;
+      for (const k of w.pollBlocks) {
+        const [x, y, z] = unkey(k);
+        const id = w.getBlock(x, y, z);
+        if (id === B.COMPARATOR && (this.tickNo & 1) === 0) this.evaluate(k);
+        else if (id === B.DAYLIGHT_DETECTOR && sun) this.readDaylight(x, y, z);
       }
     }
     if (this.sched.size) {
@@ -227,55 +288,73 @@ export class Redstone {
       const f = this.world.torchFacings.get(key(x, y, z));
       return f === undefined ? [0, -1, 0] : [TORCH_WALL[f][0], 0, TORCH_WALL[f][1]];
     }
-    if (PLATE_IDS.has(id) || id === B.REPEATER || id === B.REDSTONE_WIRE) return [0, -1, 0];
+    if (PLATE_IDS.has(id) || id === B.REPEATER || id === B.COMPARATOR || id === B.REDSTONE_WIRE) return [0, -1, 0];
     const f = this.world.redstoneStates.get(key(x, y, z))?.facing;
     return ATTACH[f ?? 1] ?? ATTACH[1];
   }
 
-  /** Is a conductor strongly powered (feeds dust as well as components)? */
-  private strong(x: number, y: number, z: number): boolean {
+  /** Strong power level of a conductor (it feeds dust as well as components):
+   *  levers/buttons hung on it, a plate on top, a lit torch under it, and
+   *  repeaters, comparators and pulsing observers pointed into it. */
+  private strongLevel(x: number, y: number, z: number): number {
     const w = this.world;
+    let best = 0;
     for (const [dx, dy, dz] of D6) {
       const nx = x + dx, ny = y + dy, nz = z + dz;
       const id = w.getBlock(nx, ny, nz);
       if (id === B.LEVER || BUTTON_IDS.has(id)) {
         if (!w.redstoneStates.get(key(nx, ny, nz))?.active) continue;
         const a = this.attachOf(nx, ny, nz, id);
-        if (a[0] === -dx && a[1] === -dy && a[2] === -dz) return true;
+        if (a[0] === -dx && a[1] === -dy && a[2] === -dz) return 15;
       } else if (PLATE_IDS.has(id)) {
-        if (dy === 1 && w.redstoneStates.get(key(nx, ny, nz))?.active) return true;
+        if (dy === 1 && w.redstoneStates.get(key(nx, ny, nz))?.active) return 15;
       } else if (id === B.REDSTONE_TORCH) {
-        if (dy === -1) return true; // a torch powers the block above it
-      } else if (id === B.REPEATER) {
-        const st = w.redstoneStates.get(key(nx, ny, nz));
-        if (st?.active && dy === 0) {
-          const [fx, fz] = H4[(st.facing ?? 0) & 3];
-          if (fx === -dx && fz === -dz) return true;
-        }
+        if (dy === -1) return 15; // a torch powers the block above it
+      } else if (id === B.REPEATER || id === B.COMPARATOR || id === B.OBSERVER) {
+        best = Math.max(best, this.emit(nx, ny, nz, -dx, -dy, -dz, false, true));
+        if (best >= 15) return 15;
       }
     }
-    return false;
+    return best;
   }
 
-  /** Is a conductor powered at all (strongly, or weakly by dust)? */
-  private weak(x: number, y: number, z: number): boolean {
-    if (this.strong(x, y, z)) return true;
-    if (this.world.getBlock(x, y + 1, z) === B.REDSTONE_WIRE && this.dust(x, y + 1, z) > 0) return true;
+  /** Power level of a conductor for components: strong power, or weak power
+   *  from dust on top of it / dust pointing into it. */
+  private weakLevel(x: number, y: number, z: number): number {
+    let best = this.strongLevel(x, y, z);
+    if (best >= 15) return best;
+    if (this.world.getBlock(x, y + 1, z) === B.REDSTONE_WIRE) best = Math.max(best, this.dust(x, y + 1, z));
     for (let i = 0; i < 4; i++) {
       const nx = x - H4[i][0], nz = z - H4[i][1]; // dust at nx that points +H4[i] into us
-      if (this.world.getBlock(nx, y, nz) !== B.REDSTONE_WIRE || this.dust(nx, y, nz) <= 0) continue;
-      if (dustPowerMask(this.shape(nx, y, nz).mask) & (1 << i)) return true;
+      if (this.world.getBlock(nx, y, nz) !== B.REDSTONE_WIRE) continue;
+      const p = this.dust(nx, y, nz);
+      if (p > best && dustPowerMask(this.shape(nx, y, nz).mask) & (1 << i)) best = p;
     }
-    return false;
+    return best;
   }
 
   /** Power the block at s sends into its neighbour s + d. Dust targets only
    *  take strong power (weakly powered blocks don't feed dust). */
-  private emit(sx: number, sy: number, sz: number, dx: number, dy: number, dz: number, toDust: boolean): number {
+  private emit(sx: number, sy: number, sz: number, dx: number, dy: number, dz: number, toDust: boolean, diodesOnly = false): number {
     const w = this.world;
     const id = w.getBlock(sx, sy, sz);
+    if (diodesOnly && id !== B.REPEATER && id !== B.COMPARATOR && id !== B.OBSERVER) return 0;
     switch (id) {
       case B.AIR: return 0;
+      case B.COMPARATOR: {
+        const st = w.redstoneStates.get(key(sx, sy, sz));
+        if (!st?.level || dy !== 0) return 0;
+        const [fx, fz] = H4[(st.facing ?? 0) & 3];
+        return fx === dx && fz === dz ? st.level : 0;
+      }
+      case B.OBSERVER: {
+        const st = w.redstoneStates.get(key(sx, sy, sz));
+        if (!st?.active) return 0;
+        const [bx, by, bz] = D6[(st.facing ?? 0) % 6]; // its face; the output is the back
+        return bx === -dx && by === -dy && bz === -dz ? 15 : 0;
+      }
+      case B.DAYLIGHT_DETECTOR:
+        return w.redstoneStates.get(key(sx, sy, sz))?.level ?? 0;
       case B.LEVER: case B.WOODEN_BUTTON: case B.STONE_BUTTON: case B.PRESSURE_PLATE: case B.STONE_PRESSURE_PLATE:
         return w.redstoneStates.get(key(sx, sy, sz))?.active ? 15 : 0;
       case B.REDSTONE_TORCH: {
@@ -298,8 +377,7 @@ export class Redstone {
       }
     }
     if (!conducts(id)) return 0;
-    if (this.strong(sx, sy, sz)) return 15;
-    return !toDust && this.weak(sx, sy, sz) ? 15 : 0;
+    return toDust ? this.strongLevel(sx, sy, sz) : this.weakLevel(sx, sy, sz);
   }
 
   /** Strongest power reaching a component from its six sides. */
@@ -319,7 +397,70 @@ export class Redstone {
     const bx = x + ax, by = y + ay, bz = z + az;
     const b = this.world.getBlock(bx, by, bz);
     if (b === B.REDSTONE_BLOCK) return true;
-    return conducts(b) && this.weak(bx, by, bz);
+    return conducts(b) && this.weakLevel(bx, by, bz) > 0;
+  }
+
+  /** A comparator's output from its current inputs. */
+  private comparatorOut(x: number, y: number, z: number, st: RedstoneState): number {
+    const w = this.world;
+    const f = (st.facing ?? 0) & 3;
+    const [fx, fz] = H4[f];
+    const bx = x - fx, bz = z - fz;
+    const bid = w.getBlock(bx, y, bz);
+    let rear = this.emit(bx, y, bz, fx, 0, fz, false);
+    const held = this.containerLevel(bx, y, bz, bid);
+    if (held !== null) rear = held; // a container behind is read, not powered
+    else if (conducts(bid) && rear < 15) {
+      const beyond = this.containerLevel(bx - fx, y, bz - fz, w.getBlock(bx - fx, y, bz - fz));
+      if (beyond !== null) rear = Math.max(rear, beyond); // read through one solid block
+    }
+    let side = 0;
+    for (const sf of [(f + 1) & 3, (f + 3) & 3]) {
+      const [sx, sz] = H4[sf];
+      if (!SIDE_SOURCES.has(w.getBlock(x + sx, y, z + sz))) continue;
+      side = Math.max(side, this.emit(x + sx, y, z + sz, -sx, 0, -sz, false));
+    }
+    return st.sub ? Math.max(0, rear - side) : rear >= side ? rear : 0;
+  }
+
+  /** Comparator reading of a block (fill level 0..15), or null if it isn't readable. */
+  private containerLevel(x: number, y: number, z: number, id: number): number | null {
+    const w = this.world;
+    const k = key(x, y, z);
+    const fill = (slots: Slot[]): number => {
+      let sum = 0;
+      for (const s of slots) if (s) sum += s.count / (hasDef(s.id) ? def(s.id).stack || 64 : 64);
+      return sum > 0 ? Math.floor(1 + (sum / slots.length) * 14) : 0;
+    };
+    switch (id) {
+      case B.CHEST: case B.CHEST_LOOT: case B.BARREL: {
+        const be = w.blockEntities.get(k);
+        return be?.type === 'chest' ? fill(be.slots) : 0;
+      }
+      case B.FURNACE: case B.FURNACE_LIT: {
+        const be = w.blockEntities.get(k);
+        return be?.type === 'furnace' ? fill([be.input, be.fuel, be.output]) : 0;
+      }
+      case B.COMPOSTER: return Math.min(8, w.bedFacings.get(k) ?? 0);
+      case B.CAKE: return Math.max(0, (7 - (w.bedFacings.get(k) ?? 0)) * 2);
+      case B.RESPAWN_ANCHOR: return ANCHOR_LEVEL[Math.max(0, Math.min(4, w.bedFacings.get(k) ?? 0))];
+      default: return null;
+    }
+  }
+
+  /** Re-read a daylight detector (invert: meta 1) and pass a change on. */
+  private readDaylight(x: number, y: number, z: number): void {
+    const w = this.world, k = key(x, y, z);
+    const sun = Math.max(0, Math.min(15, Math.round(this.hooks.sunlight(x, y, z))));
+    const level = w.bedFacings.get(k) === 1 ? 15 - sun : sun;
+    const st = this.state(k);
+    if ((st.level ?? -1) === level) return;
+    st.level = level;
+    st.active = level > 0;
+    w.redstoneStates.set(k, st);
+    this.observe(x, y, z);
+    this.dirty.add(k);
+    if (!this.flushing) this.flush();
   }
 
   /** Signal at a repeater's back. */
@@ -388,6 +529,8 @@ export class Redstone {
       if ((w.redstonePower.get(k) ?? 0) === l) continue;
       if (l > 0) w.redstonePower.set(k, l); else w.redstonePower.delete(k);
       changed.push(k);
+      const [x, y, z] = unkey(k);
+      this.observe(x, y, z);
     }
     return changed;
   }
@@ -448,6 +591,7 @@ export class Redstone {
         if (on === !!st.active) return;
         st.active = on;
         w.redstoneStates.set(k, st);
+        this.observe(x, y, z);
         if (on) this.playNote(x, y, z);
         return;
       }
@@ -464,12 +608,18 @@ export class Redstone {
         if (this.repeaterInput(x, y, z, st) !== !!st.active) this.schedule(k, (st.delay ?? 1) * 2);
         return;
       }
+      case B.COMPARATOR: {
+        const st = this.state(k);
+        if (this.comparatorOut(x, y, z, st) !== (st.level ?? 0)) this.schedule(k, 2);
+        return;
+      }
     }
     if (DOOR_IDS.has(id) || TRAPDOOR_IDS.has(id)) {
       const ly = DOOR_UPPERS.has(id) ? y - 1 : y;
       const on = TRAPDOOR_IDS.has(id) ? this.input(x, y, z) > 0 : this.input(x, ly, z) > 0 || this.input(x, ly + 1, z) > 0;
       const moved = w.applyDoorPower(x, y, z, on);
       if (!moved) return;
+      this.observe(x, ly, z); if (!TRAPDOOR_IDS.has(id)) this.observe(x, ly + 1, z);
       const iron = REDSTONE_ONLY_DOORS.has(id);
       this.hooks.sound(moved === 'open' ? (iron ? 'ironDoorOpen' : 'doorOpen') : (iron ? 'ironDoorClose' : 'doorClose'), x, y, z);
     }
@@ -519,6 +669,34 @@ export class Redstone {
       const [fx, fz] = H4[(st.facing ?? 0) & 3];
       this.dirty.add(k);
       this.dirty.add(key(x + fx, y, z + fz));
+      this.observe(x, y, z);
+      return;
+    }
+    if (id === B.COMPARATOR) {
+      const st = this.state(k);
+      const out = this.comparatorOut(x, y, z, st);
+      if (out === (st.level ?? 0)) return;
+      st.level = out;
+      st.active = out > 0;
+      w.redstoneStates.set(k, st);
+      w.markDirty(Math.floor(x / 16), Math.floor(z / 16));
+      const [fx, fz] = H4[(st.facing ?? 0) & 3];
+      this.dirty.add(k);
+      this.dirty.add(key(x + fx, y, z + fz));
+      this.observe(x, y, z);
+      return;
+    }
+    if (id === B.OBSERVER) {
+      // on: pulse for one redstone tick, then off (a change while pulsing is ignored)
+      const st = this.state(k);
+      st.active = !st.active;
+      w.redstoneStates.set(k, st);
+      if (st.active) this.schedule(k, 2);
+      w.markDirty(Math.floor(x / 16), Math.floor(z / 16));
+      const [bx, by, bz] = D6[(st.facing ?? 0) % 6];
+      this.dirty.add(k);
+      this.dirty.add(key(x - bx, y - by, z - bz)); // the block behind it
+      this.observe(x, y, z);
     }
   }
 
@@ -526,7 +704,7 @@ export class Redstone {
    *  on, plates/dust/repeaters/torches their floor or wall). null = not a part. */
   supported(x: number, y: number, z: number, id: number): boolean | null {
     if (!(id === B.LEVER || BUTTON_IDS.has(id) || PLATE_IDS.has(id) || REDSTONE_TORCHES.has(id) ||
-      id === B.REPEATER || id === B.REDSTONE_WIRE)) return null;
+      id === B.REPEATER || id === B.COMPARATOR || id === B.REDSTONE_WIRE)) return null;
     const [ax, ay, az] = this.attachOf(x, y, z, id);
     const b = this.world.getBlock(x + ax, y + ay, z + az);
     return b !== B.AIR && hasDef(b) && def(b).solid;

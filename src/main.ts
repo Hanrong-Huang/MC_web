@@ -221,6 +221,15 @@ class Game {
         this.entities.spawnNote(x + 0.5, y + 1.15, z + 0.5, pitch);
       },
       smoke: (x, y, z) => this.entities.spawnSmoke(x + 0.5, y + 0.7, z + 0.5, 4),
+      sunlight: (x, y, z) => {
+        if (this.world.dimension !== 'overworld') return 0; // no sky down there
+        const open = Math.max(0, (this.world.skyLight(x, y + 1, z) - 0.25) / 0.75);
+        const t = this.dayTime; // 0 sunrise, 0.25 noon, 0.5 sunset
+        const sun = t < 0.5 ? Math.sin(Math.PI * t / 0.5) : 0;
+        const w = this.weather;
+        const gloom = w.kind === 'clear' ? 1 : 1 - 0.25 * w.intensity;
+        return 15 * open * Math.min(1, sun * 1.6) * gloom;
+      },
     });
     this.fire = new FireSystem(this.world, {
       rainingAt: (x, y, z) => this.isRainingOn(x, y, z),

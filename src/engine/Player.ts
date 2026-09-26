@@ -1979,7 +1979,8 @@ export class Player {
         return;
       }
       // repeaters cycle their delay, note blocks step their pitch (sneak to place against them)
-      if ((t.id === B.REPEATER || t.id === B.NOTE_BLOCK) && !this.sneaking && this.placeCooldown <= 0 &&
+      if ((t.id === B.REPEATER || t.id === B.NOTE_BLOCK || t.id === B.COMPARATOR || t.id === B.DAYLIGHT_DETECTOR) &&
+        !this.sneaking && this.placeCooldown <= 0 &&
         this.deps.useRedstone?.(t.x, t.y, t.z, t.id)) {
         this.placeCooldown = 0.25;
         this.deps.renderer.triggerSwing();
@@ -2276,6 +2277,14 @@ export class Player {
     // a repeater points away from the player; its state must exist before the
     // block does so the engine reads the right facing when it first evaluates it
     if (placeId === B.REPEATER) world.redstoneStates.set(`${px},${py},${pz}`, { active: false, facing, delay: 1 });
+    if (placeId === B.COMPARATOR) world.redstoneStates.set(`${px},${py},${pz}`, { active: false, facing, level: 0 });
+    if (placeId === B.OBSERVER) {
+      // its face looks back at the player (along the nearest axis), the output points away
+      const d = this.lookDir();
+      const ax = Math.abs(d.x), ay = Math.abs(d.y), az = Math.abs(d.z);
+      const look = ax >= ay && ax >= az ? (d.x > 0 ? 0 : 1) : ay >= az ? (d.y > 0 ? 2 : 3) : (d.z > 0 ? 4 : 5);
+      world.redstoneStates.set(`${px},${py},${pz}`, { active: false, facing: look ^ 1 });
+    }
     // ladders must attach to a solid block on the targeted face
     if (placeId === B.LADDER) {
       const ax = this.target.x, ay = this.target.y, az = this.target.z;

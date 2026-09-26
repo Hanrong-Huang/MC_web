@@ -212,6 +212,12 @@ export enum B {
   STONE_PRESSURE_PLATE = 284,
   /** pitch (0..24) lives in redstoneStates */
   NOTE_BLOCK = 285,
+  /** facing (0..3, output side) / sub (subtract mode) / level (output 0..15) in redstoneStates */
+  COMPARATOR = 286,
+  /** facing (0..5 = D6 index its face looks along) / active (pulsing) in redstoneStates */
+  OBSERVER = 287,
+  /** level in redstoneStates; meta 1 (bedFacings) = inverted (night sensor) */
+  DAYLIGHT_DETECTOR = 288,
 }
 
 export enum I {
@@ -1345,6 +1351,7 @@ export function shapeBoxes(id: number, meta: number, conn: number, open: boolean
     case B.CAMPFIRE: return [[0, 0, 0, 1, 7 * P16, 1]];
     case B.CAKE: return [[(1 + 2 * Math.min(6, meta)) * P16, 0, P16, 15 * P16, 0.5, 15 * P16]];
     case B.FLOWER_POT: return [[5 * P16, 0, 5 * P16, 11 * P16, 6 * P16, 11 * P16]];
+    case B.DAYLIGHT_DETECTOR: return [[0, 0, 0, 1, 6 * P16, 1]];
     default: return null;
   }
 }
@@ -2138,27 +2145,36 @@ export const REDSTONE_IDS = new Set<number>([
   B.REDSTONE_WIRE, B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON, B.PRESSURE_PLATE, B.STONE_PRESSURE_PLATE,
   B.REDSTONE_LAMP, B.REDSTONE_LAMP_LIT, B.PISTON, B.STICKY_PISTON, B.PISTON_HEAD,
   B.REDSTONE_TORCH, B.REDSTONE_TORCH_OFF, B.REDSTONE_BLOCK, B.REPEATER, B.NOTE_BLOCK,
+  B.COMPARATOR, B.OBSERVER, B.DAYLIGHT_DETECTOR,
   ...DOOR_IDS, ...TRAPDOOR_IDS,
 ]);
+/** Parts the engine re-reads on a timer (comparators watch containers, daylight detectors the sun). */
+export const POLL_IDS = new Set<number>([B.COMPARATOR, B.DAYLIGHT_DETECTOR]);
 /** Parts dust visibly joins up with (besides more dust and a repeater's ends). */
 const DUST_JOINS = new Set<number>([
   B.LEVER, B.WOODEN_BUTTON, B.STONE_BUTTON, B.PRESSURE_PLATE, B.STONE_PRESSURE_PLATE,
-  B.REDSTONE_TORCH, B.REDSTONE_TORCH_OFF, B.REDSTONE_BLOCK,
+  B.REDSTONE_TORCH, B.REDSTONE_TORCH_OFF, B.REDSTONE_BLOCK, B.DAYLIGHT_DETECTOR,
 ]);
+/** Solid, opaque blocks that still don't carry power (vanilla). */
+const NON_CONDUCTORS = new Set<number>([B.OBSERVER, B.PISTON, B.STICKY_PISTON]);
 /** Horizontal steps by facing code (0=-z, 1=-x, 2=+z, 3=+x). */
 export const H4: readonly [number, number][] = [[0, -1], [-1, 0], [0, 1], [1, 0]];
+/** The six unit steps (+x, -x, +y, -y, +z, -z); observers keep a D6 index. */
+export const D6: readonly [number, number, number][] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+/** H4 facing code -> D6 index of the same step. */
+export const H4_TO_D6: readonly number[] = [5, 1, 4, 0];
 
 /** Full opaque blocks carry redstone power (vanilla "conductors"): glass,
  *  slabs, leaves and the like don't. */
 export function conducts(id: number): boolean {
-  return id !== B.AIR && hasDef(id) && def(id).solid && def(id).opaque && !SHAPED.has(id);
+  return id !== B.AIR && hasDef(id) && def(id).solid && def(id).opaque && !SHAPED.has(id) && !NON_CONDUCTORS.has(id);
 }
 
 /** Which ways dust at (x, y, z) runs: `mask` bit i = toward H4[i] (same level,
  *  or up/down a block step); `up` bit i = it climbs the side of that block. */
 export function dustShape(
   get: (x: number, y: number, z: number) => number,
-  repeaterFacing: (x: number, y: number, z: number) => number | undefined,
+  stateFacing: (x: number, y: number, z: number) => number | undefined,
   x: number, y: number, z: number,
 ): { mask: number; up: number } {
   let mask = 0, up = 0;
@@ -2167,7 +2183,8 @@ export function dustShape(
     const nx = x + H4[i][0], nz = z + H4[i][1];
     const n = get(nx, y, nz);
     if (n === B.REDSTONE_WIRE || DUST_JOINS.has(n) ||
-      (n === B.REPEATER && ((repeaterFacing(nx, y, nz) ?? 0) & 1) === (i & 1))) { mask |= 1 << i; continue; }
+      ((n === B.REPEATER || n === B.COMPARATOR) && ((stateFacing(nx, y, nz) ?? 0) & 1) === (i & 1)) ||
+      (n === B.OBSERVER && stateFacing(nx, y, nz) === H4_TO_D6[i])) { mask |= 1 << i; continue; }
     if (!capped && conducts(n) && get(nx, y + 1, nz) === B.REDSTONE_WIRE) { mask |= 1 << i; up |= 1 << i; continue; }
     if (!conducts(n) && get(nx, y - 1, nz) === B.REDSTONE_WIRE) mask |= 1 << i;
   }
@@ -2180,4 +2197,26 @@ export function dustPowerMask(mask: number): number {
   if (mask === 0) return 15;
   if ((mask & (mask - 1)) === 0) { const i = Math.log2(mask); return mask | (1 << ((i + 2) % 4)); }
   return mask;
+}
+
+// --- comparator, observer, daylight detector (286-288) ---
+blockDef({
+  id: B.COMPARATOR, name: 'comparator', label: 'Redstone Comparator', hardness: 0, sound: 'stone',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'comparator', bottom: 'smooth_stone', sides: 'smooth_stone_slab_side' },
+});
+blockDef({
+  id: B.OBSERVER, name: 'observer', label: 'Observer', hardness: 3, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  faces: { top: 'observer_top', bottom: 'observer_top', sides: 'observer_front', front: 'observer_front' },
+});
+blockDef({
+  id: B.DAYLIGHT_DETECTOR, name: 'daylight_detector', label: 'Daylight Detector', hardness: 0.2, tool: 'axe', sound: 'wood', fuel: 15,
+  solid: true, opaque: false, occludes: false,
+  faces: { top: 'daylight_detector_top', bottom: 'planks', sides: 'daylight_detector_side' },
+});
+OPAQUE_LUT[B.OBSERVER] = 1; OCCLUDE_LUT[B.OBSERVER] = 1;
+SHAPED.add(B.DAYLIGHT_DETECTOR); META_BLOCKS.add(B.DAYLIGHT_DETECTOR);
+FLOOR_BLOCKS.add(B.COMPARATOR);
+for (const list of [PLACEABLE, CREATIVE_ITEMS]) {
+  list.splice(list.indexOf(B.REPEATER) + 1, 0, B.COMPARATOR, B.OBSERVER, B.DAYLIGHT_DETECTOR);
 }

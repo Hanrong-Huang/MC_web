@@ -338,6 +338,9 @@ const RECIPES: Recipe[] = [
   { shape: [[I.REDSTONE, I.REDSTONE, I.REDSTONE], [I.REDSTONE, I.REDSTONE, I.REDSTONE], [I.REDSTONE, I.REDSTONE, I.REDSTONE]], out: B.REDSTONE_BLOCK, n: 1 },
   { shape: [[B.REDSTONE_BLOCK]], out: I.REDSTONE, n: 9 },
   { shape: [[P, P, P], [P, I.REDSTONE, P], [P, P, P]], out: B.NOTE_BLOCK, n: 1 },
+  { shape: [[0, B.REDSTONE_TORCH, 0], [B.REDSTONE_TORCH, I.QUARTZ, B.REDSTONE_TORCH], [B.STONE, B.STONE, B.STONE]], out: B.COMPARATOR, n: 1 },
+  { shape: [[C, C, C], [I.REDSTONE, I.REDSTONE, I.QUARTZ], [C, C, C]], out: B.OBSERVER, n: 1 },
+  { shape: [[B.GLASS, B.GLASS, B.GLASS], [I.QUARTZ, I.QUARTZ, I.QUARTZ], [B.OAK_SLAB, B.OAK_SLAB, B.OAK_SLAB]], out: B.DAYLIGHT_DETECTOR, n: 1 },
   // light + utility
   { shape: [[I.COAL], [S]], out: B.TORCH, n: 4 },
   { shape: [[G, SA, G], [SA, G, SA], [G, SA, G]], out: B.TNT, n: 1 },
