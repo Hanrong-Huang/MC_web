@@ -355,6 +355,37 @@ export class World {
     return true;
   }
 
+  /** Redstone input for the door/trapdoor at (x, y, z) (either door half).
+   *  Only a real unpowered↔powered transition moves it, so a hand-opened door
+   *  isn't slammed by an unrelated redstone update. Returns 'open' / 'close'
+   *  when it moved (for the sound), else null. */
+  applyDoorPower(x: number, y: number, z: number, powered: boolean): 'open' | 'close' | null {
+    const id = this.getBlock(x, y, z);
+    const isTrap = TRAPDOOR_IDS.has(id);
+    if (!isTrap && !DOOR_IDS.has(id)) return null;
+    const ly = DOOR_UPPERS.has(id) ? y - 1 : y;
+    const key = `${x},${ly},${z}`;
+    const st = this.doorStates.get(key);
+    if (!st || powered === !!st.poweredBy) return null;
+    st.poweredBy = powered;
+    this.doorStates.set(key, st);
+    if (st.open === powered) return null;
+    st.open = powered;
+    if (!isTrap && st.swing === undefined) st.swing = powered ? 0 : 1;
+    this.markDirty(Math.floor(x / CX), Math.floor(z / CZ));
+    // double doors swing as a pair
+    if (!isTrap) {
+      const partner = this.doorPartner(x, ly, z, st);
+      if (partner && partner.st.open !== st.open) {
+        partner.st.open = st.open;
+        partner.st.poweredBy = powered;
+        partner.st.swing = partner.st.swing ?? (powered ? 0 : 1);
+        this.markDirty(Math.floor(partner.x / CX), Math.floor(partner.z / CZ));
+      }
+    }
+    return powered ? 'open' : 'close';
+  }
+
   /** Adjacent door forming a pair: same facing, opposite hinge, along the
    *  door's width axis. Returns its lower-half key/state, or null. */
   doorPartner(lx: number, ly: number, lz: number, st: DoorState): { key: string; x: number; z: number; st: DoorState } | null {

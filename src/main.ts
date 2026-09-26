@@ -2360,44 +2360,13 @@ class Game {
           this.retractPiston(rx, ry, rz);
         }
       } else if (DOOR_IDS.has(rid) || TRAPDOOR_IDS.has(rid)) {
-        // Power any block of the door: check the lower half and both halves so a
-        // plate beside either the foot or head of the door still drives it.
+        // power either half of a door (a plate beside its foot or head drives it)
         const ly = DOOR_UPPERS.has(rid) ? ry - 1 : ry;
-        const lx = rx, lz = rz;
-        const isTrap = TRAPDOOR_IDS.has(rid);
-        const dkey = isTrap ? `${rx},${ry},${rz}` : `${lx},${ly},${lz}`;
-        const st = this.world.doorStates.get(dkey);
-        if (st) {
-          const powered = isTrap
-            ? this.isPowered(rx, ry, rz)
-            : this.isPowered(lx, ly, lz) || this.isPowered(lx, ly + 1, lz);
-          const wasPowered = !!st.poweredBy;
-          // Only a genuine power transition moves the door, so a hand-opened door
-          // isn't slammed by an unrelated redstone update elsewhere in the world.
-          if (powered !== wasPowered) {
-            st.poweredBy = powered;
-            if (st.open !== powered) {
-              st.open = powered;
-              if (st.swing === undefined) st.swing = powered ? 0 : 1;
-              this.world.doorStates.set(dkey, st);
-              this.audio.play(powered ? 'doorOpen' : 'doorClose');
-              this.world.markDirty(Math.floor(rx / 16), Math.floor(rz / 16));
-              // double doors swing as a pair
-              if (!isTrap) {
-                const partner = this.world.doorPartner(lx, ly, lz, st);
-                if (partner && partner.st.open !== st.open) {
-                  partner.st.open = st.open;
-                  partner.st.poweredBy = powered;
-                  partner.st.swing = partner.st.swing ?? (powered ? 0 : 1);
-                  this.world.doorStates.set(partner.key, partner.st);
-                  this.world.markDirty(Math.floor(partner.x / 16), Math.floor(partner.z / 16));
-                }
-              }
-            } else {
-              this.world.doorStates.set(dkey, st);
-            }
-          }
-        }
+        const powered = TRAPDOOR_IDS.has(rid)
+          ? this.isPowered(rx, ry, rz)
+          : this.isPowered(rx, ly, rz) || this.isPowered(rx, ly + 1, rz);
+        const moved = this.world.applyDoorPower(rx, ry, rz, powered);
+        if (moved) this.audio.play(moved === 'open' ? 'doorOpen' : 'doorClose');
       } else if (rid === B.REDSTONE_WIRE) {
         this.world.markDirty(Math.floor(rx / 16), Math.floor(rz / 16));
       }
