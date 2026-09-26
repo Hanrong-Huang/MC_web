@@ -1,8 +1,8 @@
 // Crimson/warped doors + trapdoors next to the oak ones on the y=108 platform:
 // closed/open, both hinges, a double door, trapdoors closed/open (day + night
 // shots), the icon sheet and held models; then asserts for placing a door from
-// the item (both halves + state), opening it by hand, double doors swinging
-// together, collision, a pressure plate driving a nether door + trapdoor,
+// the item (both halves + state), opening it by hand, double doors opening one
+// leaf at a time (vanilla Java), collision, a pressure plate driving a nether door + trapdoor,
 // breaking one (drops its own item), and the recipe book filling each wood's
 // recipe only from that wood's planks. Screenshots go to $SHOT_DIR.
 import { chromium } from 'playwright';
@@ -205,7 +205,7 @@ const beh = await page.evaluate(({ ox, oy, oz }) => {
   const st2 = w.doorStates.get(`${x + 1},${oy},${z}`);
   res.pairHinge = !!st && !!st2 && !!st2.hingeRight !== !!st.hingeRight;
   res.partner = !!st && !!w.doorPartner(x, oy, z, st);
-  // open by hand on the UPPER half: both leaves swing open
+  // open by hand on the UPPER half: only that leaf opens (vanilla)
   p.inventory.slots[0] = null;
   rightClick(x, oy + 1, z, [0, 0, 0]);
   res.openedByHand = w.doorStates.get(`${x},${oy},${z}`)?.open === true;
@@ -215,7 +215,7 @@ const beh = await page.evaluate(({ ox, oy, oz }) => {
   rightClick(x + 3, oy - 1, z);
   res.trapPlaced = w.getBlock(x + 3, oy, z) === B.WARPED_TRAPDOOR && !!w.doorStates.get(`${x + 3},${oy},${z}`);
   p.inventory.slots[0] = null;
-  rightClick(x + 3, oy, z);
+  rightClick(x + 3, oy, z, [0, -0.8, 0]); // aim at the bottom-half hatch itself
   res.trapOpened = w.isTrapdoorOpen(x + 3, oy, z);
   // break the crimson door's upper half in survival: both halves go, one crimson door drops
   const before = g.entities.entities.length;
@@ -250,7 +250,7 @@ check('placed door has state (closed, facing player)', !!beh.state && beh.state.
 check('closed nether door blocks movement', beh.closedBlocks);
 check('second door pairs with opposite hinge', beh.pairHinge && beh.partner);
 check('opening the upper half opens the door', beh.openedByHand);
-check('double nether doors swing together', beh.pairOpened);
+check('double door: the other leaf stays shut (vanilla)', !beh.pairOpened);
 check('warped trapdoor places + toggles', beh.trapPlaced && beh.trapOpened);
 check('breaking a nether door removes both halves', beh.brokeBoth);
 check('broken crimson door drops one crimson door', beh.dropOk, JSON.stringify(beh.drops));
@@ -284,8 +284,9 @@ const walk = await page.evaluate(async ({ ox, oy, oz }) => {
 }, s);
 console.log(JSON.stringify(walk));
 if (walk.hasKeys) {
-  check('closed crimson door stops the player', walk.zClosed > walk.z + 0.9, `${walk.zClosed.toFixed(2)} vs door z ${walk.z}`);
-  check('open crimson door lets the player through', walk.zOpen < walk.z + 0.9, walk.zOpen.toFixed(2));
+  // the closed leaf is a 3/16 slab on the far (+z) edge of the doorway
+  check('closed crimson door stops the player', walk.zClosed > walk.z + 0.45, `${walk.zClosed.toFixed(2)} vs door z ${walk.z}`);
+  check('open crimson door lets the player through', walk.zOpen < walk.z, walk.zOpen.toFixed(2));
 }
 
 // --- 4. recipe book: each wood's recipe fills only from its own planks -------------------------

@@ -23,6 +23,7 @@ import { probeScape, Scape, ScapeWorld, ScapePlayer, ScapeMob, ScapeWeather } fr
 export type SfxName =
   | 'pop' | 'hurt' | 'hit' | 'eat' | 'burp' | 'click' | 'select' | 'fail' | 'craft' | 'level'
   | 'doorOpen' | 'doorClose' | 'plateOn' | 'plateOff'
+  | 'ironDoorOpen' | 'ironDoorClose'
   | 'explode' | 'bow' | 'snap' | 'fuse' | 'arrowHit' | 'whoosh' | 'lowdur'
   | 'thunder' | 'rain' | 'splash' | 'hoof' | 'mount'
   | 'submerge' | 'emerge'
@@ -69,7 +70,7 @@ const CAP: Record<Pool, number> = { sfx: 36, amb: 20, music: 80 };
 // per-sound loudness trims, balanced against each other by offline renders
 const SFX_GAIN: Partial<Record<SfxName, number>> = {
   pop: 4.5, hit: 1.7, click: 3.5, select: 5, fail: 0.7, plateOn: 1.4, plateOff: 1.4, bow: 1.9,
-  snap: 1.8, arrowHit: 1.8, hoof: 1.2, doorOpen: 0.6, doorClose: 0.4, chestClose: 0.35, mount: 0.35,
+  snap: 1.8, arrowHit: 1.8, hoof: 1.2, doorOpen: 0.6, doorClose: 0.4, ironDoorOpen: 0.6, ironDoorClose: 0.4, chestClose: 0.35, mount: 0.35,
   submerge: 1.6, emerge: 1.6, splash: 0.6, whoosh: 0.6, lavaPop: 3, bubble: 5, hurt: 1.6,
   thunder: 0.8, jump: 0.8, drink: 1.4, ignite: 1.2, bell: 0.9, crackle: 1.6,
 };
@@ -1125,6 +1126,21 @@ export class AudioEngine {
         this.creak(e, 0, 0.14, rand(95, 110), rand(60, 75), 0.05);
         this.knock(e, 0.12, 190, 0.6, 0.16);
         this.nz(e, { at: 0.12, dur: 0.12, vol: 0.25, color: 'brown', type: 'lowpass', f: 300 });
+        break;
+      }
+      case 'ironDoorOpen': {
+        // a heavy latch clack, then the iron leaf grinding round on its hinge
+        this.knock(e, 0, 330, 0.34, 0.07);
+        this.creak(e, 0.02, rand(0.3, 0.36), rand(36, 44), rand(52, 60), 0.05, 0.6);
+        for (const [m, v] of [[1, 0.05], [2.76, 0.03], [5.4, 0.015]] as [number, number][]) this.tn(e, { at: 0.02, dur: 0.5, f: 610 * m, vol: v, attack: 0.003 });
+        break;
+      }
+      case 'ironDoorClose': {
+        // the leaf swings shut into its frame: a dull clang with a metal ring
+        this.creak(e, 0, 0.12, 50, 40, 0.04, 0.6);
+        this.knock(e, 0.1, 150, 0.7, 0.2);
+        for (const [m, v] of [[1, 0.07], [2.76, 0.035], [5.4, 0.02]] as [number, number][]) this.tn(e, { at: 0.1, dur: 0.7, f: 470 * m, vol: v, attack: 0.002 });
+        this.nz(e, { at: 0.1, dur: 0.1, vol: 0.2, color: 'brown', type: 'lowpass', f: 380 });
         break;
       }
       case 'chestOpen': {

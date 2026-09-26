@@ -22,8 +22,8 @@ import type { Entity } from './EntityManager';
 import type { RayHit } from './World';
 import { mouseLookSens } from './ControlsSettings';
 import type { PlayerSave } from './Persistence';
-import { netheriteUpgrade, GATE_IDS, CLIMBABLE, HANGING_PLANTS, VINE_BLOCKS, vineDrops } from './Blocks';
-import { DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, doorBlocksFor, doorItemFor } from './Blocks';
+import { netheriteUpgrade, GATE_IDS, SHAPED, CLIMBABLE, HANGING_PLANTS, VINE_BLOCKS, vineDrops } from './Blocks';
+import { DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, REDSTONE_ONLY_DOORS, doorBlocksFor, doorItemFor } from './Blocks';
 import { PORTAL_TIME_CREATIVE, PORTAL_TIME_SURVIVAL } from './NetherPortal';
 
 export type GameMode = 'survival' | 'creative';
@@ -515,7 +515,9 @@ export class Player {
       for (let by = Math.floor(this.pos.y); by <= Math.floor(this.pos.y + BOX.h); by++) {
         for (let bz = Math.floor(this.pos.z - hw); bz <= Math.floor(this.pos.z + hw); bz++) {
           for (let bx = Math.floor(this.pos.x - hw); bx <= Math.floor(this.pos.x + hw); bx++) {
-            if (CLIMBABLE.has(world.getBlock(bx, by, bz))) { this.onLadder = true; break; }
+            const cid = world.getBlock(bx, by, bz);
+            if (CLIMBABLE.has(cid) || (TRAPDOOR_IDS.has(cid) && world.isTrapdoorOpen(bx, by, bz) &&
+              world.getBlock(bx, by - 1, bz) === B.LADDER)) { this.onLadder = true; break; }
           }
           if (this.onLadder) break;
         }
@@ -2010,8 +2012,8 @@ export class Player {
         this.deps.renderer.triggerSwing();
         return;
       }
-      // doors + trapdoors toggle on use
-      if (DOOR_IDS.has(t.id) || TRAPDOOR_IDS.has(t.id)) {
+      // doors + trapdoors toggle on use (iron ones only answer to redstone)
+      if ((DOOR_IDS.has(t.id) || TRAPDOOR_IDS.has(t.id)) && !REDSTONE_ONLY_DOORS.has(t.id)) {
         const wasOpen = TRAPDOOR_IDS.has(t.id)
           ? world.isTrapdoorOpen(t.x, t.y, t.z)
           : !!world.doorStateAt(t.x, t.y, t.z)?.open;
@@ -2145,18 +2147,7 @@ export class Player {
       // facing: 0=-z,1=-x,2=+z,3=+x — derived from the closest cardinal yaw
       const yawDeg = ((this.yaw * 180 / Math.PI) % 360 + 360) % 360;
       const facing = (Math.round(yawDeg / 90) % 4) as DoorFacing;
-      const rightX = Math.cos(this.yaw);
-      const rightZ = -Math.sin(this.yaw);
-      const offX = this.pos.x - (px + 0.5);
-      const offZ = this.pos.z - (pz + 0.5);
-      let hingeRight = offX * rightX + offZ * rightZ > 0;
-      // mirror an adjacent same-facing door so the two form a double door
-      const along = facing % 2 === 0 ? [[1, 0], [-1, 0]] : [[0, 1], [0, -1]];
-      for (const [dx, dz] of along) {
-        if (!DOOR_LOWERS.has(world.getBlock(px + dx, py, pz + dz))) continue;
-        const ns = world.doorStates.get(`${px + dx},${py},${pz + dz}`);
-        if (ns && ns.facing === facing) { hingeRight = !ns.hingeRight; break; }
-      }
+      const hingeRight = this.doorHinge(px, py, pz, facing, doorHalves[0]);
       world.setBlock(px, py, pz, doorHalves[0]);
       world.setBlock(px, py + 1, pz, doorHalves[1]);
       world.doorStates.set(`${px},${py},${pz}`, { facing, open: false, hingeRight, swing: 0 });
@@ -2164,7 +2155,7 @@ export class Player {
       this.deps.onRedstoneUpdate(px, py, pz);
       this.placeCooldown = 0.3;
       this.deps.renderer.triggerSwing();
-      audio.dig('wood', 0.8);
+      audio.dig(def(doorHalves[0]).sound, 0.8, 1, doorHalves[0]);
       this.deps.useDoor(px, py, pz);
       if (this.mode === 'survival') this.inventory.consumeSelected();
       return;
@@ -2273,12 +2264,15 @@ export class Player {
       const ax = this.target.x, ay = this.target.y, az = this.target.z;
       if (!isSolid(world.getBlock(ax, ay, az))) return;
     }
-    // trapdoors need solid ground or a solid neighbor to hinge on
+    // trapdoors (vanilla): clicked on a block's side they hinge on that block,
+    // in the top or bottom half by where the click landed; on a floor or a
+    // ceiling they hinge on the far edge and sit bottom / top. No support needed.
     if (TRAPDOOR_IDS.has(placeId)) {
-      if (!isSolid(world.getBlock(px, py - 1, pz)) &&
-        !isSolid(world.getBlock(px - 1, py, pz)) && !isSolid(world.getBlock(px + 1, py, pz)) &&
-        !isSolid(world.getBlock(px, py, pz - 1)) && !isSolid(world.getBlock(px, py, pz + 1))) return;
-      world.doorStates.set(`${px},${py},${pz}`, { facing: 0, open: false });
+      const { nx, ny, nz } = this.target;
+      const side = ny === 0;
+      const tf = side ? (nz === -1 ? 0 : nx === -1 ? 1 : nz === 1 ? 2 : 3) : (facing + 2) % 4;
+      const top = side ? hitY - py > 0.5 : ny === -1;
+      world.doorStates.set(`${px},${py},${pz}`, { facing: tf as DoorFacing, open: false, top });
     }
     // never place inside the player's own hitbox (solid blocks only)
     if (isSolid(placeId) && boxIntersectsBlock(this.pos, BOX, px, py, pz)) return;
@@ -2288,6 +2282,7 @@ export class Player {
     if (META_BLOCKS.has(placeId)) { if (meta >= 0) world.bedFacings.set(pkey, meta); else world.bedFacings.delete(pkey); }
     if (world.setBlock(px, py, pz, placeId)) {
       if (GATE_IDS.has(placeId)) world.doorStates.set(pkey, { facing: facing as DoorFacing, open: false });
+      if (TRAPDOOR_IDS.has(placeId)) this.deps.onRedstoneUpdate(px, py, pz); // opens at once beside live power
       if (placeId === B.LEVER || placeId === B.WOODEN_BUTTON || placeId === B.STONE_BUTTON || placeId === B.PRESSURE_PLATE) {
         const facing = this.target.ny === -1 ? 0 : this.target.ny === 1 ? 1 : this.target.nz === -1 ? 2 : this.target.nz === 1 ? 3 : this.target.nx === -1 ? 4 : 5;
         world.redstoneStates.set(`${px},${py},${pz}`, { active: false, facing });
@@ -2315,6 +2310,34 @@ export class Player {
       if (this.mode === 'survival') this.inventory.consumeSelected();
       else this.inventory.onChange();
     }
+  }
+
+  /** Vanilla hinge side for a door placed at (px, py, pz) by a player facing
+   *  `facing`: mirror a door of the same kind beside it (a double door), else
+   *  hinge on the side with more full blocks, else on the half of the cell the
+   *  click landed in. True = hinge on the placer's right. */
+  private doorHinge(px: number, py: number, pz: number, facing: number, lower: number): boolean {
+    const { world } = this.deps;
+    const STEP = [[0, -1], [-1, 0], [0, 1], [1, 0]]; // 0=-z, 1=-x, 2=+z, 3=+x
+    const [lx, lz] = STEP[(facing + 1) % 4]; // counter-clockwise = player's left
+    const [rx, rz] = STEP[(facing + 3) % 4]; // clockwise = right
+    const full = (x: number, y: number, z: number): number => {
+      const id = world.getBlock(x, y, z);
+      return isSolid(id) && !SHAPED.has(id) ? 1 : 0;
+    };
+    const i = -full(px + lx, py, pz + lz) - full(px + lx, py + 1, pz + lz) +
+      full(px + rx, py, pz + rz) + full(px + rx, py + 1, pz + rz);
+    const doorLeft = world.getBlock(px + lx, py, pz + lz) === lower;
+    const doorRight = world.getBlock(px + rx, py, pz + rz) === lower;
+    if ((doorLeft && !doorRight) || i > 0) return true;
+    if ((doorRight && !doorLeft) || i < 0) return false;
+    // the click point: which half of the doorway (across the player's view)
+    const t = this.target!;
+    const d = this.lookDir();
+    const hx = this.pos.x + d.x * t.dist - px, hz = this.pos.z + d.z * t.dist - pz;
+    const [fx, fz] = STEP[facing];
+    const left = (fx >= 0 || hz >= 0.5) && (fx <= 0 || hz <= 0.5) && (fz >= 0 || hx <= 0.5) && (fz <= 0 || hx >= 0.5);
+    return !left;
   }
 
   /** Loose an arrow based on how long the bow was drawn. */

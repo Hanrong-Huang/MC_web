@@ -8,7 +8,7 @@
 // light model stays 2-channel without another attribute.
 
 import { CX, CZ, CY } from './Chunk';
-import { B, def, hasDef, ID_LIMIT, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, FENCE_IDS, GATE_IDS, DOOR_IDS, TRAPDOOR_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel } from './Blocks';
+import { B, def, hasDef, ID_LIMIT, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, FENCE_IDS, GATE_IDS, DOOR_IDS, TRAPDOOR_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel, doorFootprints, DOOR_THICK, trapdoorBox } from './Blocks';
 import type { Box } from './Blocks';
 import type { UVRect } from './Textures';
 
@@ -26,7 +26,7 @@ export interface MeshChunk {
   torches: Set<number>;
   glowers: Set<number>;
 }
-export interface MeshDoor { facing: number; hingeRight?: boolean; swing?: number; open?: boolean; }
+export interface MeshDoor { facing: number; hingeRight?: boolean; swing?: number; open?: boolean; top?: boolean; }
 export interface MeshRedstone { active?: boolean; facing?: number; }
 export interface MeshWorld {
   getChunk(cx: number, cz: number): MeshChunk | undefined;
@@ -570,8 +570,8 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           continue;
         }
         if (TRAPDOOR_IDS.has(id)) {
-          const open = !!world.doorStates.get(`${bx + x},${y},${bz + z}`)?.open;
-          emitTrapdoor(solid, atlas, id, x, y, z, open, skyAt(x, y, z), torchAt(x, y, z));
+          const st = world.doorStates.get(`${bx + x},${y},${bz + z}`);
+          emitTrapdoor(solid, atlas, id, x, y, z, st?.facing ?? 0, !!st?.open, !!st?.top, skyAt(x, y, z), torchAt(x, y, z));
           continue;
         }
         if (id === B.PRESSURE_PLATE) {
@@ -863,47 +863,6 @@ function emitTorch(
   g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
 }
 
-/** Door panels are thin slabs; geometry is computed in doorFootprints below. */
-const DOOR_INSET = 1 / 128; // keep the leaf off block walls to avoid z-fighting
-
-/** Closed/open panel footprints (BL=hinge-outer, then around the rectangle).
- *  Closed: thin slab flush against the player-facing block edge, filling the
- *  doorway (vanilla MC). Open: swung 90deg flat against the perpendicular wall
- *  on the hinge side, thickness pointing into the room. Both stay in-bounds and
- *  share the outer hinge corner (footprint[0]) so the swing pivots there. */
-function doorFootprints(
-  facing: number, hingeRight: boolean, t: number,
-): { closed: [number, number][]; open: [number, number][] } {
-  const e = DOOR_INSET;
-  const lo = e, hi = 1 - e;
-  switch (facing) {
-    case 0: // N=+z, flush at z=hi
-      return hingeRight
-        ? { closed: [[hi, hi], [lo, hi], [lo, hi - t], [hi, hi - t]],
-            open: [[hi, hi], [hi, lo], [hi - t, lo], [hi - t, hi]] }
-        : { closed: [[lo, hi], [hi, hi], [hi, hi - t], [lo, hi - t]],
-            open: [[lo, hi], [lo, lo], [lo + t, lo], [lo + t, hi]] };
-    case 2: // N=-z, flush at z=lo
-      return hingeRight
-        ? { closed: [[hi, lo], [lo, lo], [lo, lo + t], [hi, lo + t]],
-            open: [[hi, lo], [hi, hi], [hi - t, hi], [hi - t, lo]] }
-        : { closed: [[lo, lo], [hi, lo], [hi, lo + t], [lo, lo + t]],
-            open: [[lo, lo], [lo, hi], [lo + t, hi], [lo + t, lo]] };
-    case 1: // N=+x, flush at x=hi
-      return hingeRight
-        ? { closed: [[hi, lo], [hi, hi], [hi - t, hi], [hi - t, lo]],
-            open: [[hi, lo], [lo, lo], [lo, lo + t], [hi, lo + t]] }
-        : { closed: [[hi, hi], [hi, lo], [hi - t, lo], [hi - t, hi]],
-            open: [[hi, hi], [lo, hi], [lo, hi - t], [hi, hi - t]] };
-    default: // N=-x, flush at x=lo
-      return hingeRight
-        ? { closed: [[lo, hi], [lo, lo], [lo + t, lo], [lo + t, hi]],
-            open: [[lo, hi], [hi, hi], [hi, hi - t], [lo, hi - t]] }
-        : { closed: [[lo, lo], [lo, hi], [lo + t, hi], [lo + t, lo]],
-            open: [[lo, lo], [hi, lo], [hi, lo + t], [lo, lo + t]] };
-  }
-}
-
 /** Interpolate the leaf between closed and open. Corner-lerp with smoothstep:
  *  the outer hinge corner is fixed and the thin slab stays inside the cell at
  *  every angle, so it never clips neighbouring blocks. */
@@ -927,8 +886,7 @@ function emitDoor(
   facing: number, hingeRight: boolean, swing: number, sky: number, torch: number,
 ): void {
   const rect = atlas.rect(def(id).faces!.sides); // door_lower / door_upper per wood
-  const t = 2 / 16;
-  const foot = doorSwingFootprint(facing, hingeRight, swing, t);
+  const foot = doorSwingFootprint(facing, hingeRight, swing, DOOR_THICK);
   emitDoorPanel(g, x, y, z, foot, rect, sky, torch);
 }
 
@@ -992,18 +950,23 @@ function emitLadder(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: nu
   }
 }
 
-/** Trapdoor: a 3/16-thick hatch flush with the cell top when closed, upright
- *  against the +z edge when open. It is a real six-sided slab (the solid pass
- *  culls back faces, so the old single quad vanished from one side — a closed
- *  hatch was invisible from above): the broad faces carry the whole tile (its
- *  holes alpha-test through), the thin edges a 3px strip of the frame. */
-function emitTrapdoor(g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: number, z: number, open: boolean, sky: number, torch: number): void {
-  const rect = atlas.rect(def(id).faces!.top); // oak 'trapdoor' / '<wood>_trapdoor'
+/** Trapdoor: a 3/16-thick hatch on the bottom or top half of the cell when
+ *  closed, stood up against the edge of the block it hangs on when open
+ *  (`trapdoorBox`, shared with collision). It is a real six-sided slab (the
+ *  solid pass culls back faces, so a single quad vanished from one side): the
+ *  broad faces carry the whole tile (its holes alpha-test through), the thin
+ *  edges a 3px strip of the frame. */
+function emitTrapdoor(
+  g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y: number, z: number,
+  facing: number, open: boolean, top: boolean, sky: number, torch: number,
+): void {
+  const rect = atlas.rect(def(id).faces!.top); // oak 'trapdoor' / '<wood>_trapdoor' / iron
   const t = 3 / 16;
   const lit = torch + soulFlagAt(x, y, z);
   const hStrip: UVRect = { ...rect, v1: rect.v0 + (rect.v1 - rect.v0) * t };
   const vStrip: UVRect = { ...rect, u1: rect.u0 + (rect.u1 - rect.u0) * t };
-  const [x0, x1, y0, y1, z0, z1] = open ? [0, 1, 0, 1, 1 - t, 1] : [0, 1, 1 - t, 1, 0, 1];
+  const [x0, y0, z0, x1, y1, z1] = trapdoorBox(facing, open, top);
+  const alongX = open && (facing & 1) === 1; // open against an x edge: thin in x
   // corners counter-clockwise seen from outside: bottom-left, bottom-right, top-right, top-left
   const face = (c: number[][], r: UVRect): void => {
     const b = g.vertCount;
@@ -1011,7 +974,9 @@ function emitTrapdoor(g: GeoBuilder, atlas: MeshAtlas, id: number, x: number, y:
     for (let i = 0; i < 4; i++) g.v(x + c[i][0], y + c[i][1], z + c[i][2], sky, lit, 1, 1, 1, uv[i][0], uv[i][1]);
     g.tri2(b, b + 1, b + 2, b, b + 2, b + 3);
   };
-  const flatY = open ? hStrip : rect, flatZ = open ? rect : hStrip, sideX = open ? vStrip : hStrip;
+  const flatY = alongX ? vStrip : open ? hStrip : rect;
+  const flatZ = alongX ? vStrip : open ? rect : hStrip;
+  const sideX = alongX ? rect : open ? vStrip : hStrip;
   face([[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]], flatY); // +y
   face([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], flatY); // -y
   face([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], flatZ); // +z

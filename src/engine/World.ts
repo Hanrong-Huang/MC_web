@@ -3,7 +3,8 @@
 
 import { Chunk, chunkKey, CX, CZ, CY, isGlower } from './Chunk';
 import { WorldGenerator } from './WorldGenerator';
-import { B, isSolid, def, hasDef, DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS } from './Blocks';
+import { B, isSolid, def, hasDef, DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, doorBox, trapdoorBox } from './Blocks';
+import type { Box } from './Blocks';
 import { BlockEntity } from './Inventory';
 import { rleDecode, rleEncode, rleIsLegacy } from './Persistence';
 import type { GenResult } from './gen-worker';
@@ -32,7 +33,8 @@ function decodeSaved(saved: Uint8Array, len: number): BlockData {
 }
 
 /** Cardinal facing for a placed door/trapdoor, in 90-degree steps.
- *  For doors this is the direction the player was looking when placed. */
+ *  For doors this is the direction the player was looking when placed; for a
+ *  trapdoor it points away from the edge it hinges on (vanilla FACING). */
 export type DoorFacing = 0 | 1 | 2 | 3; // 0=-z, 1=-x, 2=+z, 3=+x
 /** Persistent state for a door (lower-half keyed). open bit + facing. */
 export interface DoorState {
@@ -45,6 +47,8 @@ export interface DoorState {
   /** last redstone power state seen — lets a manual open survive unrelated
    *  redstone updates (only a real powered↔unpowered transition moves the door) */
   poweredBy?: boolean;
+  /** trapdoors: closed hatch sits in the top half of the cell */
+  top?: boolean;
 }
 
 export interface RedstoneState {
@@ -53,6 +57,28 @@ export interface RedstoneState {
   facing?: number;
   /** pressure plates: ticks remaining before releasing after the last step-off */
   releaseT?: number;
+}
+
+/** Slab test of a ray (origin relative to the box's block) against a
+ *  block-local box: entry distance and the entered face's normal, or null. */
+function rayBox(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, b: Box): { t: number; nx: number; ny: number; nz: number } | null {
+  let tMin = 0, tMax = Infinity, axis = -1, sign = 0;
+  const o = [ox, oy, oz], d = [dx, dy, dz];
+  for (let i = 0; i < 3; i++) {
+    if (Math.abs(d[i]) < 1e-9) {
+      if (o[i] < b[i] || o[i] > b[i + 3]) return null;
+      continue;
+    }
+    let t0 = (b[i] - o[i]) / d[i], t1 = (b[i + 3] - o[i]) / d[i];
+    let s = -1;
+    if (t0 > t1) { const tt = t0; t0 = t1; t1 = tt; s = 1; }
+    if (t0 > tMin) { tMin = t0; axis = i; sign = s; }
+    if (t1 < tMax) tMax = t1;
+    if (tMin > tMax) return null;
+  }
+  // origin inside the box: report the face the ray is heading out of
+  if (axis < 0) { axis = 1; sign = dy > 0 ? -1 : 1; }
+  return { t: tMin, nx: axis === 0 ? sign : 0, ny: axis === 1 ? sign : 0, nz: axis === 2 ? sign : 0 };
 }
 
 export interface RayHit {
@@ -345,13 +371,8 @@ export class World {
     if (st.swing === undefined) st.swing = st.open ? 0 : 1;
     this.doorStates.set(key, st);
     this.markDirty(Math.floor(x / CX), Math.floor(z / CZ));
-    // double doors swing together
-    const partner = this.doorPartner(x, ly, z, st);
-    if (partner && partner.st.open !== st.open) {
-      partner.st.open = st.open;
-      this.doorStates.set(partner.key, partner.st);
-      this.markDirty(Math.floor(partner.x / CX), Math.floor(partner.z / CZ));
-    }
+    // vanilla: each leaf of a double door opens on its own (the pair only
+    // mirrors hinges); redstone between them opens both
     return true;
   }
 
@@ -373,16 +394,6 @@ export class World {
     st.open = powered;
     if (!isTrap && st.swing === undefined) st.swing = powered ? 0 : 1;
     this.markDirty(Math.floor(x / CX), Math.floor(z / CZ));
-    // double doors swing as a pair
-    if (!isTrap) {
-      const partner = this.doorPartner(x, ly, z, st);
-      if (partner && partner.st.open !== st.open) {
-        partner.st.open = st.open;
-        partner.st.poweredBy = powered;
-        partner.st.swing = partner.st.swing ?? (powered ? 0 : 1);
-        this.markDirty(Math.floor(partner.x / CX), Math.floor(partner.z / CZ));
-      }
-    }
     return powered ? 'open' : 'close';
   }
 
@@ -428,6 +439,19 @@ export class World {
   isTrapdoorOpen(x: number, y: number, z: number): boolean {
     if (!TRAPDOOR_IDS.has(this.getBlock(x, y, z))) return false;
     return this.doorStates.get(`${x},${y},${z}`)?.open ?? false;
+  }
+
+  /** Collision/selection box of a door half or trapdoor (block-local), or
+   *  null for any other block. A swinging door counts as open past halfway. */
+  doorShape(x: number, y: number, z: number, id = this.getBlock(x, y, z)): Box | null {
+    if (TRAPDOOR_IDS.has(id)) {
+      const st = this.doorStates.get(`${x},${y},${z}`);
+      return trapdoorBox(st?.facing ?? 0, !!st?.open, !!st?.top);
+    }
+    if (!DOOR_IDS.has(id)) return null;
+    const st = this.doorStateAt(x, y, z);
+    const swing = st?.swing ?? (st?.open ? 1 : 0);
+    return doorBox(st?.facing ?? 0, !!st?.hingeRight, swing >= 0.5);
   }
 
   /** Is this door block currently closed (i.e. should it block movement)? */
@@ -900,7 +924,12 @@ export class World {
     for (let i = 0; i < 256; i++) {
       const id = this.getBlock(x, y, z);
       if (id !== B.AIR && id !== B.WATER && t <= maxDist) {
-        return { x, y, z, nx, ny, nz, id, dist: t };
+        const shape = this.doorShape(x, y, z, id);
+        if (!shape) return { x, y, z, nx, ny, nz, id, dist: t };
+        // a door leaf / trapdoor only fills part of the cell: aim past it
+        // through the open part (vanilla — reach through an open trapdoor)
+        const hit = rayBox(ox - x, oy - y, oz - z, dx, dy, dz, shape);
+        if (hit && hit.t <= maxDist) return { x, y, z, nx: hit.nx, ny: hit.ny, nz: hit.nz, id, dist: hit.t };
       }
       if (tMaxX < tMaxY && tMaxX < tMaxZ) {
         x += stepX; t = tMaxX; tMaxX += tDeltaX; nx = -stepX; ny = 0; nz = 0;

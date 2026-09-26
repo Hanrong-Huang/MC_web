@@ -5,7 +5,7 @@
 // ledge up to STEP_HEIGHT (a slab or a stair) without jumping.
 
 import { World } from './World';
-import { B, def, hasDef, SHAPED, FENCE_IDS, GATE_IDS, DOOR_IDS, shapeBoxes, connectsTo } from './Blocks';
+import { B, def, hasDef, SHAPED, FENCE_IDS, GATE_IDS, shapeBoxes, connectsTo } from './Blocks';
 import type { Box } from './Blocks';
 
 export interface Vec3 { x: number; y: number; z: number }
@@ -25,7 +25,7 @@ const FULL: Box[] = [[0, 0, 0, 1, 1, 1]];
 const NONE: Box[] = [];
 
 /** Collision boxes of the cell (block-local), empty when it doesn't block.
- *  Includes closed doors (full cell) and shaped blocks' partial boxes. */
+ *  Includes door leaves / trapdoors (their slab) and shaped blocks' partial boxes. */
 function cellBoxes(world: World, x: number, y: number, z: number): Box[] {
   const id = world.getBlock(x, y, z);
   if (id === B.AIR || id === B.WATER) return NONE;
@@ -46,9 +46,9 @@ function cellBoxes(world: World, x: number, y: number, z: number): Box[] {
     return hasDef(id) && def(id).solid ? shapeBoxes(id, world.bedFacings.get(key) ?? 0, conn, false, true) ?? FULL : NONE;
   }
   if (hasDef(id) && def(id).solid) return FULL;
-  // doors block while closed
-  if (DOOR_IDS.has(id)) return world.isDoorClosed(x, y, z) ? FULL : NONE;
-  return NONE;
+  // door leaves and trapdoors collide as their thin slab, open or closed (vanilla)
+  const door = world.doorShape(x, y, z, id);
+  return door ? [door] : NONE;
 }
 
 /** Does any block box overlap the entity AABB at `pos`? */

@@ -46,7 +46,7 @@ export interface SaveState {
   /** chunk key "cx,cz" -> RLE bytes */
   world: Record<string, Uint8Array>;
   blockEntities: Record<string, BlockEntitySave>;
-  doors?: Record<string, { facing: number; open: boolean; hingeRight: boolean }>;
+  doors?: Record<string, { facing: number; open: boolean; hingeRight: boolean; top?: boolean }>;
   torches?: Record<string, number>;
   beds?: Record<string, number>;
   water?: Record<string, number>;
@@ -57,7 +57,7 @@ export interface SaveState {
   
   worldNether?: Record<string, Uint8Array>;
   blockEntitiesNether?: Record<string, BlockEntitySave>;
-  doorsNether?: Record<string, { facing: number; open: boolean; hingeRight: boolean }>;
+  doorsNether?: Record<string, { facing: number; open: boolean; hingeRight: boolean; top?: boolean }>;
   torchesNether?: Record<string, number>;
   bedsNether?: Record<string, number>;
   waterNether?: Record<string, number>;

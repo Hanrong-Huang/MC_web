@@ -357,6 +357,8 @@ const RECIPES: Recipe[] = [
   { shape: [[P, P, P], [0, S, 0], [0, S, 0]], out: B.LADDER, n: 3 },
   // 3x2 like vanilla (the old ring shape was the chest's, so it never crafted)
   { shape: [[P, P, P], [P, P, P]], out: B.TRAPDOOR, n: 2 },
+  { shape: [[FE, FE], [FE, FE], [FE, FE]], out: I.IRON_DOOR, n: 3 },
+  { shape: [[FE, FE], [FE, FE]], out: B.IRON_TRAPDOOR, n: 1 },
   // tools & utilities
   { shape: [[0, 0, S], [0, S, ST], [S, 0, 0]], out: I.FISHING_ROD, n: 1 },
   // compass: 4 iron in a diamond around a central iron (dial)

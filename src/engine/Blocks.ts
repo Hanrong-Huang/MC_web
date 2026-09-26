@@ -198,6 +198,10 @@ export enum B {
   WARPED_DOOR_UPPER = 271,
   CRIMSON_TRAPDOOR = 272,
   WARPED_TRAPDOOR = 273,
+  // --- iron door + trapdoor (274-276): redstone-only, see REDSTONE_ONLY_DOORS ---
+  IRON_DOOR_LOWER = 274,
+  IRON_DOOR_UPPER = 275,
+  IRON_TRAPDOOR = 276,
 }
 
 export enum I {
@@ -353,6 +357,7 @@ export enum I {
   // Nether-wood door items (390-391): place the matching door halves
   CRIMSON_DOOR = 390,
   WARPED_DOOR = 391,
+  IRON_DOOR = 392,
 }
 
 /** Wearable-armor slot index: 0 head, 1 chest, 2 legs, 3 feet. */
@@ -1765,12 +1770,31 @@ for (const [lower, upper, trap, item, stem, label] of [
   itemDef({ id: item, name: `${stem}_door`, label: `${label} Door`, sprite: `${stem}_door` });
 }
 
+// Iron door + trapdoor: opened only by redstone (buttons, levers, plates ...).
+blockDef({
+  id: B.IRON_DOOR_LOWER, name: 'iron_door_bottom', label: 'Iron Door', hardness: 5, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  solid: false, opaque: false, occludes: false, drop: { id: I.IRON_DOOR, min: 1, max: 1 },
+  faces: { top: 'iron_block', bottom: 'iron_block', sides: 'iron_door_lower', front: 'iron_door_lower' },
+});
+blockDef({
+  id: B.IRON_DOOR_UPPER, name: 'iron_door_top', label: 'Iron Door', hardness: 5, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  solid: false, opaque: false, occludes: false, drop: null,
+  faces: { top: 'iron_block', bottom: 'iron_block', sides: 'iron_door_upper', front: 'iron_door_upper' },
+});
+blockDef({
+  id: B.IRON_TRAPDOOR, name: 'iron_trapdoor', label: 'Iron Trapdoor', hardness: 5, tool: 'pickaxe', minTier: 2, sound: 'stone',
+  solid: false, opaque: false, occludes: false,
+  faces: { top: 'iron_trapdoor', bottom: 'iron_trapdoor', sides: 'iron_trapdoor' },
+});
+itemDef({ id: I.IRON_DOOR, name: 'iron_door', label: 'Iron Door', sprite: 'iron_door' });
+
 /** Every door kind: [lower half, upper half, door item]. Door code keys off
  *  these sets (never B.DOOR_LOWER alone) so every wood behaves the same. */
 export const DOOR_KINDS: [number, number, number][] = [
   [B.DOOR_LOWER, B.DOOR_UPPER, I.WOOD_DOOR],
   [B.CRIMSON_DOOR_LOWER, B.CRIMSON_DOOR_UPPER, I.CRIMSON_DOOR],
   [B.WARPED_DOOR_LOWER, B.WARPED_DOOR_UPPER, I.WARPED_DOOR],
+  [B.IRON_DOOR_LOWER, B.IRON_DOOR_UPPER, I.IRON_DOOR],
 ];
 export const DOOR_LOWERS = new Set<number>(DOOR_KINDS.map((k) => k[0]));
 export const DOOR_UPPERS = new Set<number>(DOOR_KINDS.map((k) => k[1]));
@@ -1779,7 +1803,77 @@ export const DOOR_IDS = new Set<number>([...DOOR_LOWERS, ...DOOR_UPPERS]);
 /** Door items (what the player holds to place a door). */
 export const DOOR_ITEMS = new Set<number>(DOOR_KINDS.map((k) => k[2]));
 /** Every trapdoor (open state in world.doorStates, keyed by its own cell). */
-export const TRAPDOOR_IDS = new Set<number>([B.TRAPDOOR, B.CRIMSON_TRAPDOOR, B.WARPED_TRAPDOOR]);
+export const TRAPDOOR_IDS = new Set<number>([B.TRAPDOOR, B.CRIMSON_TRAPDOOR, B.WARPED_TRAPDOOR, B.IRON_TRAPDOOR]);
+/** Doors/trapdoors a hand can't open — only redstone moves them (vanilla iron). */
+export const REDSTONE_ONLY_DOORS = new Set<number>([B.IRON_DOOR_LOWER, B.IRON_DOOR_UPPER, B.IRON_TRAPDOOR]);
+
+// --- door / trapdoor geometry (shared by the mesher, collision, outline, raycast) ---
+
+/** Leaf inset off the block walls (keeps the mesh from z-fighting neighbours). */
+export const DOOR_INSET = 1 / 128;
+/** Door leaf thickness (vanilla 3/16). */
+export const DOOR_THICK = 3 / 16;
+/** Trapdoor hatch thickness (vanilla 3/16). */
+export const TRAPDOOR_THICK = 3 / 16;
+
+/** A door leaf's xz footprint, closed and open (four bottom corners each).
+ *  Closed: thin slab flush against the player-facing block edge, filling the
+ *  doorway (vanilla). Open: swung 90deg flat against the perpendicular wall on
+ *  the hinge side, thickness pointing into the room. Both stay in-bounds and
+ *  share the outer hinge corner (footprint[0]) so the swing pivots there. */
+export function doorFootprints(
+  facing: number, hingeRight: boolean, t: number = DOOR_THICK,
+): { closed: [number, number][]; open: [number, number][] } {
+  const lo = DOOR_INSET, hi = 1 - DOOR_INSET;
+  switch (facing) {
+    case 0: // N=+z, flush at z=hi
+      return hingeRight
+        ? { closed: [[hi, hi], [lo, hi], [lo, hi - t], [hi, hi - t]],
+            open: [[hi, hi], [hi, lo], [hi - t, lo], [hi - t, hi]] }
+        : { closed: [[lo, hi], [hi, hi], [hi, hi - t], [lo, hi - t]],
+            open: [[lo, hi], [lo, lo], [lo + t, lo], [lo + t, hi]] };
+    case 2: // N=-z, flush at z=lo
+      return hingeRight
+        ? { closed: [[hi, lo], [lo, lo], [lo, lo + t], [hi, lo + t]],
+            open: [[hi, lo], [hi, hi], [hi - t, hi], [hi - t, lo]] }
+        : { closed: [[lo, lo], [hi, lo], [hi, lo + t], [lo, lo + t]],
+            open: [[lo, lo], [lo, hi], [lo + t, hi], [lo + t, lo]] };
+    case 1: // N=+x, flush at x=hi
+      return hingeRight
+        ? { closed: [[hi, lo], [hi, hi], [hi - t, hi], [hi - t, lo]],
+            open: [[hi, lo], [lo, lo], [lo, lo + t], [hi, lo + t]] }
+        : { closed: [[hi, hi], [hi, lo], [hi - t, lo], [hi - t, hi]],
+            open: [[hi, hi], [lo, hi], [lo, hi - t], [hi, hi - t]] };
+    default: // N=-x, flush at x=lo
+      return hingeRight
+        ? { closed: [[lo, hi], [lo, lo], [lo + t, lo], [lo + t, hi]],
+            open: [[lo, hi], [hi, hi], [hi, hi - t], [lo, hi - t]] }
+        : { closed: [[lo, lo], [lo, hi], [lo + t, hi], [lo + t, lo]],
+            open: [[lo, lo], [hi, lo], [hi, lo + t], [lo, lo + t]] };
+  }
+}
+
+/** Door half's box (block-local), snapped to the whole block edge like vanilla. */
+export function doorBox(facing: number, hingeRight: boolean, open: boolean): Box {
+  const f = doorFootprints(facing, hingeRight)[open ? 'open' : 'closed'];
+  const snap = (v: number): number => (v < 0.01 ? 0 : v > 0.99 ? 1 : v);
+  const xs = f.map((c) => snap(c[0])), zs = f.map((c) => snap(c[1]));
+  return [Math.min(...xs), 0, Math.min(...zs), Math.max(...xs), 1, Math.max(...zs)];
+}
+
+/** Trapdoor box (block-local). Closed: a 3/16 hatch on the bottom or top of
+ *  the cell. Open: stood up against the edge opposite `facing` — the edge of
+ *  the block it was hung on (facing 0=-z, 1=-x, 2=+z, 3=+x, as for doors). */
+export function trapdoorBox(facing: number, open: boolean, top: boolean): Box {
+  const t = TRAPDOOR_THICK;
+  if (!open) return top ? [0, 1 - t, 0, 1, 1, 1] : [0, 0, 0, 1, t, 1];
+  switch (facing & 3) {
+    case 0: return [0, 0, 1 - t, 1, 1, 1]; // hangs on the block at +z
+    case 2: return [0, 0, 0, 1, 1, t];
+    case 1: return [1 - t, 0, 0, 1, 1, 1];
+    default: return [0, 0, 0, t, 1, 1];
+  }
+}
 /** The [lower, upper] halves a door item places, or null. */
 export function doorBlocksFor(item: number): [number, number] | null {
   const k = DOOR_KINDS.find((d) => d[2] === item);
@@ -1852,7 +1946,8 @@ Object.defineProperty(DEFS.get(B.NETHER_GOLD_ORE)!, 'drop', {
 for (const list of [PLACEABLE, CREATIVE_ITEMS]) {
   list.splice(list.indexOf(B.NETHER_BRICKS) + 1, 0, ...NETHER_BLOCKS);
 }
-CREATIVE_ITEMS.splice(CREATIVE_ITEMS.indexOf(I.WOOD_DOOR) + 1, 0, I.CRIMSON_DOOR, I.WARPED_DOOR);
+CREATIVE_ITEMS.splice(CREATIVE_ITEMS.indexOf(I.WOOD_DOOR) + 1, 0, I.CRIMSON_DOOR, I.WARPED_DOOR, I.IRON_DOOR);
+for (const list of [PLACEABLE, CREATIVE_ITEMS]) list.splice(list.indexOf(B.WARPED_TRAPDOOR) + 1, 0, B.IRON_TRAPDOOR);
 
 // =============================================================================
 // Nether utility pass: netherite, soul light, the respawn anchor, fire charges

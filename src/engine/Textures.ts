@@ -4469,6 +4469,71 @@ Object.assign(PACK_MAP, {
   warped_door: { paths: ['item/warped_door'], kind: 'item' },
 } satisfies Record<string, PackEntry>);
 
+// Iron door + trapdoor: brushed pale steel, riveted frame, see-through
+// windows (upper half) and a grid of holes (trapdoor), as in vanilla.
+const IRON_DOOR = { ramp: pal(['#9a9a9a', '#b4b4b4', '#c6c6c6', '#d4d4d4', '#dedede', '#ececec']), frame: '#7c7c7c', lit: '#f6f6f6', dark: '#5a5a5a', rivet: '#6a6a6a' };
+
+function ironPlatePx(seed: number): Px {
+  const f = fbm(seed, [[16, 0.6, 2], [16, 0.4, 4]], 1); // vertical brushing
+  return rampFill(new Px(), IRON_DOOR.ramp.slice(1, 5), f, seed + 1, 0.12);
+}
+
+function ironHole(p: Px, x0: number, y0: number, w: number, h: number): void {
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) p.clear(x0 + i, y0 + j);
+  for (let i = -1; i <= w; i++) { p.set(x0 + i, y0 - 1, IRON_DOOR.dark); p.set(x0 + i, y0 + h, IRON_DOOR.lit); }
+  for (let j = 0; j < h; j++) { p.set(x0 - 1, y0 + j, IRON_DOOR.dark); p.set(x0 + w, y0 + j, IRON_DOOR.lit); }
+}
+
+function ironDoorPx(upper: boolean): Px {
+  const p = ironPlatePx(upper ? 7311 : 7312);
+  for (let j = 0; j < 16; j++) { p.set(0, j, IRON_DOOR.frame); p.set(15, j, IRON_DOOR.frame); p.set(1, j, IRON_DOOR.lit); p.set(14, j, IRON_DOOR.dark); }
+  if (upper) {
+    for (let i = 0; i < 16; i++) { p.set(i, 0, IRON_DOOR.frame); p.set(i, 1, IRON_DOOR.lit); }
+    ironHole(p, 3, 3, 4, 7); ironHole(p, 9, 3, 4, 7); // two tall windows
+    for (let i = 2; i <= 13; i++) p.set(i, 12, IRON_DOOR.dark); // rail
+    for (const [rx, ry] of [[2, 14], [13, 14]]) p.set(rx, ry, IRON_DOOR.rivet);
+  } else {
+    for (let i = 0; i < 16; i++) { p.set(i, 15, IRON_DOOR.frame); p.set(i, 14, IRON_DOOR.dark); }
+    // two recessed panels
+    for (const x0 of [3, 9]) for (let j = 2; j <= 12; j++) for (let i = x0; i <= x0 + 3; i++) {
+      if (j === 2 || i === x0) p.set(i, j, IRON_DOOR.dark);
+      else if (j === 12 || i === x0 + 3) p.set(i, j, IRON_DOOR.lit);
+      else p.mul(i, j, 0.93);
+    }
+    for (const [rx, ry] of [[2, 1], [13, 1], [2, 13], [13, 13]]) p.set(rx, ry, IRON_DOOR.rivet);
+  }
+  return p;
+}
+
+function ironTrapdoorPx(): Px {
+  const p = ironPlatePx(7313);
+  for (let i = 0; i < 16; i++) {
+    p.set(i, 0, IRON_DOOR.lit); p.set(0, i, IRON_DOOR.lit);
+    p.set(i, 15, IRON_DOOR.frame); p.set(15, i, IRON_DOOR.frame);
+  }
+  for (const hy of [3, 7, 11]) for (const hx of [3, 7, 11]) ironHole(p, hx, hy, 2, 2);
+  for (const [rx, ry] of [[1, 1], [14, 1], [1, 14], [14, 14]]) p.set(rx, ry, IRON_DOOR.rivet);
+  return p;
+}
+
+Object.assign(TILE_PAINTERS, {
+  iron_door_lower: (c: Ctx, x: number, y: number) => ironDoorPx(false).put(c, x, y),
+  iron_door_upper: (c: Ctx, x: number, y: number) => ironDoorPx(true).put(c, x, y),
+  iron_trapdoor: (c: Ctx, x: number, y: number) => ironTrapdoorPx().put(c, x, y),
+});
+Object.assign(ITEM_PAINTERS, {
+  iron_door: (c: Ctx) => pixmap(c, 0, 0, [
+    'OOOOOOOOOO', 'OFFFFFFFFO', 'OFkkFFkkFO', 'OFkkFFkkFO', 'OFkkFFkkFO', 'OFkkFFkkFO', 'OFFFFFFFFO', 'OdddddddFO',
+    'OFPPFFPPFO', 'OFPPFFPPFO', 'OFPPFFPPFO', 'OFPPFFPPHO', 'OFPPFFPPFO', 'OFPPFFPPFO', 'OFFFFFFFFO', 'OOOOOOOOOO',
+  ].map((r) => `...${r}...`), { O: '#4a4a4a', F: '#d8d8d8', P: '#bdbdbd', k: '#26282c', d: '#8a8a8a', H: '#6a6a6a' }),
+});
+Object.assign(PACK_MAP, {
+  iron_door_lower: { paths: ['block/iron_door_bottom'], kind: 'tile' },
+  iron_door_upper: { paths: ['block/iron_door_top'], kind: 'tile' },
+  iron_trapdoor: { paths: ['block/iron_trapdoor'], kind: 'tile' },
+  iron_door: { paths: ['item/iron_door'], kind: 'item' },
+} satisfies Record<string, PackEntry>);
+
 // =============================================================================
 // Nether utility pass: netherite block + gear, soul torch / soul lantern, the
 // respawn anchor (charge meter + portal pool), fire charge, blaze powder and

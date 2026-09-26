@@ -29,7 +29,7 @@ import type { MeshJob, MeshChunkSnap } from './engine/mesh-worker';
 import { chunkKey, CX, CY, CZ } from './engine/Chunk';
 import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, HANGING_PLANTS, def, hasDef, isSolid, mobLabel } from './engine/Blocks';
 import { SHAPED, META_BLOCKS, FENCE_IDS, GATE_IDS, VINE_BLOCKS, vineDrops, shapeBoxes, connectsTo, enchantLabel } from './engine/Blocks';
-import { DOOR_IDS, DOOR_UPPERS, TRAPDOOR_IDS } from './engine/Blocks';
+import { DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, REDSTONE_ONLY_DOORS, doorItemFor } from './engine/Blocks';
 import { craftRemainders } from './engine/Inventory';
 import { ExperienceOrbs, XpBar } from './engine/Experience';
 import { Throwables } from './engine/Throwables';
@@ -339,6 +339,8 @@ class Game {
           open: !!v.open,
           hingeRight: !!v.hingeRight,
           swing: v.open ? 1 : 0,
+          // saves from before trapdoor halves drew every closed hatch at the top
+          top: v.top ?? true,
         });
       }
       for (const [k, v] of Object.entries(save.torches ?? {})) ow.torchFacings.set(k, v as number);
@@ -364,6 +366,8 @@ class Game {
           open: !!v.open,
           hingeRight: !!v.hingeRight,
           swing: v.open ? 1 : 0,
+          // saves from before trapdoor halves drew every closed hatch at the top
+          top: v.top ?? true,
         });
       }
       for (const [k, v] of Object.entries(save.torchesNether ?? {})) ne.torchFacings.set(k, v as number);
@@ -1359,9 +1363,9 @@ class Game {
     };
 
     const serializeDoors = (doorMap: Map<string, DoorState>) => {
-      const rec: Record<string, { facing: number; open: boolean; hingeRight: boolean }> = {};
+      const rec: Record<string, { facing: number; open: boolean; hingeRight: boolean; top?: boolean }> = {};
       for (const [k, v] of doorMap) {
-        rec[k] = { facing: v.facing, open: v.open, hingeRight: !!v.hingeRight };
+        rec[k] = { facing: v.facing, open: v.open, hingeRight: !!v.hingeRight, top: !!v.top };
       }
       return rec;
     };
@@ -1854,6 +1858,14 @@ class Game {
             this.world.setBlock(x, y, z, B.AIR);
             this.entities.spawnDrop(x + 0.5, y + 0.3, z + 0.5, id, 1);
           }
+        } else if (DOOR_LOWERS.has(id)) {
+          // a door stands on its floor: without it both halves pop off as one door
+          if (!this.world.isSolidAt(x, y - 1, z)) {
+            if (DOOR_UPPERS.has(this.world.getBlock(x, y + 1, z))) this.world.setBlock(x, y + 1, z, B.AIR);
+            this.world.setBlock(x, y, z, B.AIR);
+            this.world.doorStates.delete(key);
+            this.entities.spawnDrop(x + 0.5, y + 0.3, z + 0.5, doorItemFor(id), 1);
+          }
         } else if (id === B.GRASS) {
           const above = this.world.getBlock(x, y + 1, z);
           if (above !== B.AIR && hasDef(above) && def(above).opaque) {
@@ -2078,6 +2090,8 @@ class Game {
   /** Outline extent of a shaped block (union of its boxes), or null for a cube. */
   private outlineBoxFor(x: number, y: number, z: number): number[] | null {
     const id = this.world.getBlock(x, y, z);
+    const door = this.world.doorShape(x, y, z, id);
+    if (door) return [...door];
     if (!SHAPED.has(id)) return null;
     const key = `${x},${y},${z}`;
     const gate = GATE_IDS.has(id) ? this.world.doorStates.get(key) : undefined;
@@ -2371,7 +2385,10 @@ class Game {
           ? this.isPowered(rx, ry, rz)
           : this.isPowered(rx, ly, rz) || this.isPowered(rx, ly + 1, rz);
         const moved = this.world.applyDoorPower(rx, ry, rz, powered);
-        if (moved) this.audio.play(moved === 'open' ? 'doorOpen' : 'doorClose');
+        if (moved) {
+          const iron = REDSTONE_ONLY_DOORS.has(rid);
+          this.audio.play(moved === 'open' ? (iron ? 'ironDoorOpen' : 'doorOpen') : (iron ? 'ironDoorClose' : 'doorClose'));
+        }
       } else if (rid === B.REDSTONE_WIRE) {
         this.world.markDirty(Math.floor(rx / 16), Math.floor(rz / 16));
       }
