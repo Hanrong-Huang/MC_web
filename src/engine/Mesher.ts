@@ -27,7 +27,7 @@ export interface MeshChunk {
   glowers: Set<number>;
 }
 export interface MeshDoor { facing: number; hingeRight?: boolean; swing?: number; open?: boolean; top?: boolean; }
-export interface MeshRedstone { active?: boolean; facing?: number; delay?: number; }
+export interface MeshRedstone { active?: boolean; facing?: number; delay?: number; level?: number; sub?: boolean; }
 export interface MeshWorld {
   getChunk(cx: number, cz: number): MeshChunk | undefined;
   getBlockForMesh(wx: number, wy: number, wz: number): number;
@@ -270,6 +270,7 @@ function kindOf(id: number): number {
         id === B.BED || id === B.BED_HEAD || TRAPDOOR_IDS.has(id) || id === B.PRESSURE_PLATE ||
         id === B.LEVER || id === B.WOODEN_BUTTON || id === B.STONE_BUTTON ||
         id === B.REDSTONE_TORCH || id === B.REDSTONE_TORCH_OFF || id === B.REPEATER || id === B.STONE_PRESSURE_PLATE ||
+        id === B.COMPARATOR || id === B.OBSERVER ||
         id === B.REDSTONE_WIRE || CROSS_BLOCKS.has(id) || SHAPED.has(id)) ? 2 : 1;
     KIND[id] = k;
   }
@@ -579,6 +580,19 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
           const state = world.redstoneStates.get(`${bx + x},${y},${bz + z}`);
           const active = !!state?.active;
           emitPressurePlate(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), active, id === B.STONE_PRESSURE_PLATE ? 'stone' : 'planks');
+          continue;
+        }
+        if (id === B.COMPARATOR) {
+          const st = world.redstoneStates.get(`${bx + x},${y},${bz + z}`);
+          emitComparator(solid, atlas, x, y, z, skyAt(x, y, z), torchAt(x, y, z), st?.facing ?? 0, st?.level ?? 0, !!st?.sub);
+          continue;
+        }
+        if (id === B.OBSERVER) {
+          const st = world.redstoneStates.get(`${bx + x},${y},${bz + z}`);
+          // lit like a full block from its most open side
+          const l = Math.max(skyAt(x, y + 1, z), skyAt(x + 1, y, z), skyAt(x - 1, y, z), skyAt(x, y, z + 1), skyAt(x, y, z - 1));
+          const t = Math.max(torchAt(x, y + 1, z), torchAt(x + 1, y, z), torchAt(x - 1, y, z), torchAt(x, y, z + 1), torchAt(x, y, z - 1));
+          emitObserver(solid, atlas, x, y, z, l, t, st?.facing ?? 0, !!st?.active);
           continue;
         }
         if (id === B.REPEATER) {
@@ -996,9 +1010,11 @@ function emitTrapdoor(
 function emitBox(
   g: GeoBuilder, rect: UVRect, x: number, y: number, z: number,
   x0: number, x1: number, y0: number, y1: number, z0: number, z1: number,
-  sky: number, torch: number, tint = [1, 1, 1], topRect: UVRect = rect, topRot = 0
+  sky: number, torch: number, tint = [1, 1, 1], topRect: UVRect = rect, topRot = 0,
+  faces?: (UVRect | undefined)[],
 ): void {
   const lit = torch + soulFlagAt(x, y, z);
+  if (faces?.[2]) topRect = faces[2];
   const push = (px: number, py: number, pz: number, u: number, v: number): void => {
     g.v(x + px, y + py, z + pz, sky, lit, tint[0], tint[1], tint[2], u, v);
   };
@@ -1027,43 +1043,103 @@ function emitBox(
 
   // -y bottom
   base = g.vertCount;
-  push(x0, y0, z0, rect.u0, rect.v0);
-  push(x0, y0, z1, rect.u0, rect.v1);
-  push(x1, y0, z1, rect.u1, rect.v1);
-  push(x1, y0, z0, rect.u1, rect.v0);
+  let r = faces?.[3] ?? rect;
+  push(x0, y0, z0, r.u0, r.v0);
+  push(x0, y0, z1, r.u0, r.v1);
+  push(x1, y0, z1, r.u1, r.v1);
+  push(x1, y0, z0, r.u1, r.v0);
   quad(base);
 
   // +x side
   base = g.vertCount;
-  push(x1, y0, z0, rect.u0, rect.v1);
-  push(x1, y0, z1, rect.u1, rect.v1);
-  push(x1, y1, z1, rect.u1, rect.v0);
-  push(x1, y1, z0, rect.u0, rect.v0);
+  r = faces?.[0] ?? rect;
+  push(x1, y0, z0, r.u0, r.v1);
+  push(x1, y0, z1, r.u1, r.v1);
+  push(x1, y1, z1, r.u1, r.v0);
+  push(x1, y1, z0, r.u0, r.v0);
   quad(base);
 
   // -x side
   base = g.vertCount;
-  push(x0, y0, z1, rect.u0, rect.v1);
-  push(x0, y0, z0, rect.u1, rect.v1);
-  push(x0, y1, z0, rect.u1, rect.v0);
-  push(x0, y1, z1, rect.u0, rect.v0);
+  r = faces?.[1] ?? rect;
+  push(x0, y0, z1, r.u0, r.v1);
+  push(x0, y0, z0, r.u1, r.v1);
+  push(x0, y1, z0, r.u1, r.v0);
+  push(x0, y1, z1, r.u0, r.v0);
   quad(base);
 
   // +z side
   base = g.vertCount;
-  push(x0, y0, z1, rect.u0, rect.v1);
-  push(x0, y1, z1, rect.u0, rect.v0);
-  push(x1, y1, z1, rect.u1, rect.v0);
-  push(x1, y0, z1, rect.u1, rect.v1);
+  r = faces?.[4] ?? rect;
+  push(x0, y0, z1, r.u0, r.v1);
+  push(x0, y1, z1, r.u0, r.v0);
+  push(x1, y1, z1, r.u1, r.v0);
+  push(x1, y0, z1, r.u1, r.v1);
   quad(base);
 
   // -z side
   base = g.vertCount;
-  push(x1, y0, z0, rect.u0, rect.v1);
-  push(x1, y1, z0, rect.u0, rect.v0);
-  push(x0, y1, z0, rect.u1, rect.v0);
-  push(x0, y0, z0, rect.u1, rect.v1);
+  r = faces?.[5] ?? rect;
+  push(x1, y0, z0, r.u0, r.v1);
+  push(x1, y1, z0, r.u0, r.v0);
+  push(x0, y1, z0, r.u1, r.v0);
+  push(x0, y0, z0, r.u1, r.v1);
   quad(base);
+}
+
+/** Comparator: the repeater's slab with two rear torches (lit while it
+ *  outputs) and a front torch that lights in subtract mode. */
+function emitComparator(
+  g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number,
+  sky: number, torch: number, facing: number, level: number, sub: boolean,
+): void {
+  const side = atlas.rect('smooth_stone_slab_side');
+  emitBox(g, side, x, y, z, 0, 1, 0, 2 / 16, 0, 1, sky, torch, [1, 1, 1], atlas.rect(level > 0 ? 'comparator_on' : 'comparator'), facing & 3);
+  const head = (lit: boolean): UVRect => {
+    const t = atlas.rect(lit ? 'redstone_torch' : 'redstone_torch_off');
+    const du = t.u1 - t.u0, dv = t.v1 - t.v0;
+    return { u0: t.u0 + du * 7 / 16, u1: t.u0 + du * 9 / 16, v0: t.v0 + dv * 6 / 16, v1: t.v0 + dv * 12 / 16 };
+  };
+  const place = (lx0: number, lz0: number, lx1: number, lz1: number): number[] => {
+    const pts = [[lx0, lz0], [lx1, lz1]].map(([lx, lz]) => {
+      switch (facing & 3) {
+        case 0: return [lx, lz];
+        case 2: return [1 - lx, 1 - lz];
+        case 1: return [lz, 1 - lx];
+        default: return [1 - lz, lx];
+      }
+    });
+    return [Math.min(pts[0][0], pts[1][0]), Math.max(pts[0][0], pts[1][0]), Math.min(pts[0][1], pts[1][1]), Math.max(pts[0][1], pts[1][1])];
+  };
+  // front (output) torch is shorter, as in vanilla; two rear torches at the corners
+  const parts: [number, number, number, number, number, boolean][] = [
+    [7 / 16, 2 / 16, 9 / 16, 4 / 16, 5 / 16, sub],
+    [3 / 16, 11 / 16, 5 / 16, 13 / 16, 7 / 16, level > 0],
+    [11 / 16, 11 / 16, 13 / 16, 13 / 16, 7 / 16, level > 0],
+  ];
+  for (const [lx0, lz0, lx1, lz1, h, lit] of parts) {
+    const [bx0, bx1, bz0, bz1] = place(lx0, lz0, lx1, lz1);
+    emitBox(g, head(lit), x, y, z, bx0, bx1, 2 / 16, h, bz0, bz1, sky, lit ? Math.max(torch, 0.75) : torch);
+  }
+}
+
+/** Observer: a full block with a face (the side it watches), a back with the
+ *  output dot (lit while pulsing), arrowed top/bottom and plain sides. */
+function emitObserver(
+  g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number,
+  sky: number, torch: number, facing: number, active: boolean,
+): void {
+  const front = atlas.rect('observer_front'), back = atlas.rect(active ? 'observer_back_on' : 'observer_back');
+  const top = atlas.rect('observer_top'), side = atlas.rect('observer_side');
+  const f = ((facing % 6) + 6) % 6, b = f ^ 1;
+  const faces: UVRect[] = [];
+  for (let i = 0; i < 6; i++) {
+    if (i === f) faces[i] = front;
+    else if (i === b) faces[i] = back;
+    else if (f >= 2 && f <= 3) faces[i] = i <= 1 ? side : top; // looking up/down: arrows on the z sides
+    else faces[i] = i === 2 || i === 3 ? top : side;
+  }
+  emitBox(g, side, x, y, z, 0, 1, 0, 1, 0, 1, sky, active ? Math.max(torch, 0.2) : torch, [1, 1, 1], top, 0, faces);
 }
 
 function emitPressurePlate(g: GeoBuilder, atlas: MeshAtlas, x: number, y: number, z: number, sky: number, torch: number, active: boolean, tile = 'planks'): void {
@@ -1380,6 +1456,9 @@ function shapedParts(id: number, meta: number, conn: number, open: boolean): { p
       parts.push({ b: bx16(1 + bites * 2, 0, 1, 15, 8, 15), t });
       break;
     }
+    case B.DAYLIGHT_DETECTOR:
+      parts.push({ b: bx16(0, 0, 0, 16, 6, 16), t: tiles6('daylight_detector_side', meta === 1 ? 'daylight_detector_inverted_top' : 'daylight_detector_top', 'planks') });
+      break;
     case B.FLOWER_POT: {
       parts.push({ b: bx16(5, 0, 5, 11, 6, 11), t: tiles6('flower_pot', 'flower_pot_top', 'flower_pot') });
       if (meta && hasDef(meta) && def(meta).faces) {

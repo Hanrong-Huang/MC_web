@@ -3,7 +3,7 @@
 
 import { Chunk, chunkKey, CX, CZ, CY, isGlower } from './Chunk';
 import { WorldGenerator } from './WorldGenerator';
-import { B, isSolid, def, hasDef, DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, doorBox, trapdoorBox, REDSTONE_IDS, PLATE_IDS } from './Blocks';
+import { B, isSolid, def, hasDef, DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, doorBox, trapdoorBox, REDSTONE_IDS, PLATE_IDS, POLL_IDS } from './Blocks';
 import type { Box } from './Blocks';
 import { BlockEntity } from './Inventory';
 import { rleDecode, rleEncode, rleIsLegacy } from './Persistence';
@@ -61,6 +61,10 @@ export interface RedstoneState {
   delay?: number;
   /** note blocks: pitch step 0..24 */
   pitch?: number;
+  /** comparators: subtract mode */
+  sub?: boolean;
+  /** comparators / daylight detectors: output level 0..15 */
+  level?: number;
 }
 
 /** Slab test of a ray (origin relative to the box's block) against a
@@ -118,6 +122,8 @@ export class World {
   redstoneBlocks = new Set<string>();
   /** loaded pressure plates (the per-tick "is anyone standing on it" scan) */
   plateBlocks = new Set<string>();
+  /** loaded comparators + daylight detectors (re-read on a timer) */
+  pollBlocks = new Set<string>();
   onChunkRemoved: (key: string) => void = () => {};
   /** fired after every successful setBlock (gravity blocks, torch supports, ...) */
   onBlockChanged: (x: number, y: number, z: number, oldId: number, newId: number) => void = () => {};
@@ -296,6 +302,8 @@ export class World {
     }
     if (PLATE_IDS.has(oldId)) this.plateBlocks.delete(posKey);
     if (PLATE_IDS.has(id)) this.plateBlocks.add(posKey);
+    if (POLL_IDS.has(oldId)) this.pollBlocks.delete(posKey);
+    if (POLL_IDS.has(id)) this.pollBlocks.add(posKey);
 
     if (oldId === B.WATER && id !== B.WATER) this.waterLevels.delete(posKey);
     if (oldId === B.LAVA && id !== B.LAVA) this.lavaLevels.delete(posKey);
@@ -970,6 +978,7 @@ export class World {
     this.pistonFacings = this.dimData[dim].pistonFacings;
     this.redstoneBlocks = this.dimData[dim].redstoneBlocks;
     this.plateBlocks.clear(); // refilled as the new dimension's chunks load
+    this.pollBlocks.clear();
   }
 
   scanRedstoneInChunk(chunk: Chunk): void {
@@ -981,6 +990,7 @@ export class World {
           if (REDSTONE_IDS.has(id)) {
             this.redstoneBlocks.add(`${bx + x},${y},${bz + z}`);
             if (PLATE_IDS.has(id)) this.plateBlocks.add(`${bx + x},${y},${bz + z}`);
+            if (POLL_IDS.has(id)) this.pollBlocks.add(`${bx + x},${y},${bz + z}`);
           }
         }
       }
@@ -995,6 +1005,7 @@ export class World {
       if (x >= bx0 && x < bx1 && z >= bz0 && z < bz1) {
         this.redstoneBlocks.delete(key);
         this.plateBlocks.delete(key);
+        this.pollBlocks.delete(key);
       }
     }
   }

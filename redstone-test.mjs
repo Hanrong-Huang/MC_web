@@ -3,7 +3,10 @@
 // wood 1.5 s), a lever powering a lamp through a block, dust fall-off, torch
 // inverters, repeater delay, stone vs oak pressure plates, note blocks (pitch,
 // instrument, rising edge, muffled), parts popping off, a big dust grid's
-// update time, and the save carrying repeater delay + note pitch. Screenshots
+// update time, the save carrying repeater delay + note pitch, comparators
+// (container fill, reading through a block, compare vs subtract, side inputs),
+// observers (a pulse per change, an observer clock) and daylight detectors
+// (day/night, inverted). Screenshots
 // (unless NO_SHOTS=1) of a small circuit by day and night go to $SHOT_DIR.
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
@@ -40,7 +43,7 @@ const s = await page.evaluate(() => {
   const g = window.__game, p = g.player, B = window.__B, w = g.world;
   const ox = Math.floor(p.pos.x), oy = 108, oz = Math.floor(p.pos.z);
   for (let dx = -6; dx <= 44; dx++) {
-    for (let dz = -14; dz <= 40; dz++) {
+    for (let dz = -14; dz <= 62; dz++) {
       w.setBlock(ox + dx, oy - 1, oz + dz, B.STONE);
       for (let dy = 0; dy <= 6; dy++) w.setBlock(ox + dx, oy + dy, oz + dz, 0);
     }
@@ -276,6 +279,143 @@ check('the save keeps repeater delay and note pitch', misc.savedDelay === 4 && m
 check('a 576-dust grid re-solves quickly', misc.gridOnMs < 250 && misc.gridOffMs < 250, `${misc.gridOnMs.toFixed(1)} / ${misc.gridOffMs.toFixed(1)} ms`);
 check('grid power reaches 13 blocks away at level 2', misc.gridFar === 2, `${misc.gridFar}`);
 
+// --- 6. comparators ---------------------------------------------------------------------------
+const cmp = await page.evaluate(async ({ ox, oy, oz }) => {
+  const g = window.__game, B = window.__B, w = g.world, rs = window.__rs, res = {};
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const z = oz + 50, x = ox + 30;
+  // chest -> comparator (output +x) -> lamp; 14 full stacks of 27 slots = level 8
+  w.setBlock(x, oy, z, B.CHEST);
+  const chest = new (await import('/src/engine/Inventory.ts')).ChestState();
+  for (let i = 0; i < 14; i++) chest.slots[i] = { id: B.COBBLE, count: 64 };
+  w.blockEntities.set(rs.k(x, oy, z), chest);
+  rs.set(x + 1, oy, z, B.COMPARATOR, { active: false, facing: 3, level: 0 });
+  w.setBlock(x + 2, oy, z, B.REDSTONE_LAMP);
+  await wait(900);
+  res.chestLevel = rs.state(x + 1, oy, z)?.level;
+  res.chestLamp = w.getBlock(x + 2, oy, z) === B.REDSTONE_LAMP_LIT;
+  chest.slots.fill(null);
+  await wait(900);
+  res.emptyLevel = rs.state(x + 1, oy, z)?.level;
+  res.emptyLamp = w.getBlock(x + 2, oy, z) === B.REDSTONE_LAMP;
+  // read through a solid block: chest, stone, comparator
+  const z2 = z + 2;
+  w.setBlock(x, oy, z2, B.CHEST);
+  const c2 = new (await import('/src/engine/Inventory.ts')).ChestState();
+  c2.slots[0] = { id: B.COBBLE, count: 64 };
+  w.blockEntities.set(rs.k(x, oy, z2), c2);
+  w.setBlock(x + 1, oy, z2, B.STONE);
+  rs.set(x + 2, oy, z2, B.COMPARATOR, { active: false, facing: 3, level: 0 });
+  await wait(900);
+  res.throughLevel = rs.state(x + 2, oy, z2)?.level; // 1/27 full -> 1
+  // subtract: redstone block behind (15), dust at 11 on the side -> 4, which then
+  // runs down a dust line (4, 3, 2, 1)
+  const z3 = z + 4;
+  w.setBlock(x, oy, z3, B.REDSTONE_BLOCK);
+  rs.set(x + 1, oy, z3, B.COMPARATOR, { active: false, facing: 3, level: 0, sub: true });
+  rs.set(x + 1, oy, z3 + 6, B.LEVER, { active: false, facing: 1 });
+  for (let j = 1; j <= 5; j++) w.setBlock(x + 1, oy, z3 + j, B.REDSTONE_WIRE); // side dust: 15 at +5 ... 11 at +1
+  for (let i = 2; i <= 6; i++) w.setBlock(x + i, oy, z3, B.REDSTONE_WIRE);
+  rs.press(x + 1, oy, z3 + 6);
+  await wait(900);
+  res.sideDust = w.redstonePower.get(rs.k(x + 1, oy, z3 + 1)) ?? 0;
+  res.subLevel = rs.state(x + 1, oy, z3)?.level;
+  res.subLine = [2, 3, 4, 5, 6].map((i) => w.redstonePower.get(rs.k(x + i, oy, z3)) ?? 0);
+  // compare mode with the same inputs: rear 15 >= side 11 -> 15
+  g.redstone.use(x + 1, oy, z3, B.COMPARATOR);
+  await wait(900);
+  res.cmpLevel = rs.state(x + 1, oy, z3)?.level;
+  return res;
+}, s);
+console.log(JSON.stringify(cmp));
+check('comparator reads a chest (14 of 27 stacks = 8) and lights its lamp', cmp.chestLevel === 8 && cmp.chestLamp, `${cmp.chestLevel}`);
+check('an emptied chest drops it to 0', cmp.emptyLevel === 0 && cmp.emptyLamp);
+check('comparator reads a chest through a solid block', cmp.throughLevel === 1, `${cmp.throughLevel}`);
+check('subtract mode: 15 - side 11 = 4', cmp.sideDust === 11 && cmp.subLevel === 4, `side ${cmp.sideDust} out ${cmp.subLevel}`);
+check('comparator output runs down dust', JSON.stringify(cmp.subLine) === JSON.stringify([4, 3, 2, 1, 0]), JSON.stringify(cmp.subLine));
+check('compare mode passes the back signal (15 >= 11)', cmp.cmpLevel === 15, `${cmp.cmpLevel}`);
+
+// --- 7. observers ------------------------------------------------------------------------------
+await page.evaluate(({ ox, oy, oz }) => {
+  const g = window.__game, B = window.__B, w = g.world, rs = window.__rs;
+  const x = ox + 38, z = oz + 50;
+  // observer facing +x (face at x+1), output -x into a lamp
+  rs.set(x, oy, z, B.OBSERVER, { active: false, facing: 0 });
+  w.setBlock(x - 1, oy, z, B.REDSTONE_LAMP);
+  // record the lamp in-page (a pulse is ~100 ms; polling from outside can miss it)
+  window.__obsLit = 0; window.__obsLog = [];
+  let last = w.getBlock(x - 1, oy, z);
+  window.__obsPoll = setInterval(() => {
+    const now = w.getBlock(x - 1, oy, z);
+    if (now === B.REDSTONE_LAMP_LIT) window.__obsLit++;
+    if (now !== last) { window.__obsLog.push([g.redstone.tickNo, now === B.REDSTONE_LAMP_LIT]); last = now; }
+  }, 4);
+  window.__obsT0 = g.redstone.tickNo;
+  w.setBlock(x + 1, oy, z, B.STONE); // the change it watches
+}, s);
+await page.waitForTimeout(1000);
+const obs = await page.evaluate(() => ({ t0: window.__obsT0, log: window.__obsLog }));
+const on = obs.log.find((e) => e[1]), off = obs.log.find((e) => !e[1]);
+const obsOn = on ? on[0] - obs.t0 : null, obsOff = on && off ? off[0] - on[0] : null;
+check('observer pulses its back one redstone tick after the change', obsOn !== null && obsOn >= 1 && obsOn <= 5, `${obsOn}`);
+check('...and the pulse ends a redstone tick later', obsOff !== null && obsOff >= 1 && obsOff <= 5, `${obsOff} ${JSON.stringify(obs.log)}`);
+const quiet = await page.evaluate(async () => {
+  const before = window.__obsLit;
+  await new Promise((r) => setTimeout(r, 1200));
+  clearInterval(window.__obsPoll);
+  return window.__obsLit === before;
+});
+check('no change, no pulse', quiet);
+// an observer clock: two observers watching each other keep ticking without runaway
+const clock = await page.evaluate(async ({ ox, oy, oz }) => {
+  const g = window.__game, B = window.__B, w = g.world, rs = window.__rs;
+  const x = ox + 41, z = oz + 54; // clear of the comparator test's dust
+  rs.set(x, oy, z, B.OBSERVER, { active: false, facing: 0 });     // watches x+1
+  w.setBlock(x - 1, oy, z, B.REDSTONE_LAMP);
+  rs.set(x + 1, oy, z, B.OBSERVER, { active: false, facing: 1 }); // watches x (placing it trips the first)
+  let flips = 0, last = w.getBlock(x - 1, oy, z);
+  const t0 = performance.now();
+  await new Promise((resolve) => {
+    const id = setInterval(() => {
+      const now = w.getBlock(x - 1, oy, z);
+      if (now !== last) { flips++; last = now; }
+      if (performance.now() - t0 > 2500) { clearInterval(id); resolve(); }
+    }, 5);
+  });
+  w.setBlock(x + 1, oy, z, 0); // stop it
+  return { flips };
+}, s);
+check('an observer clock keeps pulsing', clock.flips >= 4, `${clock.flips} lamp flips in 2.5 s`);
+
+// --- 8. daylight detectors -----------------------------------------------------------------------
+await page.evaluate(({ ox, oy, oz }) => {
+  const g = window.__game, B = window.__B, w = g.world;
+  g.dayTime = 0.25; // noon
+  w.setBlock(ox + 38, oy, oz + 58, B.DAYLIGHT_DETECTOR);
+  w.setBlock(ox + 39, oy, oz + 58, B.REDSTONE_LAMP);
+}, s);
+await page.waitForTimeout(1500);
+const day = await page.evaluate(({ ox, oy, oz }) => ({
+  level: window.__rs.state(ox + 38, oy, oz + 58)?.level,
+  lamp: window.__game.world.getBlock(ox + 39, oy, oz + 58) === window.__B.REDSTONE_LAMP_LIT,
+}), s);
+await page.evaluate(() => { window.__game.dayTime = 0.8; });
+await page.waitForTimeout(1800);
+const night = await page.evaluate(({ ox, oy, oz }) => ({
+  level: window.__rs.state(ox + 38, oy, oz + 58)?.level,
+  lamp: window.__game.world.getBlock(ox + 39, oy, oz + 58) === window.__B.REDSTONE_LAMP,
+}), s);
+await page.evaluate(({ ox, oy, oz }) => window.__game.redstone.use(ox + 38, oy, oz + 58, window.__B.DAYLIGHT_DETECTOR), s);
+await page.waitForTimeout(300);
+const inv = await page.evaluate(({ ox, oy, oz }) => ({
+  level: window.__rs.state(ox + 38, oy, oz + 58)?.level,
+  lamp: window.__game.world.getBlock(ox + 39, oy, oz + 58) === window.__B.REDSTONE_LAMP_LIT,
+}), s);
+await page.evaluate(() => { window.__game.dayTime = 0.3; });
+check('daylight detector: full power at noon', day.level >= 14 && day.lamp, `${day.level}`);
+check('daylight detector: dark at night', night.level === 0 && night.lamp, `${night.level}`);
+check('inverted detector powers at night', inv.level === 15 && inv.lamp, `${inv.level}`);
+
 // --- screenshots ---------------------------------------------------------------------------
 async function frame(tx, ty, tz, ex, ey, ez) {
   await page.evaluate(({ tx, ty, tz, ex, ey, ez }) => {
@@ -315,6 +455,10 @@ if (SHOTS) {
     w.setBlock(x + 9, oy, z + 3, B.NOTE_BLOCK);
     w.setBlock(x - 2, oy, z + 3, B.STONE_PRESSURE_PLATE); w.setBlock(x - 2, oy, z + 1, B.PRESSURE_PLATE);
     w.setBlock(x + 6, oy, z + 5, B.REDSTONE_BLOCK);
+    rs.set(x + 7, oy, z + 5, B.COMPARATOR, { active: false, facing: 3, level: 0, sub: true });
+    w.setBlock(x + 8, oy, z + 5, B.REDSTONE_WIRE); w.setBlock(x + 9, oy, z + 5, B.REDSTONE_WIRE);
+    rs.set(x + 9, oy, z + 1, B.OBSERVER, { active: false, facing: 5 });
+    w.setBlock(x + 11, oy, z + 3, B.DAYLIGHT_DETECTOR);
     rs.press(x, oy, z);
     g.dayTime = 0.3;
     window.__shotX = x; window.__shotZ = z;
@@ -330,7 +474,7 @@ if (SHOTS) {
   await page.screenshot({ path: `${DIR}/redstone-close.png` });
   await page.evaluate(() => {
     const g = window.__game, B = window.__B;
-    const ids = [B.REDSTONE_TORCH, B.REPEATER, B.REDSTONE_BLOCK, B.NOTE_BLOCK, B.STONE_PRESSURE_PLATE, B.PRESSURE_PLATE];
+    const ids = [B.REDSTONE_TORCH, B.REPEATER, B.COMPARATOR, B.OBSERVER, B.DAYLIGHT_DETECTOR, B.REDSTONE_BLOCK, B.NOTE_BLOCK, B.STONE_PRESSURE_PLATE, B.PRESSURE_PLATE];
     const c = document.createElement('canvas'); c.width = ids.length * 36; c.height = 36;
     const ctx = c.getContext('2d'); ctx.fillStyle = '#8b8b8b'; ctx.fillRect(0, 0, c.width, c.height);
     ids.forEach((id, i) => ctx.drawImage(g.atlas.icon(id), i * 36 + 2, 2));

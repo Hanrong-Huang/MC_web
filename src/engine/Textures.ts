@@ -4600,6 +4600,95 @@ Object.assign(PACK_MAP, {
   note_block: { paths: ['block/note_block'], kind: 'tile' },
 } satisfies Record<string, PackEntry>);
 
+// Comparator top (dust arrow + three torch sockets), observer faces, daylight
+// detector (quartz-framed glass cells; the inverted one is night blue).
+const STONE_GREY = (xx: number, yy: number): string => ((xx * 7 + yy * 13) % 11 === 0 ? '#9c9c9c' : (xx + yy) % 5 === 0 ? '#b2b2b2' : '#a8a8a8');
+
+function comparatorTopPx(lit: boolean): Px {
+  const p = new Px().fill(STONE_GREY);
+  for (let i = 0; i < 16; i++) { p.set(i, 0, '#c4c4c4'); p.set(0, i, '#c4c4c4'); p.set(i, 15, '#7c7c7c'); p.set(15, i, '#7c7c7c'); }
+  const line = lit ? ['#ff3a20', '#ff8060'] : ['#6a1a12', '#8a2a1e'];
+  // dust from the two rear sockets meeting at the front one, and the arrow tip
+  for (let j = 5; j <= 12; j++) p.set(7, j, line[0]);
+  for (let i = 4; i <= 11; i++) p.set(i, 12, line[j2(i)]);
+  p.set(6, 3, line[0]); p.set(9, 3, line[0]); p.set(7, 2, line[1]); p.set(8, 2, line[1]);
+  for (const [sx, sy] of [[3, 11], [11, 11], [7, 2]]) { p.set(sx, sy, '#4a4a4a'); p.set(sx + 1, sy, '#4a4a4a'); }
+  return p;
+  function j2(i: number): number { return i % 3 === 0 ? 1 : 0; }
+}
+
+function observerPx(face: 'front' | 'back' | 'back_on' | 'top' | 'side'): Px {
+  const dark = ['#3a3a3a', '#444444', '#4e4e4e', '#585858'];
+  const r = mulberry32(face === 'front' ? 7501 : face === 'top' ? 7502 : 7503);
+  const p = new Px().fill(() => dark[(r() * 4) | 0]); // rough cobbled casing
+  for (let i = 0; i < 16; i++) { p.set(i, 0, '#6a6a6a'); p.set(0, i, '#6a6a6a'); p.set(i, 15, '#2a2a2a'); p.set(15, i, '#2a2a2a'); }
+  if (face === 'front') {
+    // a grim little face: two slit eyes and a grille mouth
+    for (let i = 3; i <= 12; i++) { p.set(i, 4, '#1a1a1a'); p.set(i, 11, '#1a1a1a'); }
+    for (const ex of [4, 10]) for (let j = 6; j <= 8; j++) { p.set(ex, j, '#0e0e0e'); p.set(ex + 1, j, '#0e0e0e'); }
+    for (let i = 4; i <= 11; i += 2) p.set(i, 10, '#6a6a6a');
+  } else if (face === 'back' || face === 'back_on') {
+    for (let j = 5; j <= 10; j++) for (let i = 5; i <= 10; i++) p.set(i, j, '#8a8a8a');
+    const dot = face === 'back_on' ? ['#ff5a3c', '#ffb09a'] : ['#5a1410', '#7a2a20'];
+    for (let j = 6; j <= 9; j++) for (let i = 6; i <= 9; i++) p.set(i, j, dot[0]);
+    p.set(6, 6, dot[1]);
+  } else if (face === 'top') {
+    // an arrow pointing to the face (texture top = the face side)
+    for (let j = 3; j <= 12; j++) { p.set(7, j, '#9a9a9a'); p.set(8, j, '#9a9a9a'); }
+    for (let k = 0; k < 4; k++) { p.set(7 - k, 3 + k, '#9a9a9a'); p.set(8 + k, 3 + k, '#9a9a9a'); }
+  } else {
+    for (let j = 2; j <= 13; j++) { p.set(3, j, '#6a6a6a'); p.set(12, j, '#6a6a6a'); }
+  }
+  return p;
+}
+
+function daylightTopPx(inverted: boolean): Px {
+  const glass = inverted ? ['#1e2a55', '#26346a', '#33448a'] : ['#6f9fcf', '#88b4dd', '#a8cbea'];
+  const frame = ['#e8e2d6', '#d4ccbe', '#bfb6a6'];
+  const p = new Px().fill((xx, yy) => (xx % 5 === 0 || yy % 5 === 0 ? frame[(xx + yy) % 3] : glass[(xx * 3 + yy * 5) % 3]));
+  for (let i = 0; i < 16; i++) { p.set(i, 0, frame[0]); p.set(0, i, frame[0]); p.set(i, 15, frame[2]); p.set(15, i, frame[2]); }
+  return p;
+}
+
+Object.assign(TILE_PAINTERS, {
+  comparator: (c: Ctx, x: number, y: number) => comparatorTopPx(false).put(c, x, y),
+  comparator_on: (c: Ctx, x: number, y: number) => comparatorTopPx(true).put(c, x, y),
+  observer_front: (c: Ctx, x: number, y: number) => observerPx('front').put(c, x, y),
+  observer_back: (c: Ctx, x: number, y: number) => observerPx('back').put(c, x, y),
+  observer_back_on: (c: Ctx, x: number, y: number) => observerPx('back_on').put(c, x, y),
+  observer_top: (c: Ctx, x: number, y: number) => observerPx('top').put(c, x, y),
+  observer_side: (c: Ctx, x: number, y: number) => observerPx('side').put(c, x, y),
+  daylight_detector_top: (c: Ctx, x: number, y: number) => daylightTopPx(false).put(c, x, y),
+  daylight_detector_inverted_top: (c: Ctx, x: number, y: number) => daylightTopPx(true).put(c, x, y),
+  daylight_detector_side: (c: Ctx, x: number, y: number) => {
+    const p = planksPx(OAK_R, OAK_SEAM, 7504);
+    for (let yy = 0; yy < 10; yy++) for (let xx = 0; xx < 16; xx++) p.clear(xx, yy); // only the slab's 6px band shows
+    p.put(c, x, y);
+  },
+});
+Object.assign(ITEM_PAINTERS, {
+  comparator: (c: Ctx) => pixmap(c, 0, 0, [
+    '................', '................', '................', '...r.......r....',
+    '..rRr.....rRr...', '...r...d...r....', '...w..dRd..w....', '...w...w...w....',
+    '..ssssssssssss..', '.sTTTTTTTTTTTTs.', '.sTddddddddddTs.', '.sTTTTTdTTTTTTs.',
+    '.SSSSSSSSSSSSSS.', '.QQQQQQQQQQQQQQ.', '................', '................',
+  ], { r: '#b3120a', R: '#ff5a3c', d: '#6a1a12', w: '#8a6a40', s: '#9a9a9a', T: '#c4c4c4', S: '#8a8a8a', Q: '#6a6a6a' }),
+});
+BLOCK_SPRITE_ICONS.add('comparator');
+ICON_SHAPES.daylight_detector = [[0, 1, 0, 1, 0, 0.375]];
+Object.assign(PACK_MAP, {
+  comparator: { paths: ['block/comparator'], kind: 'tile' },
+  comparator_on: { paths: ['block/comparator_on'], kind: 'tile' },
+  observer_front: { paths: ['block/observer_front'], kind: 'tile' },
+  observer_back: { paths: ['block/observer_back'], kind: 'tile' },
+  observer_back_on: { paths: ['block/observer_back_on'], kind: 'tile' },
+  observer_top: { paths: ['block/observer_top'], kind: 'tile' },
+  observer_side: { paths: ['block/observer_side'], kind: 'tile' },
+  daylight_detector_top: { paths: ['block/daylight_detector_top'], kind: 'tile' },
+  daylight_detector_inverted_top: { paths: ['block/daylight_detector_inverted_top'], kind: 'tile' },
+  daylight_detector_side: { paths: ['block/daylight_detector_side'], kind: 'tile' },
+} satisfies Record<string, PackEntry>);
+
 // =============================================================================
 // Nether utility pass: netherite block + gear, soul torch / soul lantern, the
 // respawn anchor (charge meter + portal pool), fire charge, blaze powder and
