@@ -205,7 +205,7 @@ check('potion gives its effect', sys.speed === true);
 await page.evaluate(() => {
   const g = window.__game;
   const ids = [];
-  for (let id = 200; id < 256; id++) try { g.atlas.icon(id); ids.push(id); } catch { /* unused id */ }
+  for (let id = 200; id < 300; id++) try { g.atlas.icon(id); ids.push(id); } catch { /* unused id */ }
   for (const id of [61, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93]) ids.push(id);
   for (let id = 300; id < 340; id++) try { g.atlas.icon(id); ids.push(id); } catch { /* unused id */ }
   const cols = 16;

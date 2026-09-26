@@ -5,8 +5,31 @@ import { Chunk, chunkKey, CX, CZ, CY, isGlower } from './Chunk';
 import { WorldGenerator } from './WorldGenerator';
 import { B, isSolid, def, hasDef } from './Blocks';
 import { BlockEntity } from './Inventory';
-import { rleDecode, rleEncode } from './Persistence';
+import { rleDecode, rleEncode, rleIsLegacy } from './Persistence';
 import type { GenResult } from './gen-worker';
+import type { BlockData } from './Chunk';
+
+/** Old (u8-id) saves predate the vine blocks: hanging crimson roots were drawn
+ *  as weeping vines and stacked warped roots as twisting vines. Turn those into
+ *  the real (climbable) vines; floor tufts stay roots. */
+export function migrateLegacyChunk(data: BlockData): void {
+  const at = (i: number): number => (i >= 0 && i < data.length ? data[i] : B.AIR);
+  const weep: number[] = [], twist: number[] = [];
+  for (let i = 0; i < data.length; i++) {
+    const id = data[i];
+    if (id === B.CRIMSON_ROOTS && !isSolid(at(i - 256))) weep.push(i);
+    else if (id === B.WARPED_ROOTS && (at(i + 256) === B.WARPED_ROOTS || at(i - 256) === B.WARPED_ROOTS)) twist.push(i);
+  }
+  for (const i of weep) data[i] = B.WEEPING_VINES;
+  for (const i of twist) data[i] = B.TWISTING_VINES;
+}
+
+/** Decode a saved chunk blob (either RLE version), upgrading legacy content. */
+function decodeSaved(saved: Uint8Array, len: number): BlockData {
+  const data = rleDecode(saved, len);
+  if (rleIsLegacy(saved)) migrateLegacyChunk(data);
+  return data;
+}
 
 /** Cardinal facing for a placed door/trapdoor, in 90-degree steps.
  *  For doors this is the direction the player was looking when placed. */
@@ -161,7 +184,7 @@ export class World {
     const chunk = new Chunk(cx, cz);
     const saved = this.savedChunks.get(key);
     if (saved) {
-      chunk.data = rleDecode(saved, chunk.data.length);
+      chunk.data = decodeSaved(saved, chunk.data.length);
       chunk.computeHeightmap();
       chunk.scanTorches();
       chunk.ready = true;
@@ -703,7 +726,7 @@ export class World {
         this.queued.delete(key);
         const chunk = new Chunk(job.cx, job.cz);
         if (saved) {
-          chunk.data = rleDecode(saved, chunk.data.length);
+          chunk.data = decodeSaved(saved, chunk.data.length);
           chunk.computeHeightmap();
           chunk.scanTorches();
           chunk.ready = true;

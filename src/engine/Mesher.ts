@@ -8,7 +8,7 @@
 // light model stays 2-channel without another attribute.
 
 import { CX, CZ, CY } from './Chunk';
-import { B, def, hasDef, ID_LIMIT, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel } from './Blocks';
+import { B, def, hasDef, ID_LIMIT, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, FENCE_IDS, GATE_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel } from './Blocks';
 import type { Box } from './Blocks';
 import type { UVRect } from './Textures';
 
@@ -571,10 +571,10 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
         }
         if (SHAPED.has(id)) {
           const wx = bx + x, wz = bz + z, key = `${wx},${y},${wz}`;
-          const gate = id === B.FENCE_GATE ? world.doorStates.get(key) : undefined;
+          const gate = GATE_IDS.has(id) ? world.doorStates.get(key) : undefined;
           const meta = gate ? gate.facing : world.bedFacings.get(key) ?? 0;
           let conn = 0;
-          if (id === B.OAK_FENCE || id === B.GLASS_PANE) {
+          if (FENCE_IDS.has(id) || id === B.GLASS_PANE) {
             if (connectsTo(id, get(x, y, z - 1))) conn |= 1;
             if (connectsTo(id, get(x, y, z + 1))) conn |= 2;
             if (connectsTo(id, get(x - 1, y, z))) conn |= 4;
@@ -1207,7 +1207,7 @@ function shapedParts(id: number, meta: number, conn: number, open: boolean): { p
       b: fc === 0 ? [0, y0, 0, 1, y1, 0.5] : fc === 1 ? [0, y0, 0, 0.5, y1, 1] : fc === 2 ? [0, y0, 0.5, 1, y1, 1] : [0.5, y0, 0, 1, y1, 1],
       t: std,
     });
-  } else switch (id) {
+  } else switch (FENCE_IDS.has(id) ? B.OAK_FENCE : GATE_IDS.has(id) ? B.FENCE_GATE : id) {
     case B.OAK_FENCE: {
       parts.push({ b: bx16(6, 0, 6, 10, 16, 10), t: std });
       for (const [bit, a0, a1, alongX] of [[1, 0, 6, false], [2, 10, 16, false], [4, 0, 6, true], [8, 10, 16, true]] as [number, number, number, boolean][]) {

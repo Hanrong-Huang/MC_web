@@ -5,7 +5,7 @@
 import * as THREE from 'three';
 import { mulberry32 } from './Noise';
 import { def, TINTED_TILES } from './Blocks';
-import { B, hasDef, SHAPED, shapeBoxes, SLAB_KINDS, WOOL_COLORS, POTIONS } from './Blocks';
+import { B, hasDef, SHAPED, FENCE_IDS, GATE_IDS, shapeBoxes, SLAB_KINDS, WOOL_COLORS, POTIONS } from './Blocks';
 
 const TILE = 16;
 const COLS = 8;
@@ -3854,8 +3854,8 @@ export function shapedItemGeometry(id: number, atlas: Atlas, size = 1): THREE.Bu
   if (!hasShapedItemModel(id)) return null;
   const d = def(id);
   let boxes = shapeBoxes(id, 0, 4 | 8, false, false);
-  if (id === B.OAK_FENCE) boxes = [[6 / 16, 0, 6 / 16, 10 / 16, 1, 10 / 16], [0, 6 / 16, 7 / 16, 1, 9 / 16, 9 / 16], [0, 12 / 16, 7 / 16, 1, 15 / 16, 9 / 16]];
-  if (id === B.FENCE_GATE) boxes = [[0, 5 / 16, 7 / 16, 2 / 16, 1, 9 / 16], [14 / 16, 5 / 16, 7 / 16, 1, 1, 9 / 16],
+  if (FENCE_IDS.has(id)) boxes = [[6 / 16, 0, 6 / 16, 10 / 16, 1, 10 / 16], [0, 6 / 16, 7 / 16, 1, 9 / 16, 9 / 16], [0, 12 / 16, 7 / 16, 1, 15 / 16, 9 / 16]];
+  if (GATE_IDS.has(id)) boxes = [[0, 5 / 16, 7 / 16, 2 / 16, 1, 9 / 16], [14 / 16, 5 / 16, 7 / 16, 1, 1, 9 / 16],
     [2 / 16, 6 / 16, 7 / 16, 14 / 16, 9 / 16, 9 / 16], [2 / 16, 12 / 16, 7 / 16, 14 / 16, 15 / 16, 9 / 16]];
   if (id === B.ANVIL) boxes = [[2 / 16, 0, 2 / 16, 14 / 16, 4 / 16, 14 / 16], [6 / 16, 4 / 16, 4 / 16, 10 / 16, 10 / 16, 12 / 16], [0, 10 / 16, 3 / 16, 1, 1, 13 / 16]];
   if (id === B.COMPOSTER || id === B.JACK_O_LANTERN) boxes = [[0, 0, 0, 1, 1, 1]];
@@ -4324,6 +4324,9 @@ const NETHER_TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => v
   twisting_vines: (c, x, y) => vinePx(TWISTING_C, 8683, false, -1).put(c, x, y),
   twisting_vines_tip: (c, x, y) => vinePx(TWISTING_C, 8683, false, 9).put(c, x, y),
   soul_fire: paintSoulFire,
+  // Nether-wood planks: the oak board layout in the stems' magenta / teal
+  crimson_planks: (c, x, y) => planksPx(pal(['#4f2438', '#5e2b43', '#6a344b', '#763b55', '#82425e', '#8f4b69']), hex('#3a1929'), 8690).put(c, x, y),
+  warped_planks: (c, x, y) => planksPx(pal(['#1d4b48', '#235a55', '#2a6962', '#30776f', '#39877d', '#43978b']), hex('#153835'), 8691).put(c, x, y),
 };
 Object.assign(TILE_PAINTERS, NETHER_TILE_PAINTERS);
 Object.assign(PACK_MAP, {
@@ -4353,7 +4356,14 @@ Object.assign(PACK_MAP, {
   twisting_vines: { paths: ['block/twisting_vines_plant'], kind: 'tile' },
   twisting_vines_tip: { paths: ['block/twisting_vines'], kind: 'tile' },
   soul_fire: { paths: ['block/soul_fire_0'], kind: 'tile' },
+  crimson_planks: { paths: ['block/crimson_planks'], kind: 'tile' },
+  warped_planks: { paths: ['block/warped_planks'], kind: 'tile' },
 } satisfies Record<string, PackEntry>);
+// Nether-wood fences/gates reuse the oak icon models
+for (const stem of ['crimson', 'warped']) {
+  ICON_SHAPES[`${stem}_fence`] = ICON_SHAPES.oak_fence;
+  ICON_SHAPES[`${stem}_fence_gate`] = ICON_SHAPES.oak_fence_gate;
+}
 
 // =============================================================================
 // Nether utility pass: netherite block + gear, soul torch / soul lantern, the

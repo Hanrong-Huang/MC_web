@@ -26,9 +26,9 @@ import { buildChunkGeometry } from './engine/Mesher';
 import type { GeoArrays, MeshDoor, MeshRedstone } from './engine/Mesher';
 import { chunkGeometryFromArrays } from './engine/Renderer';
 import type { MeshJob, MeshChunkSnap } from './engine/mesh-worker';
-import { chunkKey, CX, CZ } from './engine/Chunk';
+import { chunkKey, CX, CY, CZ } from './engine/Chunk';
 import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, HANGING_PLANTS, def, hasDef, isSolid, mobLabel } from './engine/Blocks';
-import { SHAPED, META_BLOCKS, shapeBoxes, connectsTo, enchantLabel } from './engine/Blocks';
+import { SHAPED, META_BLOCKS, FENCE_IDS, GATE_IDS, VINE_BLOCKS, vineDrops, shapeBoxes, connectsTo, enchantLabel } from './engine/Blocks';
 import { craftRemainders } from './engine/Inventory';
 import { ExperienceOrbs, XpBar } from './engine/Experience';
 import { Throwables } from './engine/Throwables';
@@ -219,7 +219,7 @@ class Game {
       }
       // a shaped block's facing/state entry goes with it (explosions, pistons, fire ...)
       if (_oldId !== newId && META_BLOCKS.has(_oldId)) this.world.bedFacings.delete(`${x},${y},${z}`);
-      if (_oldId === B.FENCE_GATE && newId !== B.FENCE_GATE) this.world.doorStates.delete(`${x},${y},${z}`);
+      if (GATE_IDS.has(_oldId) && _oldId !== newId) this.world.doorStates.delete(`${x},${y},${z}`);
       if (GRAVITY_BLOCKS.has(newId)) this.supportQueue.add(`${x},${y},${z}`);
       // covering grass smothers it
       if (newId !== B.AIR && def(newId).opaque) this.supportQueue.add(`${x},${y - 1},${z}`);
@@ -1813,21 +1813,24 @@ class Game {
             const wx = facing === 0 ? x - 1 : facing === 1 ? x + 1 : x;
             const wz = facing === 2 ? z - 1 : facing === 3 ? z + 1 : z;
             supported = this.world.isSolidAt(wx, y, wz);
+          } else if (HANGING_PLANTS.has(id)) {
+            // weeping vines hang from a ceiling (or from more vine)
+            const above = this.world.getBlock(x, y + 1, z);
+            supported = above === id || this.world.isSolidAt(x, y + 1, z);
           } else {
             const below = this.world.getBlock(x, y - 1, z);
             supported = (hasDef(below) && below !== B.AIR && def(below).solid) ||
               (SELF_STACKING.has(id) && below === id);
-            // weeping vines hang from a ceiling (or from more vine)
-            if (!supported && HANGING_PLANTS.has(id)) {
-              const above = this.world.getBlock(x, y + 1, z);
-              supported = above === id || this.world.isSolidAt(x, y + 1, z);
-            }
           }
           if (!supported) {
             this.world.setBlock(x, y, z, B.AIR);
             if (facing !== undefined) this.world.torchFacings.delete(key);
             const d = def(id);
-            if (d.drop !== null) {
+            // a vine losing its anchor unravels segment by segment (the
+            // neighbour queued by setBlock is checked next tick)
+            if (VINE_BLOCKS.has(id)) {
+              if (vineDrops(false)) this.entities.spawnDrop(x + 0.5, y + 0.3, z + 0.5, id, 1);
+            } else if (d.drop !== null) {
               const drop = d.drop ?? { id, min: 1, max: 1 };
               this.entities.spawnDrop(x + 0.5, y + 0.3, z + 0.5, drop.id, drop.min);
             }
@@ -1978,6 +1981,7 @@ class Game {
       return true;
     }
     if (id === B.SAPLING) { this.growTree(x, y, z); return true; }
+    if (id === B.WEEPING_VINES || id === B.TWISTING_VINES) return this.growVine(x, y, z, id);
     if (id === B.PUMPKIN_STEM || id === B.MELON_STEM) {
       return this.growFruit(x, y, z, id === B.PUMPKIN_STEM ? B.PUMPKIN : B.MELON);
     }
@@ -1999,6 +2003,23 @@ class Game {
       return placed > 0;
     }
     return false;
+  }
+
+  /** Bone meal on a Nether vine: its free end (bottom of weeping, top of
+   *  twisting) grows 1-4 cells into open air. Returns true if it grew. */
+  private growVine(x: number, y: number, z: number, id: number): boolean {
+    const dir = id === B.WEEPING_VINES ? -1 : 1;
+    let ty = y;
+    for (let i = 0; i < CY && this.world.getBlock(x, ty + dir, z) === id; i++) ty += dir;
+    const n = 1 + ((Math.random() * 4) | 0);
+    let grown = 0;
+    for (let k = 1; k <= n; k++) {
+      const ny = ty + dir * k;
+      if (ny < 1 || ny >= CY - 1 || this.world.getBlock(x, ny, z) !== B.AIR) break;
+      if (!this.world.setBlock(x, ny, z, id)) break;
+      grown++;
+    }
+    return grown > 0;
   }
 
   /** A ripe pumpkin/melon stem puts a fruit on a free neighbouring patch of
@@ -2047,9 +2068,9 @@ class Game {
     const id = this.world.getBlock(x, y, z);
     if (!SHAPED.has(id)) return null;
     const key = `${x},${y},${z}`;
-    const gate = id === B.FENCE_GATE ? this.world.doorStates.get(key) : undefined;
+    const gate = GATE_IDS.has(id) ? this.world.doorStates.get(key) : undefined;
     let conn = 0;
-    if (id === B.OAK_FENCE || id === B.GLASS_PANE) {
+    if (FENCE_IDS.has(id) || id === B.GLASS_PANE) {
       if (connectsTo(id, this.world.getBlock(x, y, z - 1))) conn |= 1;
       if (connectsTo(id, this.world.getBlock(x, y, z + 1))) conn |= 2;
       if (connectsTo(id, this.world.getBlock(x - 1, y, z))) conn |= 4;

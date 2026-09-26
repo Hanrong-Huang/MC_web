@@ -417,7 +417,7 @@ export class NetherGen {
             // twisting vines climb from the floor
             const h2 = hash3(this.seed ^ 0xf11, wx, y, wz);
             const len = h2 < 0.25 ? 6 + ((h2 * 40) | 0) : 2 + ((h2 * 5) | 0);
-            for (let k = 1; k <= len && y + k < CY - 1 && chunk.get(x, y + k, z) === B.AIR; k++) chunk.setRaw(x, y + k, z, B.WARPED_ROOTS);
+            for (let k = 1; k <= len && y + k < CY - 1 && chunk.get(x, y + k, z) === B.AIR; k++) chunk.setRaw(x, y + k, z, B.TWISTING_VINES);
           }
           break;
         case SOUL: {
@@ -464,7 +464,7 @@ export class NetherGen {
       const h = hash3(this.seed ^ 0xc10, wx, y, wz);
       if (h > 0.07) continue;
       const len = h < 0.025 ? 7 + ((h * 400) | 0) : 2 + ((h * 60) | 0);
-      for (let k = 1; k <= len && y - k > LAVA_SEA && chunk.get(x, y - k, z) === B.AIR; k++) chunk.setRaw(x, y - k, z, B.CRIMSON_ROOTS);
+      for (let k = 1; k <= len && y - k > LAVA_SEA && chunk.get(x, y - k, z) === B.AIR; k++) chunk.setRaw(x, y - k, z, B.WEEPING_VINES);
     }
   }
 
@@ -606,7 +606,7 @@ export class NetherGen {
   private vine(chunk: Chunk, wx: number, y: number, wz: number, len: number): void {
     const x = wx - chunk.cx * CX, z = wz - chunk.cz * CZ;
     if (x < 0 || x >= CX || z < 0 || z >= CZ) return;
-    for (let k = 0; k < len && y - k > LAVA_SEA && chunk.get(x, y - k, z) === B.AIR; k++) chunk.setRaw(x, y - k, z, B.CRIMSON_ROOTS);
+    for (let k = 0; k < len && y - k > LAVA_SEA && chunk.get(x, y - k, z) === B.AIR; k++) chunk.setRaw(x, y - k, z, B.WEEPING_VINES);
   }
 
   /** Lowest air cell under a ceiling in a local column (scanning down from the
@@ -679,7 +679,7 @@ export class NetherGen {
 const NB4: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const NB6: [number, number, number][] = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
 /** cells a feature may grow into without `force` */
-const SOFT = new Set<number>([B.AIR, B.FIRE, B.CRIMSON_ROOTS, B.WARPED_ROOTS]);
+const SOFT = new Set<number>([B.AIR, B.FIRE, B.CRIMSON_ROOTS, B.WARPED_ROOTS, B.WEEPING_VINES, B.TWISTING_VINES]);
 
 /** Trilinear density from four lattice columns (x0z0, x1z0, x0z1, x1z1). */
 function tri(a: LatticeCol, b: LatticeCol, c: LatticeCol, d: LatticeCol, fx: number, fz: number, y: number): number {

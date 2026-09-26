@@ -172,10 +172,25 @@ export enum B {
   NETHER_GOLD_ORE = 248,
   /** blast-proof; diamond pickaxe */
   ANCIENT_DEBRIS = 249,
-  /** floor tuft; hanging from a ceiling (nothing solid below) it draws as weeping vines */
+  /** floor tuft (older saves' hanging/stacked roots migrate to the real vines) */
   CRIMSON_ROOTS = 250,
-  /** floor tuft; stacked on itself it draws as twisting vines */
   WARPED_ROOTS = 251,
+  // --- Nether wood + vines (ids 256-267: chunks store u16 ids) ---
+  /** hangs from a ceiling or more vine; climbable; tip drawn on the lowest cell */
+  WEEPING_VINES = 256,
+  /** grows up from a floor or more vine; climbable; tip drawn on the highest cell */
+  TWISTING_VINES = 257,
+  CRIMSON_PLANKS = 258,
+  WARPED_PLANKS = 259,
+  CRIMSON_SLAB = 260,
+  WARPED_SLAB = 261,
+  CRIMSON_STAIRS = 262,
+  WARPED_STAIRS = 263,
+  CRIMSON_FENCE = 264,
+  WARPED_FENCE = 265,
+  /** open/facing live in world.doorStates, like the oak gate */
+  CRIMSON_FENCE_GATE = 266,
+  WARPED_FENCE_GATE = 267,
 }
 
 export enum I {
@@ -1080,6 +1095,24 @@ blockDef({
   opaque: false, occludes: false,
   faces: { top: 'planks', bottom: 'planks', sides: 'planks' },
 });
+// Nether-wood fences + gates: same models, fireproof (no fuel, don't burn)
+for (const [fence, gate, stem, label] of [
+  [B.CRIMSON_FENCE, B.CRIMSON_FENCE_GATE, 'crimson', 'Crimson'],
+  [B.WARPED_FENCE, B.WARPED_FENCE_GATE, 'warped', 'Warped'],
+] as [number, number, string, string][]) {
+  const t = `${stem}_planks`;
+  blockDef({
+    id: fence, name: `${stem}_fence`, label: `${label} Fence`, hardness: 2, tool: 'axe', sound: 'wood',
+    opaque: false, occludes: false, faces: { top: t, bottom: t, sides: t },
+  });
+  blockDef({
+    id: gate, name: `${stem}_fence_gate`, label: `${label} Fence Gate`, hardness: 2, tool: 'axe', sound: 'wood',
+    opaque: false, occludes: false, faces: { top: t, bottom: t, sides: t },
+  });
+}
+/** Every fence post / fence gate (they all join each other). */
+export const FENCE_IDS = new Set<number>([B.OAK_FENCE, B.CRIMSON_FENCE, B.WARPED_FENCE]);
+export const GATE_IDS = new Set<number>([B.FENCE_GATE, B.CRIMSON_FENCE_GATE, B.WARPED_FENCE_GATE]);
 
 /** Slab/stair material table: [slab, stairs | 0, full block, tile top, tile side, label, tool]. */
 export const SLAB_KINDS: [number, number, number, string, string, string, 'pickaxe' | 'axe'][] = [
@@ -1089,12 +1122,15 @@ export const SLAB_KINDS: [number, number, number, string, string, string, 'picka
   [B.STONE_BRICK_SLAB, B.STONE_BRICK_STAIRS, B.STONE_BRICKS, 'stone_bricks', 'stone_bricks', 'Stone Brick', 'pickaxe'],
   [B.BRICK_SLAB, B.BRICK_STAIRS, B.BRICKS, 'bricks', 'bricks', 'Brick', 'pickaxe'],
   [B.SANDSTONE_SLAB, 0, B.SANDSTONE, 'sandstone_top', 'sandstone_side', 'Sandstone', 'pickaxe'],
+  [B.CRIMSON_SLAB, B.CRIMSON_STAIRS, B.CRIMSON_PLANKS, 'crimson_planks', 'crimson_planks', 'Crimson', 'axe'],
+  [B.WARPED_SLAB, B.WARPED_STAIRS, B.WARPED_PLANKS, 'warped_planks', 'warped_planks', 'Warped', 'axe'],
 ];
 for (const [slab, stairs, , top, side, label, tool] of SLAB_KINDS) {
   const wood = tool === 'axe';
+  const netherWood = label === 'Crimson' || label === 'Warped'; // fireproof: not a fuel
   const common = {
     hardness: 2, tool, minTier: wood ? undefined : 2, sound: (wood ? 'wood' : 'stone') as SoundClass,
-    opaque: false, occludes: false, ...(wood ? { fuel: 7 } : {}),
+    opaque: false, occludes: false, ...(wood && !netherWood ? { fuel: 7 } : {}),
   };
   blockDef({
     id: slab, name: `${label.toLowerCase().replace(/ /g, '_')}_slab`, label: `${label} Slab`, ...common,
@@ -1214,7 +1250,7 @@ export function slabFullBlock(slab: number): number {
 /** Non-cube blocks drawn by Mesher.emitShaped (with collision from shapeBoxes). */
 export const SHAPED = new Set<number>([
   ...SLAB_IDS, ...STAIR_IDS,
-  B.LANTERN, B.GLASS_PANE, B.OAK_FENCE, B.FENCE_GATE, B.ANVIL, B.ENCHANTING_TABLE,
+  B.LANTERN, B.GLASS_PANE, ...FENCE_IDS, ...GATE_IDS, B.ANVIL, B.ENCHANTING_TABLE,
   B.CAMPFIRE, B.CAKE, B.FLOWER_POT, B.COMPOSTER, B.JACK_O_LANTERN,
 ]);
 /** Blocks whose meta entry must be dropped when they are removed. */
@@ -1224,7 +1260,7 @@ export const META_BLOCKS = new Set<number>([...SHAPED]);
 export function connectsTo(self: number, other: number): boolean {
   if (other === B.AIR || !hasDef(other)) return false;
   if (self === B.GLASS_PANE) return other === B.GLASS_PANE || other === B.GLASS || (def(other).opaque && def(other).solid);
-  return other === B.OAK_FENCE || other === B.FENCE_GATE || (def(other).opaque && def(other).solid);
+  return FENCE_IDS.has(other) || GATE_IDS.has(other) || (def(other).opaque && def(other).solid);
 }
 
 /** Axis-aligned box in block-local units: x0, y0, z0, x1, y1, z1. */
@@ -1265,15 +1301,15 @@ function postBoxes(r: number, h: number, conn: number): Box[] {
 export function shapeBoxes(id: number, meta: number, conn: number, open: boolean, collide: boolean): Box[] | null {
   if (SLAB_IDS.has(id)) return [meta === 1 ? [0, 0.5, 0, 1, 1, 1] : [0, 0, 0, 1, 0.5, 1]];
   if (STAIR_IDS.has(id)) return stairBoxes(meta);
+  if (FENCE_IDS.has(id)) return postBoxes(2 * P16, collide ? 1.5 : 1, conn);
+  if (GATE_IDS.has(id)) {
+    if (open && collide) return [];
+    const alongX = (meta & 1) === 0; // facing north/south: the gate spans x
+    const h = collide ? 1.5 : 1;
+    return [alongX ? [0, 0, 7 * P16, 1, h, 9 * P16] : [7 * P16, 0, 0, 9 * P16, h, 1]];
+  }
   switch (id) {
-    case B.OAK_FENCE: return postBoxes(2 * P16, collide ? 1.5 : 1, conn);
     case B.GLASS_PANE: return postBoxes(P16, 1, conn);
-    case B.FENCE_GATE: {
-      if (open && collide) return [];
-      const alongX = (meta & 1) === 0; // facing north/south: the gate spans x
-      const h = collide ? 1.5 : 1;
-      return [alongX ? [0, 0, 7 * P16, 1, h, 9 * P16] : [7 * P16, 0, 0, 9 * P16, h, 1]];
-    }
     case B.LANTERN: case B.SOUL_LANTERN: return meta === 1
       ? [[5 * P16, 1 * P16, 5 * P16, 11 * P16, 10 * P16, 11 * P16]]
       : [[5 * P16, 0, 5 * P16, 11 * P16, 9 * P16, 11 * P16]];
@@ -1671,38 +1707,65 @@ blockDef({
   faces: { top: 'warped_roots', bottom: 'warped_roots', sides: 'warped_roots' },
 });
 
+// Nether wood: planks from a stem (slabs/stairs via SLAB_KINDS, fences/gates
+// above). Fireproof like vanilla: no fuel value and never catches.
+blockDef({
+  id: B.CRIMSON_PLANKS, name: 'crimson_planks', label: 'Crimson Planks', hardness: 2, tool: 'axe', sound: 'wood',
+  faces: { top: 'crimson_planks', bottom: 'crimson_planks', sides: 'crimson_planks' },
+});
+blockDef({
+  id: B.WARPED_PLANKS, name: 'warped_planks', label: 'Warped Planks', hardness: 2, tool: 'axe', sound: 'wood',
+  faces: { top: 'warped_planks', bottom: 'warped_planks', sides: 'warped_planks' },
+});
+// vines: the item/icon shows the tip; drops only with shears or 1 in 3 (vineDrops)
+blockDef({
+  id: B.WEEPING_VINES, name: 'weeping_vines', label: 'Weeping Vines', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false, drop: null,
+  faces: { top: 'weeping_vines_tip', bottom: 'weeping_vines_tip', sides: 'weeping_vines_tip' },
+});
+blockDef({
+  id: B.TWISTING_VINES, name: 'twisting_vines', label: 'Twisting Vines', hardness: 0, sound: 'grass',
+  solid: false, opaque: false, occludes: false, drop: null,
+  faces: { top: 'twisting_vines_tip', bottom: 'twisting_vines_tip', sides: 'twisting_vines_tip' },
+});
+
 const NETHER_BLOCKS = [
   B.CRIMSON_NYLIUM, B.WARPED_NYLIUM, B.CRIMSON_STEM, B.WARPED_STEM, B.NETHER_WART_BLOCK, B.WARPED_WART_BLOCK,
   B.SHROOMLIGHT, B.BASALT, B.BLACKSTONE, B.SOUL_SOIL, B.NETHER_GOLD_ORE, B.ANCIENT_DEBRIS,
-  B.CRIMSON_ROOTS, B.WARPED_ROOTS,
+  B.CRIMSON_ROOTS, B.WARPED_ROOTS, B.WEEPING_VINES, B.TWISTING_VINES,
+  B.CRIMSON_PLANKS, B.CRIMSON_SLAB, B.CRIMSON_STAIRS, B.CRIMSON_FENCE, B.CRIMSON_FENCE_GATE,
+  B.WARPED_PLANKS, B.WARPED_SLAB, B.WARPED_STAIRS, B.WARPED_FENCE, B.WARPED_FENCE_GATE,
 ];
 for (const id of NETHER_BLOCKS) {
   const d = DEFS.get(id)!;
   OPAQUE_LUT[id] = d.opaque ? 1 : 0;
   OCCLUDE_LUT[id] = d.occludes ? 1 : 0;
 }
-CROSS_BLOCKS.add(B.CRIMSON_ROOTS).add(B.WARPED_ROOTS);
-FLOOR_BLOCKS.add(B.CRIMSON_ROOTS).add(B.WARPED_ROOTS);
-SELF_STACKING.add(B.WARPED_ROOTS); // twisting vines climb on themselves
+CROSS_BLOCKS.add(B.CRIMSON_ROOTS).add(B.WARPED_ROOTS).add(B.WEEPING_VINES).add(B.TWISTING_VINES);
+FLOOR_BLOCKS.add(B.CRIMSON_ROOTS).add(B.WARPED_ROOTS).add(B.WEEPING_VINES).add(B.TWISTING_VINES);
+SELF_STACKING.add(B.TWISTING_VINES); // twisting vines climb on themselves
 
-/** Plants that may also hang from the block above (or from more of themselves):
- *  crimson roots dangling off a ceiling are weeping vines. */
-export const HANGING_PLANTS = new Set<number>([B.CRIMSON_ROOTS]);
+/** Support-checked plants that hang from the block above (or from more of
+ *  themselves) instead of standing on a floor: weeping vines. */
+export const HANGING_PLANTS = new Set<number>([B.WEEPING_VINES]);
+/** Nether vines: climbable, pop off in a chain when their anchor goes. */
+export const VINE_BLOCKS = new Set<number>([B.WEEPING_VINES, B.TWISTING_VINES]);
+/** Blocks the player climbs like a ladder. */
+export const CLIMBABLE = new Set<number>([B.LADDER, B.WEEPING_VINES, B.TWISTING_VINES]);
+/** Does breaking a vine drop it? Shears always; otherwise 1 in 3 (vanilla). */
+export function vineDrops(shears: boolean): boolean {
+  return shears || Math.random() < 1 / 3;
+}
 
 /** Blocks explosions can't break. */
 export const BLAST_PROOF = new Set<number>([B.BEDROCK, B.ANCIENT_DEBRIS]);
 
-/** Tile for a crossed-billboard plant given its neighbours below/above: crimson
- *  roots with nothing solid under them draw as weeping vines, stacked warped
- *  roots as twisting vines, and fire on soul sand/soil burns blue. */
+/** Tile for a crossed-billboard plant given its neighbours below/above: vines
+ *  draw their leafy tip on the free end, and fire on soul sand/soil burns blue. */
 export function crossTile(id: number, below: number, above: number): string {
   if (id === B.FIRE) return below === B.SOUL_SAND || below === B.SOUL_SOIL ? 'soul_fire' : 'fire';
-  if (id === B.CRIMSON_ROOTS && !DEFS.get(below)?.solid) {
-    return below === B.CRIMSON_ROOTS ? 'weeping_vines' : 'weeping_vines_tip';
-  }
-  if (id === B.WARPED_ROOTS && (above === B.WARPED_ROOTS || below === B.WARPED_ROOTS)) {
-    return above === B.WARPED_ROOTS ? 'twisting_vines' : 'twisting_vines_tip';
-  }
+  if (id === B.WEEPING_VINES) return below === B.WEEPING_VINES ? 'weeping_vines' : 'weeping_vines_tip';
+  if (id === B.TWISTING_VINES) return above === B.TWISTING_VINES ? 'twisting_vines' : 'twisting_vines_tip';
   return DEFS.get(id)!.faces!.sides;
 }
 

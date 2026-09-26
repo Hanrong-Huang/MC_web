@@ -22,7 +22,7 @@ import type { Entity } from './EntityManager';
 import type { RayHit } from './World';
 import { mouseLookSens } from './ControlsSettings';
 import type { PlayerSave } from './Persistence';
-import { netheriteUpgrade } from './Blocks';
+import { netheriteUpgrade, GATE_IDS, CLIMBABLE, HANGING_PLANTS, VINE_BLOCKS, vineDrops } from './Blocks';
 import { PORTAL_TIME_CREATIVE, PORTAL_TIME_SURVIVAL } from './NetherPortal';
 
 export type GameMode = 'survival' | 'creative';
@@ -500,7 +500,7 @@ export class Player {
       for (let by = Math.floor(this.pos.y); by <= Math.floor(this.pos.y + BOX.h); by++) {
         for (let bz = Math.floor(this.pos.z - hw); bz <= Math.floor(this.pos.z + hw); bz++) {
           for (let bx = Math.floor(this.pos.x - hw); bx <= Math.floor(this.pos.x + hw); bx++) {
-            if (world.getBlock(bx, by, bz) === B.LADDER) { this.onLadder = true; break; }
+            if (CLIMBABLE.has(world.getBlock(bx, by, bz))) { this.onLadder = true; break; }
           }
           if (this.onLadder) break;
         }
@@ -1127,7 +1127,7 @@ export class Player {
     // shaped blocks keep a small state value (facing, slab half, pot plant ...)
     const meta = world.bedFacings.get(beKey) ?? 0;
     if (META_BLOCKS.has(id)) world.bedFacings.delete(beKey);
-    if (id === B.FENCE_GATE) world.doorStates.delete(beKey);
+    if (GATE_IDS.has(id)) world.doorStates.delete(beKey);
 
     world.setBlock(x, y, z, B.AIR);
     audio.dig(def(id).sound, 1, 1, id);
@@ -1170,6 +1170,11 @@ export class Player {
       const shears = this.heldId() === I.SHEARS;
       if (shears && (LEAF_BLOCKS.has(id) || id === B.TALL_GRASS)) {
         entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, id, 1);
+        return;
+      }
+      // Nether vines: kept whole by shears, otherwise only now and then
+      if (VINE_BLOCKS.has(id)) {
+        if (vineDrops(shears)) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, id, 1);
         return;
       }
       if (LEAF_BLOCKS.has(id)) {
@@ -1430,7 +1435,7 @@ export class Player {
    */
   private useDecorBlock(x: number, y: number, z: number, id: number): boolean {
     const { world, audio, entities } = this.deps;
-    const DECOR = id === B.FENCE_GATE || id === B.BARREL || id === B.CAKE || id === B.FLOWER_POT ||
+    const DECOR = GATE_IDS.has(id) || id === B.BARREL || id === B.CAKE || id === B.FLOWER_POT ||
       id === B.COMPOSTER || id === B.ANVIL || id === B.ENCHANTING_TABLE || id === B.CAMPFIRE;
     if (!DECOR) return false;
     if (this.placeCooldown > 0) return true;
@@ -1438,7 +1443,7 @@ export class Player {
     const held = this.inventory.getSelected();
     const meta = world.bedFacings.get(key) ?? 0;
     const dirty = (): void => world.markDirty(Math.floor(x / 16), Math.floor(z / 16));
-    switch (id) {
+    switch (GATE_IDS.has(id) ? B.FENCE_GATE : id) {
       case B.FENCE_GATE: {
         const st = world.doorStates.get(key) ?? { facing: 0 as const, open: false };
         st.open = !st.open;
@@ -2234,7 +2239,11 @@ export class Player {
     if (held.id === I.REDSTONE) placeId = B.REDSTONE_WIRE;
 
     // plants/torches need a floor (cane and cactus may stack on themselves)
-    if (FLOOR_BLOCKS.has(placeId)) {
+    if (HANGING_PLANTS.has(placeId)) {
+      // weeping vines hang from a ceiling or the end of another vine
+      const above = world.getBlock(px, py + 1, pz);
+      if (!isSolid(above) && above !== placeId) return;
+    } else if (FLOOR_BLOCKS.has(placeId)) {
       const below = world.getBlock(px, py - 1, pz);
       const supported = isSolid(below) || (SELF_STACKING.has(placeId) && below === placeId);
       if (!supported) return;
@@ -2258,7 +2267,7 @@ export class Player {
     const pkey = `${px},${py},${pz}`;
     if (META_BLOCKS.has(placeId)) { if (meta >= 0) world.bedFacings.set(pkey, meta); else world.bedFacings.delete(pkey); }
     if (world.setBlock(px, py, pz, placeId)) {
-      if (placeId === B.FENCE_GATE) world.doorStates.set(pkey, { facing: facing as DoorFacing, open: false });
+      if (GATE_IDS.has(placeId)) world.doorStates.set(pkey, { facing: facing as DoorFacing, open: false });
       if (placeId === B.LEVER || placeId === B.WOODEN_BUTTON || placeId === B.STONE_BUTTON || placeId === B.PRESSURE_PLATE) {
         const facing = this.target.ny === -1 ? 0 : this.target.ny === 1 ? 1 : this.target.nz === -1 ? 2 : this.target.nz === 1 ? 3 : this.target.nx === -1 ? 4 : 5;
         world.redstoneStates.set(`${px},${py},${pz}`, { active: false, facing });

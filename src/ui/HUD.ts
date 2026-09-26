@@ -5,7 +5,7 @@
 // with full cursor-stack slot interactions and a side-panel recipe book.
 
 import { Atlas } from '../engine/Textures';
-import { Inventory, Slot, matchRecipe, FurnaceState, ChestState, SMELT_TIME, allRecipes, RecipeView, furnaceSlotFor } from '../engine/Inventory';
+import { Inventory, Slot, matchRecipe, FurnaceState, ChestState, SMELT_TIME, allRecipes, RecipeView, furnaceSlotFor, ingredientOptions } from '../engine/Inventory';
 import { def, CREATIVE_ITEMS, I, B, spriteNameFor, mobLabel, enchantLabel } from '../engine/Blocks';
 import { SaveSummary, SlotData } from '../engine/Persistence';
 import { AudioEngine, SfxName, MobVoice } from '../engine/Audio';
@@ -2051,9 +2051,14 @@ ${seedLine.textContent}`;
     return w <= craftW && h <= craftW;
   }
 
+  /** How many of an ingredient the player holds, counting tag alternatives (any planks). */
+  private haveCount(inv: Inventory, id: number): number {
+    return ingredientOptions(id).reduce((n, alt) => n + inv.count(alt), 0);
+  }
+
   private canFillRecipe(r: RecipeView, inv: Inventory, craftW: number): boolean {
     if (r.out === B.PORTAL) return false;
-    return this.recipeFitsGrid(r, craftW) && r.counts.every((need) => inv.count(need.id) >= need.count);
+    return this.recipeFitsGrid(r, craftW) && r.counts.every((need) => this.haveCount(inv, need.id) >= need.count);
   }
 
   private recipeCategory(r: RecipeView): Exclude<RecipeFilter, 'all' | 'ready'> {
@@ -2082,7 +2087,7 @@ ${seedLine.textContent}`;
     if (!this.recipeFitsGrid(r, craftW)) return 'Requires crafting table';
     if (this.cursor) return 'Clear cursor first';
     const missing = r.counts
-      .map((need) => ({ ...need, have: inv.count(need.id) }))
+      .map((need) => ({ ...need, have: this.haveCount(inv, need.id) }))
       .filter((need) => need.have < need.count);
     if (missing.length === 0) return 'Ready';
     return `Missing ${missing.map((need) => `${need.count - need.have} ${def(need.id).label}`).join(', ')}`;
@@ -2133,8 +2138,10 @@ ${seedLine.textContent}`;
       for (let x = 0; x < r.shape[y].length; x++) {
         const id = r.shape[y][x];
         if (id === 0) continue;
-        if (!this.takeFromInventory(inv, id, 1)) return false;
-        view.craftGrid[y * view.craftW + x] = { id, count: 1 };
+        // tagged ingredients (any planks) take whichever variant is on hand
+        const got = ingredientOptions(id).find((alt) => inv.count(alt) > 0) ?? id;
+        if (!this.takeFromInventory(inv, got, 1)) return false;
+        view.craftGrid[y * view.craftW + x] = { id: got, count: 1 };
       }
     }
     inv.onChange();
@@ -2155,7 +2162,7 @@ ${seedLine.textContent}`;
   private recipeNeedsEl(r: RecipeView, inv: Inventory, parent: HTMLElement): void {
     const needs = el('div', 'recipe-needs', parent);
     for (const need of r.counts) {
-      const have = inv.count(need.id);
+      const have = this.haveCount(inv, need.id);
       const chip = el('span', have >= need.count ? 'need-ok' : 'need-miss', needs);
       chip.textContent = `${Math.min(have, need.count)}/${need.count} ${def(need.id).label}`;
     }

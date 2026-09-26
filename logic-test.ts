@@ -4,10 +4,12 @@ import { matchRecipe, FurnaceState, ChestState, Slot, smeltResult, furnaceSlotFo
 import {
   B, B2, I, breakTime, canHarvest, attackCooldown, attackStrength, foodSaturation, pickItemFor, def,
   CREATIVE_ITEMS, shapeBoxes, slabFullBlock, connectsTo, enchantsFor, enchantLabel, repairMaterial,
+  ID_LIMIT, allDefs, crossTile, CLIMBABLE, vineDrops,
 } from './src/engine/Blocks.ts';
 import { craftRemainders } from './src/engine/Inventory.ts';
 import { xpForLevel } from './src/engine/Player.ts';
 import { campfireCooks } from './src/engine/Campfires.ts';
+import { migrateLegacyChunk } from './src/engine/World.ts';
 
 let failures = 0;
 function check(name: string, cond: boolean): void {
@@ -243,7 +245,10 @@ check('pick stone -> stone', pickItemFor(B.STONE) === B.STONE);
     const d = def(id);
     if (!(d.faces || d.sprite)) check(`${d.name} has a texture`, false);
   }
-  check('block ids fit a byte', CREATIVE_ITEMS.filter((id) => def(id).block).every((id) => id < 256));
+  // id ranges: blocks 1-99, 200-299, 1000-4095; items 100-199, 300-999
+  const blockRange = (id: number): boolean => (id > 0 && id < 100) || (id >= 200 && id < 300) || (id >= 1000 && id < ID_LIMIT);
+  check('block ids sit in the block ranges', allDefs().filter((d) => d.block).every((d) => blockRange(d.id)));
+  check('item ids stay out of the block ranges', allDefs().filter((d) => !d.block).every((d) => !blockRange(d.id)));
   // shapes + physics tables
   check('bottom slab is half height', shapeBoxes(B.OAK_SLAB, 0, 0, false, true)?.[0][4] === 0.5);
   check('top slab sits high', shapeBoxes(B.OAK_SLAB, 1, 0, false, true)?.[0][1] === 0.5);
@@ -265,6 +270,45 @@ check('pick stone -> stone', pickItemFor(B.STONE) === B.STONE);
   check('melon drops slices', def(B.MELON).drop?.id === I.MELON_SLICE);
   check('xp curve', xpForLevel(0) === 7 && xpForLevel(16) === 42 && xpForLevel(31) === 121);
   check('campfire cooks beef', campfireCooks(I.BEEF) === I.COOKED_BEEF && campfireCooks(B.IRON_ORE) === undefined);
+  // Nether wood: stems -> planks, which work in every planks recipe
+  const CP = B.CRIMSON_PLANKS, WP = B.WARPED_PLANKS;
+  check('crimson stem -> 4 crimson planks', matchRecipe(g9([B.CRIMSON_STEM, 0, 0, 0, 0, 0, 0, 0, 0]), 3)?.id === CP &&
+    matchRecipe(g9([B.CRIMSON_STEM, 0, 0, 0, 0, 0, 0, 0, 0]), 3)?.count === 4);
+  check('warped stem -> warped planks', r9([B.WARPED_STEM, 0, 0, 0, 0, 0, 0, 0, 0]) === WP);
+  check('crimson planks -> sticks', matchRecipe(g4(CP, 0, CP, 0), 2)?.id === I.STICK);
+  check('warped planks -> crafting table', matchRecipe(g4(WP, WP, WP, WP), 2)?.id === B.TABLE);
+  check('mixed planks -> crafting table', matchRecipe(g4(WP, B.PLANKS, CP, WP), 2)?.id === B.TABLE);
+  check('crimson wooden pickaxe', r9([CP, CP, CP, 0, S, 0, 0, S, 0]) === I.WOOD_PICK);
+  check('warped chest', r9([WP, WP, WP, WP, 0, WP, WP, WP, WP]) === B.CHEST);
+  check('crimson slab (exact beats the planks tag)', r9([CP, CP, CP, 0, 0, 0, 0, 0, 0]) === B.CRIMSON_SLAB);
+  check('warped stairs', r9([WP, 0, 0, WP, WP, 0, WP, WP, WP]) === B.WARPED_STAIRS);
+  check('crimson fence', r9([CP, S, CP, CP, S, CP, 0, 0, 0]) === B.CRIMSON_FENCE);
+  check('warped fence gate', r9([S, WP, S, S, WP, S, 0, 0, 0]) === B.WARPED_FENCE_GATE);
+  check('barrel from crimson slabs', r9([P, B.CRIMSON_SLAB, P, P, 0, P, P, B.CRIMSON_SLAB, P]) === B.BARREL);
+  check('nether planks are not fuel', !def(CP).fuel && !def(B.WARPED_SLAB).fuel);
+  check('nether slabs double into their planks', slabFullBlock(B.CRIMSON_SLAB) === CP);
+  check('nether fences join oak fences', connectsTo(B.CRIMSON_FENCE, B.OAK_FENCE) && connectsTo(B.OAK_FENCE, B.WARPED_FENCE_GATE));
+  check('nether gate opens', shapeBoxes(B.WARPED_FENCE_GATE, 0, 0, true, true)?.length === 0);
+  // vines: real blocks, tip on the free end, climbable
+  check('weeping vine tip draws on the lowest cell', crossTile(B.WEEPING_VINES, B.AIR, B.WEEPING_VINES) === 'weeping_vines_tip' &&
+    crossTile(B.WEEPING_VINES, B.WEEPING_VINES, B.NETHERRACK) === 'weeping_vines');
+  check('twisting vine tip draws on the top cell', crossTile(B.TWISTING_VINES, B.WARPED_NYLIUM, B.AIR) === 'twisting_vines_tip' &&
+    crossTile(B.TWISTING_VINES, B.TWISTING_VINES, B.TWISTING_VINES) === 'twisting_vines');
+  check('roots stay roots', crossTile(B.CRIMSON_ROOTS, B.AIR, B.NETHERRACK) === 'crimson_roots');
+  check('vines are climbable', CLIMBABLE.has(B.WEEPING_VINES) && CLIMBABLE.has(B.TWISTING_VINES) && CLIMBABLE.has(B.LADDER));
+  check('vines drop only by chance', def(B.WEEPING_VINES).drop === null && vineDrops(true));
+  // legacy (u8) chunk: hanging crimson roots / stacked warped roots become vines
+  const leg = new Uint16Array(40960);
+  const ix = (x: number, y: number, z: number): number => x | (z << 4) | (y << 8);
+  leg[ix(1, 50, 1)] = B.NETHERRACK; leg[ix(1, 49, 1)] = B.CRIMSON_ROOTS; leg[ix(1, 48, 1)] = B.CRIMSON_ROOTS;
+  leg[ix(2, 10, 2)] = B.CRIMSON_NYLIUM; leg[ix(2, 11, 2)] = B.CRIMSON_ROOTS;
+  leg[ix(3, 10, 3)] = B.WARPED_NYLIUM; leg[ix(3, 11, 3)] = B.WARPED_ROOTS; leg[ix(3, 12, 3)] = B.WARPED_ROOTS;
+  leg[ix(4, 10, 4)] = B.WARPED_NYLIUM; leg[ix(4, 11, 4)] = B.WARPED_ROOTS;
+  const legDec = rleDecode(rleEncodeLegacy(leg), 40960);
+  migrateLegacyChunk(legDec);
+  check('legacy hanging roots -> weeping vines', legDec[ix(1, 49, 1)] === B.WEEPING_VINES && legDec[ix(1, 48, 1)] === B.WEEPING_VINES);
+  check('legacy floor roots stay roots', legDec[ix(2, 11, 2)] === B.CRIMSON_ROOTS && legDec[ix(4, 11, 4)] === B.WARPED_ROOTS);
+  check('legacy stacked warped roots -> twisting vines', legDec[ix(3, 11, 3)] === B.TWISTING_VINES && legDec[ix(3, 12, 3)] === B.TWISTING_VINES);
 }
 
 console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');

@@ -196,6 +196,14 @@ const DECOR_RECIPES: Recipe[] = [
   // fencing, glazing, lighting
   { shape: [[P, S, P], [P, S, P]], out: B.OAK_FENCE, n: 3 },
   { shape: [[S, P, S], [S, P, S]], out: B.FENCE_GATE, n: 1 },
+  // Nether wood: stems saw into planks; fences/gates keep their colour
+  { shape: [[B.CRIMSON_STEM]], out: B.CRIMSON_PLANKS, n: 4 },
+  { shape: [[B.WARPED_STEM]], out: B.WARPED_PLANKS, n: 4 },
+  ...([[B.CRIMSON_PLANKS, B.CRIMSON_FENCE, B.CRIMSON_FENCE_GATE], [B.WARPED_PLANKS, B.WARPED_FENCE, B.WARPED_FENCE_GATE]] as const)
+    .flatMap(([NP, fence, gate]): Recipe[] => [
+      { shape: [[NP, S, NP], [NP, S, NP]], out: fence, n: 3 },
+      { shape: [[S, NP, S], [S, NP, S]], out: gate, n: 1 },
+    ]),
   { shape: [[FG, FG, FG], [FG, FG, FG]], out: B.GLASS_PANE, n: 16 },
   { shape: [[0, FE, 0], [FE, B.TORCH, FE], [0, FE, 0]], out: B.LANTERN, n: 2 },
   { shape: [[B.PUMPKIN], [B.TORCH]], out: B.JACK_O_LANTERN, n: 1 },
@@ -416,18 +424,40 @@ function shapeEquals(a: number[][], b: number[][]): boolean {
   return true;
 }
 
-export function matchRecipe(grid: Slot[], w: number): { id: number; count: number } | null {
-  const cropped = cropGrid(grid, w);
-  if (!cropped) return null;
+/** Ingredient tags: any plank works wherever oak planks do (tools, sticks,
+ *  table, chest ...) and any wooden slab wherever oak slabs do (barrel,
+ *  composter). Recipes name the oak id; exact matches (crimson planks ->
+ *  crimson slab) still win because the tag pass only runs when they fail. */
+const TAG_OF = new Map<number, number>([
+  [B.CRIMSON_PLANKS, B.PLANKS], [B.WARPED_PLANKS, B.PLANKS],
+  [B.CRIMSON_SLAB, B.OAK_SLAB], [B.WARPED_SLAB, B.OAK_SLAB],
+]);
+
+/** Every id a recipe ingredient accepts (itself first), for the recipe book. */
+export function ingredientOptions(id: number): number[] {
+  const out = [id];
+  for (const [alt, base] of TAG_OF) if (base === id) out.push(alt);
+  return out;
+}
+
+function findRecipe(shape: number[][]): Recipe | null {
   for (const r of RECIPES) {
     // the portal recipe exists only as a recipe-book hint; the real way to make
     // one is to ignite an obsidian frame with flint & steel (see Player).
     if (r.out === B.PORTAL) continue;
-    if (shapeEquals(cropped, r.shape) || shapeEquals(cropped, mirror(r.shape))) {
-      return { id: r.out, count: r.n };
-    }
+    if (shapeEquals(shape, r.shape) || shapeEquals(shape, mirror(r.shape))) return r;
   }
   return null;
+}
+
+export function matchRecipe(grid: Slot[], w: number): { id: number; count: number } | null {
+  const cropped = cropGrid(grid, w);
+  if (!cropped) return null;
+  let r = findRecipe(cropped);
+  if (!r && cropped.some((row) => row.some((id) => TAG_OF.has(id)))) {
+    r = findRecipe(cropped.map((row) => row.map((id) => TAG_OF.get(id) ?? id)));
+  }
+  return r ? { id: r.out, count: r.n } : null;
 }
 
 // ---------------------------------------------------------------------------

@@ -86,11 +86,11 @@ if (!ONLY || ONLY.includes('showcase')) {
     for (let i = 0; i < 12; i++) put(i, 0, 4, [B.CRIMSON_NYLIUM, B.WARPED_NYLIUM, B.SOUL_SOIL, B.SOUL_SAND][i >> 2 & 3]);
     put(0, 1, 4, B.CRIMSON_ROOTS); put(1, 1, 4, B.CRIMSON_ROOTS);
     put(4, 1, 4, B.WARPED_ROOTS); put(5, 1, 4, B.WARPED_ROOTS);
-    for (let k = 1; k <= 4; k++) put(6, k, 4, B.WARPED_ROOTS);
+    for (let k = 1; k <= 4; k++) put(6, k, 4, B.TWISTING_VINES);
     put(8, 1, 4, B.FIRE); put(9, 1, 4, B.FIRE); put(10, 1, 4, B.FIRE); put(11, 1, 4, B.FIRE);
     for (let i = 0; i < 4; i++) {
       put(i, 5, 4, B.NETHER_WART_BLOCK);
-      for (let k = 4; k >= 5 - (2 + i); k--) put(i, k, 4, B.CRIMSON_ROOTS);
+      for (let k = 4; k >= 5 - (2 + i); k--) put(i, k, 4, B.WEEPING_VINES);
     }
     p.flying = true; p.vel = { x: 0, y: 0, z: 0 };
     g.dayTime = 0.12;
@@ -108,7 +108,7 @@ await page.waitForTimeout(3000);
 check('in the nether', await page.evaluate(() => window.__game.world.dimension === 'nether'));
 
 const LABEL = { wastes: 'nether_wastes', crimson: 'crimson_forest', warped: 'warped_forest', soul_valley: 'soul_sand_valley', basalt: 'basalt_deltas' };
-const SIGNATURE = { wastes: ['NETHERRACK'], crimson: ['CRIMSON_NYLIUM', 'CRIMSON_STEM', 'NETHER_WART_BLOCK'], warped: ['WARPED_NYLIUM', 'WARPED_STEM', 'WARPED_WART_BLOCK'], soul_valley: ['SOUL_SOIL', 'SOUL_SAND'], basalt: ['BASALT', 'BLACKSTONE'] };
+const SIGNATURE = { wastes: ['NETHERRACK'], crimson: ['CRIMSON_NYLIUM', 'CRIMSON_STEM', 'NETHER_WART_BLOCK', 'WEEPING_VINES'], warped: ['WARPED_NYLIUM', 'WARPED_STEM', 'WARPED_WART_BLOCK', 'TWISTING_VINES'], soul_valley: ['SOUL_SOIL', 'SOUL_SAND'], basalt: ['BASALT', 'BLACKSTONE'] };
 for (const biome of Object.keys(LABEL)) {
   if (ONLY && !ONLY.includes(biome)) continue;
   // find a spot well inside the biome (same biome 24 blocks around), with a floor

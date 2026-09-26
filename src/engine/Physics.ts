@@ -5,7 +5,7 @@
 // ledge up to STEP_HEIGHT (a slab or a stair) without jumping.
 
 import { World } from './World';
-import { B, def, hasDef, SHAPED, shapeBoxes, connectsTo } from './Blocks';
+import { B, def, hasDef, SHAPED, FENCE_IDS, GATE_IDS, shapeBoxes, connectsTo } from './Blocks';
 import type { Box } from './Blocks';
 
 export interface Vec3 { x: number; y: number; z: number }
@@ -31,12 +31,12 @@ function cellBoxes(world: World, x: number, y: number, z: number): Box[] {
   if (id === B.AIR || id === B.WATER) return NONE;
   if (SHAPED.has(id)) {
     const key = `${x},${y},${z}`;
-    if (id === B.FENCE_GATE) {
+    if (GATE_IDS.has(id)) {
       const st = world.doorStates.get(key);
       return shapeBoxes(id, st?.facing ?? 0, 0, !!st?.open, true) ?? FULL;
     }
     let conn = 0;
-    if (id === B.OAK_FENCE || id === B.GLASS_PANE) {
+    if (FENCE_IDS.has(id) || id === B.GLASS_PANE) {
       if (connectsTo(id, world.getBlock(x, y, z - 1))) conn |= 1;
       if (connectsTo(id, world.getBlock(x, y, z + 1))) conn |= 2;
       if (connectsTo(id, world.getBlock(x - 1, y, z))) conn |= 4;
