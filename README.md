@@ -62,7 +62,20 @@ There is one shared, always-on world everyone can join. Nothing to install:
 2. On the **Multiplayer** card, type **Your Name** and press **Join Server**. Leave **Server Address** blank to join the online world.
 3. You spawn in the shared world. Anyone else online shows up with their name above their head.
 
-In game: **T** to chat, hold **Tab** for the player list, and use the chat commands `/list` (who's online), `/time set day|noon|night|midnight` and `/help`.
+In game: **T** to chat and hold **Tab** for the player list. Type commands in chat; `/help` lists the ones you can use:
+
+| Command | What it does |
+|---|---|
+| `/tp <player>` | Teleport to a player |
+| `/sethome` · `/home` | Save this spot as your home · go back to it |
+| `/spawn` | Go to the world spawn |
+| `/msg <player> <text>` | Whisper to one player |
+| `/list` | Who's online |
+| `/login <password>` | Become an admin (the server owner has the password) |
+
+Admins also get: `/tp <player> <player>`, `/tp [player] <x> <y> <z>` (`~` = relative), `/tphere <player>`, `/time set day|noon|night|midnight`, `/weather clear|rain|thunder`, `/gamemode survival|creative [player]`, `/give <player> <item> [count]`, `/heal [player]`, `/setspawn`, `/kick <player>`, `/op` · `/deop <player>`, `/say <text>`, `/seed`.
+
+Single-player worlds have the same kind of commands (`/help` in chat): `/tp <x> <y> <z>`, `/sethome`, `/home`, `/spawn`, `/time`, `/weather`, `/gamemode`, `/give <item> [count]`, `/heal`, `/seed`.
 
 **What is shared:** the world (every block anyone places, breaks or uses: doors, levers, chests and their contents, TNT craters), the day/night clock, chat and each other's players with name tags. The night is skipped once everyone in the Overworld is in bed.
 
@@ -78,7 +91,14 @@ In game: **T** to chat, hold **Tab** for the player list, and use the chat comma
 2. 在 **Multiplayer** 卡片里填上 **Your Name**（你的名字），点 **Join Server**。Server Address 留空，就是加入在线世界。
 3. 进去后就在同一个世界里了，其他玩家头顶会显示名字。
 
-游戏里按 **T** 聊天，按住 **Tab** 看在线玩家。聊天命令有 `/list`（谁在线）、`/time set day|night`（改时间）和 `/help`。
+游戏里按 **T** 聊天，按住 **Tab** 看在线玩家。在聊天框输入命令，`/help` 会列出你能用的命令：
+
+- `/tp <玩家名>` 传送到某个玩家身边
+- `/sethome` 把当前位置设为家，`/home` 回家
+- `/spawn` 回到出生点
+- `/msg <玩家名> <内容>` 私聊
+- `/list` 看谁在线
+- `/login <密码>` 成为管理员（密码在服主那里）。管理员还能用 `/time`、`/weather`、`/gamemode`、`/give`、`/heal`、`/tphere`、`/kick`、`/setspawn` 等，输入 `/help` 查看全部。
 你的背包、位置和出生点按**名字**保存在服务器上，下次用同一个名字就能接着玩。没有密码，别人用你的名字也能进你的角色。
 
 ### Hosting the online world (Cloudflare)
@@ -87,6 +107,7 @@ The game is served from GitHub Pages and the world runs on Cloudflare as a Worke
 
 - **Deploy server changes:** `npx wrangler login` once, then `npm run worker:deploy`. To make pushes to `main` deploy it automatically, add the repo secrets `CLOUDFLARE_API_TOKEN` (a token from the *Edit Cloudflare Workers* template) and `CLOUDFLARE_ACCOUNT_ID`. Without them the *Deploy multiplayer server* workflow only type-checks.
 - **Move the world to another server:** change the `VITE_MP_SERVER` variable (Settings → Secrets and variables → Actions → Variables) and re-run *Deploy site*. A direct link also works: `https://hanrong-huang.github.io/MC_web/?server=wss://…`.
+- **Admin password** (for `/login`) is the Worker secret `ADMIN_PASSWORD`: set or change it with `npx wrangler secret put ADMIN_PASSWORD`.
 - **World settings** live in `wrangler.toml` (`MODE`, `SEED`, `MAX_PLAYERS`, `WORLD_NAME`). With nobody online the world sleeps and the day clock pauses. The free plan comfortably covers a group of friends playing a few hours a day; see Cloudflare's pricing page for the daily request and storage-write limits.
 - **Mainland China:** `*.workers.dev` is often blocked there. Add a domain to the Cloudflare account and attach it to the Worker under *Workers & Pages → voxelcraft → Settings → Domains & Routes → Custom domain* (e.g. `mc.example.com`). Then point `VITE_MP_SERVER` at `wss://mc.example.com` and re-run *Deploy site*.
 - `npm run worker:dev` runs the same server locally on port 8787.
@@ -110,7 +131,7 @@ It prints something like `play: http://localhost:8080/`. The world is saved in `
 - **Over the internet:** forward TCP port 8080 on the router to the host, or expose it with a tunnel such as `cloudflared tunnel --url http://localhost:8080` or `ngrok http 8080`, then share the https link it prints. It can also run on any small VPS or container host (Fly.io, Railway, …) with `npm run server`.
 - The Play-now page on GitHub Pages can also join a server: type its address (e.g. `wss://your-tunnel.example.com`) into **Server Address**.
 
-Server options (environment variables): `PORT` (8080), `WORLD` (world file name), `SEED`, `MODE` (`survival`/`creative` for new players), `MAX_PLAYERS` (16), `DATA_DIR`. Chat commands: `/list`, `/time set day|noon|night|midnight`, `/help`.
+Server options (environment variables): `PORT` (8080), `WORLD` (world file name), `SEED`, `MODE` (`survival`/`creative` for new players), `MAX_PLAYERS` (16), `DATA_DIR`, `ADMIN_PASSWORD` (for `/login`; if unset, a random one is printed when the server starts). The chat commands are the ones listed above.
 
 ## Run it locally
 

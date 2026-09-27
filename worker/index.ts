@@ -11,7 +11,7 @@
 // in as the default, see VITE_MP_SERVER).
 
 import { DurableObject } from 'cloudflare:workers';
-import { WorldCore, newWorld, parseSeed, type Conn, type WorldData } from '../server/core';
+import { WorldCore, newWorld, parseSeed, type Conn, type Place, type WorldData } from '../server/core';
 import type { CellState, NetMode, PlayerSave } from '../src/net/protocol';
 
 export interface Env {
@@ -20,6 +20,13 @@ export interface Env {
   SEED?: string;
   MODE?: string;
   MAX_PLAYERS?: string;
+  /** secret: `/login <ADMIN_PASSWORD>` makes a player an admin (wrangler secret put ADMIN_PASSWORD) */
+  ADMIN_PASSWORD?: string;
+}
+
+interface Meta {
+  seed: number; mode: NetMode; dayTime: number;
+  homes?: Record<string, Place>; spawn?: Place; weather?: WorldData['weather']; weatherLeft?: number;
 }
 
 const CORS = { 'access-control-allow-origin': '*' };
@@ -61,8 +68,12 @@ export class WorldRoom extends DurableObject<Env> {
     const metaRow = sql.exec('SELECT v FROM meta WHERE k = ?', 'world').toArray()[0] as Row | undefined;
     let data: WorldData;
     if (metaRow) {
-      const m = JSON.parse(String(metaRow.v)) as { seed: number; mode: NetMode; dayTime: number };
-      data = { seed: m.seed, mode: m.mode, dayTime: m.dayTime, cells: new Map(), players: new Map() };
+      const m = JSON.parse(String(metaRow.v)) as Meta;
+      data = {
+        seed: m.seed, mode: m.mode, dayTime: m.dayTime, cells: new Map(), players: new Map(),
+        homes: new Map(Object.entries(m.homes ?? {})), ...(m.spawn ? { spawn: m.spawn } : {}),
+        weather: m.weather ?? 'clear', weatherLeft: m.weatherLeft ?? 300,
+      };
       for (const r of sql.exec('SELECT k, v FROM cells')) data.cells.set(String(r.k), JSON.parse(String(r.v)) as CellState);
       for (const r of sql.exec('SELECT name, v FROM players')) data.players.set(String(r.name), JSON.parse(String(r.v)) as PlayerSave);
     } else {
@@ -71,6 +82,7 @@ export class WorldRoom extends DurableObject<Env> {
     this.core = new WorldCore(data, {
       world: this.env.WORLD_NAME ?? 'world',
       maxPlayers: Number(this.env.MAX_PLAYERS ?? 16) || 16,
+      ...(this.env.ADMIN_PASSWORD ? { adminPassword: this.env.ADMIN_PASSWORD } : {}),
     });
     if (!metaRow) { this.core.dirtyMeta = true; this.flush(); }
   }
@@ -83,7 +95,10 @@ export class WorldRoom extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       if (core.dirtyMeta) {
         this.sql.exec('INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)', 'world',
-          JSON.stringify({ seed: w.seed, mode: w.mode, dayTime: w.dayTime }));
+          JSON.stringify({
+            seed: w.seed, mode: w.mode, dayTime: w.dayTime, homes: Object.fromEntries(w.homes),
+            ...(w.spawn ? { spawn: w.spawn } : {}), weather: w.weather, weatherLeft: w.weatherLeft,
+          } satisfies Meta));
       }
       for (const k of core.dirtyCells) {
         const c = w.cells.get(k);

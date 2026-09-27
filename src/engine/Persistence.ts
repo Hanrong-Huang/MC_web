@@ -83,6 +83,8 @@ export interface SaveState {
   campfires?: { k: string; items: number[]; t: number[] }[];
   /** Nether pass: remembered portals per dimension, the respawn-anchor spawn */
   nether?: import('./NetherController').NetherSave;
+  /** single-player /sethome spot */
+  home?: { x: number; y: number; z: number; dim: 'overworld' | 'nether' };
   lastPlayed: number;
 }
 
@@ -230,6 +232,8 @@ const STORE = 'saves';
 
 export interface SaveSummary {
   slot: string;
+  /** single-player /sethome spot */
+  home?: { x: number; y: number; z: number; dim: 'overworld' | 'nether' };
   lastPlayed: number;
   gameMode: string;
   seed: number;

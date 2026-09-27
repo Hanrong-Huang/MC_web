@@ -189,6 +189,8 @@ export class Player {
 
   private deps!: PlayerDeps;
   private fallDist = 0;
+  /** Forget any fall in progress (a teleport shouldn't land as fall damage). */
+  clearFall(): void { this.fallDist = 0; }
   /** seconds since the last swing: attack strength recharges over attackCooldown() */
   private attackTimer = 10;
   private placeCooldown = 0;

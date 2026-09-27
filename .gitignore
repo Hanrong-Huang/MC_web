@@ -18,3 +18,4 @@ fluid-test.png
 dist-server/
 server-data/
 .wrangler/
+admin-password.txt

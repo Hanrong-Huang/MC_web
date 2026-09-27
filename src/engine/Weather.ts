@@ -173,6 +173,8 @@ export class Weather {
   private darken = 0;
   /** when true (e.g. in the Nether), no precipitation, gloom, or lightning */
   private suppressed = false;
+  /** multiplayer: the server picks the weather (setKind), no local rolls */
+  netControlled = false;
 
   constructor(scene: THREE.Scene, world: World, hooks: WeatherHooks) {
     this.scene = scene;
@@ -208,7 +210,7 @@ export class Weather {
       return;
     }
     this.timer -= dt;
-    if (this.timer <= 0) this.rollWeather();
+    if (this.timer <= 0 && !this.netControlled) this.rollWeather();
 
     // fade intensity toward target
     const target = this.kind === 'clear' ? 0 : 1;

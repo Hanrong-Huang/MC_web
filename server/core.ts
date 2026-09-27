@@ -8,8 +8,9 @@
 
 import {
   PROTOCOL, NET_DAY_LENGTH, cleanName, cleanChat,
-  type CellState, type ClientMsg, type ServerMsg, type Pose, type PlayerSave, type NetMode,
+  type CellState, type ClientMsg, type ServerMsg, type Pose, type PlayerSave, type NetMode, type NetWeather,
 } from '../src/net/protocol';
+import { runCommand } from './commands';
 
 export interface Socket {
   send(data: string): void;
@@ -26,11 +27,22 @@ export interface WorldData {
   cells: Map<string, CellState>;
   /** player name → their save */
   players: Map<string, PlayerSave>;
+  /** player name → /sethome spot */
+  homes: Map<string, Place>;
+  /** world spawn set by an admin (/setspawn); unset = the seed's spawn */
+  spawn?: Place;
+  weather: NetWeather;
+  /** seconds of the current weather left (the server rolls the next) */
+  weatherLeft: number;
 }
+
+export interface Place { x: number; y: number; z: number; dim: 'overworld' | 'nether' }
 
 export interface CoreOptions {
   world: string;
   maxPlayers: number;
+  /** `/login <password>` makes a player an admin for the session (unset = nobody can) */
+  adminPassword?: string;
   log?: (line: string) => void;
 }
 
@@ -41,6 +53,10 @@ export interface Conn {
   pose: Pose | null;
   sleeping: boolean;
   joined: boolean;
+  /** logged in with the admin password (or /op'd) this session */
+  admin: boolean;
+  /** a wrong /login locks further tries until then (ms) */
+  loginLockUntil?: number;
 }
 
 const MAX_CELLS_PER_MSG = 8192;
@@ -57,7 +73,7 @@ export function parseSeed(raw: string | undefined): number {
 }
 
 export function newWorld(seed: number, mode: NetMode): WorldData {
-  return { seed, mode, dayTime: 0.1, cells: new Map(), players: new Map() };
+  return { seed, mode, dayTime: 0.1, cells: new Map(), players: new Map(), homes: new Map(), weather: 'clear', weatherLeft: 300 };
 }
 
 function validCell(c: unknown): c is CellState {
@@ -76,11 +92,11 @@ export class WorldCore {
   readonly dirtyPlayers = new Set<string>();
   dirtyMeta = false;
 
-  constructor(readonly data: WorldData, private opts: CoreOptions) {}
+  constructor(readonly data: WorldData, readonly opts: CoreOptions) {}
 
   get dirty(): boolean { return this.dirtyMeta || this.dirtyCells.size > 0 || this.dirtyPlayers.size > 0; }
 
-  private log(line: string): void { this.opts.log?.(line); }
+  log(line: string): void { this.opts.log?.(line); }
 
   online(): Conn[] {
     return [...this.conns.values()].filter((c) => c.joined);
@@ -89,7 +105,7 @@ export class WorldCore {
   // --- connections ---------------------------------------------------------------
 
   connect(sock: Socket): Conn {
-    const c: Conn = { id: this.nextId++, sock, name: '', pose: null, sleeping: false, joined: false };
+    const c: Conn = { id: this.nextId++, sock, name: '', pose: null, sleeping: false, joined: false, admin: false };
     this.conns.set(c.id, c);
     return c;
   }
@@ -101,18 +117,18 @@ export class WorldCore {
     this.updateSleepers();
   }
 
-  private send(c: Conn, msg: ServerMsg): void {
+  send(c: Conn, msg: ServerMsg): void {
     if (c.sock.open) c.sock.send(JSON.stringify(msg));
   }
 
-  private broadcast(msg: ServerMsg, except?: Conn): void {
+  broadcast(msg: ServerMsg, except?: Conn): void {
     const data = JSON.stringify(msg);
     for (const c of this.conns.values()) {
       if (c !== except && c.joined && c.sock.open) c.sock.send(data);
     }
   }
 
-  private system(text: string): void {
+  system(text: string): void {
     this.broadcast({ t: 'chat', from: null, text });
     this.log(`[chat] * ${text}`);
   }
@@ -128,6 +144,35 @@ export class WorldCore {
       this.broadcast({ t: 'time', dayTime: w.dayTime });
       this.dirtyMeta = true;
     }
+    // weather is the server's: roll the next spell when this one runs out
+    // (the same odds the single-player Weather uses)
+    w.weatherLeft -= dt;
+    if (w.weatherLeft <= 0) this.setWeather(this.rollWeather());
+  }
+
+  private rollWeather(): NetWeather {
+    const r = Math.random();
+    if (this.data.weather === 'clear') return r < 0.15 ? 'thunder' : 'rain';
+    if (this.data.weather === 'rain' && r < 0.3) return 'thunder';
+    return 'clear';
+  }
+
+  setWeather(kind: NetWeather, seconds?: number): void {
+    const w = this.data;
+    w.weather = kind;
+    w.weatherLeft = seconds ?? (kind === 'clear' ? 100 + Math.random() * 160 : kind === 'rain' ? 80 + Math.random() * 120 : 50 + Math.random() * 70);
+    this.dirtyMeta = true;
+    this.broadcast({ t: 'weather', kind });
+  }
+
+  /** A joined player by name: exact (any case) first, then a unique prefix. */
+  findPlayer(name: string): Conn | null {
+    const on = this.online();
+    const n = name.toLowerCase();
+    const exact = on.find((c) => c.name.toLowerCase() === n);
+    if (exact) return exact;
+    const pre = on.filter((c) => c.name.toLowerCase().startsWith(n));
+    return pre.length === 1 ? pre[0] : null;
   }
 
   // --- sleeping: the night skips once everyone in the Overworld is in bed ------------
@@ -151,6 +196,7 @@ export class WorldCore {
         this.dirtyMeta = true;
         for (const c of still) c.sleeping = false;
         this.broadcast({ t: 'time', dayTime: 0, skip: true });
+        if (this.data.weather !== 'clear') this.setWeather('clear'); // vanilla: sleeping clears the storm
         this.system('Everyone slept — good morning!');
       }, 1500);
     } else if (!allAsleep && this.skipTimer) {
@@ -188,7 +234,7 @@ export class WorldCore {
       c.joined = true;
       this.send(c, {
         t: 'welcome', id: c.id, name, world: this.opts.world, seed: w.seed, mode: w.mode, dayTime: w.dayTime,
-        cells: [],
+        cells: [], weather: w.weather,
         players: this.online().filter((o) => o !== c).map((o) => ({ id: o.id, name: o.name, pose: o.pose ?? undefined })),
         you: w.players.get(name) ?? null,
       });
@@ -226,7 +272,7 @@ export class WorldCore {
       case 'chat': {
         const text = cleanChat(msg.text ?? '');
         if (!text) return;
-        if (text.startsWith('/')) { this.command(c, text); return; }
+        if (text.startsWith('/')) { runCommand(this, c, text); return; }
         this.broadcast({ t: 'chat', from: c.name, text });
         this.log(`[chat] <${c.name}> ${text}`);
         break;
@@ -238,32 +284,12 @@ export class WorldCore {
         break;
       }
       case 'sleep': {
+        // (the night skips below; sleeping players also let the weather clear)
         c.sleeping = !!msg.on;
         this.updateSleepers();
         break;
       }
     }
-  }
-
-  private command(c: Conn, text: string): void {
-    const reply = (t: string): void => this.send(c, { t: 'chat', from: null, text: t });
-    if (text === '/list') {
-      const on = this.online();
-      reply(`Online (${on.length}): ${on.map((o) => o.name).join(', ')}`);
-      return;
-    }
-    const tm = /^\/time set (\S+)$/.exec(text);
-    if (tm) {
-      const named: Record<string, number> = { day: 0.05, noon: 0.25, sunset: 0.48, night: 0.6, midnight: 0.75 };
-      const v = named[tm[1]] ?? Number(tm[1]);
-      if (!Number.isFinite(v) || v < 0 || v > 1) { reply('Usage: /time set day|noon|night|midnight|<0-1>'); return; }
-      this.data.dayTime = v % 1;
-      this.dirtyMeta = true;
-      this.broadcast({ t: 'time', dayTime: this.data.dayTime });
-      this.system(`${c.name} set the time to ${tm[1]}`);
-      return;
-    }
-    reply('Commands: /list — who is online, /time set day|noon|night|midnight|<0-1>, /help');
   }
 
   status(): { world: string; players: string[]; protocol: number } {

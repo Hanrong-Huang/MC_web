@@ -19,6 +19,7 @@ import path from 'node:path';
 
 const PORT = +(process.env.PORT ?? 8123);
 const WORKER = process.env.MP_BACKEND === 'worker';
+const WIN = process.platform === 'win32';
 const CLIENT_PORT = PORT + 1; // worker mode: the static client (like GitHub Pages)
 const DIR = process.env.SHOT_DIR ?? '.';
 const DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-mp-'));
@@ -35,12 +36,13 @@ function startServer() {
   return new Promise((resolve, reject) => {
     server = WORKER
       ? spawn('npx', ['wrangler', 'dev', '--port', String(PORT), '--ip', '127.0.0.1', '--persist-to', DATA,
-        '--var', 'SEED:multiplayer-test', '--var', 'MODE:creative'], {
-        env: { ...process.env, CI: '1', WRANGLER_SEND_METRICS: 'false' }, stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+        '--var', 'SEED:multiplayer-test', '--var', 'MODE:creative', '--var', 'ADMIN_PASSWORD:test-admin'], {
+        env: { ...process.env, CI: '1', WRANGLER_SEND_METRICS: 'false' }, stdio: ['ignore', 'pipe', 'pipe'],
+        detached: !WIN, shell: WIN,
       })
       : spawn('node', ['dist-server/server.mjs'], {
-        env: { ...process.env, PORT: String(PORT), DATA_DIR: DATA, STATIC_DIR: 'dist', SEED: 'multiplayer-test', MODE: 'creative' },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, PORT: String(PORT), DATA_DIR: DATA, STATIC_DIR: 'dist', SEED: 'multiplayer-test', MODE: 'creative', ADMIN_PASSWORD: 'test-admin' },
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       });
     const ready = WORKER ? 'Ready on' : 'play:';
     server.stdout.on('data', (d) => { if (String(d).includes(ready)) resolve(); });
@@ -51,8 +53,10 @@ function startServer() {
 function stopServer() {
   return new Promise((resolve) => {
     server.once('exit', resolve);
-    // wrangler runs workerd as a child: signal the whole group
-    if (WORKER) process.kill(-server.pid, 'SIGINT'); else server.kill('SIGINT');
+    if (!WORKER) { server.send('shutdown'); return; } // saves the world, then exits
+    // wrangler runs workerd as a child: stop the whole tree
+    if (WIN) spawn('taskkill', ['/pid', String(server.pid), '/T', '/F']);
+    else process.kill(-server.pid, 'SIGINT');
   });
 }
 const client = WORKER ? await preview({ preview: { port: CLIENT_PORT, strictPort: true }, logLevel: 'error' }) : null;
@@ -180,11 +184,66 @@ await alice.page.evaluate((far) => {
 await bob.page.waitForTimeout(800);
 const bobHadIt = await bob.page.evaluate((far) => !!window.__game.world.chunks.get(`${Math.floor(far.x / 16)},${Math.floor(far.z / 16)}`), far);
 await bob.page.evaluate((far) => { window.__game.world.ensureChunk(Math.floor(far.x / 16), Math.floor(far.z / 16)); }, far);
-check('an edit to a chunk Bob had not loaded is there when it loads', !bobHadIt && await until(bob.page, (far) => window.__game.world.getBlock(far.x, 150, far.z) === window.__B.GLASS, far));
+const farOk = await until(bob.page, (far) => window.__game.world.getBlock(far.x, 150, far.z) === window.__B.GLASS, far);
+check('an edit to a chunk Bob had not loaded is there when it loads', !bobHadIt && farOk,
+  JSON.stringify({ bobHadIt, farOk, block: await bob.page.evaluate((far) => window.__game.world.getBlock(far.x, 150, far.z), far),
+    known: await bob.page.evaluate((far) => window.__game.sync.known.overworld.get(`${Math.floor(far.x / 16)},${Math.floor(far.z / 16)}`)?.size ?? 0, far) }));
 
 // --- chat ---------------------------------------------------------------------------
 await alice.page.evaluate(() => window.__game.net.send({ t: 'chat', text: 'hello bob' }));
 check('chat reaches Bob', await until(bob.page, () => [...document.querySelectorAll('.chat-line')].some((l) => l.textContent.includes('<Alice> hello bob'))));
+
+// --- commands -------------------------------------------------------------------------
+const chatHas = (page, s) => until(page, (s) => [...document.querySelectorAll('.chat-line')].some((l) => l.textContent.includes(s)), s, 10000);
+const cmd = (page, text) => page.evaluate((text) => window.__game.net.send({ t: 'chat', text }), text);
+await cmd(alice.page, '/help');
+check('/help lists the player commands', await chatHas(alice.page, '/sethome — ') && await chatHas(alice.page, '/tp <player>'));
+check('...and not the admin ones', !(await alice.page.evaluate(() => [...document.querySelectorAll('.chat-line')].some((l) => l.textContent.startsWith('/weather')))));
+await cmd(alice.page, '/weather thunder');
+check('admin commands are refused before /login', await chatHas(alice.page, 'is an admin command'));
+await cmd(alice.page, '/login nope');
+check('a wrong password is refused', await chatHas(alice.page, 'Wrong password'));
+await alice.page.waitForTimeout(3200); // the wrong-password lockout
+await cmd(alice.page, '/login test-admin');
+check('/login with the admin password', await chatHas(alice.page, 'You are now an admin'));
+await cmd(alice.page, '/help');
+check('an admin /help includes the admin commands', await chatHas(alice.page, '/weather clear|rain|thunder'));
+
+// /tp to a player (anyone may), /sethome + /home
+await bob.page.evaluate((pad) => { const p = window.__game.player; p.pos.x = pad.x + 6.5; p.pos.z = pad.z + 2.5; }, pad);
+await bob.page.waitForTimeout(800);
+await cmd(alice.page, '/tp Bob');
+check('/tp <player> takes you to them', await until(alice.page, (pad) =>
+  Math.hypot(window.__game.player.pos.x - (pad.x + 6.5), window.__game.player.pos.z - (pad.z + 2.5)) < 1, pad));
+await alice.page.waitForTimeout(600); // let the post-teleport pose reach the server
+await cmd(alice.page, '/sethome');
+check('/sethome confirms', await chatHas(alice.page, 'Home set'));
+await alice.page.evaluate(() => { window.__game.player.pos.x -= 5; });
+await alice.page.waitForTimeout(500);
+await cmd(alice.page, '/home');
+check('/home brings you back', await until(alice.page, (pad) => Math.abs(window.__game.player.pos.x - (pad.x + 6.5)) < 1, pad));
+await cmd(bob.page, '/tp Alice');
+check('a non-admin can /tp to a player too', await chatHas(bob.page, 'Teleported to Alice'));
+await cmd(bob.page, '/tp 0 100 0');
+check('...but not to coordinates', await chatHas(bob.page, 'Only admins'));
+
+// world + player commands
+await cmd(alice.page, '/weather thunder');
+check('/weather reaches everyone', await until(bob.page, () => window.__game.weather.kind === 'thunder') &&
+  await until(alice.page, () => window.__game.weather.kind === 'thunder'));
+await cmd(alice.page, '/weather clear');
+await cmd(alice.page, '/gamemode survival Bob');
+check('/gamemode <mode> <player>', await until(bob.page, () => window.__game.player.mode === 'survival'));
+await cmd(alice.page, '/gamemode creative Bob');
+await cmd(alice.page, '/give Bob diamond 3');
+check('/give puts the items in their inventory', await until(bob.page, () => {
+  const id = window.__findId('diamond');
+  return window.__game.player.inventory.slots.some((s) => s && s.id === id && s.count >= 3);
+}));
+await cmd(alice.page, '/give Bob not_a_thing 1');
+check('/give with an unknown item says so', await chatHas(bob.page, 'There is no item called'));
+await cmd(alice.page, '/tp ~ ~5 ~');
+check('/tp with relative coordinates (admin)', await chatHas(alice.page, 'Teleported to '));
 
 // --- sleeping: the night skips only when both are in bed ---------------------------
 await alice.page.evaluate(() => window.__game.net.send({ t: 'chat', text: '/time set night' }));

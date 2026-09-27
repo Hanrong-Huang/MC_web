@@ -55,7 +55,22 @@ export interface Pose {
   dead: boolean;
   riding: boolean;
   sleeping: boolean;
+  /** survival | creative (mobs leave creative players alone) */
+  mode?: NetMode;
 }
+
+export type NetWeather = 'clear' | 'rain' | 'thunder';
+
+/** Something the server asks one client to do (the result of a command). */
+export type NetAction =
+  /** move there (switching dimension if needed); no y = the surface there */
+  | { do: 'teleport'; x: number; y?: number; z: number; dim: Dim }
+  /** go to the world spawn: the server's if an admin set one, else the seed's */
+  | { do: 'spawn'; at?: { x: number; y: number; z: number } }
+  | { do: 'gamemode'; mode: NetMode }
+  /** an item by registry name (the client owns the item registry) */
+  | { do: 'give'; item: string; count: number; by: string }
+  | { do: 'heal' };
 
 /** The per-player part of a save, kept by the server under the player's name. */
 export interface PlayerSave {
@@ -83,6 +98,7 @@ export type ServerMsg =
   | {
     t: 'welcome'; id: number; name: string; world: string; seed: number; mode: NetMode;
     dayTime: number; cells: CellState[]; players: PlayerInfo[]; you: PlayerSave | null;
+    weather?: NetWeather;
   }
   | { t: 'join'; id: number; name: string }
   | { t: 'leave'; id: number; name: string }
@@ -93,6 +109,8 @@ export type ServerMsg =
   /** clock sync; `skip` = everyone slept, the night is over */
   | { t: 'time'; dayTime: number; skip?: boolean }
   | { t: 'sleepers'; n: number; total: number }
+  | { t: 'weather'; kind: NetWeather }
+  | { t: 'cmd'; a: NetAction }
   | { t: 'error'; msg: string };
 
 /** Chat / name hygiene shared by both ends. */

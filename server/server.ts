@@ -8,14 +8,16 @@
 //
 // Environment: PORT (8080), HOST (0.0.0.0), WORLD (world), SEED (random for a
 // new world), MODE (survival | creative, for new players), DATA_DIR
-// (server-data), STATIC_DIR (dist), MAX_PLAYERS (16).
+// (server-data), STATIC_DIR (dist), MAX_PLAYERS (16), ADMIN_PASSWORD (for
+// `/login`; a random one is made and printed at start when unset).
 
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { DEFAULT_PORT, type CellState, type PlayerSave, type NetMode } from '../src/net/protocol';
-import { WorldCore, newWorld, parseSeed, type WorldData } from './core';
+import { randomBytes } from 'node:crypto';
+import { WorldCore, newWorld, parseSeed, type WorldData, type Place } from './core';
 
 const PORT = Number(process.env.PORT ?? DEFAULT_PORT);
 const HOST = process.env.HOST ?? '0.0.0.0';
@@ -33,6 +35,10 @@ interface WorldFile {
   dayTime: number;
   cells: Record<string, CellState>;
   players: Record<string, PlayerSave>;
+  homes?: Record<string, Place>;
+  spawn?: Place;
+  weather?: WorldData['weather'];
+  weatherLeft?: number;
 }
 
 const worldPath = path.join(DATA_DIR, `${WORLD}.json`);
@@ -44,13 +50,16 @@ function loadWorld(): WorldData {
       return {
         seed: w.seed, mode: w.mode, dayTime: w.dayTime ?? 0.1,
         cells: new Map(Object.entries(w.cells)), players: new Map(Object.entries(w.players)),
+        homes: new Map(Object.entries(w.homes ?? {})), ...(w.spawn ? { spawn: w.spawn } : {}),
+        weather: w.weather ?? 'clear', weatherLeft: w.weatherLeft ?? 300,
       };
     }
   } catch { /* new world */ }
   return newWorld(parseSeed(process.env.SEED), process.env.MODE === 'creative' ? 'creative' : 'survival');
 }
 
-const core = new WorldCore(loadWorld(), { world: WORLD, maxPlayers: MAX_PLAYERS, log: (l) => console.log(l) });
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || randomBytes(6).toString('base64url');
+const core = new WorldCore(loadWorld(), { world: WORLD, maxPlayers: MAX_PLAYERS, adminPassword: ADMIN_PASSWORD, log: (l) => console.log(l) });
 
 function saveWorld(force = false): void {
   if (!core.dirty && !force) return;
@@ -58,6 +67,8 @@ function saveWorld(force = false): void {
   const file: WorldFile = {
     version: 1, seed: w.seed, mode: w.mode, dayTime: w.dayTime,
     cells: Object.fromEntries(w.cells), players: Object.fromEntries(w.players),
+    homes: Object.fromEntries(w.homes), ...(w.spawn ? { spawn: w.spawn } : {}),
+    weather: w.weather, weatherLeft: w.weatherLeft,
   };
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = `${worldPath}.tmp`;
@@ -133,10 +144,13 @@ function shutdown(): void {
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+// Windows has no SIGINT for child processes: a parent (the test harness) asks over IPC
+process.on('message', (m) => { if (m === 'shutdown') shutdown(); });
 
 httpServer.listen(PORT, HOST, () => {
   console.log(`Voxelcraft server — world "${WORLD}" (seed ${core.data.seed}, ${core.data.mode})`);
   console.log(`  play:   http://localhost:${PORT}/   (friends: http://<this machine's IP>:${PORT}/)`);
   console.log(`  data:   ${worldPath}`);
+  console.log(`  admin:  type /login ${process.env.ADMIN_PASSWORD ? '<ADMIN_PASSWORD>' : ADMIN_PASSWORD} in chat`);
   if (!fs.existsSync(path.join(STATIC_DIR, 'index.html'))) console.log(`  note:   ${STATIC_DIR} has no index.html — run \`npm run build\` first`);
 });

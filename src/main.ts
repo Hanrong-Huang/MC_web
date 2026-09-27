@@ -27,7 +27,7 @@ import type { GeoArrays, MeshDoor, MeshRedstone } from './engine/Mesher';
 import { chunkGeometryFromArrays } from './engine/Renderer';
 import type { MeshJob, MeshChunkSnap } from './engine/mesh-worker';
 import { chunkKey, CX, CY, CZ } from './engine/Chunk';
-import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, HANGING_PLANTS, def, hasDef, isSolid, mobLabel } from './engine/Blocks';
+import { B, I, GRAVITY_BLOCKS, FLOOR_BLOCKS, SELF_STACKING, HANGING_PLANTS, def, hasDef, isSolid, mobLabel, ID_LIMIT } from './engine/Blocks';
 import { SHAPED, META_BLOCKS, FENCE_IDS, GATE_IDS, VINE_BLOCKS, vineDrops, shapeBoxes, connectsTo, enchantLabel } from './engine/Blocks';
 import { DOOR_LOWERS, DOOR_UPPERS, doorItemFor, RAIL_IDS } from './engine/Blocks';
 import { craftRemainders } from './engine/Inventory';
@@ -48,7 +48,7 @@ import { Action, actionsFor, bindingFor, keyLabel } from './engine/Keybinds';
 import { NetClient } from './net/NetClient';
 import { NetSync } from './net/NetSync';
 import { RemotePlayers } from './net/RemotePlayers';
-import type { ServerMsg, Pose, PlayerSave } from './net/protocol';
+import type { ServerMsg, Pose, PlayerSave, NetAction, Dim } from './net/protocol';
 import { Chat } from './ui/Chat';
 
 const DAY_LENGTH = 1200; // 20 real minutes
@@ -57,6 +57,20 @@ const AUTOSAVE_SECONDS = 60;
 const INTRO_TIME = 1.9; // camera sweep from above into the player's eyes after loading
 
 type GameUIState = 'loading' | 'playing' | 'paused' | 'container' | 'dead' | 'sleeping' | 'chat';
+
+/** An item or block id from a typed name: its registry name ("diamond_sword",
+ *  "minecraft:" prefix allowed) or its label ("Diamond Sword"); -1 if none. */
+function itemIdByName(raw: string): number {
+  const want = raw.toLowerCase().replace(/^minecraft:/, '').replace(/[\s-]+/g, '_');
+  let byLabel = -1;
+  for (let i = 1; i < ID_LIMIT; i++) {
+    if (!hasDef(i)) continue;
+    const d = def(i);
+    if (d.name === want) return i;
+    if (byLabel < 0 && d.label.toLowerCase().replace(/[\s-]+/g, '_') === want) byLabel = i;
+  }
+  return byLabel;
+}
 
 class Game {
   private app: App;
@@ -157,6 +171,10 @@ class Game {
   /** multiplayer sleep: the server said everyone is in bed, the night may skip */
   private netNightSkip = false;
   private sleepersNote = '';
+  /** single-player /sethome spot (multiplayer homes live on the server) */
+  private home: { x: number; y: number; z: number; dim: Dim } | null = null;
+  /** the seed's spawn point, worked out once (for /spawn) */
+  private seedSpawn: { x: number; y: number; z: number } | null = null;
 
   constructor(app: App, slot: string, save: SaveState | null, fresh: { seed: number; mode: GameMode } | null, net: NetClient | null = null) {
     this.app = app;
@@ -372,6 +390,7 @@ class Game {
       this.player.inventory.load(save.inventory);
       this.dayTime = save.environment?.dayTime ?? 0.1;
       this.spawnPoint = save.spawn ?? null;
+      this.home = save.home ?? null;
       if (save.advancements) this.adv.load(save.advancements);
       this.fire.load(save.fires);
       this.campfires.load(save.campfires);
@@ -516,6 +535,9 @@ class Game {
     const w = net.welcome;
     this.dayTime = w.dayTime;
     this.sync!.applyRemote(w.cells);
+    // the server owns the weather: no local rolls, just follow it
+    this.weather.netControlled = true;
+    this.weather.setKind(w.weather ?? 'clear');
     for (const p of w.players) this.remotes!.add(p.id, p.name, p.pose);
     this.chat.add(null, `Connected to "${w.world}" as ${w.name} — ${w.players.length + 1} online. Press ${keyLabel(bindingFor('chat'))} to chat.`);
     net.onClose = (reason) => {
@@ -553,7 +575,9 @@ class Game {
         this.sleepersNote = `${m.n}/${m.total} players sleeping`;
         if (this.state === 'sleeping' && m.n < m.total) this.hud.toast(this.sleepersNote);
         break;
-      case 'error': this.hud.toast(m.msg); break;
+      case 'weather': this.weather.setKind(m.kind); break;
+      case 'cmd': this.runAction(m.a); break;
+      case 'error': this.hud.toast(m.msg); this.chat.add(null, m.msg); break;
       case 'welcome': break;
     }
   }
@@ -594,7 +618,11 @@ class Game {
     this.state = 'chat';
     this.input.exitLock();
     this.chat.open((text) => {
-      if (this.net) this.net.send({ t: 'chat', text });
+      if (this.net) {
+        // commands act on where you are: make sure the server has it first
+        if (text.startsWith('/')) { this.lastPoseKey = ''; this.poseT = 1; this.sendPose(0); }
+        this.net.send({ t: 'chat', text });
+      } else if (text.startsWith('/')) this.localCommand(text);
       else this.chat.add('You', text);
     }, () => {
       if (this.state !== 'chat') return;
@@ -602,6 +630,161 @@ class Game {
       this.input.clearClicks();
       this.input.requestLock();
     });
+  }
+
+  // --- commands --------------------------------------------------------------------
+
+  /** Carry out a command's effect in this game (from the server's `cmd`, or a
+   *  single-player command below). */
+  private runAction(a: NetAction): void {
+    const p = this.player;
+    switch (a.do) {
+      case 'teleport': this.teleportTo(a.x, a.y, a.z, a.dim); break;
+      case 'spawn': {
+        const s = a.at ?? this.worldSpawn();
+        this.teleportTo(s.x, a.at ? s.y : undefined, s.z, 'overworld');
+        break;
+      }
+      case 'gamemode':
+        p.mode = a.mode;
+        if (a.mode === 'survival') p.flying = false;
+        this.onInventoryChange();
+        break;
+      case 'give': {
+        const id = itemIdByName(a.item);
+        if (id < 0) { this.chat.add(null, `There is no item called "${a.item}".`); break; }
+        const left = p.inventory.add(id, a.count);
+        if (left > 0) this.entities.spawnDrop(p.pos.x, p.pos.y + 1, p.pos.z, id, left);
+        p.inventory.onChange();
+        this.chat.add(null, `${a.by} gave you ${a.count} × ${def(id).label}.`);
+        this.audio.play('pop');
+        break;
+      }
+      case 'heal':
+        p.hp = 20; p.hunger = 20; p.saturation = 5; p.fireT = 0; p.air = 20;
+        break;
+    }
+  }
+
+  /** The seed's spawn (cached: it samples terrain). */
+  private worldSpawn(): { x: number; y: number; z: number } {
+    if (!this.seedSpawn) {
+      const was = this.world.generator.dimension;
+      this.world.generator.dimension = 'overworld';
+      this.seedSpawn = this.world.generator.findSpawn();
+      this.world.generator.dimension = was;
+    }
+    return this.seedSpawn;
+  }
+
+  /** Move the player (switching dimension if needed). Without a y, land on
+   *  the ground there; with one, step up out of any block in the way. */
+  private teleportTo(x: number, y: number | undefined, z: number, dim: Dim): void {
+    const p = this.player;
+    if (p.dead) return;
+    if (this.state === 'sleeping') this.leaveBed();
+    if (p.isRiding()) p.dismount(false);
+    this.entities.spawnPoof(p.pos.x, p.pos.y + 1, p.pos.z);
+    if (dim !== this.world.dimension) this.nether.switchTo(dim, x, y ?? 64, z);
+    const cx = Math.floor(x / CX), cz = Math.floor(z / CZ);
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) this.world.ensureChunk(cx + dx, cz + dz);
+    const fx = Math.floor(x), fz = Math.floor(z);
+    let ty = y ?? this.surfaceY(fx, fz);
+    const blocked = (yy: number): boolean => isSolid(this.world.getBlock(fx, Math.floor(yy), fz)) || isSolid(this.world.getBlock(fx, Math.floor(yy) + 1, fz));
+    for (let i = 0; i < 12 && blocked(ty); i++) ty = Math.floor(ty) + 1;
+    p.pos = { x, y: ty + 0.01, z };
+    p.vel = { x: 0, y: 0, z: 0 };
+    p.clearFall();
+    this.audio.play('whoosh');
+  }
+
+  /** Where to stand at (x,z): the top surface in the Overworld; in the Nether
+   *  the lowest two-high gap over solid, non-lava ground under the roof. */
+  private surfaceY(x: number, z: number): number {
+    const w = this.world;
+    if (w.dimension === 'nether') {
+      for (let y = 32; y < 120; y++) {
+        const below = w.getBlock(x, y - 1, z);
+        if (isSolid(below) && below !== B.LAVA && !isSolid(w.getBlock(x, y, z)) && !isSolid(w.getBlock(x, y + 1, z))
+          && w.getBlock(x, y, z) !== B.LAVA) return y;
+      }
+      return 64;
+    }
+    for (let y = CY - 2; y > 1; y--) if (isSolid(w.getBlock(x, y, z))) return y + 1;
+    return 80;
+  }
+
+  /** Single-player commands: everything is yours, so the admin set is open. */
+  private localCommand(text: string): void {
+    const [head = '', ...args] = text.slice(1).trim().split(/\s+/);
+    const say = (t: string): void => this.chat.add(null, t);
+    const p = this.player;
+    const rel = (raw: string, base: number): number => raw.startsWith('~') ? base + (Number(raw.slice(1)) || 0) : Number(raw);
+    switch (head.toLowerCase()) {
+      case 'help':
+        for (const line of [
+          'Commands (single player):',
+          '/tp <x> <y> <z> — teleport (~ = relative)',
+          '/sethome — make this spot your home',
+          '/home — go home',
+          '/spawn — go to the world spawn',
+          '/time set day|noon|night|midnight|<0-1>',
+          '/weather clear|rain|thunder',
+          '/gamemode survival|creative',
+          '/give <item> [count] — e.g. /give diamond 5',
+          '/heal — refill health and hunger',
+          '/seed — show the world seed',
+          'In multiplayer there are more: /tp <player>, /msg, /list …',
+        ]) say(line);
+        break;
+      case 'tp': case 'teleport': {
+        if (args.length !== 3) { say('Usage: /tp <x> <y> <z> (players to teleport to only exist in multiplayer)'); break; }
+        const x = rel(args[0], p.pos.x), y = rel(args[1], p.pos.y), z = rel(args[2], p.pos.z);
+        if (![x, y, z].every(Number.isFinite)) { say('Coordinates must be numbers (or ~ for relative).'); break; }
+        this.teleportTo(x, y, z, this.world.dimension);
+        say(`Teleported to ${Math.floor(x)}, ${Math.floor(y)}, ${Math.floor(z)}.`);
+        break;
+      }
+      case 'sethome':
+        this.home = { x: p.pos.x, y: p.pos.y, z: p.pos.z, dim: this.world.dimension };
+        say('Home set. Use /home to come back.');
+        break;
+      case 'home':
+        if (!this.home) { say('You have no home yet — type /sethome where you want it. Going to spawn.'); this.runAction({ do: 'spawn' }); break; }
+        this.teleportTo(this.home.x, this.home.y, this.home.z, this.home.dim);
+        say('Welcome home.');
+        break;
+      case 'spawn': this.runAction({ do: 'spawn' }); say('Teleported to spawn.'); break;
+      case 'time': {
+        const named: Record<string, number> = { day: 0.05, noon: 0.25, sunset: 0.48, night: 0.6, midnight: 0.75 };
+        const v = args[0] === 'set' && args[1] !== undefined ? named[args[1]] ?? Number(args[1]) : NaN;
+        if (!Number.isFinite(v) || v < 0 || v > 1) { say('Usage: /time set day|noon|night|midnight|<0-1>'); break; }
+        this.dayTime = v % 1;
+        say(`Time set to ${args[1]}.`);
+        break;
+      }
+      case 'weather':
+        if (args[0] !== 'clear' && args[0] !== 'rain' && args[0] !== 'thunder') { say('Usage: /weather clear|rain|thunder'); break; }
+        this.weather.setKind(args[0]);
+        say(`Weather set to ${args[0]}.`);
+        break;
+      case 'gamemode': case 'gm': {
+        const m = args[0] === 'survival' || args[0] === 's' ? 'survival' : args[0] === 'creative' || args[0] === 'c' ? 'creative' : null;
+        if (!m) { say('Usage: /gamemode survival|creative'); break; }
+        this.runAction({ do: 'gamemode', mode: m });
+        say(`Game mode: ${m}.`);
+        break;
+      }
+      case 'give': {
+        const n = args[1] !== undefined ? Math.floor(Number(args[1])) : 1;
+        if (!args[0] || !Number.isFinite(n) || n < 1) { say('Usage: /give <item> [count]'); break; }
+        this.runAction({ do: 'give', item: args[0].toLowerCase(), count: Math.min(n, 64 * 36), by: 'You' });
+        break;
+      }
+      case 'heal': this.runAction({ do: 'heal' }); say('You feel refreshed.'); break;
+      case 'seed': say(`Seed: ${this.world.seed}`); break;
+      default: say(`Unknown command /${head}. Type /help for the list.`);
+    }
   }
 
   private playerListRows(): { title: string; rows: { name: string; you?: boolean; note?: string }[] } {
@@ -650,6 +833,7 @@ class Game {
     if (location.hash.includes('dev') && !location.hash.includes('debugmobs')) {
       (window as unknown as { __game: unknown; __B: unknown }).__game = this;
       (window as unknown as { __B: unknown }).__B = B;
+      (window as unknown as { __findId: unknown }).__findId = itemIdByName;
     }
     // dev helper: #debugmobs drops a few tameable/rideable mobs at spawn and
     // faces the player east toward the horse for screenshot testing
@@ -1621,6 +1805,7 @@ class Game {
       campfires: this.campfires.serialize(),
       nether: this.nether.serialize(),
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
+      ...(this.home ? { home: { ...this.home } } : {}),
       lastPlayed: Date.now(),
     };
   }

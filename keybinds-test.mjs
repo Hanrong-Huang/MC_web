@@ -111,6 +111,32 @@ await page.waitForTimeout(300);
 check('Enter sends the line', await page.locator('.chat-line', { hasText: '<You> hello there' }).count() === 1);
 check('...and closes chat', await state() !== 'chat', await state());
 
+// single-player commands through the same chat line
+async function slash(text) {
+  if (await state() !== 'playing') { await page.mouse.click(640, 360); await page.waitForTimeout(300); }
+  await page.keyboard.press('KeyT');
+  await page.waitForTimeout(300);
+  await page.keyboard.type(text);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(400);
+}
+await slash('/help');
+check('/help lists the single-player commands', await page.locator('.chat-line', { hasText: '/sethome' }).count() >= 1);
+await slash('/give diamond 2');
+check('/give diamond 2', await page.evaluate(() => {
+  const id = window.__findId('diamond');
+  return window.__game.player.inventory.slots.some((s) => s && s.id === id && s.count >= 2);
+}));
+const homeAt = await page.evaluate(() => ({ x: window.__game.player.pos.x, z: window.__game.player.pos.z }));
+await slash('/sethome');
+await slash('/tp ~20 ~ ~');
+const moved = await page.evaluate((h) => Math.abs(window.__game.player.pos.x - (h.x + 20)) < 1, homeAt);
+await slash('/home');
+const back = await page.evaluate((h) => Math.hypot(window.__game.player.pos.x - h.x, window.__game.player.pos.z - h.z) < 1, homeAt);
+check('/tp ~20 ~ ~, then /home comes back', moved && back, `${moved} ${back}`);
+await slash('/weather thunder');
+check('/weather thunder', await page.evaluate(() => window.__game.weather.kind === 'thunder'));
+
 // --- persistence + reset --------------------------------------------------------------------
 await page.reload();
 await page.waitForLoadState('networkidle', { timeout: 180000 });

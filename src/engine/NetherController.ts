@@ -201,6 +201,17 @@ export class NetherController {
 
   // --- travel -----------------------------------------------------------------------
 
+  /** Jump straight to another dimension (a command teleport, not a portal):
+   *  swap the world over, reset the portal/particle effects and snap the air. */
+  switchTo(dim: Dim, x: number, y: number, z: number): void {
+    const { world } = this.host;
+    if (world.dimension === dim) return;
+    world.switchDimension(dim);
+    portalFX.reset();
+    netherFX.clear();
+    this.atmo.snap(world, x, y + 1, z);
+  }
+
   /** Take the player through the portal they're standing in. */
   travel(): void {
     const { world, player, audio } = this.host;
