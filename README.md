@@ -54,6 +54,26 @@ Every key above except the hotbar, Esc and F1–F3 can be rebound in **Options �
 
 ## Play together (multiplayer)
 
+There are two ways to host the shared world: **online on Cloudflare** (always on, join straight from the Play-now link, free tier), or **on your own computer** with `npm run server`.
+
+### Play online (GitHub Pages + Cloudflare, one-time setup)
+
+The game stays on GitHub Pages; the world runs as a Cloudflare Worker with a Durable Object (`worker/index.ts`). Once this is set up, anyone opens the Play-now link, types a name on the **Multiplayer** card and presses **Join Server**.
+
+1. **Create a free Cloudflare account** at <https://dash.cloudflare.com/sign-up>, then open **Workers & Pages** once. If it asks, pick your `workers.dev` subdomain (e.g. `yourname.workers.dev`).
+2. **Make an API token.** Go to **My Profile → API Tokens → Create Token**, use the **Edit Cloudflare Workers** template, and copy the token. Also copy your **Account ID** (shown on the Workers & Pages overview page).
+3. **Give them to GitHub.** In this repo: **Settings → Secrets and variables → Actions → New repository secret**, add `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+4. **Deploy.** Every push to `main` that touches the server deploys it (workflow *Deploy multiplayer server*; you can also run it from the **Actions** tab). The log ends with the address, e.g. `https://voxelcraft.yourname.workers.dev`.
+5. **Point the site at it.** Under **Settings → Secrets and variables → Actions → Variables**, add `VITE_MP_SERVER` = `wss://voxelcraft.yourname.workers.dev`, then re-run the *Deploy site* workflow. The Multiplayer card now joins that world by default.
+
+You can also share a direct link that fills in the server: `https://hanrong-huang.github.io/MC_web/?server=wss://voxelcraft.yourname.workers.dev`.
+
+World settings live in `wrangler.toml` (`MODE`, `SEED`, `MAX_PLAYERS`, `WORLD_NAME`). The Workers Free plan covers a group of friends playing a few hours a day comfortably. Its limits are daily request and storage-write quotas; see Cloudflare's pricing page for the current numbers. With nobody online the world sleeps and the day clock pauses. `npm run worker:dev` runs the same server locally on port 8787.
+
+> In mainland China, `*.workers.dev` can be slow or blocked. Bind a custom domain to the Worker in the Cloudflare dashboard, or host with `npm run server` on a local cloud server behind https.
+
+### Host it yourself
+
 One person runs the server and everyone else joins it from their browser.
 
 **1. Start the server** (needs [Node.js](https://nodejs.org) 18+):

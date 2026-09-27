@@ -99,10 +99,9 @@ export class NetSync {
       this.remember(c);
     }
     this.touched.clear();
-    if (cells.length) {
-      this.client.send({ t: 'cells', cells });
-      this.sent += cells.length;
-    }
+    // batches keep each frame well under hosted WebSocket message limits (~1 MiB)
+    for (let i = 0; i < cells.length; i += 3000) this.client.send({ t: 'cells', cells: cells.slice(i, i + 3000) });
+    this.sent += cells.length;
   }
 
   /** The full current state of one cell (null if its chunk isn't loaded). */

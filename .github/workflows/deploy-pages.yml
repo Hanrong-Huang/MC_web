@@ -32,6 +32,10 @@ jobs:
 
       - name: Build
         run: npm run build
+        env:
+          # the multiplayer server the Multiplayer card joins by default
+          # (repo Settings → Secrets and variables → Actions → Variables)
+          VITE_MP_SERVER: ${{ vars.VITE_MP_SERVER }}
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

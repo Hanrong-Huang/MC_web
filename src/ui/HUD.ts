@@ -632,22 +632,28 @@ ${seedLine.textContent}`;
     const addrLbl = el('label', 'field-label', mp); addrLbl.textContent = 'Server Address';
     const addrInput = el('input', 'menu-input', mp) as HTMLInputElement;
     addrInput.type = 'text'; addrInput.id = 'mp-address'; addrLbl.htmlFor = addrInput.id;
-    addrInput.placeholder = 'Blank = the server this page came from';
-    addrInput.value = mpPrefs.address ?? '';
+    // a shared link (?server=wss://…) wins, then what this player used last,
+    // then the server the site was built with (VITE_MP_SERVER on GitHub Pages)
+    const linkServer = new URLSearchParams(location.search).get('server') ?? '';
+    const builtIn = import.meta.env.VITE_MP_SERVER ?? '';
+    addrInput.placeholder = builtIn ? `Blank = ${builtIn}` : 'Blank = the server this page came from';
+    addrInput.value = linkServer || mpPrefs.address || '';
     const nameLbl2 = el('label', 'field-label', mp); nameLbl2.textContent = 'Your Name';
     const playerInput = el('input', 'menu-input', mp) as HTMLInputElement;
     playerInput.type = 'text'; playerInput.maxLength = 16; playerInput.id = 'mp-name'; nameLbl2.htmlFor = playerInput.id;
     playerInput.placeholder = 'Steve';
     playerInput.value = mpPrefs.name ?? '';
     const mpStatus = el('div', 'mode-desc mp-status', mp);
-    mpStatus.textContent = 'Play together: run `npm run server`, then everyone joins its address.';
+    mpStatus.textContent = builtIn
+      ? 'Join the shared online world — pick a name and go.'
+      : 'Play together: run `npm run server`, then everyone joins its address.';
     const joinBtn = wire(el('button', 'mc-btn join-btn', mp));
     joinBtn.textContent = 'Join Server';
     joinBtn.onclick = () => {
       this.audio.ensure();
-      const address = addrInput.value.trim();
+      const address = addrInput.value.trim() || builtIn;
       const name = playerInput.value.trim() || 'Steve';
-      try { localStorage.setItem('voxelcraft-mp', JSON.stringify({ address, name })); } catch { /* storage blocked */ }
+      try { localStorage.setItem('voxelcraft-mp', JSON.stringify({ address: addrInput.value.trim(), name })); } catch { /* storage blocked */ }
       joinBtn.disabled = true;
       handlers.onJoin(address, name, (msg, error) => {
         mpStatus.textContent = msg;

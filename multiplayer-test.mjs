@@ -6,13 +6,20 @@
 // they get there, chat arrives, the night only skips once both are in bed,
 // and after a server restart the edits and a player's position come back.
 // Screenshot (unless NO_SHOTS=1): $SHOT_DIR/mp-alice-sees-bob.png.
+//
+// MP_BACKEND=worker runs the same checks against the Cloudflare Worker
+// (`wrangler dev`, local runtime + local SQLite) with the client served on its
+// own port, as it is from GitHub Pages, joining by Server Address.
 import { chromium } from 'playwright';
+import { preview } from 'vite';
 import { spawn, execSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 const PORT = +(process.env.PORT ?? 8123);
+const WORKER = process.env.MP_BACKEND === 'worker';
+const CLIENT_PORT = PORT + 1; // worker mode: the static client (like GitHub Pages)
 const DIR = process.env.SHOT_DIR ?? '.';
 const DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-mp-'));
 const failures = [];
@@ -26,18 +33,32 @@ if (!process.env.SKIP_BUILD) {
 let server = null;
 function startServer() {
   return new Promise((resolve, reject) => {
-    server = spawn('node', ['dist-server/server.mjs'], {
-      env: { ...process.env, PORT: String(PORT), DATA_DIR: DATA, STATIC_DIR: 'dist', SEED: 'multiplayer-test', MODE: 'creative' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    server.stdout.on('data', (d) => { if (String(d).includes('play:')) resolve(); });
-    server.stderr.on('data', (d) => console.log('[server]', String(d).trim()));
+    server = WORKER
+      ? spawn('npx', ['wrangler', 'dev', '--port', String(PORT), '--ip', '127.0.0.1', '--persist-to', DATA,
+        '--var', 'SEED:multiplayer-test', '--var', 'MODE:creative'], {
+        env: { ...process.env, CI: '1', WRANGLER_SEND_METRICS: 'false' }, stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+      })
+      : spawn('node', ['dist-server/server.mjs'], {
+        env: { ...process.env, PORT: String(PORT), DATA_DIR: DATA, STATIC_DIR: 'dist', SEED: 'multiplayer-test', MODE: 'creative' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    const ready = WORKER ? 'Ready on' : 'play:';
+    server.stdout.on('data', (d) => { if (String(d).includes(ready)) resolve(); });
+    server.stderr.on('data', (d) => { const t = String(d).trim(); if (t && !/WARNING|Proxy/.test(t)) console.log('[server]', t); });
     server.on('exit', (code) => { if (code) reject(new Error(`server exited ${code}`)); });
   });
 }
 function stopServer() {
-  return new Promise((resolve) => { server.once('exit', resolve); server.kill('SIGINT'); });
+  return new Promise((resolve) => {
+    server.once('exit', resolve);
+    // wrangler runs workerd as a child: signal the whole group
+    if (WORKER) process.kill(-server.pid, 'SIGINT'); else server.kill('SIGINT');
+  });
 }
+const client = WORKER ? await preview({ preview: { port: CLIENT_PORT, strictPort: true }, logLevel: 'error' }) : null;
+const PAGE = WORKER ? `http://localhost:${CLIENT_PORT}/#dev` : `http://localhost:${PORT}/#dev`;
+// MP_ADDRESS='' checks a client built with VITE_MP_SERVER (blank = the baked-in server)
+const ADDRESS = process.env.MP_ADDRESS ?? (WORKER ? `ws://127.0.0.1:${PORT}` : '');
 
 await startServer();
 const browser = await chromium.launch({
@@ -51,8 +72,9 @@ async function join(name) {
   const page = await ctx.newPage();
   page.on('console', (m) => { if (m.type() === 'error') errors.push(`${name}: ${m.text()}`); });
   page.on('pageerror', (e) => errors.push(`${name} PAGEERROR: ${e.message}`));
-  await page.goto(`http://localhost:${PORT}/#dev`, { timeout: 180000 });
+  await page.goto(PAGE, { timeout: 180000 });
   await page.waitForSelector('#mp-name', { timeout: 120000 });
+  await page.fill('#mp-address', ADDRESS);
   await page.fill('#mp-name', name);
   await page.locator('.mp-card .join-btn').click();
   await page.waitForFunction(() => !!window.__game, null, { timeout: 180000 });
@@ -196,6 +218,7 @@ check('the door survives a server restart', await until(bob.page, (pad) => windo
 
 await browser.close();
 await stopServer();
+if (client) await new Promise((r) => client.httpServer.close(r));
 fs.rmSync(DATA, { recursive: true, force: true });
 console.log(errors.length ? `--- console errors ---\n${errors.slice(0, 12).join('\n')}` : 'no console errors');
 console.log(failures.length ? `FAILED: ${failures.join(', ')}` : 'ALL PASS');

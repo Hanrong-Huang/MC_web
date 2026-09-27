@@ -87,6 +87,7 @@ export type ServerMsg =
   | { t: 'join'; id: number; name: string }
   | { t: 'leave'; id: number; name: string }
   | { t: 'pose'; id: number; p: Pose }
+  /** a peer's edits (`from` = their id), or 0: the edit log, sent in batches after `welcome` */
   | { t: 'cells'; from: number; cells: CellState[] }
   | { t: 'chat'; from: string | null; text: string }
   /** clock sync; `skip` = everyone slept, the night is over */

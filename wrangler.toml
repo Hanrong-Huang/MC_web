@@ -1,0 +1,23 @@
+# Voxelcraft multiplayer on Cloudflare: a Worker in front of one Durable
+# Object that holds the shared world (worker/index.ts, server/core.ts).
+# Deploys from GitHub Actions (.github/workflows/deploy-worker.yml) or with
+# `npx wrangler deploy`; `npm run worker:dev` runs it locally on :8787.
+name = "voxelcraft"
+main = "worker/index.ts"
+compatibility_date = "2025-09-01"
+
+[[durable_objects.bindings]]
+name = "WORLD"
+class_name = "WorldRoom"
+
+# SQLite-backed Durable Objects are the kind the Workers Free plan includes
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WorldRoom"]
+
+[vars]
+WORLD_NAME = "world"
+# game mode for new players: survival | creative
+MODE = "survival"
+MAX_PLAYERS = "16"
+# SEED = "my seed"   # seed for a brand-new world (random if unset)
