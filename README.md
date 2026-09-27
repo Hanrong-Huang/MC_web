@@ -54,27 +54,46 @@ Every key above except the hotbar, Esc and F1–F3 can be rebound in **Options �
 
 ## Play together (multiplayer)
 
-There are two ways to host the shared world: **online on Cloudflare** (always on, join straight from the Play-now link, free tier), or **on your own computer** with `npm run server`.
+### Join the online world
 
-### Play online (GitHub Pages + Cloudflare, one-time setup)
+There is one shared, always-on world everyone can join. Nothing to install:
 
-The game stays on GitHub Pages; the world runs as a Cloudflare Worker with a Durable Object (`worker/index.ts`). Once this is set up, anyone opens the Play-now link, types a name on the **Multiplayer** card and presses **Join Server**.
+1. Open **[the game](https://hanrong-huang.github.io/MC_web/)**.
+2. On the **Multiplayer** card, type **Your Name** and press **Join Server**. Leave **Server Address** blank to join the online world.
+3. You spawn in the shared world. Anyone else online shows up with their name above their head.
 
-1. **Create a free Cloudflare account** at <https://dash.cloudflare.com/sign-up>, then open **Workers & Pages** once. If it asks, pick your `workers.dev` subdomain (e.g. `yourname.workers.dev`).
-2. **Make an API token.** Go to **My Profile → API Tokens → Create Token**, use the **Edit Cloudflare Workers** template, and copy the token. Also copy your **Account ID** (shown on the Workers & Pages overview page).
-3. **Give them to GitHub.** In this repo: **Settings → Secrets and variables → Actions → New repository secret**, add `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
-4. **Deploy.** Every push to `main` that touches the server deploys it (workflow *Deploy multiplayer server*; you can also run it from the **Actions** tab). The log ends with the address, e.g. `https://voxelcraft.yourname.workers.dev`.
-5. **Point the site at it.** Under **Settings → Secrets and variables → Actions → Variables**, add `VITE_MP_SERVER` = `wss://voxelcraft.yourname.workers.dev`, then re-run the *Deploy site* workflow. The Multiplayer card now joins that world by default.
+In game: **T** to chat, hold **Tab** for the player list, and use the chat commands `/list` (who's online), `/time set day|noon|night|midnight` and `/help`.
 
-You can also share a direct link that fills in the server: `https://hanrong-huang.github.io/MC_web/?server=wss://voxelcraft.yourname.workers.dev`.
+**What is shared:** the world (every block anyone places, breaks or uses: doors, levers, chests and their contents, TNT craters), the day/night clock, chat and each other's players with name tags. The night is skipped once everyone in the Overworld is in bed.
 
-World settings live in `wrangler.toml` (`MODE`, `SEED`, `MAX_PLAYERS`, `WORLD_NAME`). The Workers Free plan covers a group of friends playing a few hours a day comfortably. Its limits are daily request and storage-write quotas; see Cloudflare's pricing page for the current numbers. With nobody online the world sleeps and the day clock pauses. `npm run worker:dev` runs the same server locally on port 8787.
+**Your progress:** your inventory, position and spawn are saved on the server under **your name**. Use the same name next time to carry on. There are no passwords, so anyone typing your name gets your character.
 
-> In mainland China, `*.workers.dev` can be slow or blocked. Bind a custom domain to the Worker in the Cloudflare dashboard, or host with `npm run server` on a local cloud server behind https.
+**Not shared yet:** mobs, animals and weather are still simulated separately in each player's game.
+
+> **Mainland China:** if **Join Server** can't connect, the server's `*.workers.dev` address is being blocked on your network. See [Hosting the online world](#hosting-the-online-world-cloudflare) for serving it from a custom domain.
+
+#### 联机玩法（中文）
+
+1. 打开 **[游戏页面](https://hanrong-huang.github.io/MC_web/)**。
+2. 在 **Multiplayer** 卡片里填上 **Your Name**（你的名字），点 **Join Server**。Server Address 留空，就是加入在线世界。
+3. 进去后就在同一个世界里了，其他玩家头顶会显示名字。
+
+游戏里按 **T** 聊天，按住 **Tab** 看在线玩家。聊天命令有 `/list`（谁在线）、`/time set day|night`（改时间）和 `/help`。
+你的背包、位置和出生点按**名字**保存在服务器上，下次用同一个名字就能接着玩。没有密码，别人用你的名字也能进你的角色。
+
+### Hosting the online world (Cloudflare)
+
+The game is served from GitHub Pages and the world runs on Cloudflare as a Worker + Durable Object (`worker/index.ts`), on the free plan. It is live at `wss://voxelcraft.voxelcraft.workers.dev`. The Pages build bakes that address in from the repo variable `VITE_MP_SERVER`, which is why the Multiplayer card needs no address.
+
+- **Deploy server changes:** `npx wrangler login` once, then `npm run worker:deploy`. To make pushes to `main` deploy it automatically, add the repo secrets `CLOUDFLARE_API_TOKEN` (a token from the *Edit Cloudflare Workers* template) and `CLOUDFLARE_ACCOUNT_ID`. Without them the *Deploy multiplayer server* workflow only type-checks.
+- **Move the world to another server:** change the `VITE_MP_SERVER` variable (Settings → Secrets and variables → Actions → Variables) and re-run *Deploy site*. A direct link also works: `https://hanrong-huang.github.io/MC_web/?server=wss://…`.
+- **World settings** live in `wrangler.toml` (`MODE`, `SEED`, `MAX_PLAYERS`, `WORLD_NAME`). With nobody online the world sleeps and the day clock pauses. The free plan comfortably covers a group of friends playing a few hours a day; see Cloudflare's pricing page for the daily request and storage-write limits.
+- **Mainland China:** `*.workers.dev` is often blocked there. Add a domain to the Cloudflare account and attach it to the Worker under *Workers & Pages → voxelcraft → Settings → Domains & Routes → Custom domain* (e.g. `mc.example.com`). Then point `VITE_MP_SERVER` at `wss://mc.example.com` and re-run *Deploy site*.
+- `npm run worker:dev` runs the same server locally on port 8787.
 
 ### Host it yourself
 
-One person runs the server and everyone else joins it from their browser.
+For a private world (LAN party, or a server you control), one person runs the server and everyone else joins it from their browser.
 
 **1. Start the server** (needs [Node.js](https://nodejs.org) 18+):
 
@@ -90,8 +109,6 @@ It prints something like `play: http://localhost:8080/`. The world is saved in `
 - **Same Wi-Fi / LAN:** friends open `http://<the host's LAN IP>:8080/`, e.g. `http://192.168.1.23:8080/` (on Windows, `ipconfig` shows the IP; allow Node through the firewall if asked).
 - **Over the internet:** forward TCP port 8080 on the router to the host, or expose it with a tunnel such as `cloudflared tunnel --url http://localhost:8080` or `ngrok http 8080`, then share the https link it prints. It can also run on any small VPS or container host (Fly.io, Railway, …) with `npm run server`.
 - The Play-now page on GitHub Pages can also join a server: type its address (e.g. `wss://your-tunnel.example.com`) into **Server Address**.
-
-**What is shared:** the world (every block anyone places, breaks or uses: doors, levers, chests and their contents, TNT craters), the day/night clock, chat and each other's players with name tags. The night is skipped once everyone in the Overworld is in bed. Your inventory, position and spawn are saved on the server under your name. Mobs, animals and weather are still simulated separately in each player's game in this first version.
 
 Server options (environment variables): `PORT` (8080), `WORLD` (world file name), `SEED`, `MODE` (`survival`/`creative` for new players), `MAX_PLAYERS` (16), `DATA_DIR`. Chat commands: `/list`, `/time set day|noon|night|midnight`, `/help`.
 
