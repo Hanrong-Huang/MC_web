@@ -44,13 +44,19 @@ import { waterFX } from './engine/WaterFX';
 import { NetherController } from './engine/NetherController';
 import type { Entity } from './engine/EntityManager';
 import { Redstone } from './engine/Redstone';
+import { Action, actionsFor, bindingFor, keyLabel } from './engine/Keybinds';
+import { NetClient } from './net/NetClient';
+import { NetSync } from './net/NetSync';
+import { RemotePlayers } from './net/RemotePlayers';
+import type { ServerMsg, Pose, PlayerSave } from './net/protocol';
+import { Chat } from './ui/Chat';
 
 const DAY_LENGTH = 1200; // 20 real minutes
 const SAVE_VERSION = 2;
 const AUTOSAVE_SECONDS = 60;
 const INTRO_TIME = 1.9; // camera sweep from above into the player's eyes after loading
 
-type GameUIState = 'loading' | 'playing' | 'paused' | 'container' | 'dead' | 'sleeping';
+type GameUIState = 'loading' | 'playing' | 'paused' | 'container' | 'dead' | 'sleeping' | 'chat';
 
 class Game {
   private app: App;
@@ -139,9 +145,24 @@ class Game {
   private campfireHurtT = 0;
   /** explorer map + recovery compass overlays */
   private mapOverlay: MapOverlay;
+  /** chat log + input and the player list (Tab) */
+  private chat: Chat;
+  /** multiplayer: the server connection, block sync and other players (null in single player) */
+  private net: NetClient | null;
+  private sync: NetSync | null = null;
+  private remotes: RemotePlayers | null = null;
+  private poseT = 0;
+  private lastPoseKey = '';
+  private swingCount = 0;
+  /** multiplayer sleep: the server said everyone is in bed, the night may skip */
+  private netNightSkip = false;
+  private sleepersNote = '';
 
-  constructor(app: App, slot: string, save: SaveState | null, fresh: { seed: number; mode: GameMode } | null) {
+  constructor(app: App, slot: string, save: SaveState | null, fresh: { seed: number; mode: GameMode } | null, net: NetClient | null = null) {
     this.app = app;
+    this.net = net;
+    this.chat = new Chat(app.root);
+    app.hud.multiplayer = !!net;
     this.slot = slot;
     this.hud = app.hud;
     this.audio = app.audio;
@@ -155,6 +176,17 @@ class Game {
     this.renderer.setViewDistance(this.world.viewDist);
     this.renderer.blockAt = (x, y, z) => this.world.getBlock(x, y, z); // outline shape
     this.input = new Input(this.renderer.canvas);
+    if (net) {
+      this.sync = new NetSync(this.world, net, {
+        ignite: (x, y, z) => { this.fire.ignite(x, y, z); return this.world.getBlock(x, y, z) === B.FIRE; },
+        redstoneUpdate: (x, y, z) => this.triggerRedstoneUpdate(x, y, z),
+      });
+      this.remotes = new RemotePlayers(this.renderer.scene, this.atlas);
+      this.world.onChunkInstalled = (cx, cz) => this.sync?.onChunkInstalled(cx, cz);
+      // count arm swings so other players see each one
+      const swing = this.renderer.triggerSwing.bind(this.renderer);
+      this.renderer.triggerSwing = () => { this.swingCount++; swing(); };
+    }
     this.entities = new EntityManager(this.renderer.scene, this.world, this.atlas, this.audio);
     this.entities.setPlayer(this.player);
     waterFX.attach(this.renderer.scene, this.world, this.audio);
@@ -243,6 +275,7 @@ class Game {
 
     this.world.onChunkRemoved = (key) => this.renderer.removeChunk(key);
     this.world.onBlockChanged = (x, y, z, _oldId, newId) => {
+      this.sync?.touch(x, y, z); // multiplayer: inside a capture this cell goes out
       this.nether.onBlockChanged(x, y, z, _oldId, newId); // broken frames collapse their portal
       // a removed block exposes whatever sat on it; a placed gravity block may drop
       if (newId === B.AIR) {
@@ -467,7 +500,118 @@ class Game {
       this.entities.spawnDrop(p.x, p.y + 1, p.z, id, count, dur, mob, ench);
     };
 
+    if (net) this.startNet(net);
+
     void this.pregenerate();
+  }
+
+  // --- multiplayer ---------------------------------------------------------------
+
+  /** Run a player-caused world change; in multiplayer its cells are sent. */
+  private capture<T>(fn: () => T): T {
+    return this.sync ? this.sync.capture(fn) : fn();
+  }
+
+  private startNet(net: NetClient): void {
+    const w = net.welcome;
+    this.dayTime = w.dayTime;
+    this.sync!.applyRemote(w.cells);
+    for (const p of w.players) this.remotes!.add(p.id, p.name, p.pose);
+    this.chat.add(null, `Connected to "${w.world}" as ${w.name} — ${w.players.length + 1} online. Press ${keyLabel(bindingFor('chat'))} to chat.`);
+    net.onClose = (reason) => {
+      if (this.disposed) return;
+      this.hud.toast(`Disconnected: ${reason}`);
+      this.dispose();
+      void this.app.showMenu();
+    };
+    net.listen((m) => this.onNet(m));
+  }
+
+  private onNet(m: ServerMsg): void {
+    if (this.disposed) return;
+    switch (m.t) {
+      case 'join': this.remotes?.add(m.id, m.name); break;
+      case 'leave': this.remotes?.remove(m.id); break;
+      case 'pose': this.remotes?.pose(m.id, m.p); break;
+      case 'cells': this.sync?.applyRemote(m.cells); break;
+      case 'chat':
+        this.chat.add(m.from, m.text);
+        if (m.from !== null) this.audio.ui('hover');
+        break;
+      case 'time':
+        if (m.skip) {
+          this.netNightSkip = true;
+          if (this.state !== 'sleeping') { this.dayTime = m.dayTime; this.weather.setKind('clear'); }
+        } else {
+          // nudge toward the server clock (wrap-aware); snap if far off
+          let d = m.dayTime - this.dayTime;
+          d -= Math.round(d);
+          this.dayTime = Math.abs(d) > 0.01 ? m.dayTime : (this.dayTime + d * 0.5 + 1) % 1;
+        }
+        break;
+      case 'sleepers':
+        this.sleepersNote = `${m.n}/${m.total} players sleeping`;
+        if (this.state === 'sleeping' && m.n < m.total) this.hud.toast(this.sleepersNote);
+        break;
+      case 'error': this.hud.toast(m.msg); break;
+      case 'welcome': break;
+    }
+  }
+
+  /** ~12 Hz pose updates (and at least once a second while idle). */
+  private sendPose(dt: number): void {
+    if (!this.net) return;
+    this.poseT += dt;
+    if (this.poseT < 1 / 12) return;
+    const p = this.player;
+    const pose: Pose = {
+      x: Math.round(p.pos.x * 100) / 100, y: Math.round(p.pos.y * 100) / 100, z: Math.round(p.pos.z * 100) / 100,
+      yaw: Math.round(p.yaw * 1000) / 1000, pitch: Math.round(p.pitch * 1000) / 1000,
+      dim: this.world.dimension, sneak: p.sneaking, held: p.heldId(), swing: this.swingCount,
+      dead: p.dead, riding: p.isRiding(), sleeping: this.state === 'sleeping',
+    };
+    const key = JSON.stringify(pose);
+    if (key === this.lastPoseKey && this.poseT < 1) return;
+    this.poseT = 0;
+    this.lastPoseKey = key;
+    this.net.send({ t: 'pose', p: pose });
+  }
+
+  /** The per-player part of the save, kept by the server under your name. */
+  private buildPlayerSave(): PlayerSave {
+    return {
+      gameMode: this.player.mode,
+      player: this.player.serialize(),
+      inventory: this.player.inventory.serialize(),
+      dimension: this.world.dimension,
+      ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
+      advancements: this.adv.serialize(),
+    };
+  }
+
+  private openChat(): void {
+    if (this.state !== 'playing') return;
+    this.state = 'chat';
+    this.input.exitLock();
+    this.chat.open((text) => {
+      if (this.net) this.net.send({ t: 'chat', text });
+      else this.chat.add('You', text);
+    }, () => {
+      if (this.state !== 'chat') return;
+      this.state = 'playing';
+      this.input.clearClicks();
+      this.input.requestLock();
+    });
+  }
+
+  private playerListRows(): { title: string; rows: { name: string; you?: boolean; note?: string }[] } {
+    const me = { name: this.net ? this.net.name : 'You', you: true, note: this.world.dimension === 'nether' ? 'Nether' : '' };
+    if (!this.net || !this.remotes) return { title: 'Single player', rows: [me] };
+    const rows = [me, ...this.remotes.list().map((r) => ({
+      name: r.name,
+      note: r.pose ? (r.pose.dim === 'nether' ? 'Nether' : `${Math.round(Math.hypot(r.pose.x - this.player.pos.x, r.pose.z - this.player.pos.z))} m`) : '',
+    }))];
+    return { title: `${this.net.welcome.world} — ${rows.length} online`, rows };
   }
 
   // --- boot -------------------------------------------------------------------
@@ -502,6 +646,11 @@ class Game {
     // sweep the camera down into the player's eyes (dev/test hooks skip it so
     // harness screenshots keep their framing)
     this.introT = /nointro|debug|test/.test(location.hash) ? INTRO_TIME : 0;
+    // dev helper: #dev only exposes the game to harnesses (multiplayer tests)
+    if (location.hash.includes('dev') && !location.hash.includes('debugmobs')) {
+      (window as unknown as { __game: unknown; __B: unknown }).__game = this;
+      (window as unknown as { __B: unknown }).__B = B;
+    }
     // dev helper: #debugmobs drops a few tameable/rideable mobs at spawn and
     // faces the player east toward the horse for screenshot testing
     if (location.hash.includes('debugmobs')) {
@@ -693,7 +842,7 @@ class Game {
       }
     };
 
-    this.input.onMouseDown = (button) => {
+    this.input.onMouseDown = (button) => this.capture(() => {
       if (button === 0) {
         this.player.onLeftClick();
         const t = this.player.target;
@@ -701,7 +850,7 @@ class Game {
       }
       // middle click: pick block
       if (button === 1 && this.state === 'playing' && this.input.active) this.player.pickBlock();
-    };
+    });
 
     this.input.onWheel = (delta) => {
       if (this.state !== 'playing') return;
@@ -715,37 +864,9 @@ class Game {
         if (n >= 1 && n <= 9 && this.state === 'playing') this.player.selectSlot(n - 1);
         return;
       }
+      // rebindable actions (Keybinds.ts); several can share a key
+      for (const act of actionsFor(code)) this.onAction(act, doubleTap);
       switch (code) {
-        case 'KeyW':
-          if (doubleTap && this.state === 'playing') this.player.sprinting = true;
-          break;
-        case 'Space':
-          if (doubleTap && this.state === 'playing' && this.player.mode === 'creative') this.player.toggleFly();
-          break;
-        case 'KeyF':
-          if (this.state === 'playing') {
-            this.player.toggleFly();
-            this.hud.toast(this.player.flying ? 'Flying enabled' : 'Flying disabled');
-          }
-          break;
-        case 'KeyL':
-          // advancement panel toggle
-          if (this.hud.isAdvancementsOpen()) this.hud.hideAdvancements();
-          else if (this.state === 'playing' || this.hud.isAdvancementsOpen()) {
-            this.input.exitLock();
-            this.hud.toggleAdvancements(this.adv.list());
-          }
-          break;
-        case 'KeyQ':
-          // Q tosses one of the held item; Ctrl+Q (sneak+Q) tosses the stack
-          if (this.state === 'playing' && this.input.active) {
-            this.player.dropSelected(this.input.down('ControlLeft') || this.input.down('ControlRight'));
-          }
-          break;
-        case 'KeyE':
-          if (this.state === 'playing' && this.input.active) this.openInventory();
-          else if (this.state === 'container') this.closeContainer();
-          break;
         case 'F3':
           this.hud.setDebugVisible(!this.hud.isDebugVisible());
           break;
@@ -759,13 +880,6 @@ class Game {
           break;
         case 'F2':
           if (this.state !== 'loading') this.takeScreenshot();
-          break;
-        case 'KeyH':
-          if (this.hud.isControlsOpen()) this.closeControls();
-          else if (this.state === 'playing') {
-            this.input.exitLock();
-            this.hud.toggleControls(() => { if (this.state === 'playing') this.input.requestLock(); });
-          }
           break;
         case 'Escape':
           // with pointer lock active the browser eats Esc; this handles menus
@@ -906,6 +1020,58 @@ class Game {
     this.state = 'playing';
     this.input.clearClicks();
     this.input.requestLock();
+  }
+
+  /** A rebindable action's key went down (see Keybinds.ts). */
+  private onAction(act: Action, doubleTap: boolean): void {
+    const playing = this.state === 'playing';
+    switch (act) {
+      case 'forward':
+        if (doubleTap && playing) this.player.sprinting = true;
+        break;
+      case 'jump':
+        if (doubleTap && playing && this.player.mode === 'creative') this.player.toggleFly();
+        break;
+      case 'sneak':
+        if (playing) this.player.onSneakPressed();
+        break;
+      case 'fly':
+        if (playing) {
+          this.player.toggleFly();
+          this.hud.toast(this.player.flying ? 'Flying enabled' : 'Flying disabled');
+        }
+        break;
+      case 'advancements':
+        if (this.hud.isAdvancementsOpen()) this.hud.hideAdvancements();
+        else if (playing) {
+          this.input.exitLock();
+          this.hud.toggleAdvancements(this.adv.list());
+        }
+        break;
+      case 'drop':
+        // tosses one of the held item; with Ctrl held, the whole stack (vanilla)
+        if (playing && this.input.active) this.player.dropSelected(this.input.down('ControlLeft'));
+        break;
+      case 'inventory':
+        if (playing && this.input.active) this.openInventory();
+        else if (this.state === 'container') this.closeContainer();
+        break;
+      case 'controls':
+        if (this.hud.isControlsOpen()) this.closeControls();
+        else if (playing) {
+          this.input.exitLock();
+          this.hud.toggleControls(() => { if (this.state === 'playing') this.input.requestLock(); });
+        }
+        break;
+      case 'chat':
+        if (playing) this.openChat();
+        break;
+      case 'players':
+        if (playing) { const l = this.playerListRows(); this.chat.showPlayers(l.title, l.rows); }
+        break;
+      case 'back': case 'left': case 'right': case 'sprint':
+        break; // held-only: read each frame through Input.held
+    }
   }
 
   private openInventory(): void {
@@ -1108,6 +1274,8 @@ class Game {
     this.hud.showSleepPrompt(() => this.leaveBed());
     this.hud.setCrosshairVisible(false);
     this.renderer.setHeldVisible(false);
+    this.netNightSkip = false;
+    this.net?.send({ t: 'sleep', on: true });
   }
 
   /** Out of bed — either by choice (Leave Bed / Esc) or after waking at dawn. */
@@ -1115,6 +1283,7 @@ class Game {
     if (this.state !== 'sleeping') return;
     this.state = 'playing';
     this.sleepBed = null;
+    this.net?.send({ t: 'sleep', on: false });
     this.hud.hideSleepPrompt();
     this.hud.setSleepFade(0);
     this.hud.setCrosshairVisible(true);
@@ -1130,6 +1299,12 @@ class Game {
     const t = this.sleepT;
     this.player.vel.x = 0; this.player.vel.z = 0;
     if (t < 1.2) {
+      this.hud.setSleepFade(0);
+      return;
+    }
+    // multiplayer: lie awake until the server says everyone is in bed
+    if (this.net && !this.netNightSkip) {
+      this.sleepT = 1.2;
       this.hud.setSleepFade(0);
       return;
     }
@@ -1213,6 +1388,9 @@ class Game {
 
   private closeContainer(): void {
     if (this.state !== 'container') return;
+    // multiplayer: the chest / furnace contents go to everyone
+    const pos = this.containerPos;
+    if (pos) this.capture(() => this.sync?.touchKey(pos));
     this.hud.closeContainer();
     if (this.container?.kind === 'chest') this.audio.play('chestClose');
     this.container = null;
@@ -1452,6 +1630,11 @@ class Game {
     // a save already in flight was built from older state (say an autosave
     // just before Save & Quit): let it land, then write the current state
     while (this.saving) await this.saving;
+    if (this.net) {
+      // multiplayer: the world lives on the server; send our player's part
+      this.net.send({ t: 'save', save: this.buildPlayerSave() });
+      return true;
+    }
     const run = (async (): Promise<boolean> => {
       if (this.state !== 'loading') this.recordWorldCard();
       try {
@@ -1470,6 +1653,7 @@ class Game {
     if (this.state === 'container') this.hud.closeContainer();
     const ok = await this.saveGame();
     if (!ok) this.hud.toast('Save failed — see console');
+    if (this.net) await new Promise((r) => setTimeout(r, 150)); // let the save frame leave
     this.dispose();
     void this.app.showMenu();
   }
@@ -1494,28 +1678,28 @@ class Game {
       if (tv !== this.touchVisible) { this.touchVisible = tv; this.touch.setVisible(tv); }
     }
 
-    const paused = this.state === 'paused';
+    const paused = this.state === 'paused' && !this.net; // a shared world keeps running
     if (!paused) {
       const prevDay = this.dayTime;
       this.dayTime = (this.dayTime + dt / DAY_LENGTH) % 1;
       if (this.dayTime < prevDay) this.worldDays++;
 
       if (this.state === 'sleeping') this.updateSleep(dt);
-      this.player.update(dt);
+      this.capture(() => this.player.update(dt));
       if (location.hash.includes('bowtest')) this.player.bowCharge = 0.9;
       const devBow = (window as unknown as { __bowCharge?: number }).__bowCharge;
       if (devBow !== undefined) this.player.bowCharge = devBow; // dev: harnesses hold a bow draw
       // mounting hint when the player climbs onto a horse
       if (this.player.isRiding() !== this.wasRiding) {
         this.wasRiding = this.player.isRiding();
-        if (this.wasRiding) this.hud.toast('Mounted — WASD to ride, Space to jump, Shift to dismount');
+        if (this.wasRiding) this.hud.toast(`Mounted — ${keyLabel(bindingFor('forward'))}${keyLabel(bindingFor('left'))}${keyLabel(bindingFor('back'))}${keyLabel(bindingFor('right'))} to ride, ${keyLabel(bindingFor('jump'))} to jump, ${keyLabel(bindingFor('sneak'))} to dismount`);
       }
       this.world.update(this.player.pos.x, this.player.pos.z, 5);
       this.world.updateDoorSwings(dt);
       this.processMeshing(8);
-      this.entities.update(dt, this.elapsed, this.renderer.camera.quaternion);
+      this.capture(() => this.entities.update(dt, this.elapsed, this.renderer.camera.quaternion));
       waterFX.update(dt, this.world, this.renderer.camera.position, this.renderer.daylight, this.entities.entities);
-      this.throwables.update(dt);
+      this.capture(() => this.throwables.update(dt));
       this.xpOrbs.update(dt, this.player.dead || this.player.mode !== 'survival' ? null : this.player.pos, (n) => {
         this.player.addXp(n);
         this.audio.play('pop', 0.6);
@@ -1700,6 +1884,12 @@ class Game {
       );
     }
     if (this.hud.isDebugVisible()) this.updateDebug();
+
+    // multiplayer + chat
+    this.remotes?.update(dt, this.world.dimension);
+    this.sendPose(dt);
+    this.chat.update(dt);
+    if (this.chat.playersShown && (!this.input.held('players') || this.state !== 'playing')) this.chat.hidePlayers();
 
     const eye = this.renderer.camera.position;
     const inLava = this.world.getBlock(Math.floor(eye.x), Math.floor(eye.y), Math.floor(eye.z)) === B.LAVA;
@@ -2414,6 +2604,9 @@ class Game {
   dispose(): void {
     this.disposed = true;
     cancelAnimationFrame(this.raf);
+    this.net?.close();
+    this.remotes?.clear();
+    this.chat.dispose();
     this.meshWorker?.terminate();
     this.meshWorker = null;
     this.world.dispose(); // stop the terrain-generation workers
@@ -2489,7 +2682,35 @@ class App {
       },
       onExport: (slot) => void this.downloadWorld(slot),
       onImport: (file) => void this.uploadWorld(file),
+      onJoin: (address, name, status) => this.joinServer(address, name, status),
     });
+  }
+
+  /** Multiplayer: connect, then start a game in the server's world (with the
+   *  player's saved state from the server, if they have played there before). */
+  private async joinServer(address: string, name: string, status: (msg: string, error?: boolean) => void): Promise<void> {
+    status('Connecting…');
+    let net: NetClient;
+    try {
+      net = await NetClient.connect(address, name);
+    } catch (err) {
+      status((err as Error).message || 'Could not connect', true);
+      return;
+    }
+    const w = net.welcome;
+    const you = w.you;
+    const save: SaveState | null = you ? {
+      version: SAVE_VERSION, seed: w.seed, gameMode: you.gameMode,
+      player: you.player as SaveState['player'], inventory: you.inventory as SaveState['inventory'],
+      dimension: you.dimension, world: {}, blockEntities: {},
+      environment: { dayTime: w.dayTime },
+      ...(you.spawn ? { spawn: you.spawn } : {}),
+      ...(Array.isArray(you.advancements) ? { advancements: you.advancements as string[] } : {}),
+      lastPlayed: Date.now(),
+    } : null;
+    this.hud.hideMenu();
+    this.audio.setMenuMusic(false);
+    this.game = new Game(this, `mp:${w.world}`, save, save ? null : { seed: w.seed, mode: w.mode }, net);
   }
 
   /** Download a saved world as a portable .json file. */

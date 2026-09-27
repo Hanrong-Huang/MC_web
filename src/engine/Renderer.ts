@@ -535,7 +535,7 @@ const ITEM_POS = new THREE.Vector3(1.13 / 16, 3.2 / 16, 1.13 / 16);
 const ITEM_ROT = new THREE.Euler(0, 105 * DEG, 20 * DEG);
 const ITEM_SCALE = 0.5;
 const BLOCK_ROT = new THREE.Euler(10 * DEG, 45 * DEG, 0);
-const BLOCK_SCALE = 0.26;
+const BLOCK_SCALE = 0.22;
 
 export class Renderer {
   readonly canvas: HTMLCanvasElement;
@@ -1565,16 +1565,18 @@ export class Renderer {
     // eating: lift the food toward the mouth and nudge it with each chew
     this.eatAmt += (this.eatTarget - this.eatAmt) * Math.min(1, dt * 10);
     if (this.eatAmt > 0.01 && this.heldVanilla) {
-      // vanilla applyEatTransform: swing the food in front of the mouth and
-      // bob it with each bite
+      // vanilla-style eating: bring the food in to the bottom centre, turned
+      // face-on (undoing the display turn so its lit face shows), a little
+      // smaller, bobbing with each bite
       this.eatPhase += dt * 22;
       const e = this.eatAmt;
-      const bite = Math.abs(Math.cos(this.eatPhase * 0.7)) * 0.1 * e;
+      const bite = Math.abs(Math.cos(this.eatPhase * 0.7)) * 0.06 * e;
+      const ap = this.armPos;
       this.rigBegin();
-      this.rigT(0, bite + bob, 0);
-      this.rigT(0.6 * e, -0.5 * e, 0);
-      this.rigR('y', 90 * e); this.rigR('x', 10 * e); this.rigR('z', 30 * e);
-      this.rigT(this.armPos.x, this.armPos.y - lower * 1.5, this.armPos.z);
+      this.rigT(ap.x + (0.02 - ap.x) * e, ap.y + (-0.36 - ap.y) * e + bite + bob - lower * 1.5, ap.z + (-0.68 - ap.z) * e);
+      this.rigR('y', -ITEM_ROT.y / DEG * e);
+      this.rigR('x', 12 * e);
+      this.rigS(1 - 0.3 * e);
       this.rigEnd();
       return;
     }
@@ -1724,7 +1726,7 @@ export class Renderer {
   /** Pose a 1-unit block model with vanilla's block display transform. */
   private vanillaBlock(mesh: THREE.Mesh): THREE.Mesh {
     this.heldVanilla = true;
-    this.heldRestPos.set(0, 0.1, 0); // sit clear of the bottom of the view
+    this.heldRestPos.set(0, 0.12, 0); // sit clear of the bottom of the view
     this.heldIdleRot.copy(BLOCK_ROT);
     this.heldScale = BLOCK_SCALE;
     mesh.rotation.copy(BLOCK_ROT);
@@ -1740,6 +1742,7 @@ export class Renderer {
     const a = deg * DEG;
     this.rigM.multiply(axis === 'x' ? this.rigOp.makeRotationX(a) : axis === 'y' ? this.rigOp.makeRotationY(a) : this.rigOp.makeRotationZ(a));
   }
+  private rigS(k: number): void { this.rigM.multiply(this.rigOp.makeScale(k, k, k)); }
   private rigEnd(): void {
     this.rigM.decompose(this.heldGroup.position, this.heldGroup.quaternion, this.heldGroup.scale);
     if (this.heldMesh) {

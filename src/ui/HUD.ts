@@ -11,6 +11,7 @@ import { SaveSummary, SlotData } from '../engine/Persistence';
 import { AudioEngine, SfxName, MobVoice } from '../engine/Audio';
 import type { GameMode } from '../engine/Player';
 import { isTouchDevice } from './TouchControls';
+import { ACTIONS, Action, RESERVED, bindingFor, keyLabel, keySettings, normalizeCode, resetBindings, setBinding, setSneakToggle } from '../engine/Keybinds';
 import {
   pixelText, scaled, countCanvas, drawLogo, heartIcon, shankIcon, armorIcon, bubbleIcon,
   GUI_ICONS, drawPlayerFigure, Fill,
@@ -38,6 +39,8 @@ export interface ContainerView {
 
 export interface MenuHandlers {
   onPlay: (slot: string, fresh: { seed: number; mode: GameMode } | null) => void;
+  /** join a multiplayer server; `status` reports progress / errors on the card */
+  onJoin: (address: string, name: string, status: (msg: string, error?: boolean) => void) => void;
   onDelete: (slot: string) => void;
   onPack: (files: File[]) => void;
   /** download a saved world as a portable .json file */
@@ -190,6 +193,8 @@ export class HUD {
   private audio: AudioEngine;
 
   readonly settings: UiSettings = loadUiSettings();
+  /** in a multiplayer world (pause menu says Disconnect) */
+  multiplayer = false;
 
   private menu: HTMLElement;
   private backdrop: TitleBackdrop | null = null;
@@ -263,6 +268,9 @@ export class HUD {
   private confirmEl: HTMLElement;
   private confirmKey: ((e: KeyboardEvent) => void) | null = null;
   private pauseBuilt = false;
+  private pauseQuit: HTMLButtonElement | null = null;
+  /** tears down an open Key Binds page (and any key capture in progress) */
+  private keyBindsCleanup: (() => void) | null = null;
   private pauseH: PauseHandlers | null = null;
   private pauseMode: GameMode = 'survival';
   private pauseViewDist = 8;
@@ -616,6 +624,41 @@ ${seedLine.textContent}`;
       inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); createBtn.click(); } });
     }
 
+    // --- multiplayer -----------------------------------------------------------
+    const mp = el('div', 'menu-card mp-card', col);
+    el('div', 'card-head', mp).textContent = 'Multiplayer';
+    let mpPrefs: { address?: string; name?: string } = {};
+    try { mpPrefs = JSON.parse(localStorage.getItem('voxelcraft-mp') ?? '{}'); } catch { /* none yet */ }
+    const addrLbl = el('label', 'field-label', mp); addrLbl.textContent = 'Server Address';
+    const addrInput = el('input', 'menu-input', mp) as HTMLInputElement;
+    addrInput.type = 'text'; addrInput.id = 'mp-address'; addrLbl.htmlFor = addrInput.id;
+    addrInput.placeholder = 'Blank = the server this page came from';
+    addrInput.value = mpPrefs.address ?? '';
+    const nameLbl2 = el('label', 'field-label', mp); nameLbl2.textContent = 'Your Name';
+    const playerInput = el('input', 'menu-input', mp) as HTMLInputElement;
+    playerInput.type = 'text'; playerInput.maxLength = 16; playerInput.id = 'mp-name'; nameLbl2.htmlFor = playerInput.id;
+    playerInput.placeholder = 'Steve';
+    playerInput.value = mpPrefs.name ?? '';
+    const mpStatus = el('div', 'mode-desc mp-status', mp);
+    mpStatus.textContent = 'Play together: run `npm run server`, then everyone joins its address.';
+    const joinBtn = wire(el('button', 'mc-btn join-btn', mp));
+    joinBtn.textContent = 'Join Server';
+    joinBtn.onclick = () => {
+      this.audio.ensure();
+      const address = addrInput.value.trim();
+      const name = playerInput.value.trim() || 'Steve';
+      try { localStorage.setItem('voxelcraft-mp', JSON.stringify({ address, name })); } catch { /* storage blocked */ }
+      joinBtn.disabled = true;
+      handlers.onJoin(address, name, (msg, error) => {
+        mpStatus.textContent = msg;
+        mpStatus.classList.toggle('err', !!error);
+        if (error) joinBtn.disabled = false;
+      });
+    };
+    for (const inp of [addrInput, playerInput]) {
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); joinBtn.click(); } });
+    }
+
     const toolRow = el('div', 'menu-row menu-tools', inner);
     const packBtn = wire(el('button', 'mc-btn small', toolRow));
     packBtn.textContent = 'Texture Pack…';
@@ -726,21 +769,29 @@ ${seedLine.textContent}`;
     close.onclick = done;
     // Esc / H close it wherever it was opened from (title, pause or in game)
     this.controlsKey = (e: KeyboardEvent): void => {
-      if (e.code !== 'Escape' && e.code !== 'KeyH') return;
+      if (e.code !== 'Escape' && normalizeCode(e.code) !== bindingFor('controls')) return;
       e.preventDefault(); e.stopPropagation();
       done();
     };
     document.addEventListener('keydown', this.controlsKey, true);
     ov.addEventListener('pointerdown', (e) => { if (e.target === ov) done(); });
     const touch = isTouchDevice();
+    const K = (a: Action): string => keyLabel(bindingFor(a));
     const groups: [string, [string, string][]][] = touch ? [
       ['Moving', [['Left stick', 'Walk (push far to sprint)'], ['▲', 'Jump / swim up'], ['▼', 'Sneak, dismount'], ['Fly', 'Toggle flight']]],
       ['Looking & acting', [['Drag right side', 'Look around'], ['Dig', 'Hold to break blocks / attack'], ['Place', 'Place blocks, use items, interact']]],
       ['Menus', [['Hotbar', 'Tap a slot to select it'], ['Items', 'Inventory + crafting'], ['Menu', 'Options, save, quit']]],
     ] : [
-      ['Movement', [['W A S D', 'Walk'], ['Space', 'Jump · double-tap to fly (creative)'], ['Shift', 'Sneak (won\'t fall off edges) · dismount'], ['W W', 'Double-tap to sprint'], ['F', 'Toggle flight']]],
-      ['Actions', [['Left click', 'Break / attack'], ['Right click', 'Place · use · eat · interact'], ['Middle click', 'Pick block'], ['Q', 'Drop item (Ctrl+Q: stack)'], ['1 – 9 / wheel', 'Choose hotbar slot']]],
-      ['Screens', [['E', 'Inventory & crafting'], ['L', 'Advancements'], ['Esc', 'Pause · close menus'], ['H', 'This controls page']]],
+      ['Movement', [
+        [[K('forward'), K('left'), K('back'), K('right')].join(' '), 'Walk'],
+        [K('jump'), 'Jump · double-tap to fly (creative)'],
+        [K('sneak'), `Sneak (won't fall off edges) · dismount${keySettings().sneakToggle ? ' · toggles' : ''}`],
+        [bindingFor('sprint') ? `${K('sprint')} / ${K('forward')} ${K('forward')}` : `${K('forward')} ${K('forward')}`, 'Sprint (double-tap forward)'],
+        [K('fly'), 'Toggle flight']]],
+      ['Actions', [['Left click', 'Break / attack'], ['Right click', 'Place · use · eat · interact'], ['Middle click', 'Pick block'],
+        [K('drop'), `Drop item (Ctrl+${K('drop')}: stack)`], ['1 – 9 / wheel', 'Choose hotbar slot'],
+        [K('chat'), 'Chat'], [K('players'), 'Player list (hold)']]],
+      ['Screens', [[K('inventory'), 'Inventory & crafting'], [K('advancements'), 'Advancements'], ['Esc', 'Pause · close menus'], [K('controls'), 'This controls page']]],
       ['Display', [['F1', 'Hide the HUD'], ['F2', 'Save a screenshot'], ['F3', 'Debug info & coordinates']]],
       ['In menus', [['Shift + click', 'Quick-move a stack'], ['Right click', 'Split a stack / place one'], ['1 – 9 over slot', 'Swap with hotbar'], ['Q over slot', 'Drop it']]],
     ];
@@ -1338,6 +1389,9 @@ ${seedLine.textContent}`;
     if (!this.pauseBuilt) this.buildPauseMenu();
     if (!wasOpen) {
       // always reopen on the main page, with keyboard focus on "Back to Game"
+      // (the menu is reused across worlds: re-arm a quit button left "Saving...")
+      if (this.pauseQuit) this.pauseQuit.disabled = false;
+      this.keyBindsCleanup?.();
       this.pauseMainEl?.classList.remove('hidden');
       this.pauseOptsEl?.classList.add('hidden');
       setTimeout(() => (this.pauseMainEl?.querySelector('button') as HTMLButtonElement | null)?.focus({ preventScroll: true }), 0);
@@ -1406,11 +1460,13 @@ ${seedLine.textContent}`;
     const modeBtn = this.pauseButton(col, '', () => this.pauseH?.onToggleMode(), 'wide');
     this.pauseSyncers.push(() => { modeBtn.textContent = `Game Mode: ${this.pauseMode === 'survival' ? 'Survival' : 'Creative'}`; });
     const quit = this.pauseButton(col, 'Save and Quit to Title', () => {
-      quit.textContent = 'Saving...';
+      quit.textContent = this.multiplayer ? 'Disconnecting...' : 'Saving...';
       quit.disabled = true;
       this.showLoading('Saving world', false);
       this.pauseH?.onSaveQuit();
     }, 'wide quit-btn');
+    this.pauseQuit = quit;
+    this.pauseSyncers.push(() => { if (!quit.disabled) quit.textContent = this.multiplayer ? 'Disconnect' : 'Save and Quit to Title'; });
 
     // --- options page -------------------------------------------------------
     const optsEl = el('div', 'pause-screen options hidden', this.pauseEl);
@@ -1470,6 +1526,17 @@ ${seedLine.textContent}`;
     this.mcSlider(grid, 60, 220, 5, () => Math.round((this.pauseH?.touchLook() ?? 1) * 100),
       (v) => `Touch Look: ${v}%`,
       (v) => this.pauseH?.onTouchLook(v / 100));
+    this.pauseButton(grid, 'Key Binds…', () => {
+      optsEl.classList.add('hidden');
+      this.buildKeyBinds(optsEl);
+      this.audio.ui('swipe');
+    });
+    const sneakBtn = this.pauseButton(grid, '', () => {
+      setSneakToggle(!keySettings().sneakToggle);
+      this.audio.ui(keySettings().sneakToggle ? 'toggleOn' : 'toggleOff');
+      this.syncPauseUi();
+    });
+    this.pauseSyncers.push(() => { sneakBtn.textContent = `Sneak: ${keySettings().sneakToggle ? 'Toggle' : 'Hold'}`; });
 
     // vanilla-style tooltips: a description line for whatever is hovered/focused
     const HINTS = [
@@ -1487,6 +1554,8 @@ ${seedLine.textContent}`;
       'Captions for sounds, with arrows showing where they come from.',
       'How fast the camera turns with the mouse.',
       'How fast the camera turns when dragging on a touch screen.',
+      'Change which key does what.',
+      'Hold: sneak while the key is held. Toggle: press once to crouch, again to stand.',
     ];
     const hint = el('div', 'opt-hint', optsEl);
     const idle = 'Hover an option to see what it does.';
@@ -1510,6 +1579,78 @@ ${seedLine.textContent}`;
     }, 'wide');
 
     this.pauseBuilt = true;
+  }
+
+  /** Options → Key Binds: every rebindable action with its key. Click a key,
+   *  then press the new one (Esc cancels, Backspace unbinds). Keys shared by
+   *  two actions show red; Ctrl on a movement key gets a warning, since Ctrl+W
+   *  closes the browser tab. */
+  private buildKeyBinds(back: HTMLElement): void {
+    this.keyBindsCleanup?.();
+    const page = el('div', 'pause-screen keybinds', this.pauseEl);
+    const t = el('h2', 'pause-title', page);
+    t.appendChild(scaled(pixelText('Key Binds', '#ffffff'), 3));
+    t.setAttribute('aria-label', 'Key Binds');
+    const grid = el('div', 'opt-grid kb-grid', page);
+    const hint = el('div', 'opt-hint', page);
+    const idle = 'Click a key, then press the new one. Esc cancels, Backspace unbinds.';
+    hint.textContent = idle;
+    const buttons = new Map<Action, HTMLButtonElement>();
+    let capture: ((e: KeyboardEvent) => void) | null = null;
+    const stopCapture = (): void => {
+      if (capture) document.removeEventListener('keydown', capture, true);
+      capture = null;
+    };
+    const paint = (): void => {
+      const counts = new Map<string, number>();
+      for (const a of ACTIONS) { const c = bindingFor(a.id); if (c) counts.set(c, (counts.get(c) ?? 0) + 1); }
+      let warn = '';
+      for (const a of ACTIONS) {
+        const b = buttons.get(a.id)!;
+        const c = bindingFor(a.id);
+        b.textContent = keyLabel(c);
+        b.classList.toggle('kb-clash', !!c && (counts.get(c) ?? 0) > 1);
+        b.classList.toggle('kb-none', !c);
+        if (c === 'ControlLeft' && a.group === 'Movement') warn = 'Careful: Ctrl + W closes the browser tab. Ctrl is a risky movement key.';
+      }
+      hint.textContent = warn || idle;
+      hint.classList.toggle('on', !!warn);
+    };
+    let group = '';
+    for (const a of ACTIONS) {
+      if (a.group !== group) { group = a.group; el('div', 'opt-section', grid).textContent = group; }
+      const row = el('div', 'kb-row', grid);
+      el('span', 'kb-label', row).textContent = a.label;
+      const b = this.pauseButton(row, '', () => {
+        stopCapture();
+        paint();
+        b.textContent = '> ? <';
+        b.classList.add('kb-wait');
+        capture = (e: KeyboardEvent): void => {
+          e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+          if (e.repeat) return;
+          stopCapture();
+          b.classList.remove('kb-wait');
+          if (e.code === 'Escape') { paint(); return; }
+          const code = e.code === 'Backspace' || e.code === 'Delete' ? '' : normalizeCode(e.code);
+          if (RESERVED.has(code)) { paint(); hint.textContent = `${keyLabel(code)} is kept for the game (hotbar, menus, debug).`; return; }
+          setBinding(a.id, code);
+          this.audio.ui('toggleOn');
+          paint();
+        };
+        document.addEventListener('keydown', capture, true);
+      }, 'kb-key');
+      buttons.set(a.id, b);
+    }
+    paint();
+    const col = el('div', 'menu-col pause-col', page);
+    this.pauseButton(col, 'Reset Keys', () => { stopCapture(); resetBindings(); paint(); }, 'wide');
+    this.keyBindsCleanup = () => { stopCapture(); page.remove(); this.keyBindsCleanup = null; };
+    this.pauseButton(col, 'Done', () => {
+      this.keyBindsCleanup?.();
+      back.classList.remove('hidden');
+      this.audio.ui('swipe');
+    }, 'wide');
   }
 
   private syncPauseUi(): void {
@@ -1641,7 +1782,7 @@ ${seedLine.textContent}`;
     }
   }
 
-  /** 1-9 over a slot swaps with the hotbar; Q drops one, Ctrl+Q the stack. */
+  /** 1-9 over a slot swaps with the hotbar; the drop key tosses one, Ctrl+drop the stack. */
   private containerKey(e: KeyboardEvent): void {
     if (!this.view || !this.inv || !this.hoverSlot) return;
     const t = e.target as HTMLElement | null;
@@ -1656,7 +1797,7 @@ ${seedLine.textContent}`;
       this.audio.play('click');
       inv.onChange();
       this.renderContainer(this.viewMode);
-    } else if (e.code === 'KeyQ' && !this.cursor) {
+    } else if (normalizeCode(e.code) === bindingFor('drop') && !this.cursor) {
       const s = arr[i];
       if (!s) return;
       const n = e.ctrlKey || e.metaKey ? s.count : 1;

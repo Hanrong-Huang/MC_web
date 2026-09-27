@@ -736,7 +736,7 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 }
 .menu-input::placeholder { color: #707070; }
 .menu-input:focus { border-color: #fff; }
-.create-btn { margin-top: 6px; }
+.create-btn, .join-btn { margin-top: 6px; }
 .mode-pick { display: flex; gap: 6px; }
 .mode-pick .mc-btn { flex: 1; min-height: 34px; }
 .mode-pick .mc-btn.on {
@@ -1293,6 +1293,7 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 .menu-card { animation: fadeup 0.5s ease both; }
 .menu-card.worlds-card { animation-delay: 0.3s; }
 .menu-card.create-card { animation-delay: 0.42s; }
+.menu-card.mp-card { animation-delay: 0.5s; }
 .menu-tools, .menu-help { animation: fadeup 0.5s 0.55s ease both; }
 .world-row { animation: fadeup 0.35s calc(0.4s + var(--i, 0) * 0.05s) ease both; }
 @keyframes fadeup { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
@@ -1382,3 +1383,40 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   .load-tip { opacity: 1; }
   .hotbar-sel { transition: none; }
 }
+
+/* Options → Key Binds */
+.kb-grid { max-height: min(60vh, 520px); overflow-y: auto; padding-right: 4px; }
+.kb-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.kb-label { flex: 1; min-width: 0; color: #e0e0e0; font-size: 13px; text-shadow: 1px 1px #000; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-row .kb-key { flex: 0 0 132px; min-height: 34px; padding: 4px 8px; }
+.kb-key.kb-clash { color: #ff5555; }
+.kb-key.kb-none { color: #9a9a9a; }
+.kb-key.kb-wait { color: #ffff55; }
+
+/* chat (bottom-left, above the hotbar) + player list (Tab) */
+.chat-root {
+  position: absolute; left: 8px; bottom: calc(110px * var(--gui, 1) + env(safe-area-inset-bottom, 0px));
+  width: min(520px, calc(100vw - 16px)); z-index: 30; pointer-events: none;
+  font: 14px/1.35 monospace; color: #fff; text-shadow: 1px 1px 0 #3f3f3f;
+}
+.chat-log { display: flex; flex-direction: column; gap: 1px; max-height: 40vh; overflow: hidden; justify-content: flex-end; }
+.chat-root.open .chat-log { overflow-y: auto; pointer-events: auto; }
+.chat-line { background: rgba(0,0,0,0.45); padding: 1px 6px; word-wrap: break-word; transition: opacity 0.3s; }
+.chat-line.sys { color: #ffff55; }
+.chat-name { color: #d8d8d8; }
+.chat-input { margin-top: 4px; pointer-events: auto; }
+.chat-input input {
+  width: 100%; box-sizing: border-box; padding: 5px 6px;
+  background: rgba(0,0,0,0.6); border: 0; outline: 1px solid rgba(255,255,255,0.35);
+  color: #fff; font: 14px monospace;
+}
+.player-list {
+  position: absolute; top: 12%; left: 50%; transform: translateX(-50%); z-index: 31;
+  min-width: 240px; max-width: 90vw; padding: 6px 8px; background: rgba(0,0,0,0.55);
+  font: 14px/1.5 monospace; color: #fff; text-shadow: 1px 1px 0 #3f3f3f; pointer-events: none;
+}
+.pl-title { color: #ffff55; text-align: center; margin-bottom: 4px; }
+.pl-row { display: flex; justify-content: space-between; gap: 18px; padding: 0 4px; background: rgba(255,255,255,0.06); margin-top: 2px; }
+.pl-row.you .pl-name { color: #55ffff; }
+.pl-note { color: #aaaaaa; }
+.mp-status.err { color: #ff6b6b; }

@@ -125,6 +125,8 @@ export class World {
   /** loaded comparators + daylight detectors (re-read on a timer) */
   pollBlocks = new Set<string>();
   onChunkRemoved: (key: string) => void = () => {};
+  /** a chunk was generated / reloaded and is ready (multiplayer replays its edits) */
+  onChunkInstalled: (cx: number, cz: number) => void = () => {};
   /** fired after every successful setBlock (gravity blocks, torch supports, ...) */
   onBlockChanged: (x: number, y: number, z: number, oldId: number, newId: number) => void = () => {};
 
@@ -236,6 +238,7 @@ export class World {
     this.scanRedstoneInChunk(chunk);
     this.markDirty(cx - 1, cz); this.markDirty(cx + 1, cz);
     this.markDirty(cx, cz - 1); this.markDirty(cx, cz + 1);
+    this.onChunkInstalled(cx, cz);
     return chunk;
   }
 
@@ -834,6 +837,7 @@ export class World {
     this.chunks.set(key, chunk);
     this.dirtySet.add(key);
     this.scanRedstoneInChunk(chunk);
+    this.onChunkInstalled(chunk.cx, chunk.cz);
   }
 
   /** Lazily start the generation workers (null when Workers are unavailable). */

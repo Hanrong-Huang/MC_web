@@ -449,6 +449,54 @@ export class MobModels {
 
   // --- hostiles -----------------------------------------------------------------
 
+  /** A player (multiplayer): Steve's proportions — 8x8x8 head, 8x12x4 body,
+   *  4x12x4 arms and legs — with the shirt/trousers/hair colours picked per
+   *  player so friends tell each other apart. Arms hang down (rotation 0). */
+  player(shirt: string, pants: string, hair: string): Built {
+    const g = new THREE.Group();
+    const mats: THREE.MeshLambertMaterial[] = [];
+    const key = `${shirt}${pants}${hair}`;
+    const skinC = '#c69c7a', skinS = '#b88d6b';
+    const shade = (hex: string, f: number): string => {
+      const n = parseInt(hex.slice(1), 16);
+      const c = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => Math.max(0, Math.min(255, Math.round(v * f))));
+      return `#${c.map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+    };
+    const skinM = this.mat(this.skin('pl_skin', skinC, skinS), mats);
+    const hairM = this.mat(this.skin(`pl_hair_${key}`, skinC, skinS, (ctx) => px(ctx, hair, 0, 0, 8, 3)), mats);
+    const topM = this.mat(this.skin(`pl_top_${key}`, hair, shade(hair, 0.85)), mats);
+    const backM = this.mat(this.skin(`pl_back_${key}`, hair, shade(hair, 0.85), (ctx) => px(ctx, skinC, 0, 7, 8, 1)), mats);
+    const faceM = this.mat(this.skin(`pl_face_${key}`, skinC, skinS, (ctx) => {
+      px(ctx, hair, 0, 0, 8, 2); px(ctx, hair, 0, 2, 1, 1); px(ctx, hair, 7, 2, 1, 1); // hairline
+      px(ctx, '#ffffff', 1, 4, 1, 1); px(ctx, '#3b4fa8', 2, 4, 1, 1);                   // eyes
+      px(ctx, '#3b4fa8', 5, 4, 1, 1); px(ctx, '#ffffff', 6, 4, 1, 1);
+      px(ctx, '#9a6b4f', 3, 5, 2, 1);                                                   // nose
+      px(ctx, '#7a4a38', 2, 6, 4, 1);                                                   // mouth
+    }), mats);
+    const shirtM = this.mat(this.skin(`pl_shirt_${key}`, shirt, shade(shirt, 0.88)), mats);
+    const pantsM = this.mat(this.skin(`pl_pants_${key}`, pants, shade(pants, 0.88), (ctx) => px(ctx, '#4a4a4f', 0, 6, 8, 2)), mats);
+
+    g.add(this.box(8 * P, 12 * P, 4 * P, shirtM, 0, 18 * P, 0));
+    const head = new THREE.Group();
+    head.position.set(0, 24 * P, 0);
+    head.add(this.box(8 * P, 8 * P, 8 * P, [hairM, hairM, topM, skinM, backM, faceM], 0, 4 * P, 0));
+    g.add(head);
+    const legs = [
+      this.leg(4 * P, 12 * P, pantsM, -2 * P, 12 * P, 0),
+      this.leg(4 * P, 12 * P, pantsM, 2 * P, 12 * P, 0),
+    ];
+    const arms: THREE.Group[] = [];
+    for (const sx of [-1, 1]) {
+      const a = new THREE.Group();
+      a.position.set(sx * 6 * P, 22 * P, 0);
+      a.add(this.box(4 * P, 4 * P, 4 * P, shirtM, 0, 0, 0));              // sleeve
+      a.add(this.box(3.9 * P, 8 * P, 3.9 * P, skinM, 0, -6 * P, 0));      // forearm + hand
+      arms.push(a);
+    }
+    g.add(...legs, ...arms);
+    return { mesh: g, limbs: { legs, arms, head, legLen: 12 * P }, mats };
+  }
+
   private zombie(g: THREE.Group, mats: THREE.MeshLambertMaterial[], limbs: Partial<LimbSet>, done: Done): Built {
     const green = '#5f9a4c', greenS = '#528a42';
     const skinM = this.mat(this.skin('zombie', green, greenS), mats);

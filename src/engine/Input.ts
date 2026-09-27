@@ -1,5 +1,7 @@
 // Pointer-lock mouse look + keyboard state with double-tap detection.
 
+import { Action, bindingFor, normalizeCode } from './Keybinds';
+
 export class Input {
   keys = new Set<string>();
   mouseDX = 0;
@@ -41,19 +43,23 @@ export class Input {
 
   private keydown = (e: KeyboardEvent): void => {
     if (this.disposed) return;
-    // Ctrl is sneak, so keep Ctrl+W / Ctrl+Q (toss stack) from reaching the browser
-    if (e.code === 'Tab' || (e.ctrlKey && (e.code === 'KeyW' || e.code === 'KeyQ'))) e.preventDefault();
+    // typing into a text field (chat, world name, server address) never drives the game
+    if (isTextField(e.target)) return;
+    // Tab is the player list; Ctrl+Q tosses a stack. (Ctrl+W can't be caught —
+    // the browser keeps it to close the tab — so no movement key uses Ctrl.)
+    if (e.code === 'Tab' || (e.ctrlKey && e.code === 'KeyQ')) e.preventDefault();
     if (e.repeat) return;
+    const code = normalizeCode(e.code);
     const now = performance.now();
-    const last = this.lastTap.get(e.code) ?? -1e9;
+    const last = this.lastTap.get(code) ?? -1e9;
     const doubleTap = now - last < 280;
-    this.lastTap.set(e.code, doubleTap ? -1e9 : now);
-    this.keys.add(e.code);
-    this.onKeyDown(e.code, doubleTap);
+    this.lastTap.set(code, doubleTap ? -1e9 : now);
+    this.keys.add(code);
+    this.onKeyDown(code, doubleTap);
   };
 
   private keyup = (e: KeyboardEvent): void => {
-    this.keys.delete(e.code);
+    this.keys.delete(normalizeCode(e.code));
   };
 
   private mousemove = (e: MouseEvent): void => {
@@ -125,6 +131,13 @@ export class Input {
 
   down(code: string): boolean { return this.keys.has(code); }
 
+  /** Is a rebindable action held — its bound key, or the '@action' virtual
+   *  key the touch controls press? */
+  held(a: Action): boolean {
+    const code = bindingFor(a);
+    return (!!code && this.keys.has(code)) || this.keys.has(`@${a}`);
+  }
+
   dispose(): void {
     this.disposed = true;
     document.removeEventListener('keydown', this.keydown);
@@ -136,4 +149,14 @@ export class Input {
     document.removeEventListener('pointerlockchange', this.plc);
     document.removeEventListener('contextmenu', this.ctxmenu);
   }
+}
+
+function isTextField(t: EventTarget | null): boolean {
+  const el = t as HTMLElement | null;
+  if (!el || !el.tagName) return false;
+  if (el.isContentEditable) return true;
+  if (el.tagName === 'TEXTAREA') return true;
+  if (el.tagName !== 'INPUT') return false;
+  const type = (el as HTMLInputElement).type;
+  return type === 'text' || type === 'search' || type === 'url' || type === 'number' || type === 'password' || type === '';
 }

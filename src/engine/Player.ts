@@ -21,6 +21,7 @@ import type { EntityManager } from './EntityManager';
 import type { Entity } from './EntityManager';
 import type { RayHit } from './World';
 import { mouseLookSens } from './ControlsSettings';
+import { keySettings } from './Keybinds';
 import type { PlayerSave } from './Persistence';
 import { netheriteUpgrade, GATE_IDS, SHAPED, CLIMBABLE, HANGING_PLANTS, VINE_BLOCKS, vineDrops } from './Blocks';
 import { DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, REDSTONE_ONLY_DOORS, doorBlocksFor, doorItemFor } from './Blocks';
@@ -147,6 +148,8 @@ export class Player {
   mode: GameMode = 'survival';
   flying = false;
   sneaking = false;
+  /** Sneak: Toggle latch (see sneakKeyDown) */
+  sneakLatched = false;
   sprinting = false;
   onGround = false;
   swimming = false;
@@ -277,6 +280,7 @@ export class Player {
 
   toggleFly(): void {
     this.flying = !this.flying;
+    this.sneakLatched = false;
     if (this.flying) this.vel.y = 0;
     this.fallDist = 0;
   }
@@ -491,11 +495,11 @@ export class Player {
     let space = false;
     this.sneaking = false;
     if (!uiOpen && input.active) {
-      if (input.down('KeyW')) fwd += 1;
-      if (input.down('KeyS')) fwd -= 1;
-      if (input.down('KeyA')) strafe -= 1;
-      if (input.down('KeyD')) strafe += 1;
-      space = input.down('Space');
+      if (input.held('forward')) fwd += 1;
+      if (input.held('back')) fwd -= 1;
+      if (input.held('left')) strafe -= 1;
+      if (input.held('right')) strafe += 1;
+      space = input.held('jump');
       this.sneaking = this.sneakKeyDown() && !this.flying;
     }
 
@@ -505,10 +509,10 @@ export class Player {
         (this.mode === 'creative' || this.hunger > 6);
       if (!canSprint) this.sprinting = false;
     }
-    // sprint: double-tap W (main.ts) or the touch stick's full push. Shift is
-    // sneak, as in vanilla; Ctrl is deliberately not a movement key — the
-    // browser closes the tab on Ctrl+W and the page cannot block it
-    if (input.down('Sprint') && fwd > 0 && !this.sneaking &&
+    // sprint: double-tap forward (main.ts), the sprint key if one is bound,
+    // or the touch stick's full push. It is unbound by default: vanilla's Ctrl
+    // would make Ctrl+W, which closes the browser tab and can't be blocked
+    if (input.held('sprint') && fwd > 0 && !this.sneaking &&
       !this.blocking && !this.scoping && (this.mode === 'creative' || this.hunger > 6)) {
       this.sprinting = true;
     }
@@ -595,7 +599,7 @@ export class Player {
       this.glidePhysics(dt);
       this.fallDist = 0;
     } else if (this.flying) {
-      const upWish = (space ? FLY_VERT : 0) + (this.sneakKeyDown() ? -FLY_VERT : 0);
+      const upWish = (space ? FLY_VERT : 0) + (this.deps.input.held('sneak') ? -FLY_VERT : 0);
       this.vel.y += (upWish - this.vel.y) * Math.min(1, 10 * dt);
       this.fallDist = 0;
     } else if (wasInWater) {
@@ -606,7 +610,7 @@ export class Player {
       // ladder: hold to climb up, sneak to descend, otherwise slow slide
       let targetVy: number;
       if (space) targetVy = LADDER_SPEED;
-      else if (this.sneakKeyDown()) targetVy = -LADDER_SPEED * 0.6;
+      else if (this.deps.input.held('sneak')) targetVy = -LADDER_SPEED * 0.6;
       else targetVy = Math.min(this.vel.y, -0.6); // gentle cling
       this.vel.y += (targetVy - this.vel.y) * Math.min(1, 10 * dt);
       this.fallDist = 0;
@@ -893,10 +897,19 @@ export class Player {
     return lvl > 0 ? 1 - 1 / (lvl + 1) : 0;
   }
 
-  /** Shift sneaks, as in vanilla (never Ctrl: Ctrl+W closes the browser tab). */
+  /** Sneak intent: the held sneak key, or — with Sneak: Toggle — the latch a
+   *  press flips (the touch button always acts as hold). Flight descent,
+   *  ladders and dismounting read the held key directly. */
   private sneakKeyDown(): boolean {
     const i = this.deps.input;
-    return i.down('ShiftLeft') || i.down('ShiftRight');
+    if (keySettings().sneakToggle) return this.sneakLatched || i.keys.has('@sneak');
+    return i.held('sneak');
+  }
+
+  /** Sneak key pressed (from main): flips the latch in toggle mode. */
+  onSneakPressed(): void {
+    if (!keySettings().sneakToggle || this.flying || this.riding) return;
+    this.sneakLatched = !this.sneakLatched;
   }
 
   /** Is there a single-block ledge in the wish direction we can hop onto? */
@@ -919,6 +932,7 @@ export class Player {
   /** Begin riding a horse (called from updateRightClick on a 'mount' result). */
   mount(horse: Entity): void {
     this.riding = horse;
+    this.sneakLatched = false;
     this.prevSneak = true; // ignore the shift that may still be held from sneaking
     if (horse.kind === 'minecart') horse.ridden = true;
     else this.deps.entities.mountHorse(horse);
@@ -941,12 +955,12 @@ export class Player {
 
     let fwd = 0, strafe = 0, jump = false, dismount = false;
     if (!uiOpen && input.active) {
-      if (input.down('KeyW')) fwd += 1;
-      if (input.down('KeyS')) fwd -= 1;
-      if (input.down('KeyA')) strafe -= 1;
-      if (input.down('KeyD')) strafe += 1;
-      jump = input.down('Space');
-      const sneak = this.sneakKeyDown();
+      if (input.held('forward')) fwd += 1;
+      if (input.held('back')) fwd -= 1;
+      if (input.held('left')) strafe -= 1;
+      if (input.held('right')) strafe += 1;
+      jump = input.held('jump');
+      const sneak = input.held('sneak');
       dismount = sneak && !this.prevSneak; // tap shift to dismount
       this.prevSneak = sneak;
     }
@@ -979,8 +993,8 @@ export class Player {
     const uiOpen = this.deps.isUIOpen() || this.dead;
     let fwd = 0, getOut = false;
     if (!uiOpen && input.active) {
-      if (input.down('KeyW')) fwd = 1;
-      const sneak = this.sneakKeyDown();
+      if (input.held('forward')) fwd = 1;
+      const sneak = input.held('sneak');
       getOut = sneak && !this.prevSneak;
       this.prevSneak = sneak;
     }
