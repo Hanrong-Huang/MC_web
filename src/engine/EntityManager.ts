@@ -13,6 +13,7 @@ import { AudioEngine } from './Audio';
 import { SEA_LEVEL } from './WorldGenerator';
 import { netherStructureAt } from './NetherStructures';
 import type { Player } from './Player';
+import { ENT_FLAGS, type EntState, type GoneWhy, type PlayerHit, type NetFx, type ClientMsg, type Dim, type Pose } from '../net/protocol';
 import { netherFX } from './NetherFX';
 import { MobModels, LimbSet, MOB_EXPOSURE, MAGMA_SIZES, rollVariant } from './MobModels';
 import { buildOrbRig, setOrbOpen, disposeOrb, orbGlowTexture, orbStarTexture, ORB_GLOW, ORB_IDLE_GLOW, OrbRig } from './CatcherOrb';
@@ -338,6 +339,30 @@ export class Entity {
   burst = 0;
   /** strider: off the lava (purple, shivering, slow) */
   cold = false;
+  // multiplayer (see EntityManager "networked entities")
+  /** network id when this entity is shared (null in single player / local fx) */
+  nid: string | null = null;
+  /** someone else simulates it: this copy only follows their snapshots */
+  remote = false;
+  /** puppet snapshots (seconds, position, yaw) to interpolate between */
+  netSnaps: { t: number; x: number; y: number; z: number; yw: number }[] = [];
+  /** when a snapshot last arrived (puppets drop out after a silence) */
+  netSeen = 0;
+  /** last compact state sent, and when the last full one went */
+  netKey = '';
+  netSentAt = 0;
+  /** why it went, for the owner's 'egone' (default: despawn / die) */
+  netWhy: GoneWhy | null = null;
+  /** removed because the network said so: don't report it back */
+  netSilent = false;
+  /** attack-swing / hurt counters (a puppet plays one per increment) */
+  swingN = 0;
+  hurtN = 0;
+  netSwing = 0;
+  netHurt = 0;
+  /** seconds (performance clock) of the last pickup request / take */
+  pickReq = 0;
+  netTakeAt = 0;
   /** piglin out of the Nether: seconds shaking before it zombifies */
   convertT = 0;
 
@@ -348,6 +373,50 @@ export class Entity {
     this.mesh = mesh;
   }
 }
+
+/** Multiplayer hooks the game hands the entity manager. */
+export interface EntityNet {
+  myId: number;
+  myName: string;
+  send(m: ClientMsg): void;
+}
+
+/** Another player as the mobs see them, built from their pose. Hits a mob
+ *  lands on one are buffered here and sent to that player's game. */
+export class RemotePlayerTarget {
+  pos: Vec3 = { x: 0, y: 0, z: 0 };
+  /** a mob may launch them (hoglin toss): read back into the hit */
+  vel: Vec3 = { x: 0, y: 0, z: 0 };
+  dead = false;
+  mode: 'survival' | 'creative' = 'survival';
+  sneaking = false;
+  yaw = 0;
+  held = 0;
+  hit: PlayerHit | null = null;
+  constructor(readonly id: number, readonly name: string) {}
+  heldId(): number { return this.held; }
+  private h(): PlayerHit { return (this.hit ??= { dmg: 0, cause: '', kx: 0, kz: 0, kb: 0 }); }
+  damage(dmg: number, src?: Entity, cause = ''): boolean {
+    const h = this.h();
+    h.dmg += dmg;
+    h.cause = cause;
+    if (src?.nid) h.src = src.nid;
+    return true;
+  }
+  applyKnockback(dx: number, dz: number, strength: number): void {
+    const h = this.h();
+    h.kx = dx; h.kz = dz; h.kb = strength;
+  }
+  addEffect(name: string, secs: number, amp: number): void { this.h().effect = { name, secs, amp }; }
+  setOnFire(secs: number, who: string): void { this.h().fire = { secs, who }; }
+}
+
+/** Whoever a mob pays attention to: you, or (multiplayer) another player. */
+export type PlayerLike = Player | RemotePlayerTarget;
+
+/** Entity kinds that are shared in multiplayer (particles, falling sand,
+ *  bobbers and capture-orb effects stay local). */
+const NET_KINDS = new Set<string>([...MOB_KINDS, 'drop', 'arrow', 'tnt', 'minecart']);
 
 export class EntityManager {
   entities: Entity[] = [];
@@ -372,6 +441,18 @@ export class EntityManager {
   private arrowSprite: HTMLCanvasElement | null = null;
   private spawnTick = 0;
   mobsEnabled = true;
+  /** multiplayer hooks (null in single player) */
+  net: EntityNet | null = null;
+  /** shared entities by network id */
+  private byNid = new Map<string, Entity>();
+  /** other players in this dimension, as mob targets */
+  private remoteTargets = new Map<number, RemotePlayerTarget>();
+  private netT = 0;
+  private netCounter = 0;
+  private netGoneQ: { id: string; why: GoneWhy }[] = [];
+  /** building a puppet from the network: no new id, no sounds */
+  private netApplying = false;
+  private lastDim = '';
   /** a blaze's small fireball struck a block: light the open cell it flew through */
   onIgnite: ((x: number, y: number, z: number) => void) | null = null;
   private smallFireMats: THREE.MeshBasicMaterial[] | null = null;
@@ -398,7 +479,7 @@ export class EntityManager {
     if (mob !== undefined) e.mob = mob;
     if (ench) e.ench = ench;
     e.vel = { x: (Math.random() - 0.5) * 2.4, y: 3.2, z: (Math.random() - 0.5) * 2.4 };
-    this.entities.push(e);
+    this.register(e);
     this.scene.add(mesh);
     return e;
   }
@@ -428,7 +509,7 @@ export class EntityManager {
       e.shadow = this.makeShadow(Math.min(1.6, body.box.w));
       mesh.add(e.shadow);
     }
-    this.entities.push(e);
+    this.register(e);
     this.scene.add(mesh);
     return e;
   }
@@ -489,8 +570,10 @@ export class EntityManager {
   captureMob(e: Entity, fx = true): string | null {
     if (!this.isMob(e) || e.dead) return null;
     if (!CAPTURABLE.has(e.kind)) return null;
+    if (!this.claim(e)) return null; // (someone else's pet)
     const kind = e.kind;
     e.dead = true;                 // removed by the update loop; skips loot/poof
+    e.netWhy = 'capture';
     e.target = null;
     this.clearFoe(e);
     if (fx) {
@@ -508,6 +591,7 @@ export class EntityManager {
     if (!this.isPet(e) || e.dead) return null;
     const kind = e.kind;
     e.dead = true;
+    e.netWhy = 'capture';
     e.target = null;
     this.clearFoe(e);
     this.startRecallFx(e);
@@ -1202,9 +1286,9 @@ export class EntityManager {
         }
       }
     });
-    this.entities.push(e);
+    this.register(e);
     this.scene.add(mesh);
-    this.audio.play('fuse');
+    if (!this.netApplying) this.audio.play('fuse');
   }
 
   /** Cast a fishing bobber from the player; returns the new bobber entity. */
@@ -1334,9 +1418,9 @@ export class EntityManager {
     e.owner = shooter === 'player' ? 'player' : pet ? 'pet' : 'mob';
     e.shooter = shooter;
     e.dmg = dmg;
-    this.entities.push(e);
+    this.register(e);
     this.scene.add(mesh);
-    this.audio.play('bow');
+    if (!this.netApplying) this.audio.play('bow');
   }
 
   /** One textured fleck sampled from the block's tile. */
@@ -1542,16 +1626,18 @@ export class EntityManager {
     }
     this.spawnBlockParticles(cx, cy, cz, B.STONE, 26);
 
-    // entity + player damage with distance falloff
+    // entity + player damage with distance falloff (other players included:
+    // their game takes the hit, and everyone nearby sees and hears the blast)
     const range = power * 2;
-    const p = this.player;
-    if (p && !p.dead) {
+    for (const p of this.playersAll()) {
+      if (p.dead) continue;
       const d = Math.hypot(p.pos.x - x, p.pos.y + 0.9 - y, p.pos.z - z);
       if (d < range) {
         p.damage(Math.ceil((1 - d / range) * power * 7), undefined, cause);
         p.applyKnockback(p.pos.x - x, p.pos.z - z, (1 - d / range) * 14);
       }
     }
+    this.net?.send({ t: 'fx', fx: { k: 'boom', x, y, z, power, cause } });
     for (const e of this.entities) {
       if (!this.isMob(e) || e.dead) continue;
       const d = Math.hypot(e.pos.x - x, e.pos.y + e.box.h / 2 - y, e.pos.z - z);
@@ -1564,8 +1650,8 @@ export class EntityManager {
   /** Lightning strike: heavy damage to entities in a small radius + a flash. */
   lightningDamage(x: number, y: number, z: number): void {
     const range = 4;
-    const p = this.player;
-    if (p && !p.dead && p.mode === 'survival') {
+    for (const p of this.playersAll()) {
+      if (p.dead || p.mode !== 'survival') continue;
       const d = Math.hypot(p.pos.x - x, p.pos.y + 0.9 - y, p.pos.z - z);
       if (d < range) {
         p.damage(5, undefined, 'Struck by lightning');
@@ -1586,11 +1672,502 @@ export class EntityManager {
     }
   }
 
+  // --- networked entities (multiplayer) ----------------------------------------------
+  //
+  // Each shared entity is simulated by exactly one client, its owner; everyone
+  // else holds a puppet that follows the owner's snapshots (see protocol.ts).
+  // Whoever hits, feeds, rides or captures a puppet takes it over at once
+  // (claim); the server settles races, hands entities to nearer players and
+  // grants every pickup exactly once.
+
+  private now(): number { return performance.now() / 1000; }
+
+  /** Add a new entity; a shared kind made here (not rebuilt from the
+   *  network) gets a network id, and we own it. */
+  private register(e: Entity): void {
+    this.entities.push(e);
+    if (this.net && !this.netApplying && NET_KINDS.has(e.kind)) {
+      e.nid = `${this.net.myId}.${++this.netCounter}`;
+      this.byNid.set(e.nid, e);
+    }
+  }
+
+  /** You plus (multiplayer) the other players in this dimension. */
+  private playersAll(): PlayerLike[] {
+    const me = this.player!;
+    return this.remoteTargets.size ? [me, ...this.remoteTargets.values()] : [me];
+  }
+
+  /** The player a mob pays attention to: the nearest living one. */
+  private focus(e: Entity): PlayerLike {
+    const me = this.player!;
+    if (!this.remoteTargets.size) return me;
+    let best: PlayerLike = me;
+    let bd = me.dead ? Infinity : Math.hypot(me.pos.x - e.pos.x, me.pos.z - e.pos.z);
+    for (const t of this.remoteTargets.values()) {
+      if (t.dead) continue;
+      const d = Math.hypot(t.pos.x - e.pos.x, t.pos.z - e.pos.z);
+      if (d < bd) { bd = d; best = t; }
+    }
+    return best;
+  }
+
+  /** The other players this frame (from their latest poses). */
+  setRemotePlayers(list: { id: number; name: string; pose: Pose | null }[]): void {
+    const seen = new Set<number>();
+    for (const r of list) {
+      const pose = r.pose;
+      if (!pose || pose.dim !== this.world.dimension) continue;
+      let t = this.remoteTargets.get(r.id);
+      if (!t) { t = new RemotePlayerTarget(r.id, r.name); this.remoteTargets.set(r.id, t); }
+      t.pos.x = pose.x; t.pos.y = pose.y; t.pos.z = pose.z;
+      t.dead = pose.dead;
+      t.mode = pose.mode ?? 'survival';
+      t.sneaking = pose.sneak;
+      t.yaw = pose.yaw;
+      t.held = pose.held;
+      seen.add(r.id);
+    }
+    for (const id of [...this.remoteTargets.keys()]) if (!seen.has(id)) this.remoteTargets.delete(id);
+  }
+
+  /** Take over an entity someone else simulates (we are hitting, riding or
+   *  using it). False for another player's pet or a mount someone is riding:
+   *  the caller leaves it alone. Always true for our own entities. */
+  claim(e: Entity): boolean {
+    if (!e.remote || !this.net || !e.nid) return true;
+    if ((e.tamed && e.ownerName && e.ownerName !== 'player') || e.ridden) return false;
+    this.makeLocal(e);
+    e.netTakeAt = this.now();
+    this.net.send({ t: 'take', id: e.nid });
+    return true;
+  }
+
+  private makeLocal(e: Entity): void {
+    e.remote = false;
+    e.netSnaps.length = 0;
+    e.vel = { x: 0, y: 0, z: 0 };
+    if (e.state === 'fuse' && e.kind !== 'creeper') e.state = 'idle';
+    e.stateTime = Math.min(e.stateTime, 0.5);
+    e.netKey = '';
+    e.netSentAt = 0; // a full state goes out on the next tick
+  }
+
+  private makeRemote(e: Entity): void {
+    e.remote = true;
+    e.netSnaps = [{ t: this.now(), x: e.pos.x, y: e.pos.y, z: e.pos.z, yw: e.yaw }];
+    e.netSeen = this.now();
+    this.clearFoe(e);
+    e.target = null;
+    e.foe = null;
+    const p = this.player;
+    if (p && p.riding === e) p.dismount(true);
+  }
+
+  private netState(e: Entity, full: boolean): EntState {
+    const r2 = (v: number): number => Math.round(v * 100) / 100;
+    const s: EntState = {
+      n: e.nid!, k: e.kind, d: (e.kind === 'minecart' ? e.cartDim : this.world.dimension) as Dim,
+      x: r2(e.pos.x), y: r2(e.pos.y), z: r2(e.pos.z), yw: r2(e.yaw),
+    };
+    let f = e.onGround ? ENT_FLAGS.ground : 0;
+    if (this.isMob(e)) {
+      s.hp = Math.round(e.hp * 10) / 10;
+      if (e.variant) s.v = e.variant;
+      if (e.state !== 'idle') s.st = e.state;
+      if (e.baby) f |= ENT_FLAGS.baby;
+      if (e.sheared) f |= ENT_FLAGS.sheared;
+      if (e.tamed) f |= ENT_FLAGS.tamed;
+      if (e.sitting) f |= ENT_FLAGS.sitting;
+      if (e.saddled) f |= ENT_FLAGS.saddled;
+      if (e.ridden) f |= ENT_FLAGS.ridden;
+      if (e.burnT > 0) f |= ENT_FLAGS.burning;
+      if (e.angryT > 0) f |= ENT_FLAGS.angry;
+      if (e.cold) f |= ENT_FLAGS.cold;
+      if (e.armorTier > 0) f |= ENT_FLAGS.armored;
+      if (e.swingN) s.sw = e.swingN;
+      if (e.hurtN) s.hc = e.hurtN;
+      if (e.state === 'fuse') s.ft = r2(e.fuseT);
+      if (e.tamed && e.ownerName) s.on = e.ownerName === 'player' ? this.net!.myName : e.ownerName;
+      if (full) s.ex = { trades: e.trades, growT: e.growT, loveT: e.loveT, breedCooldown: e.breedCooldown, circling: e.circling };
+    } else if (e.kind === 'drop') {
+      s.i = e.itemId;
+      s.c = e.count;
+      if (e.dmg > 0) s.du = e.dmg;
+      if (e.mob !== undefined) s.mob = e.mob;
+      if (e.ench) s.en = e.ench;
+    } else if (e.kind === 'arrow') {
+      s.vx = r2(e.vel.x); s.vy = r2(e.vel.y); s.vz = r2(e.vel.z);
+      s.pj = `${e.proj}|${e.owner}|${e.shooter}`;
+      if (e.stuckT >= 0) f |= ENT_FLAGS.stuck;
+    } else if (e.kind === 'tnt') {
+      s.ft = r2(e.fuseT);
+    } else if (e.kind === 'minecart') {
+      s.vx = r2(e.vel.x); s.vz = r2(e.vel.z);
+      s.hp = e.hp;
+      if (e.ridden) f |= ENT_FLAGS.ridden;
+    }
+    if (f) s.f = f;
+    return s;
+  }
+
+  /** ~10 Hz: send what our entities did (changed ones; everything in full
+   *  every 2 s), what vanished, and any hits our mobs landed on other players. */
+  private netTick(dt: number): void {
+    const net = this.net!;
+    for (const t of this.remoteTargets.values()) {
+      if (!t.hit && t.vel.y <= 0) continue;
+      const h = t.hit ?? { dmg: 0, cause: '', kx: 0, kz: 0, kb: 0 };
+      if (t.vel.y > 0) h.up = t.vel.y;
+      net.send({ t: 'phurt', to: t.id, h });
+      t.hit = null;
+      t.vel.x = 0; t.vel.y = 0; t.vel.z = 0;
+    }
+    this.netT += dt;
+    if (this.netT < 0.1) return;
+    this.netT = 0;
+    const now = this.now();
+    const list: EntState[] = [];
+    for (const e of this.entities) {
+      if (e.dead || e.remote || !e.nid) continue;
+      if (e.swingT > e.netSwing + 0.01) e.swingN++;
+      e.netSwing = e.swingT;
+      if (e.hurtFlash > e.netHurt + 0.01) e.hurtN++;
+      e.netHurt = e.hurtFlash;
+      const full = now - e.netSentAt > 2;
+      const st = this.netState(e, false);
+      const key = JSON.stringify(st);
+      if (!full && key === e.netKey) continue;
+      e.netKey = key;
+      if (full) { e.netSentAt = now; list.push(this.netState(e, true)); } else list.push(st);
+    }
+    for (let i = 0; i < list.length; i += 250) net.send({ t: 'ents', list: list.slice(i, i + 250) });
+    if (this.netGoneQ.length) {
+      const byWhy = new Map<GoneWhy, string[]>();
+      for (const g of this.netGoneQ) {
+        const a = byWhy.get(g.why) ?? [];
+        a.push(g.id);
+        byWhy.set(g.why, a);
+      }
+      for (const [why, ids] of byWhy) net.send({ t: 'egone', ids, why });
+      this.netGoneQ = [];
+    }
+  }
+
+  /** Switched dimension: puppets from the old one go; our mobs there are left behind. */
+  private netDimCheck(): void {
+    const dim = this.world.dimension;
+    if (dim === this.lastDim) return;
+    const first = this.lastDim === '';
+    this.lastDim = dim;
+    if (first) return;
+    for (const e of this.entities) {
+      if (!e.nid || e.dead) continue;
+      if (e.remote) { e.dead = true; e.netSilent = true; continue; }
+      if (e.kind === 'minecart' || (e.tamed && e.ownerName === 'player')) continue;
+      e.dead = true;
+    }
+    this.remoteTargets.clear();
+  }
+
+  /** Another player's entities moved / changed. */
+  netApply(list: EntState[]): void {
+    const now = this.now();
+    for (const st of list) {
+      let e = this.byNid.get(st.n);
+      if (!e) {
+        if (st.d !== this.world.dimension) continue;
+        const made = this.makePuppet(st);
+        if (!made) continue;
+        e = made;
+      } else if (!e.remote) {
+        if (now - e.netTakeAt < 1.5) continue; // we just took it: this is older news
+        this.makeRemote(e);
+      }
+      this.applyState(e, st, now, false);
+    }
+  }
+
+  /** Build the puppet for an entity we have never seen. */
+  private makePuppet(st: EntState): Entity | null {
+    this.netApplying = true;
+    let e: Entity | null = null;
+    try {
+      if (MOB_KINDS.has(st.k as MobKind)) {
+        e = this.spawnMob(st.k as MobKind, st.x, st.y, st.z, st.v ?? 0);
+      } else if (st.k === 'drop' && st.i !== undefined && hasDef(st.i)) {
+        e = this.spawnDrop(st.x, st.y, st.z, st.i, st.c ?? 1, st.du, st.mob, st.en);
+        e.vel = { x: 0, y: 0, z: 0 };
+      } else if (st.k === 'arrow') {
+        const [proj = 'arrow', owner = 'mob', shooter = 'skeleton'] = (st.pj ?? '').split('|');
+        const vx = st.vx ?? 0, vy = st.vy ?? 0, vz = st.vz ?? 1;
+        if (proj === 'small_fireball') this.spawnBlazeCharge(st.x, st.y, st.z, vx, vy, vz, owner === 'pet' ? 'pet' : 'mob');
+        else if (proj === 'fireball') this.spawnFireball(st.x, st.y, st.z, vx, vy, vz, owner === 'pet' ? 'pet' : 'mob');
+        else this.shootArrow(shooter, st.x, st.y, st.z, vx, vy, vz, Math.hypot(vx, vy, vz) || 1, 0, owner === 'pet');
+        e = this.entities[this.entities.length - 1];
+      } else if (st.k === 'tnt') {
+        this.spawnTnt(st.x - 0.5, st.y, st.z - 0.5, st.ft ?? 2);
+        e = this.entities[this.entities.length - 1];
+        e.vel.y = 0;
+      } else if (st.k === 'minecart') {
+        e = this.spawnMinecart(st.x - 0.5, st.y - RAIL_Y, st.z - 0.5, st.d);
+      }
+    } finally {
+      this.netApplying = false;
+    }
+    if (!e) return null;
+    e.nid = st.n;
+    e.remote = true;
+    e.yaw = e.visYaw = st.yw;
+    e.netSnaps = [];
+    e.netSeen = this.now();
+    this.byNid.set(st.n, e);
+    return e;
+  }
+
+  private setBaby(e: Entity, baby: boolean): void {
+    e.baby = baby;
+    const kind = e.kind as MobKind;
+    e.mesh.scale.setScalar(baby ? 0.55 : 1);
+    e.limbs?.head?.scale.setScalar(baby ? (kind === 'horse' ? 1.25 : kind === 'hoglin' ? 1.15 : 1.6) : 1);
+    const b = MOB_STATS[kind].box;
+    e.box = baby ? { w: b.w * 0.6, h: b.h * 0.6 } : { ...b };
+  }
+
+  /** Apply a received state: to a puppet (queued for interpolation), or to an
+   *  entity we have just become the owner of (`own`: placed directly). */
+  private applyState(e: Entity, st: EntState, now: number, own: boolean): void {
+    if (own) {
+      e.pos = { x: st.x, y: st.y, z: st.z };
+      e.yaw = st.yw;
+    } else {
+      e.netSnaps.push({ t: now, x: st.x, y: st.y, z: st.z, yw: st.yw });
+      if (e.netSnaps.length > 24) e.netSnaps.shift();
+      e.netSeen = now;
+    }
+    const f = st.f ?? 0;
+    const has = (b: number): boolean => (f & b) !== 0;
+    if (!own) e.onGround = has(ENT_FLAGS.ground);
+    if (st.hp !== undefined) e.hp = st.hp;
+    if (this.isMob(e)) {
+      if (has(ENT_FLAGS.baby) !== e.baby) this.setBaby(e, has(ENT_FLAGS.baby));
+      e.sheared = has(ENT_FLAGS.sheared);
+      e.tamed = has(ENT_FLAGS.tamed);
+      e.sitting = has(ENT_FLAGS.sitting);
+      if (has(ENT_FLAGS.saddled) && !e.saddled) {
+        if (e.kind === 'strider') this.saddleStrider(e); else this.saddleHorse(e);
+      }
+      if (has(ENT_FLAGS.armored) && e.armorTier === 0) this.armorHorse(e, 1);
+      e.ridden = has(ENT_FLAGS.ridden);
+      if (!own) {
+        e.burnT = has(ENT_FLAGS.burning) ? 1 : 0;
+        e.angryT = has(ENT_FLAGS.angry) ? 1 : 0;
+      }
+      e.cold = has(ENT_FLAGS.cold);
+      e.state = (st.st ?? 'idle') as Entity['state'];
+      if (st.ft !== undefined) e.fuseT = st.ft;
+      e.ownerName = st.on ? (st.on === this.net?.myName ? 'player' : st.on) : null;
+      if (!own && (st.hc ?? 0) > e.hurtN) {
+        e.hurtFlash = 0.35;
+        this.audio.play('hit', this.localVol(e));
+      }
+      if (!own && (st.sw ?? 0) > e.swingN) e.swingT = 0.3;
+      e.hurtN = Math.max(e.hurtN, st.hc ?? 0);
+      e.swingN = Math.max(e.swingN, st.sw ?? 0);
+      if (own) { e.netHurt = e.hurtFlash; e.netSwing = e.swingT; }
+      this.applyExtras(e, st);
+    } else if (e.kind === 'drop') {
+      if (st.c !== undefined) e.count = st.c;
+    } else if (e.kind === 'arrow') {
+      e.vel = { x: st.vx ?? 0, y: st.vy ?? 0, z: st.vz ?? 0 };
+      e.stuckT = has(ENT_FLAGS.stuck) ? Math.max(0, e.stuckT) : -1;
+    } else if (e.kind === 'tnt') {
+      if (st.ft !== undefined) e.fuseT = st.ft;
+    } else if (e.kind === 'minecart') {
+      e.vel = { x: st.vx ?? 0, y: 0, z: st.vz ?? 0 };
+      e.ridden = has(ENT_FLAGS.ridden);
+    }
+  }
+
+  /** The owner-only bits a full state carries (trades, breeding timers …). */
+  private applyExtras(e: Entity, st: EntState): void {
+    const ex = st.ex as { trades?: Entity['trades']; growT?: number; loveT?: number; breedCooldown?: number; circling?: number } | undefined;
+    if (!ex) return;
+    if (Array.isArray(ex.trades)) e.trades = ex.trades;
+    if (typeof ex.growT === 'number') e.growT = ex.growT;
+    if (typeof ex.loveT === 'number') e.loveT = ex.loveT;
+    if (typeof ex.breedCooldown === 'number') e.breedCooldown = ex.breedCooldown;
+    if (typeof ex.circling === 'number') e.circling = ex.circling;
+  }
+
+  private localVol(e: Entity): number {
+    const p = this.player;
+    return p ? Math.max(0, 1 - Math.hypot(p.pos.x - e.pos.x, p.pos.y - e.pos.y, p.pos.z - e.pos.z) / 24) : 0;
+  }
+
+  /** A puppet each frame: glide ~100 ms behind the owner's snapshots and
+   *  animate from the motion; no AI, physics or damage of its own. */
+  private updatePuppet(e: Entity, dt: number, elapsed: number, camQ: THREE.Quaternion): void {
+    const now = this.now();
+    if (now - e.netSeen > 8) { e.dead = true; e.netSilent = true; return; } // out of range
+    const snaps = e.netSnaps;
+    if (snaps.length) {
+      const rt = now - 0.1;
+      let a = snaps[0], b = snaps[0];
+      for (let i = snaps.length - 1; i >= 0; i--) {
+        if (snaps[i].t <= rt) { a = snaps[i]; b = snaps[Math.min(i + 1, snaps.length - 1)]; break; }
+      }
+      const span = b.t - a.t;
+      const k = span > 1e-4 ? Math.max(0, Math.min(1, (rt - a.t) / span)) : 1;
+      const x = a.x + (b.x - a.x) * k, y = a.y + (b.y - a.y) * k, z = a.z + (b.z - a.z) * k;
+      let dyaw = b.yw - a.yw;
+      dyaw = Math.atan2(Math.sin(dyaw), Math.cos(dyaw));
+      if (dt > 0 && (this.isMob(e) || e.kind === 'drop')) {
+        const m = Math.min(1, dt * 12);
+        e.vel.x += ((x - e.pos.x) / dt - e.vel.x) * m;
+        e.vel.y += ((y - e.pos.y) / dt - e.vel.y) * m;
+        e.vel.z += ((z - e.pos.z) / dt - e.vel.z) * m;
+      }
+      e.pos.x = x; e.pos.y = y; e.pos.z = z;
+      e.yaw = a.yw + dyaw * k;
+      while (snaps.length > 2 && snaps[1].t < rt) snaps.shift();
+    }
+    if (this.isMob(e)) {
+      e.hurtFlash = Math.max(0, e.hurtFlash - dt);
+      e.swingT = Math.max(0, e.swingT - dt);
+      this.tintMob(e);
+      if (e.burnT > 0 && Math.random() < dt * 8) {
+        this.spawnTorchFlame(e.pos.x + (Math.random() - 0.5) * e.box.w, e.pos.y + Math.random() * e.box.h,
+          e.pos.z + (Math.random() - 0.5) * e.box.w);
+      }
+      this.animateMob(e, dt, this.focus(e));
+      const sitting = (e.kind === 'wolf' || e.kind === 'cat') && e.sitting;
+      this.placeMob(e, dt, sitting ? -0.12 * e.mesh.scale.y : 0);
+      return;
+    }
+    switch (e.kind) {
+      case 'drop': {
+        e.mesh.position.set(e.pos.x, e.pos.y + 0.12 + Math.sin(elapsed * 2 + e.age) * 0.05, e.pos.z);
+        e.mesh.rotation.y = elapsed * 1.4;
+        const p = this.player;
+        if (p && !p.dead && e.age > 0.6 &&
+          Math.hypot(p.pos.x - e.pos.x, p.pos.y + 0.9 - e.pos.y, p.pos.z - e.pos.z) < 1.3) this.requestPick(e);
+        break;
+      }
+      case 'arrow':
+        e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+        if (e.proj === 'small_fireball') { e.mesh.quaternion.copy(camQ); e.mesh.rotateZ(e.age * 9); }
+        else e.mesh.lookAt(e.pos.x + e.vel.x, e.pos.y + e.vel.y, e.pos.z + e.vel.z);
+        break;
+      case 'tnt': {
+        const flash = Math.sin(e.age * 16) > 0;
+        for (const m of e.materials) m.emissive.setScalar(flash ? 0.7 : 0);
+        e.mesh.scale.setScalar(1 + Math.max(0, 0.5 - e.fuseT) * 0.25);
+        e.mesh.position.set(e.pos.x, e.pos.y + 0.48, e.pos.z);
+        break;
+      }
+      case 'minecart':
+        e.mesh.visible = e.cartDim === this.world.dimension;
+        e.mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
+        e.mesh.rotation.y = e.yaw;
+        break;
+      default: break;
+    }
+  }
+
+  /** Ask the server for a dropped item (it grants each one once). */
+  private requestPick(e: Entity): void {
+    const now = this.now();
+    if (!this.net || !e.nid || now - e.pickReq < 1) return;
+    e.pickReq = now;
+    this.net.send({ t: 'pick', id: e.nid });
+  }
+
+  /** Our pickup was granted: into the inventory it goes. */
+  netPicked(st: EntState): void {
+    const e = this.byNid.get(st.n);
+    if (e) { e.dead = true; e.netSilent = true; }
+    const p = this.player;
+    if (!p || st.i === undefined || !hasDef(st.i)) return;
+    const left = this.giveItems(st.i, st.c ?? 1, st.du, st.mob, st.en);
+    this.audio.play('pop');
+    if (left > 0) this.spawnDrop(p.pos.x, p.pos.y + 1, p.pos.z, st.i, left, st.du, st.mob, st.en);
+  }
+
+  /** Entities that are gone for everyone (died, picked up, captured, despawned). */
+  netGone(ids: string[], why: GoneWhy): void {
+    for (const id of ids) {
+      const e = this.byNid.get(id);
+      if (!e || e.dead) continue;
+      e.netSilent = true;
+      const p = this.player;
+      if (p && p.riding === e) p.dismount(true);
+      if (why === 'die' && this.isMob(e)) {
+        e.dead = true;
+        e.corpse = true;
+        e.mesh.traverse((o) => { if (o.userData.shadow) o.visible = false; });
+        this.corpses.push({ mesh: e.mesh, mats: e.materials, t: 0, w: e.box.w, x: e.pos.x, y: e.pos.y, z: e.pos.z });
+        this.audio.mobSound(e.kind as string, this.localVol(e), 'death');
+      } else {
+        e.dead = true;
+        if (why === 'capture') this.spawnPoof(e.pos.x, e.pos.y + e.box.h * 0.5, e.pos.z);
+      }
+    }
+  }
+
+  /** An entity changed hands (ours now, or someone else's). */
+  netOwner(id: string, owner: number, st: EntState): void {
+    if (!this.net) return;
+    let e = this.byNid.get(id);
+    if (owner === this.net.myId) {
+      if (!e) {
+        if (st.d !== this.world.dimension) return;
+        const made = this.makePuppet(st);
+        if (!made) return;
+        e = made;
+      }
+      if (e.remote) {
+        this.makeLocal(e);
+        this.applyState(e, st, this.now(), true);
+      } else {
+        this.applyExtras(e, st); // confirming our own take: keep where it is now
+      }
+    } else if (e) {
+      if (!e.remote) this.makeRemote(e);
+      this.applyState(e, st, this.now(), false);
+    }
+  }
+
+  /** One of another player's mobs (or their explosion) hurt us. */
+  netHurtMe(h: PlayerHit): void {
+    const p = this.player;
+    if (!p || p.dead || p.mode !== 'survival') return;
+    const src = h.src ? this.byNid.get(h.src) : undefined;
+    const landed = h.dmg > 0 ? p.damage(h.dmg, src, h.cause) : false;
+    if (h.kb) p.applyKnockback(h.kx, h.kz, h.kb);
+    if (h.up) p.vel.y = Math.max(p.vel.y, h.up);
+    if (landed && h.effect) p.addEffect(h.effect.name as Parameters<Player['addEffect']>[0], h.effect.secs, h.effect.amp);
+    if (landed && h.fire) p.setOnFire(h.fire.secs, h.fire.who);
+    if (src) this.onOwnerHurt(src);
+  }
+
+  /** Another player's explosion: the bang and the debris (its damage to us
+   *  comes separately, as a hit). */
+  netFx(fx: NetFx): void {
+    if (fx.k !== 'boom') return;
+    const p = this.player;
+    const d = p ? Math.hypot(p.pos.x - fx.x, p.pos.y - fx.y, p.pos.z - fx.z) : 0;
+    this.audio.play('explode', Math.max(0.2, 1 - d / 60));
+    this.spawnBlockParticles(Math.floor(fx.x), Math.floor(fx.y), Math.floor(fx.z), B.STONE, 26);
+  }
+
   // --- per-frame update ---------------------------------------------------------
 
   update(dt: number, elapsed: number, camQ: THREE.Quaternion): void {
+    if (this.net) this.netDimCheck();
     for (const e of this.entities) {
       e.age += dt;
+      if (e.remote) { this.updatePuppet(e, dt, elapsed, camQ); continue; }
       switch (e.kind) {
         case 'drop': this.updateDrop(e, dt, elapsed); break;
         case 'arrow': this.updateArrow(e, dt, camQ); break;
@@ -1612,9 +2189,14 @@ export class EntityManager {
           disposeGroup(e.mesh);
         }
         this.entities.splice(i, 1);
+        if (e.nid) {
+          this.byNid.delete(e.nid);
+          if (!e.remote && !e.netSilent) this.netGoneQ.push({ id: e.nid, why: e.netWhy ?? (e.corpse ? 'die' : 'despawn') });
+        }
       }
     }
     this.updateCorpses(dt);
+    if (this.net) this.netTick(dt);
   }
 
   /** Vanilla death: the body tips onto its side, flushed red, then vanishes in a
@@ -1654,7 +2236,9 @@ export class EntityManager {
       e.vel.x += dx * pull;
       e.vel.y += dy * pull;
       e.vel.z += dz * pull;
-      if (dist < 0.6) {
+      if (dist < 0.6 && this.net) {
+        this.requestPick(e);
+      } else if (dist < 0.6) {
         const leftover = this.pickupDrop(e);
         if (leftover <= 0) {
           e.dead = true;
@@ -1687,7 +2271,13 @@ export class EntityManager {
   }
 
   private pickupDrop(e: Entity): number {
+    return this.giveItems(e.itemId, e.count, e.dmg > 0 ? e.dmg : undefined, e.mob, e.ench);
+  }
+
+  /** Put picked-up items in the player's inventory; returns what didn't fit. */
+  private giveItems(itemId: number, count: number, dur?: number, mob?: string, ench?: Record<string, number>): number {
     const inv = this.player!.inventory;
+    const e = { itemId, count, dmg: dur ?? 0, mob, ench };
     if (e.dmg > 0 || e.ench) {
       let left = e.count;
       for (let i = 0; i < inv.slots.length && left > 0; i++) {
@@ -1771,12 +2361,12 @@ export class EntityManager {
       }
       // entity hit
       if (hurtsPlayer) {
-        const p = this.player!;
         const hw = 0.3;
-        if (!p.dead && p.mode === 'survival' &&
-          e.pos.x > p.pos.x - hw && e.pos.x < p.pos.x + hw &&
-          e.pos.y > p.pos.y && e.pos.y < p.pos.y + 1.8 &&
-          e.pos.z > p.pos.z - hw && e.pos.z < p.pos.z + hw) {
+        for (const p of this.playersAll()) {
+          if (p.dead || p.mode !== 'survival' ||
+            !(e.pos.x > p.pos.x - hw && e.pos.x < p.pos.x + hw &&
+              e.pos.y > p.pos.y && e.pos.y < p.pos.y + 1.8 &&
+              e.pos.z > p.pos.z - hw && e.pos.z < p.pos.z + hw)) continue;
           const who = mobWithArticle(e.shooter);
           const landed = p.damage(e.dmg, undefined, fireball ? `Fireballed by ${who}` : `Shot by ${who}`);
           p.applyKnockback(e.vel.x, e.vel.z, 5);
@@ -1917,7 +2507,9 @@ export class EntityManager {
   }
 
   private updateMob(e: Entity, dt: number): void {
-    const p = this.player!;
+    const owner = this.player!;
+    const tamedFollow = (e.kind === 'wolf' || e.kind === 'cat') ? e.tamed : this.isPet(e);
+    const p: PlayerLike = tamedFollow ? owner : this.focus(e);
     e.attackCooldown = Math.max(0, e.attackCooldown - dt);
     e.hurtFlash = Math.max(0, e.hurtFlash - dt);
     e.angryT = Math.max(0, e.angryT - dt);
@@ -1949,7 +2541,7 @@ export class EntityManager {
     const distToPlayer = Math.hypot(p.pos.x - e.pos.x, p.pos.z - e.pos.z);
 
     // tamed wolf/cat + captured pets: follow the owner (sit = stay put)
-    const petFollow = (e.kind === 'wolf' || e.kind === 'cat') ? e.tamed : this.isPet(e);
+    const petFollow = tamedFollow;
     if (petFollow) {
       if (this.isPet(e)) this.retargetPet(e);
       // a pet with a live (wild) target chases it instead of sticking to the owner
@@ -2270,7 +2862,7 @@ export class EntityManager {
 
   /** Shared mob animation: stride-matched walk cycle, head tracking + idle
    *  glances, blinking, tails/ears/wings, grazing, creeper swell. */
-  private animateMob(e: Entity, dt: number, p: Player): void {
+  private animateMob(e: Entity, dt: number, p: PlayerLike): void {
     const limbs = e.limbs;
     if (!limbs) return;
     const hSpeed = Math.hypot(e.vel.x, e.vel.z);
@@ -2674,7 +3266,7 @@ export class EntityManager {
    *  third of a second apart, then a rest. Collides with blocks; wreathed in
    *  embers and smoke. */
   private updateBlaze(e: Entity, dt: number): void {
-    const p = this.player!;
+    const p = this.focus(e);
     this.tintMob(e);
     const foe = e.foe && !e.foe.dead ? e.foe : null;
     const hunting = e.state === 'chase';
@@ -2796,8 +3388,9 @@ export class EntityManager {
     e.shooter = 'blaze';
     e.proj = 'small_fireball';
     e.dmg = 5;
-    this.entities.push(e);
+    this.register(e);
     this.scene.add(mesh);
+    if (this.netApplying) return;
     const p = this.player;
     const dist = p ? Math.hypot(p.pos.x - x, p.pos.z - z) : 0;
     this.audio.mobSound('blaze_shoot', Math.max(0.15, 1 - dist / 28), 'idle');
@@ -2859,7 +3452,7 @@ export class EntityManager {
   /** Cave bat: an erratic flutter between nearby open spots, shy of light
    *  and of players, with its wings beating fast. Collides with blocks. */
   private updateBat(e: Entity, dt: number): void {
-    const p = this.player!;
+    const p = this.focus(e);
     this.tintMob(e);
     e.stateTime -= dt;
     if (e.stateTime <= 0) {
@@ -2901,7 +3494,7 @@ export class EntityManager {
   }
 
   private updatePhantom(e: Entity, dt: number): void {
-    const p = this.player!;
+    const p = this.focus(e);
     this.tintMob(e);
     e.circling += dt;
     const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
@@ -2951,7 +3544,7 @@ export class EntityManager {
   /** Emberghast: hovers above the player at a stand-off range, bobbing, and
    *  lobs slow fireballs on a cooldown. Flies, so it ignores block collision. */
   private updateEmberghast(e: Entity, dt: number): void {
-    const p = this.player!;
+    const p = this.focus(e);
     e.circling += dt;
     const dx = p.pos.x - e.pos.x, dz = p.pos.z - e.pos.z;
     const distH = Math.hypot(dx, dz);
@@ -3018,9 +3611,9 @@ export class EntityManager {
     e.shooter = 'emberghast';
     e.proj = 'fireball';
     e.dmg = 4;
-    this.entities.push(e);
+    this.register(e);
     this.scene.add(mesh);
-    this.audio.mobSound('emberghast_shoot', Math.max(0.2, this.voiceVol(e)), 'idle');
+    if (!this.netApplying) this.audio.mobSound('emberghast_shoot', Math.max(0.2, this.voiceVol(e)), 'idle');
   }
 
   /** Where a fireball lands: a blaze's small one spits sparks and sizzles, an
@@ -3043,12 +3636,13 @@ export class EntityManager {
   // --- 20 Hz AI tick --------------------------------------------------------------
 
   tick(isNight: boolean): void {
-    const p = this.player;
-    if (!p) return;
+    const me = this.player;
+    if (!me) return;
     this.tickWither();
 
     for (const e of this.entities) {
-      if (!this.isMob(e)) continue;
+      if (!this.isMob(e) || e.remote) continue;
+      const p = this.focus(e);
       const stats = MOB_STATS[e.kind as MobKind];
       if (e.dead) continue;
       this.tickNether(e);
@@ -3078,9 +3672,10 @@ export class EntityManager {
       e.stateTime -= 0.05;
       const d = Math.hypot(p.pos.x - e.pos.x, p.pos.z - e.pos.z);
 
-      // idle voices, attenuated by distance
-      if (d < 24 && Math.random() < (e.state === 'chase' ? 0.008 : 0.0035)) {
-        this.audio.mobSound(e.kind, (1 - d / 24) * 0.9, 'idle', ((e.pos.x - p.pos.x) * Math.cos(p.yaw) - (e.pos.z - p.pos.z) * Math.sin(p.yaw)) / Math.max(1, d) * 0.7);
+      // idle voices, attenuated by distance from the listener (you)
+      const dv = Math.hypot(me.pos.x - e.pos.x, me.pos.z - e.pos.z);
+      if (dv < 24 && Math.random() < (e.state === 'chase' ? 0.008 : 0.0035)) {
+        this.audio.mobSound(e.kind, (1 - dv / 24) * 0.9, 'idle', ((e.pos.x - me.pos.x) * Math.cos(me.yaw) - (e.pos.z - me.pos.z) * Math.sin(me.yaw)) / Math.max(1, dv) * 0.7);
       }
 
       if (stats.hostile && e.state !== 'fuse' && !this.isPet(e)) {
@@ -3090,7 +3685,7 @@ export class EntityManager {
           if (sky >= 0.95 && !inWater(this.world, e.pos, e.box)) e.burnT = Math.max(e.burnT, 3);
         }
         const dark = this.world.skyLight(Math.floor(e.pos.x), Math.floor(e.pos.y + 1), Math.floor(e.pos.z)) < 0.7;
-        const aggressive = this.wantsPlayer(e, isNight, dark);
+        const aggressive = this.wantsPlayer(e, isNight, dark, p);
         // a pet that has engaged this mob becomes its quarry (they brawl while
         // the owner keeps their distance); dropped when it dies or runs off
         if (e.foe && (e.foe.dead || !this.isPet(e.foe)
@@ -3258,10 +3853,10 @@ export class EntityManager {
   /** Does a wild hostile want the player right now? Spiders only in the dark;
    *  piglins unless the player wears gold (or angered them); zombified
    *  piglins only once provoked; babies and busy piglins never. */
-  private wantsPlayer(e: Entity, isNight: boolean, dark: boolean): boolean {
+  private wantsPlayer(e: Entity, isNight: boolean, dark: boolean, p: PlayerLike): boolean {
     switch (e.kind) {
       case 'spider': return isNight || dark || e.angryT > 0;
-      case 'piglin': return !e.baby && e.admireT <= 0 && !e.lure && (e.angryT > 0 || !this.wearsGold());
+      case 'piglin': return !e.baby && e.admireT <= 0 && !e.lure && (e.angryT > 0 || p !== this.player || !this.wearsGold());
       case 'zombified_piglin': return e.angryT > 0;
       case 'hoglin': return !e.baby;
       default: return true;
@@ -3786,6 +4381,7 @@ export class EntityManager {
 
   hurt(e: Entity, dmg: number, kbX: number, kbZ: number, attacker?: Entity | Player, crit = false): void {
     if (e.dead || !this.isMob(e)) return;
+    if (!this.claim(e)) return; // another player's pet or mount
     if (e.armorTier > 0) dmg *= 0.5; // iron horse barding halves damage
     e.hp -= dmg;
     e.hurtFlash = 0.35;
@@ -3968,6 +4564,7 @@ export class EntityManager {
    *  Returns the interaction kind (the player consumes items / opens UI). */
   interactMob(e: Entity, heldId: number):
     'tamed' | 'sit' | 'trade' | 'mount' | 'love' | 'saddle' | 'armor' | null {
+    if (!this.claim(e)) return null; // another player's pet or mount
     // a captured pet obeys stay/follow like a tamed wolf does
     if (this.isPet(e)) {
       e.sitting = !e.sitting;
@@ -4150,6 +4747,7 @@ export class EntityManager {
 
   /** Player mounts a horse. Untamed horses start a buck-off. */
   mountHorse(e: Entity): void {
+    this.claim(e);
     e.ridden = true;
     e.sitting = false;
     e.vel.x = 0; e.vel.z = 0;
@@ -4300,7 +4898,7 @@ export class EntityManager {
     e.cartDim = dim;
     e.hp = 6;
     mesh.position.set(e.pos.x, e.pos.y, e.pos.z);
-    this.entities.push(e);
+    this.register(e);
     this.scene.add(mesh);
     return e;
   }
@@ -4437,7 +5035,7 @@ export class EntityManager {
 
   /** A punch: carts break after a few (at once in creative), dropping themselves in survival. */
   hitCart(e: Entity, creative: boolean): void {
-    if (e.dead) return;
+    if (e.dead || !this.claim(e)) return;
     e.hp -= 2;
     e.hurtFlash = 0.4;
     this.audio.play('hit');

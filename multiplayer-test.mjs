@@ -183,8 +183,13 @@ await alice.page.evaluate((far) => {
 }, far);
 await bob.page.waitForTimeout(800);
 const bobHadIt = await bob.page.evaluate((far) => !!window.__game.world.chunks.get(`${Math.floor(far.x / 16)},${Math.floor(far.z / 16)}`), far);
-await bob.page.evaluate((far) => { window.__game.world.ensureChunk(Math.floor(far.x / 16), Math.floor(far.z / 16)); }, far);
-const farOk = await until(bob.page, (far) => window.__game.world.getBlock(far.x, 150, far.z) === window.__B.GLASS, far);
+// once the edit has reached Bob, load that chunk and look straight away (it
+// unloads again soon: it is far outside his view)
+await until(bob.page, (far) => (window.__game.sync.known.overworld.get(`${Math.floor(far.x / 16)},${Math.floor(far.z / 16)}`)?.size ?? 0) > 0, far);
+const farOk = await bob.page.evaluate((far) => {
+  window.__game.world.ensureChunk(Math.floor(far.x / 16), Math.floor(far.z / 16));
+  return window.__game.world.getBlock(far.x, 150, far.z) === window.__B.GLASS;
+}, far);
 check('an edit to a chunk Bob had not loaded is there when it loads', !bobHadIt && farOk,
   JSON.stringify({ bobHadIt, farOk, block: await bob.page.evaluate((far) => window.__game.world.getBlock(far.x, 150, far.z), far),
     known: await bob.page.evaluate((far) => window.__game.sync.known.overworld.get(`${Math.floor(far.x / 16)},${Math.floor(far.z / 16)}`)?.size ?? 0, far) }));
@@ -245,6 +250,73 @@ check('/give with an unknown item says so', await chatHas(bob.page, 'There is no
 await cmd(alice.page, '/tp ~ ~5 ~');
 check('/tp with relative coordinates (admin)', await chatHas(alice.page, 'Teleported to '));
 
+// --- shared entities -----------------------------------------------------------------
+// back onto the pad, side by side
+await alice.page.evaluate((pad) => { const p = window.__game.player; p.flying = true; p.vel = { x: 0, y: 0, z: 0 }; p.pos.x = pad.x + 0.5; p.pos.y = pad.y + 0.01; p.pos.z = pad.z + 0.5; p.flying = false; }, pad);
+await bob.page.evaluate((pad) => { const p = window.__game.player; p.flying = true; p.vel = { x: 0, y: 0, z: 0 }; p.pos.x = pad.x + 4.5; p.pos.y = pad.y + 0.01; p.pos.z = pad.z + 0.5; p.flying = false; }, pad);
+await alice.page.waitForTimeout(1000);
+const cowId = await alice.page.evaluate((pad) => window.__game.entities.spawnMob('cow', pad.x + 2.5, pad.y, pad.z - 1.5).nid, pad);
+check('a mob spawned in multiplayer gets a network id', typeof cowId === 'string' && cowId.length > 0, cowId);
+const puppet = (id) => window.__game.entities.entities.find((e) => e.nid === id && !e.dead);
+check('Bob sees Alice\'s cow (a puppet)', await until(bob.page, ([id, f]) => { const e = eval(f)(id); return !!e && e.remote && e.kind === 'cow'; }, [cowId, puppet.toString()]));
+await alice.page.evaluate((id) => { const e = window.__game.entities.entities.find((x) => x.nid === id); e.state = 'wander'; e.stateTime = 5; e.yaw = 0; }, cowId);
+await alice.page.waitForTimeout(2500);
+const cowPos = async (page) => page.evaluate((id) => { const e = window.__game.entities.entities.find((x) => x.nid === id && !x.dead); return e ? { x: e.pos.x, z: e.pos.z, remote: e.remote, hp: e.hp } : null; }, cowId);
+const [ca, cb] = [await cowPos(alice.page), await cowPos(bob.page)];
+check('the puppet follows the owner\'s cow', !!ca && !!cb && Math.hypot(ca.x - cb.x, ca.z - cb.z) < 1.2, JSON.stringify({ ca, cb }));
+// Bob hits it: he takes it over
+await bob.page.evaluate((id) => { const g = window.__game; const e = g.entities.entities.find((x) => x.nid === id); g.entities.hurt(e, 1, 1, 0, g.player); }, cowId);
+check('hitting a puppet takes it over (Bob simulates the cow now)', (await cowPos(bob.page))?.remote === false &&
+  await until(alice.page, (id) => window.__game.entities.entities.find((x) => x.nid === id && !x.dead)?.remote === true, cowId));
+// kill it: the death shows for Alice, the loot is Bob's and only one player gets it
+await bob.page.evaluate((id) => { const g = window.__game; const e = g.entities.entities.find((x) => x.nid === id); g.entities.hurt(e, 50, 1, 0, g.player); }, cowId);
+check('the kill shows for Alice', await until(alice.page, (id) => !window.__game.entities.entities.some((x) => x.nid === id && !x.dead), cowId));
+const beef = await alice.page.evaluate(() => window.__findId('beef'));
+check('the loot reaches Alice as shared drops', await until(alice.page, (beef) => window.__game.entities.entities.some((x) => x.kind === 'drop' && x.remote && x.itemId === beef), beef));
+const beefCount = (page) => page.evaluate((beef) => window.__game.player.inventory.slots.reduce((n, s) => n + (s && s.id === beef ? s.count : 0), 0), beef);
+const [a0, b0] = [await beefCount(alice.page), await beefCount(bob.page)];
+// both players stand on the loot at once
+const lootAt = await alice.page.evaluate((beef) => { const d = window.__game.entities.entities.find((x) => x.kind === 'drop' && x.itemId === beef); return { x: d.pos.x, y: d.pos.y, z: d.pos.z }; }, beef);
+await bob.page.evaluate((l) => { const p = window.__game.player; p.vel = { x: 0, y: 0, z: 0 }; p.pos.x = l.x; p.pos.y = Math.floor(l.y) + 0.01; p.pos.z = l.z; }, lootAt);
+await alice.page.evaluate((l) => { const p = window.__game.player; p.vel = { x: 0, y: 0, z: 0 }; p.pos.x = l.x; p.pos.y = Math.floor(l.y) + 0.01; p.pos.z = l.z; }, lootAt);
+// pickups retry every second until the server grants one: wait for the loot to go
+await until(alice.page, (beef) => !window.__game.entities.entities.some((x) => x.kind === 'drop' && x.itemId === beef && !x.dead), beef, 20000);
+await alice.page.waitForTimeout(500);
+if (process.env.MP_DEBUG) {
+  for (const [who, pg] of [['alice', alice.page], ['bob', bob.page]]) {
+    console.log(who, JSON.stringify(await pg.evaluate((beef) => ({
+      me: window.__game.player.pos,
+      drops: window.__game.entities.entities.filter((x) => x.kind === 'drop' && !x.dead).map((x) => ({ nid: x.nid, remote: x.remote, id: x.itemId, age: x.age, pickReq: x.pickReq, pos: x.pos })),
+    }), beef)));
+  }
+}
+const [a1, b1] = [await beefCount(alice.page), await beefCount(bob.page)];
+const drops = await alice.page.evaluate((beef) => window.__game.entities.entities.filter((x) => x.kind === 'drop' && x.itemId === beef && !x.dead).length, beef);
+check('each piece of loot is picked up exactly once', (a1 - a0) + (b1 - b0) >= 1 && drops === 0, JSON.stringify({ alice: a1 - a0, bob: b1 - b0, left: drops }));
+
+// a zombie Alice simulates hunts and hurts Bob
+await cmd(alice.page, '/time set midnight');
+await cmd(alice.page, '/gamemode survival Bob');
+await until(bob.page, () => window.__game.player.mode === 'survival');
+await bob.page.evaluate((pad) => { const p = window.__game.player; p.pos.x = pad.x + 6.5; p.pos.z = pad.z + 0.5; p.hp = 20; }, pad);
+await alice.page.evaluate((pad) => { const p = window.__game.player; p.pos.x = pad.x - 2.5; p.pos.z = pad.z + 0.5; }, pad);
+await alice.page.waitForTimeout(800);
+const zid = await alice.page.evaluate((pad) => window.__game.entities.spawnMob('zombie', pad.x + 4.5, pad.y, pad.z + 0.5).nid, pad);
+check('another player\'s zombie hurts you', await until(bob.page, () => window.__game.player.hp < 20, null, 30000),
+  String(await bob.page.evaluate(() => window.__game.player.hp)));
+await alice.page.evaluate((id) => { const g = window.__game; const e = g.entities.entities.find((x) => x.nid === id); if (e) g.entities.hurt(e, 99, 0, 1, g.player); }, zid);
+// TNT: the blast reaches the other player
+await bob.page.evaluate(() => { window.__game.player.hp = 20; });
+// ~3.5 blocks from Bob: it hurts him without killing him (a dead player would
+// rightly not count toward "everyone in bed" in the sleep check below)
+// (south-east of Bob, well clear of the test door and chest)
+await alice.page.evaluate((pad) => window.__game.entities.spawnTnt(pad.x + 5, pad.y, pad.z + 3, 1.5), pad);
+check('Bob sees the lit TNT', await until(bob.page, () => window.__game.entities.entities.some((x) => x.kind === 'tnt' && x.remote), null, 8000));
+check('...and its blast hurts him', await until(bob.page, () => window.__game.player.hp < 20, null, 15000));
+check('...without killing him', !(await bob.page.evaluate(() => window.__game.player.dead)));
+await cmd(alice.page, '/heal Bob');
+await cmd(alice.page, '/gamemode creative Bob');
+
 // --- sleeping: the night skips only when both are in bed ---------------------------
 await alice.page.evaluate(() => window.__game.net.send({ t: 'chat', text: '/time set night' }));
 check('/time set night reaches both clocks', await until(alice.page, () => window.__game.dayTime > 0.55 && window.__game.dayTime < 0.65) &&
@@ -257,6 +329,20 @@ check('one sleeper alone does not skip the night', aliceStillNight);
 await bob.page.evaluate(() => window.__game.startSleep({ cx: window.__game.player.pos.x, cz: window.__game.player.pos.z, y: window.__game.player.pos.y, yaw: 0 }));
 check('both in bed: morning for both', await until(alice.page, () => window.__game.state === 'playing' && window.__game.dayTime < 0.2, null, 20000) &&
   await until(bob.page, () => window.__game.dayTime < 0.2, null, 20000));
+
+// --- a player leaving hands their entities to whoever is still here ---------------
+const sheepId = await alice.page.evaluate((pad) => window.__game.entities.spawnMob('sheep', pad.x + 3.5, pad.y, pad.z + 2.5).nid, pad);
+await until(bob.page, (id) => window.__game.entities.entities.some((x) => x.nid === id && x.remote), sheepId);
+const carol = await join('Carol');
+await carol.page.evaluate((pad) => { const p = window.__game.player; p.flying = true; p.pos.x = pad.x + 3.5; p.pos.y = pad.y + 0.01; p.pos.z = pad.z + 4.5; }, pad);
+check('a late joiner sees the entities already there', await until(carol.page, (id) => window.__game.entities.entities.some((x) => x.nid === id && x.remote), sheepId, 20000));
+await carol.page.evaluate(() => window.__game.saveAndQuit());
+await carol.ctx.close();
+await alice.page.evaluate(() => window.__game.saveAndQuit());
+await alice.page.waitForTimeout(800);
+check('Alice leaves: her sheep passes to Bob', await until(bob.page, (id) => window.__game.entities.entities.some((x) => x.nid === id && !x.remote && !x.dead), sheepId, 15000));
+await alice.ctx.close();
+alice = await join('Alice');
 
 // --- persistence across a server restart ------------------------------------------
 await bob.page.evaluate(() => { const p = window.__game.player; p.pos.x += 1.25; });

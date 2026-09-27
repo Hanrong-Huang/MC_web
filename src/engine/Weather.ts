@@ -286,6 +286,9 @@ export class Weather {
     this.hooks.onStrike(x, y + 1, z);
   }
 
+  /** A lightning flash without a strike of our own (another player's bolt). */
+  flash(): void { if (!this.suppressed) this.flashT = 0.35; }
+
   /** Force a specific weather (used by pause-menu toggle / dev). */
   setKind(k: WeatherKind): void {
     this.kind = k;

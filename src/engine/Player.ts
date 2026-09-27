@@ -933,6 +933,8 @@ export class Player {
 
   /** Begin riding a horse (called from updateRightClick on a 'mount' result). */
   mount(horse: Entity): void {
+    // multiplayer: riding means simulating it; another player's mount stays theirs
+    if (!this.deps.entities.claim(horse)) { this.deps.toast('Someone else is using that'); return; }
     this.riding = horse;
     this.sneakLatched = false;
     this.prevSneak = true; // ignore the shift that may still be held from sneaking

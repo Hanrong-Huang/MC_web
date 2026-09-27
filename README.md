@@ -77,11 +77,10 @@ Admins also get: `/tp <player> <player>`, `/tp [player] <x> <y> <z>` (`~` = rela
 
 Single-player worlds have the same kind of commands (`/help` in chat): `/tp <x> <y> <z>`, `/sethome`, `/home`, `/spawn`, `/time`, `/weather`, `/gamemode`, `/give <item> [count]`, `/heal`, `/seed`.
 
-**What is shared:** the world (every block anyone places, breaks or uses: doors, levers, chests and their contents, TNT craters), the day/night clock, chat and each other's players with name tags. The night is skipped once everyone in the Overworld is in bed.
+**What is shared:** everything you see. That means the world (every block anyone places, breaks or uses: doors, levers, chests and their contents, TNT craters), mobs and animals, dropped items, arrows and fireballs, lit TNT and minecarts, the day/night clock and the weather, chat, and each other's players with name tags. A zombie chasing your friend is the same zombie on your screen; hit it and it's the same fight. Each dropped item can be picked up by one player only. The night is skipped once everyone in the Overworld is in bed.
 
 **Your progress:** your inventory, position and spawn are saved on the server under **your name**. Use the same name next time to carry on. There are no passwords, so anyone typing your name gets your character.
 
-**Not shared yet:** mobs, animals and weather are still simulated separately in each player's game.
 
 > **Mainland China:** if **Join Server** can't connect, the server's `*.workers.dev` address is being blocked on your network. See [Hosting the online world](#hosting-the-online-world-cloudflare) for serving it from a custom domain.
 
@@ -89,7 +88,7 @@ Single-player worlds have the same kind of commands (`/help` in chat): `/tp <x> 
 
 1. 打开 **[游戏页面](https://hanrong-huang.github.io/MC_web/)**。
 2. 在 **Multiplayer** 卡片里填上 **Your Name**（你的名字），点 **Join Server**。Server Address 留空，就是加入在线世界。
-3. 进去后就在同一个世界里了，其他玩家头顶会显示名字。
+3. 进去后就在同一个世界里了，其他玩家头顶会显示名字。生物、动物、掉落物、箭、TNT、矿车、天气和昼夜全部同步：朋友身边的僵尸在你屏幕上也是同一只，每个掉落物只能被一个人捡到。
 
 游戏里按 **T** 聊天，按住 **Tab** 看在线玩家。在聊天框输入命令，`/help` 会列出你能用的命令：
 

@@ -2,14 +2,23 @@
 // Node server (server/server.ts). Messages are JSON objects tagged by `t`.
 // Pure data only — no DOM or Three.js — so the server can import it.
 //
-// Sync model (v1): every client generates terrain from the shared seed and
-// runs its own automata (water, fire, redstone, crops) and mobs. What travels
-// is the *cause*: the final state of every cell a player's actions touched
-// (break / place / use / containers / their explosions), plus poses, chat and
-// the day clock. The server keeps the latest state of every edited cell and
-// replays them to anyone who joins, so the world is shared and persistent.
+// Sync model: every client generates terrain from the shared seed and runs
+// its own automata (water, fire, redstone, crops). What travels for blocks is
+// the *cause*: the final state of every cell a player's actions touched
+// (break / place / use / containers / their explosions). The server keeps the
+// latest state of every edited cell and replays them to anyone who joins.
+//
+// Entities (mobs, animals, dropped items, arrows, TNT, minecarts) are shared
+// by *ownership*: exactly one client simulates each (its AI, physics, health)
+// and streams its state ~10 Hz; everyone else shows a smoothed puppet. The
+// server keeps who owns what: whoever hits, feeds, rides or captures an
+// entity takes it over on the spot; a player who walks away or leaves hands
+// theirs to the nearest remaining player; pickups are granted by the server
+// so an item can only be picked up once. Mobs hunt the nearest player, and
+// damage to someone else's player travels as a `phurt`. Weather and the day
+// clock are the server's.
 
-export const PROTOCOL = 1;
+export const PROTOCOL = 2;
 /** Default port for `npm run server` (HTTP + WebSocket on /ws). */
 export const DEFAULT_PORT = 8080;
 /** Real seconds per in-game day (keep in step with main.ts DAY_LENGTH). */
@@ -80,9 +89,72 @@ export interface PlayerSave {
   dimension: Dim;
   spawn?: { x: number; y: number; z: number };
   advancements?: unknown;
+  /** captured pets that follow this player */
+  pets?: unknown;
 }
 
 export interface PlayerInfo { id: number; name: string; pose?: Pose }
+
+/** A networked entity's state (see the sync model above). Compact on the
+ *  wire: only `n k d x y z yw` always; the rest when relevant. */
+export interface EntState {
+  /** network id: `${owner client id}.${counter}` from whoever created it */
+  n: string;
+  /** EntityKind: a mob kind, 'drop', 'arrow', 'tnt' or 'minecart' */
+  k: string;
+  d: Dim;
+  x: number; y: number; z: number;
+  yw: number;
+  /** velocity (arrows, fireballs, carts) */
+  vx?: number; vy?: number; vz?: number;
+  hp?: number;
+  /** coat / outfit / size variant */
+  v?: number;
+  /** ENT_FLAGS bits */
+  f?: number;
+  /** AI state (drives the puppet's animation): idle | wander | flee | chase | fuse */
+  st?: string;
+  /** fuse seconds left (TNT, creepers) */
+  ft?: number;
+  /** attack-swing and hurt counters: a puppet plays one of each per increment */
+  sw?: number;
+  hc?: number;
+  /** drop: item id, count, durability, captured mob, enchantments */
+  i?: number; c?: number; du?: number; mob?: string; en?: Record<string, number>;
+  /** tamed-by (player name) */
+  on?: string;
+  /** projectile: `${proj}|${owner}|${shooter}` */
+  pj?: string;
+  /** full-state extras the next owner needs (villager trades, breeding timers …) */
+  ex?: Record<string, unknown>;
+}
+
+/** EntState.f bits */
+export const ENT_FLAGS = {
+  baby: 1, sheared: 2, tamed: 4, sitting: 8, saddled: 16, ridden: 32, burning: 64,
+  angry: 128, cold: 256, stuck: 512, ground: 1024, armored: 2048,
+} as const;
+
+export type GoneWhy = 'die' | 'pick' | 'despawn' | 'capture';
+
+/** Damage one client's mob (or blast) deals to another client's player. */
+export interface PlayerHit {
+  dmg: number;
+  cause: string;
+  /** knockback direction + strength */
+  kx: number; kz: number; kb: number;
+  /** upward launch (hoglin toss) */
+  up?: number;
+  effect?: { name: string; secs: number; amp: number };
+  fire?: { secs: number; who: string };
+  /** the attacker, so the victim's pets can retaliate */
+  src?: string;
+}
+
+/** A one-off effect everyone nearby should see/hear. */
+export type NetFx =
+  | { k: 'boom'; x: number; y: number; z: number; power: number; cause: string }
+  | { k: 'bolt'; x: number; y: number; z: number };
 
 // --- client → server ------------------------------------------------------------
 export type ClientMsg =
@@ -91,7 +163,17 @@ export type ClientMsg =
   | { t: 'cells'; cells: CellState[] }
   | { t: 'chat'; text: string }
   | { t: 'save'; save: PlayerSave }
-  | { t: 'sleep'; on: boolean };
+  | { t: 'sleep'; on: boolean }
+  /** states of entities the sender owns (new ones included) */
+  | { t: 'ents'; list: EntState[] }
+  /** the sender's entities are gone */
+  | { t: 'egone'; ids: string[]; why: GoneWhy }
+  /** take over an entity (the sender is hitting / riding / using it) */
+  | { t: 'take'; id: string }
+  /** ask to pick up a dropped item (granted once, by the server) */
+  | { t: 'pick'; id: string }
+  | { t: 'phurt'; to: number; h: PlayerHit }
+  | { t: 'fx'; fx: NetFx };
 
 // --- server → client ------------------------------------------------------------
 export type ServerMsg =
@@ -110,6 +192,14 @@ export type ServerMsg =
   | { t: 'time'; dayTime: number; skip?: boolean }
   | { t: 'sleepers'; n: number; total: number }
   | { t: 'weather'; kind: NetWeather }
+  | { t: 'ents'; from: number; list: EntState[] }
+  | { t: 'egone'; ids: string[]; why: GoneWhy }
+  /** an entity changed hands (or a take was refused: `owner` is who keeps it) */
+  | { t: 'owner'; id: string; owner: number; s: EntState }
+  /** your pickup was granted: the item's state */
+  | { t: 'picked'; id: string; s: EntState }
+  | { t: 'phurt'; from: number; h: PlayerHit }
+  | { t: 'fx'; from: number; fx: NetFx }
   | { t: 'cmd'; a: NetAction }
   | { t: 'error'; msg: string };
 

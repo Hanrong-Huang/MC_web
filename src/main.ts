@@ -206,6 +206,8 @@ class Game {
       this.renderer.triggerSwing = () => { this.swingCount++; swing(); };
     }
     this.entities = new EntityManager(this.renderer.scene, this.world, this.atlas, this.audio);
+    // multiplayer: mobs, animals, drops, arrows, TNT and carts are shared by ownership
+    if (net) this.entities.net = { myId: net.id, myName: net.name, send: (m) => net.send(m) };
     this.entities.setPlayer(this.player);
     waterFX.attach(this.renderer.scene, this.world, this.audio);
     this.entities.onKill = (kind) => {
@@ -578,6 +580,15 @@ class Game {
       case 'weather': this.weather.setKind(m.kind); break;
       case 'cmd': this.runAction(m.a); break;
       case 'error': this.hud.toast(m.msg); this.chat.add(null, m.msg); break;
+      case 'ents': this.entities.netApply(m.list); break;
+      case 'egone': this.entities.netGone(m.ids, m.why); break;
+      case 'owner': this.entities.netOwner(m.id, m.owner, m.s); break;
+      case 'picked': this.entities.netPicked(m.s); break;
+      case 'phurt': this.entities.netHurtMe(m.h); break;
+      case 'fx':
+        if (m.fx.k === 'bolt') this.showRemoteBolt(m.fx.x, m.fx.y, m.fx.z);
+        else this.entities.netFx(m.fx);
+        break;
       case 'welcome': break;
     }
   }
@@ -592,7 +603,7 @@ class Game {
       x: Math.round(p.pos.x * 100) / 100, y: Math.round(p.pos.y * 100) / 100, z: Math.round(p.pos.z * 100) / 100,
       yaw: Math.round(p.yaw * 1000) / 1000, pitch: Math.round(p.pitch * 1000) / 1000,
       dim: this.world.dimension, sneak: p.sneaking, held: p.heldId(), swing: this.swingCount,
-      dead: p.dead, riding: p.isRiding(), sleeping: this.state === 'sleeping',
+      dead: p.dead, riding: p.isRiding(), sleeping: this.state === 'sleeping', mode: p.mode,
     };
     const key = JSON.stringify(pose);
     if (key === this.lastPoseKey && this.poseT < 1) return;
@@ -610,6 +621,7 @@ class Game {
       dimension: this.world.dimension,
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
       advancements: this.adv.serialize(),
+      pets: this.entities.savePets(),
     };
   }
 
@@ -1547,7 +1559,16 @@ class Game {
   }
 
   /** Lightning struck at (x,y,z): ignite TNT, scorch mobs, flash + thunder. */
+  /** Another player's lightning strike: the flash, thunder and sparks (what
+   *  it set alight arrives as cells, what it hurt as hits). */
+  private showRemoteBolt(x: number, y: number, z: number): void {
+    this.weather.flash();
+    this.audio.thunder(Math.hypot(x - this.player.pos.x, z - this.player.pos.z));
+    this.entities.spawnBlockParticles(x, y - 1, z, B.TORCH, 14);
+  }
+
   private onLightning(x: number, y: number, z: number): void {
+    this.net?.send({ t: 'fx', fx: { k: 'bolt', x, y, z } });
     this.audio.thunder(Math.hypot(x - this.player.pos.x, z - this.player.pos.z));
     this.adv.unlock('thunder');
     // the bolt can set the strike point alight
@@ -1882,6 +1903,7 @@ class Game {
       this.world.update(this.player.pos.x, this.player.pos.z, 5);
       this.world.updateDoorSwings(dt);
       this.processMeshing(8);
+      if (this.remotes) this.entities.setRemotePlayers(this.remotes.list());
       this.capture(() => this.entities.update(dt, this.elapsed, this.renderer.camera.quaternion));
       waterFX.update(dt, this.world, this.renderer.camera.position, this.renderer.daylight, this.entities.entities);
       this.capture(() => this.throwables.update(dt));
@@ -1893,7 +1915,8 @@ class Game {
       // weather follows the player; the Nether has no sky, so no weather there
       const pp = this.player.pos;
       this.weather.setSuppressed(this.world.dimension !== 'overworld');
-      this.weather.update(dt, pp.x, pp.y + this.player.eyeHeight(), pp.z);
+      // (a lightning strike can light fires and TNT: those cells are shared)
+      this.capture(() => this.weather.update(dt, pp.x, pp.y + this.player.eyeHeight(), pp.z));
 
       // weather beds (rain / snow / blizzard wind), wind, foliage, surf,
       // streams, fire, cave echo, village life and the chase music all follow
@@ -2891,6 +2914,7 @@ class App {
       environment: { dayTime: w.dayTime },
       ...(you.spawn ? { spawn: you.spawn } : {}),
       ...(Array.isArray(you.advancements) ? { advancements: you.advancements as string[] } : {}),
+      ...(Array.isArray(you.pets) ? { pets: you.pets as SaveState['pets'] } : {}),
       lastPlayed: Date.now(),
     } : null;
     this.hud.hideMenu();
