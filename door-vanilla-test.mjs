@@ -187,10 +187,11 @@ check('pressure plate opens an iron door (iron sound)', red.plateOpens && red.ir
 check('stepping off closes it', red.plateCloses);
 check('a button beside the door opens it', red.buttonOpens);
 check('a lever opens an iron trapdoor', red.leverTrap);
-// the button springs back after ~1 s and the door shuts
-await page.waitForTimeout(2500);
-const shut = await page.evaluate(({ ox, oy, oz }) => window.__game.world.doorStates.get(`${ox + 20},${oy},${oz - 4}`).open, s);
-check('the door shuts when the button pops out', shut === false);
+// the button springs back after ~1 s of game time and the door shuts (poll:
+// the headless sim runs slower than the wall clock, more so under load)
+const shut = await page.waitForFunction(({ ox, oy, oz }) => window.__game.world.doorStates.get(`${ox + 20},${oy},${oz - 4}`).open === false,
+  s, { timeout: 10000, polling: 200 }).then(() => true, () => false);
+check('the door shuts when the button pops out', shut);
 
 // --- trapdoor placement, collision, raycast ---------------------------------------------
 const trap = await page.evaluate(({ ox, oy, oz }) => {
@@ -256,7 +257,9 @@ const misc = await page.evaluate(async ({ ox, oy, oz }) => {
   w.setBlock(x, oy, z, B.DOOR_LOWER); w.setBlock(x, oy + 1, z, B.DOOR_UPPER);
   w.doorStates.set(`${x},${oy},${z}`, { facing: 0, open: false, swing: 0 });
   w.setBlock(x, oy - 1, z, 0);
-  await new Promise((r) => setTimeout(r, 600));
+  // the support queue pops it within a few ticks (poll: headless ticks run slow)
+  for (let i = 0; i < 40 && !(w.getBlock(x, oy, z) === 0 && w.getBlock(x, oy + 1, z) === 0); i++) await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 200)); // let the drop spawn
   res.gone = w.getBlock(x, oy, z) === 0 && w.getBlock(x, oy + 1, z) === 0;
   res.drop = g.entities.entities.filter((e) => e.kind === 'drop' && Math.hypot(e.pos.x - x - 0.5, e.pos.z - z - 0.5) < 1.5).map((e) => e.itemId);
   // ladder column with an open trapdoor on top
