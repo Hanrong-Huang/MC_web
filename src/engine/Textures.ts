@@ -1263,28 +1263,99 @@ function chestPx(face: 'top' | 'side' | 'front'): Px {
   return p;
 }
 
-function doorPx(upper: boolean): Px {
-  const p = planksPx(OAK_R, OAK_SEAM, 345);
-  const frame = hex('#5a4225'), lit = hex('#c2a36c'), dark = hex('#4a3620');
-  for (let j = 0; j < 16; j++) { p.set(0, j, frame); p.set(15, j, frame); p.set(1, j, lit); p.set(14, j, dark); }
+/** A wooden door leaf's look: grain ramp, board seam, the dark outline, the
+ *  lit/shadow bevel colours and how the upper half is cut through. */
+interface DoorWood {
+  ramp: RGB[]; seam: RGB; edge: string; lit: string; dark: string; seed: number;
+  window: 'panes' | 'holes' | 'cross'; vein?: string; hinge: string;
+}
+const OAK_DOOR: DoorWood = {
+  ramp: OAK_R, seam: OAK_SEAM, edge: '#4a3519', lit: '#c9ab74', dark: '#5c4524', seed: 345,
+  window: 'panes', hinge: '#3b3b3e',
+};
+
+/** Clear a hole and bevel its rim: the frame above/left casts a shadow into
+ *  it, the sill below/right catches the light. */
+function doorHole(p: Px, x0: number, y0: number, w: number, h: number, lit: string, dark: string): void {
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) p.clear(x0 + i, y0 + j);
+  for (let i = -1; i <= w; i++) { p.set(x0 + i, y0 - 1, dark); p.set(x0 + i, y0 + h, lit); }
+  for (let j = 0; j < h; j++) { p.set(x0 - 1, y0 + j, dark); p.set(x0 + w, y0 + j, lit); }
+}
+
+/** Sunken panel (inclusive corners): darker field, shadowed top/left lip, lit bottom/right lip. */
+function doorRecess(p: Px, x0: number, y0: number, x1: number, y1: number, lit: string, dark: string): void {
+  for (let j = y0 + 1; j < y1; j++) for (let i = x0 + 1; i < x1; i++) p.mul(i, j, 0.84);
+  for (let i = x0; i <= x1; i++) { p.set(i, y0, dark); p.set(i, y1, lit); }
+  for (let j = y0; j <= y1; j++) { p.set(x0, j, dark); p.set(x1, j, lit); }
+}
+
+/** Frame-and-panel door leaf in the spirit of vanilla's: vertical boards held
+ *  in a stile-and-rail frame, glazing cut right through the upper half (real
+ *  holes — the chunk material alpha-tests), two sunken panels below and iron
+ *  hinge straps. u=0 is the hinge edge (the mesher maps it that way on both
+ *  faces), so the lock plate sits at the right, under the 3D handle. */
+function woodDoorPx(w: DoorWood, upper: boolean): Px {
+  const p = new Px();
+  const n = w.ramp.length;
+  // clean timber: grain runs along the stiles and the boards, across the rails
+  const f = fbm(w.seed + (upper ? 7 : 8), [[16, 0.6, 2], [16, 0.4, 4]], 1.2);
+  const railAt = (x: number, y: number): boolean => x > 2 && x < 13 && (upper ? y <= 1 || y >= 12 : y <= 1 || y >= 14);
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    const g = railAt(x, y) ? f(y * 3, x) : f(x * 3, y);
+    p.set(x, y, w.ramp[clampI(2.6 + (g - 0.5) * 2.6, n)]);
+  }
+  // a few dark grain streaks
+  const r = mulberry32(w.seed + 9);
+  for (let i = 0; i < 6; i++) {
+    const x = 1 + ((r() * 14) | 0), y0 = (r() * 16) | 0, len = 2 + ((r() * 3) | 0);
+    for (let k = 0; k < len; k++) p.set(x, y0 + k, w.ramp[1]);
+  }
+  void w.seam;
+  // outline + a bevel down each stile
+  for (let j = 0; j < 16; j++) {
+    p.set(0, j, w.edge); p.set(15, j, w.edge);
+    p.set(1, j, w.lit); p.set(14, j, w.dark);
+    p.set(3, j, w.dark); p.set(12, j, w.lit); // the stiles' inner shoulders
+  }
   if (upper) {
-    for (let i = 0; i < 16; i++) p.set(i, 0, frame);
-    // two small glass panes
-    for (const wx of [3, 9]) {
-      for (let j = 3; j <= 8; j++) for (let i = 0; i < 4; i++) p.set(wx + i, j, j === 3 ? '#e2f0f4' : i === 0 ? '#c4dde6' : '#a7c9d4');
-      for (let i = -1; i < 5; i++) { p.set(wx + i, 2, dark); p.set(wx + i, 9, lit); }
-      p.set(wx - 1, 5, dark);
+    for (let i = 0; i < 16; i++) { p.set(i, 0, w.edge); p.set(i, 1, w.lit); }
+    for (let i = 3; i <= 12; i++) p.set(i, 2, w.dark);
+    if (w.window === 'panes') {
+      // four lights in a cross of glazing bars
+      for (const [x0, y0] of [[4, 4], [9, 4], [4, 9], [9, 9]]) doorHole(p, x0, y0, 3, 3, w.lit, w.dark);
+    } else if (w.window === 'holes') {
+      for (const hy of [4, 8]) for (const hx of [4, 7, 10]) doorHole(p, hx, hy, 2, 2, w.lit, w.dark);
+    } else {
+      // one tall light split by a cross mullion
+      doorHole(p, 4, 4, 8, 7, w.lit, w.dark);
+      for (let j = 4; j < 11; j++) { p.set(7, j, w.dark); p.set(8, j, w.lit); }
+      for (let i = 4; i < 12; i++) p.set(i, 7, w.ramp[1]);
     }
+    // lock rail across the foot of the glazing, a sunken strip under it
+    for (let i = 3; i <= 12; i++) { p.set(i, 13, w.lit); p.set(i, 14, w.ramp[3]); p.set(i, 15, w.ramp[2]); }
+    for (let i = 4; i <= 11; i++) p.set(i, 12, w.dark);
+    // top hinge strap
+    for (let i = 0; i <= 3; i++) { p.set(i, 3, w.hinge); p.set(i, 4, w.hinge); }
+    p.set(1, 3, '#77777c'); p.set(3, 4, '#1e1e20');
   } else {
-    for (let i = 0; i < 16; i++) p.set(i, 15, frame);
-    // raised panel
-    for (let j = 3; j <= 12; j++) for (let i = 3; i <= 12; i++) {
-      if (j === 3 || i === 3) p.set(i, j, lit); else if (j === 12 || i === 12) p.set(i, j, dark);
-    }
-    // iron handle near the top of the lower half (waist height)
-    p.set(12, 0, '#b0b0b0'); p.set(12, 1, '#6a6a6a'); p.set(11, 1, '#2a2a2a'); p.set(13, 1, '#2a2a2a');
+    for (let i = 0; i < 16; i++) { p.set(i, 15, w.edge); p.set(i, 14, w.dark); }
+    for (let i = 3; i <= 12; i++) { p.set(i, 0, w.ramp[2]); p.set(i, 1, w.dark); }
+    // two sunken panels divided by a centre muntin
+    doorRecess(p, 4, 2, 7, 12, w.lit, w.dark);
+    doorRecess(p, 8, 2, 11, 12, w.lit, w.dark);
+    if (w.vein) for (const [vx, vy] of [[5, 5], [6, 6], [6, 7], [5, 8], [10, 7], [9, 8], [9, 9]]) p.set(vx, vy, w.vein);
+    // bottom hinge strap
+    for (let i = 0; i <= 3; i++) { p.set(i, 10, w.hinge); p.set(i, 11, w.hinge); }
+    p.set(1, 10, '#77777c'); p.set(3, 11, '#1e1e20');
+    // lock plate behind the handle
+    for (let j = 0; j <= 3; j++) { p.set(12, j, '#4a4a50'); p.set(13, j, '#8c8c92'); }
+    p.set(13, 2, '#1a1a1c');
   }
   return p;
+}
+
+function doorPx(upper: boolean): Px {
+  return woodDoorPx(OAK_DOOR, upper);
 }
 
 // crack_0 .. crack_9: a fracture web spreading out from the centre, like the
@@ -1740,18 +1811,11 @@ const ITEM_PAINTERS: Record<string, (ctx: Ctx) => void> = {
     '..rRRRRRRRRdr...', '..rRRRRRRRRdr...', '..rRRRRRRRddr...', '...rRRRRRRdr....',
     '....rRRdRRdr....', '.....rr.rrr.....', '................', '................',
   ], { R: '#d62c28', r: '#a81c1a', L: '#f26a5c', W: '#ffd2c8', d: '#86121a', s: '#5a3a1a', g: '#4f9a30', G: '#7cc44c' }), 0.35).put(c, 0, 0),
-  wood_door: (c) => {
-    // tall door icon: draw two stacked panels
-    const rail = '#9c7f4e', dark = '#5d4222', light = '#b8945f', iron = '#3f3f3f';
-    const rows: string[] = [];
-    const map = 'OOOOOOOOOOOO....|OdddddddddO.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|OdddddddddO.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|.dmmmmmmd.O.....|Oddddddddd.O....|..........OO....|................';
-    const pal: Record<string, string> = { O: dark, d: rail, m: light };
-    for (const row of map.split('|')) {
-      rows.push(row.padEnd(16, '.'));
-    }
-    pixmap(c, 0, 0, rows, pal);
-    c.fillStyle = iron; c.fillRect(12, 8, 1, 1);
-  },
+  // front-on oak door: four lights up top, lock rail + handle, two sunken panels
+  wood_door: (c) => pixmap(c, 0, 0, [
+    'OOOOOOOOOO', 'OLFFFFFFdO', 'OLkkFkkFdO', 'OLkkFkkFdO', 'OLFFFFFFdO', 'OLkkFkkFdO', 'OLkkFkkFdO', 'OLFFFFFFdO',
+    'OLssssssHO', 'OLFFFFFFHO', 'OLsPFsPFdO', 'OLsPFsPFdO', 'OLsPFsPFdO', 'OLsPFsPFdO', 'OLFFFFFFdO', 'OOOOOOOOOO',
+  ].map((r) => `...${r}...`), { O: '#4a3519', L: '#c9ab74', F: '#a88b57', d: '#6e5530', P: '#8d7042', s: '#5c4524', k: '#2e2112', H: '#2a2a2e' }),
   bone: (c) => outlinePx(diagPx((a, cc) => {
     const knob = Math.abs(a) >= 9 && Math.abs(a) <= 12 && cc >= 13 && cc <= 18 &&
       !(Math.abs(a) >= 11 && (cc === 15 || cc === 16));
@@ -4390,30 +4454,10 @@ function punchHole(p: Px, x0: number, y0: number, w: number, h: number, w8: Neth
 
 function netherDoorPx(stem: 'crimson' | 'warped', upper: boolean): Px {
   const w8 = NETHER_WOOD[stem];
-  const boards = planksPx(w8.ramp, w8.seam, w8.seed + (upper ? 1 : 0));
-  const p = new Px().fill((x, y) => boards.get(y, x)); // vertical boards
-  for (let j = 0; j < 16; j++) { p.set(0, j, w8.frame); p.set(15, j, w8.frame); p.set(1, j, w8.lit); p.set(14, j, w8.dark); }
-  if (upper) {
-    for (let i = 0; i < 16; i++) p.set(i, 0, w8.frame);
-    if (stem === 'crimson') {
-      for (const hy of [3, 7]) for (const hx of [4, 7, 10]) punchHole(p, hx, hy, 2, 2, w8);
-    } else {
-      // tall window split by a cross mullion
-      punchHole(p, 4, 3, 8, 7, w8);
-      for (let j = 3; j < 10; j++) { p.set(7, j, w8.frame); p.set(8, j, w8.lit); }
-      for (let i = 4; i < 12; i++) { p.set(i, 6, w8.frame); }
-    }
-    for (let i = 3; i <= 12; i++) p.set(i, 12, w8.dark); // rail between the panels
-  } else {
-    for (let i = 0; i < 16; i++) p.set(i, 15, w8.frame);
-    // raised panel with a glowing vein, and a dark iron handle at waist height
-    for (let j = 3; j <= 12; j++) for (let i = 3; i <= 12; i++) {
-      if (j === 3 || i === 3) p.set(i, j, w8.lit); else if (j === 12 || i === 12) p.set(i, j, w8.dark);
-    }
-    for (const [vx, vy] of stem === 'crimson' ? [[5, 5], [6, 6], [6, 7], [7, 8], [8, 8], [9, 9]] : [[9, 5], [8, 6], [8, 7], [7, 8], [6, 9], [6, 10]]) p.set(vx, vy, w8.vein);
-    p.set(12, 0, '#6a6a70'); p.set(12, 1, '#3a3a40'); p.set(11, 1, '#1a1a1e'); p.set(13, 1, '#1a1a1e');
-  }
-  return p;
+  return woodDoorPx({
+    ramp: w8.ramp, seam: w8.seam, edge: w8.dark, lit: w8.lit, dark: w8.frame, seed: w8.seed,
+    window: stem === 'crimson' ? 'holes' : 'cross', vein: w8.vein, hinge: '#26262b',
+  }, upper);
 }
 
 function netherTrapdoorPx(stem: 'crimson' | 'warped'): Px {

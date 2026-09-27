@@ -195,9 +195,9 @@ const ride = await page.evaluate(async ({ ox, oy, oz }) => {
   res.seated = Math.abs(p.pos.x - cart.pos.x) < 0.35 && Math.abs(p.pos.y - (cart.pos.y + 0.25)) < 0.05; // (one frame apart)
   // shift gets you out onto free ground beside the cart
   p.prevSneak = false;
-  p.deps.input.keys.add('ControlLeft');
+  p.deps.input.keys.add('ShiftLeft');
   await new Promise((r) => setTimeout(r, 300));
-  p.deps.input.keys.delete('ControlLeft');
+  p.deps.input.keys.delete('ShiftLeft');
   res.out = p.riding === null;
   const fx = Math.floor(p.pos.x), fy = Math.floor(p.pos.y), fz = Math.floor(p.pos.z);
   res.freeSpot = w.getBlock(fx, fy, fz) === 0 || !window.__B || !g.world.isSolidAt(fx, fy, fz);

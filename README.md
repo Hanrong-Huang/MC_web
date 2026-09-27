@@ -20,8 +20,8 @@ Your worlds are saved in your browser automatically (every 60 s, and when you ch
 |---|---|
 | **WASD** + mouse | Move and look |
 | **Space** | Jump (swim up / fly up) |
-| **Shift** or double-tap **W** | Sprint |
-| **Ctrl** | Sneak (you won't fall off edges) |
+| Double-tap **W** | Sprint |
+| **Shift** | Sneak (you won't fall off edges) |
 | **Left click** | Mine blocks / attack |
 | **Right click** | Place blocks · use items · open chests and furnaces · eat · draw a bow · block with a shield |
 | **Middle click** | Pick the block you're looking at |

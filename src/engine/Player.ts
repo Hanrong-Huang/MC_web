@@ -496,7 +496,7 @@ export class Player {
       if (input.down('KeyA')) strafe -= 1;
       if (input.down('KeyD')) strafe += 1;
       space = input.down('Space');
-      this.sneaking = (input.down('ControlLeft') || input.down('ControlRight')) && !this.flying;
+      this.sneaking = this.sneakKeyDown() && !this.flying;
     }
 
     // sprint upkeep (a raised shield or spyglass slows you to a shuffle)
@@ -505,7 +505,10 @@ export class Player {
         (this.mode === 'creative' || this.hunger > 6);
       if (!canSprint) this.sprinting = false;
     }
-    if ((input.down('ShiftLeft') || input.down('ShiftRight')) && fwd > 0 && !this.sneaking &&
+    // sprint: double-tap W (main.ts) or the touch stick's full push. Shift is
+    // sneak, as in vanilla; Ctrl is deliberately not a movement key — the
+    // browser closes the tab on Ctrl+W and the page cannot block it
+    if (input.down('Sprint') && fwd > 0 && !this.sneaking &&
       !this.blocking && !this.scoping && (this.mode === 'creative' || this.hunger > 6)) {
       this.sprinting = true;
     }
@@ -890,8 +893,10 @@ export class Player {
     return lvl > 0 ? 1 - 1 / (lvl + 1) : 0;
   }
 
+  /** Shift sneaks, as in vanilla (never Ctrl: Ctrl+W closes the browser tab). */
   private sneakKeyDown(): boolean {
-    return this.deps.input.down('ControlLeft') || this.deps.input.down('ControlRight');
+    const i = this.deps.input;
+    return i.down('ShiftLeft') || i.down('ShiftRight');
   }
 
   /** Is there a single-block ledge in the wish direction we can hop onto? */

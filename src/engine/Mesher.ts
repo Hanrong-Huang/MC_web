@@ -8,7 +8,7 @@
 // light model stays 2-channel without another attribute.
 
 import { CX, CZ, CY } from './Chunk';
-import { B, def, hasDef, ID_LIMIT, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, FENCE_IDS, GATE_IDS, DOOR_IDS, TRAPDOOR_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel, doorFootprints, DOOR_THICK, trapdoorBox, dustShape, H4, RAIL_IDS } from './Blocks';
+import { B, def, hasDef, ID_LIMIT, OPAQUE_LUT, OCCLUDE_LUT, CROSS_BLOCKS, TINTED_TILES, SHAPED, SLAB_IDS, STAIR_IDS, FENCE_IDS, GATE_IDS, DOOR_IDS, DOOR_LOWERS, REDSTONE_ONLY_DOORS, TRAPDOOR_IDS, connectsTo, crossTile, SOUL_LIGHTS, emitLevel, doorFootprints, DOOR_THICK, trapdoorBox, dustShape, H4, RAIL_IDS } from './Blocks';
 import type { Box } from './Blocks';
 import type { UVRect } from './Textures';
 
@@ -915,9 +915,39 @@ function emitDoor(
   const rect = atlas.rect(def(id).faces!.sides); // door_lower / door_upper per wood
   const foot = doorSwingFootprint(facing, hingeRight, swing, DOOR_THICK);
   emitDoorPanel(g, x, y, z, foot, rect, sky, torch);
+  // wooden doors get a little iron pull handle on both faces, over the lock
+  // plate painted at the top of the lower half (iron doors are redstone-only)
+  if (DOOR_LOWERS.has(id) && !REDSTONE_ONLY_DOORS.has(id)) {
+    emitDoorHandle(g, x, y, z, foot, rect, sky, torch);
+  }
 }
 
-/** Textured door slab from four bottom xz corners (y spans 0..1 in the cell). */
+type V3 = [number, number, number];
+
+/** One quad, wound to face away from `centre` whatever order the corners
+ *  arrive in (door footprints mirror with the hinge, which flips winding). */
+function outQuad(
+  g: GeoBuilder, bx: number, by: number, bz: number, c: V3[], uv: [number, number][], centre: V3,
+  sky: number, lit: number, tint = 1,
+): void {
+  const e1 = [c[1][0] - c[0][0], c[1][1] - c[0][1], c[1][2] - c[0][2]];
+  const e2 = [c[2][0] - c[0][0], c[2][1] - c[0][1], c[2][2] - c[0][2]];
+  const n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+  const m = [0, 1, 2].map((k) => (c[0][k] + c[1][k] + c[2][k] + c[3][k]) / 4 - centre[k]);
+  const flip = n[0] * m[0] + n[1] * m[1] + n[2] * m[2] < 0;
+  const base = g.vertCount;
+  for (let i = 0; i < 4; i++) {
+    const k = flip ? 3 - i : i;
+    g.v(bx + c[k][0], by + c[k][1], bz + c[k][2], sky, lit, tint, tint, tint, uv[k][0], uv[k][1]);
+  }
+  g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
+}
+
+/** Textured door slab from four bottom xz corners (y spans 0..1 in the cell):
+ *  [0] hinge/outer, [1] free/outer, [2] free/inner, [3] hinge/inner. Both
+ *  broad faces map u=0 to the hinge edge, so the leaf reads the same from
+ *  either side (handle and hinges where they physically are); the thin edges
+ *  take the matching 3px strip of the tile, like vanilla's door model. */
 function emitDoorPanel(
   g: GeoBuilder, bx: number, by: number, bz: number,
   foot: [number, number][],
@@ -925,29 +955,64 @@ function emitDoorPanel(
   sky: number, torch: number,
 ): void {
   const { u0, u1, v0, v1 } = rect;
-  const y0 = 0, y1 = 1;
   const lit = torch + soulFlagAt(bx, by, bz);
-  const bot = foot.map(([px, pz]) => [px, y0, pz]);
-  const top = foot.map(([px, pz]) => [px, y1, pz]);
-  const pushQuad = (corners: number[][], us: number[], vs: number[]): void => {
-    const base = g.vertCount;
-    for (let i = 0; i < 4; i++) {
-      g.v(bx + corners[i][0], by + corners[i][1], bz + corners[i][2], sky, lit, 1, 1, 1, us[i], vs[i]);
-    }
-    g.tri2(base, base + 1, base + 2, base, base + 2, base + 3);
-  };
-  const faceU = [u0, u1, u1, u0];
-  const faceV = [v1, v1, v0, v0];
-  const edgeU = [u0, u1, u1, u0];
-  const edgeV = [v1, v1, v0, v0];
+  const bot = foot.map(([px, pz]): V3 => [px, 0, pz]);
+  const top = foot.map(([px, pz]): V3 => [px, 1, pz]);
+  const centre: V3 = [(foot[0][0] + foot[2][0]) / 2, 0.5, (foot[0][1] + foot[2][1]) / 2];
+  const t = DOOR_THICK;
+  const su = (u1 - u0) * t, sv = (v1 - v0) * t;
+  const q = (c: V3[], uv: [number, number][]): void => outQuad(g, bx, by, bz, c, uv, centre, sky, lit);
+  const face: [number, number][] = [[u0, v1], [u1, v1], [u1, v0], [u0, v0]]; // hinge-bottom, free-bottom, free-top, hinge-top
+  q([bot[0], bot[1], top[1], top[0]], face);                       // outer face
+  q([bot[3], bot[2], top[2], top[3]], face);                       // inner face
+  q([bot[0], bot[3], top[3], top[0]], [[u0, v1], [u0 + su, v1], [u0 + su, v0], [u0, v0]]); // hinge edge
+  q([bot[1], bot[2], top[2], top[1]], [[u1, v1], [u1 - su, v1], [u1 - su, v0], [u1, v0]]); // free edge
+  q([top[0], top[1], top[2], top[3]], [[u0, v0], [u1, v0], [u1, v0 + sv], [u0, v0 + sv]]); // top cap
+  q([bot[0], bot[1], bot[2], bot[3]], [[u0, v1], [u1, v1], [u1, v1 - sv], [u0, v1 - sv]]); // bottom cap
+}
 
-  // front/back: average the two side quads' winding from the footprint
-  pushQuad([bot[0], bot[1], top[1], top[0]], faceU, faceV);
-  pushQuad([bot[2], bot[3], top[3], top[2]], faceU, faceV);
-  pushQuad([bot[1], bot[2], top[2], top[1]], edgeU, edgeV);
-  pushQuad([bot[3], bot[0], top[0], top[3]], edgeU, edgeV);
-  pushQuad([bot[0], bot[1], bot[2], bot[3]], edgeU, edgeV);
-  pushQuad([top[2], top[1], top[0], top[3]], edgeU, edgeV);
+/** Pull handle on both faces of a lower door leaf: a 1x3px grip standing
+ *  proud on two stems, near the free edge at the top of the half. It samples
+ *  the door tile's own lock-plate texels, so each wood's iron matches. */
+function emitDoorHandle(
+  g: GeoBuilder, bx: number, by: number, bz: number, foot: [number, number][],
+  rect: UVRect, sky: number, torch: number,
+): void {
+  const lit = torch + soulFlagAt(bx, by, bz);
+  const [h0, f0, , h1] = foot;
+  // leaf frame: `al` hinge -> free, `nx` inner -> outer (both unit, in xz)
+  const al = [f0[0] - h0[0], f0[1] - h0[1]];
+  const alen = Math.hypot(al[0], al[1]) || 1;
+  al[0] /= alen; al[1] /= alen;
+  const nx = [h0[0] - h1[0], h0[1] - h1[1]];
+  const nlen = Math.hypot(nx[0], nx[1]) || 1;
+  nx[0] /= nlen; nx[1] /= nlen;
+  const P = 1 / 16;
+  const mid = [(h0[0] + h1[0]) / 2, (h0[1] + h1[1]) / 2]; // hinge line, mid-thickness
+  const half = DOOR_THICK / 2;
+  const box = (a0: number, a1: number, y0: number, y1: number, o0: number, o1: number, side: number, texel: [number, number]): void => {
+    const pt = (a: number, yy: number, o: number): V3 => {
+      const d = side * (half + o);
+      return [mid[0] + al[0] * a + nx[0] * d, yy, mid[1] + al[1] * a + nx[1] * d];
+    };
+    const c = [
+      pt(a0, y0, o0), pt(a1, y0, o0), pt(a1, y0, o1), pt(a0, y0, o1),
+      pt(a0, y1, o0), pt(a1, y1, o0), pt(a1, y1, o1), pt(a0, y1, o1),
+    ];
+    const centre: V3 = [(c[0][0] + c[6][0]) / 2, (y0 + y1) / 2, (c[0][2] + c[6][2]) / 2];
+    // sample inside one texel of the painted lock plate (dark iron)
+    const du = (rect.u1 - rect.u0) / 16, dv = (rect.v1 - rect.v0) / 16;
+    const u0 = rect.u0 + texel[0] * du, v0 = rect.v0 + texel[1] * dv;
+    const uv: [number, number][] = [[u0 + 0.3 * du, v0 + 0.7 * dv], [u0 + 0.7 * du, v0 + 0.7 * dv], [u0 + 0.7 * du, v0 + 0.3 * dv], [u0 + 0.3 * du, v0 + 0.3 * dv]];
+    const q = (k: number[]): void => outQuad(g, bx, by, bz, k.map((i) => c[i]), uv, centre, sky, lit);
+    q([0, 1, 5, 4]); q([1, 2, 6, 5]); q([2, 3, 7, 6]); q([3, 0, 4, 7]); q([4, 5, 6, 7]); q([0, 1, 2, 3]);
+  };
+  const a = 13 * P; // along the leaf, over the painted lock plate
+  for (const side of [1, -1]) {
+    box(a - 0.5 * P, a + 0.5 * P, 11.5 * P, 15 * P, 1.2 * P, 2.2 * P, side, [13, 2]); // grip
+    box(a - 0.4 * P, a + 0.4 * P, 12 * P, 13 * P, 0, 1.2 * P, side, [12, 1]); // lower stem
+    box(a - 0.4 * P, a + 0.4 * P, 13.5 * P, 14.5 * P, 0, 1.2 * P, side, [12, 1]); // upper stem
+  }
 }
 
 /** Ladder: a flat panel against the back of the cell, 1/16 off the wall. */

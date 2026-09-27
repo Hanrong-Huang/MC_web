@@ -260,7 +260,7 @@ export class TouchControls {
     this.hold('tb tb-mine', ICONS.mine, () => { input.leftDown = true; input.onMouseDown(0); }, () => { input.leftDown = false; }, 'Mine / attack');
     this.hold('tb tb-place', ICONS.place, () => { input.rightDown = true; input.queueRightClick(); }, () => { input.rightDown = false; }, 'Place / use');
     this.hold('tb tb-jump', ICONS.jump, () => { input.keys.add('Space'); }, () => { input.keys.delete('Space'); }, 'Jump');
-    this.hold('tb tb-down', ICONS.down, () => { input.keys.add('ControlLeft'); }, () => { input.keys.delete('ControlLeft'); }, 'Sneak / descend');
+    this.hold('tb tb-down', ICONS.down, () => { input.keys.add('ShiftLeft'); }, () => { input.keys.delete('ShiftLeft'); }, 'Sneak / descend');
     this.tap('tb tb-inv', ICONS.inv, hooks.onInventory, 'Inventory', 'Items');
     this.tap('tb tb-fly', ICONS.fly, hooks.onFly, 'Toggle flight', 'Fly');
     this.tap('tb tb-pause', ICONS.pause, hooks.onPause, 'Pause', 'Menu');
@@ -274,7 +274,7 @@ export class TouchControls {
     set('KeyS', ny > 0.35);
     set('KeyA', nx < -0.35);
     set('KeyD', nx > 0.35);
-    set('ShiftLeft', ny < -0.35 && Math.hypot(nx, ny) > 0.92);
+    set('Sprint', ny < -0.35 && Math.hypot(nx, ny) > 0.92); // virtual key: Shift is sneak
   }
 
   private buzz(): void { try { navigator.vibrate?.(8); } catch { /* unsupported */ } }
@@ -308,7 +308,7 @@ export class TouchControls {
   /** Clear any held inputs (called when hiding / opening a menu). */
   private reset(): void {
     for (const r of this.resets) r();
-    for (const c of ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'Space', 'ControlLeft', 'ShiftLeft']) this.input.keys.delete(c);
+    for (const c of ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'Space', 'ShiftLeft', 'Sprint']) this.input.keys.delete(c);
     this.input.leftDown = false;
     this.input.rightDown = false;
   }

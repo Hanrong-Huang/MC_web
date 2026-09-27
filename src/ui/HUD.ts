@@ -638,7 +638,7 @@ ${seedLine.textContent}`;
         '<b>Dig</b> break · <b>Place</b> use · tap hotbar to switch · <b>Pause</b> top-left';
     } else {
       help.innerHTML =
-        '<b>WASD</b> move · <b>Space</b> jump · <b>Shift</b> sprint · <b>F</b> fly · <b>E</b> inventory<br>' +
+        '<b>WASD</b> move · <b>Space</b> jump · <b>Shift</b> sneak · <b>W W</b> sprint · <b>F</b> fly · <b>E</b> inventory<br>' +
         '<b>LMB</b> break · <b>RMB</b> place / use · <b>1–9</b> + scroll hotbar · <b>Esc</b> pause · <b>H</b> all controls';
     }
 
@@ -738,7 +738,7 @@ ${seedLine.textContent}`;
       ['Looking & acting', [['Drag right side', 'Look around'], ['Dig', 'Hold to break blocks / attack'], ['Place', 'Place blocks, use items, interact']]],
       ['Menus', [['Hotbar', 'Tap a slot to select it'], ['Items', 'Inventory + crafting'], ['Menu', 'Options, save, quit']]],
     ] : [
-      ['Movement', [['W A S D', 'Walk'], ['Space', 'Jump · double-tap to fly (creative)'], ['Shift', 'Sprint'], ['Ctrl', 'Sneak · dismount'], ['W W', 'Double-tap to sprint'], ['F', 'Toggle flight']]],
+      ['Movement', [['W A S D', 'Walk'], ['Space', 'Jump · double-tap to fly (creative)'], ['Shift', 'Sneak (won\'t fall off edges) · dismount'], ['W W', 'Double-tap to sprint'], ['F', 'Toggle flight']]],
       ['Actions', [['Left click', 'Break / attack'], ['Right click', 'Place · use · eat · interact'], ['Middle click', 'Pick block'], ['Q', 'Drop item (Ctrl+Q: stack)'], ['1 – 9 / wheel', 'Choose hotbar slot']]],
       ['Screens', [['E', 'Inventory & crafting'], ['L', 'Advancements'], ['Esc', 'Pause · close menus'], ['H', 'This controls page']]],
       ['Display', [['F1', 'Hide the HUD'], ['F2', 'Save a screenshot'], ['F3', 'Debug info & coordinates']]],

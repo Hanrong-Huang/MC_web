@@ -521,51 +521,21 @@ void main() {
 
 type U<T> = { value: T };
 
-// held-item rest pose (radians): tilt of the head away from the player, and
-// the turn about the vertical that shows the item's face at an angle
-const HELD_TILT = -0.18;
-const HELD_TURN = 2.36;
-
-/** Principal axis of a sprite's opaque pixels (sprite-centered, y up): the
- *  axis angle (pointing up) and the grip point at its low end. Roundish
- *  sprites (food, orbs) keep their upright orientation. */
-function spriteAxis(sprite: HTMLCanvasElement): { angle: number; gx: number; gy: number; long: boolean } {
-  const W = sprite.width, H = sprite.height;
-  const data = sprite.getContext('2d')!.getImageData(0, 0, W, H).data;
-  const px: number[] = [], py: number[] = [];
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      if (data[(y * W + x) * 4 + 3] > 40) { px.push(x + 0.5 - W / 2); py.push(H - 1 - y + 0.5 - H / 2); }
-    }
-  }
-  const n = px.length;
-  if (n < 3) return { angle: Math.PI / 4, gx: 0, gy: -H / 2, long: false };
-  let mx = 0, my = 0;
-  for (let i = 0; i < n; i++) { mx += px[i]; my += py[i]; }
-  mx /= n; my /= n;
-  let cxx = 0, cyy = 0, cxy = 0;
-  for (let i = 0; i < n; i++) {
-    const dx = px[i] - mx, dy = py[i] - my;
-    cxx += dx * dx; cyy += dy * dy; cxy += dx * dy;
-  }
-  const tr = cxx + cyy, det = cxx * cyy - cxy * cxy;
-  const l1 = tr / 2 + Math.sqrt(Math.max(0, tr * tr / 4 - det));
-  const l2 = tr - l1;
-  let angle = 0.5 * Math.atan2(2 * cxy, cxx - cyy);
-  const long = l1 >= l2 * 1.8;
-  if (!long) angle = Math.PI / 2; // not elongated: treat as upright
-  let dx = Math.cos(angle), dy = Math.sin(angle);
-  if (dy < -1e-6 || (Math.abs(dy) <= 1e-6 && dx < 0)) { dx = -dx; dy = -dy; }
-  angle = Math.atan2(dy, dx);
-  // grip: average of the pixels at the low end of the axis
-  let lo = Infinity;
-  for (let i = 0; i < n; i++) lo = Math.min(lo, px[i] * dx + py[i] * dy);
-  let gx = 0, gy = 0, k = 0;
-  for (let i = 0; i < n; i++) {
-    if (px[i] * dx + py[i] * dy <= lo + 2) { gx += px[i]; gy += py[i]; k++; }
-  }
-  return { angle, gx: gx / k, gy: gy / k, long };
-}
+const DEG = Math.PI / 180;
+// First-person hand rig, modelled on vanilla's ItemInHandRenderer: the right
+// hand sits at ARM_POS in view space and swings/eats with vanilla's pose
+// sequence; the held mesh then gets a fixed display transform. Flat items
+// keep their painted diagonal (handle low-left, head high-right — no per-
+// sprite axis fitting, which turned pickaxes sideways): turned past edge-on
+// so the head leans away toward the crosshair and the face shows at ~50
+// degrees, tipped 20 degrees upright. Blocks get a 45 degree turn with a
+// little forward tip so the top and two sides show.
+const ARM_POS = new THREE.Vector3(0.44, -0.45, -0.82);
+const ITEM_POS = new THREE.Vector3(1.13 / 16, 3.2 / 16, 1.13 / 16);
+const ITEM_ROT = new THREE.Euler(0, 105 * DEG, 20 * DEG);
+const ITEM_SCALE = 0.5;
+const BLOCK_ROT = new THREE.Euler(10 * DEG, 45 * DEG, 0);
+const BLOCK_SCALE = 0.26;
 
 export class Renderer {
   readonly canvas: HTMLCanvasElement;
@@ -670,6 +640,14 @@ export class Renderer {
   private heldIdleRot = new THREE.Euler(0, 0, 0);
   /** resting offset of the held mesh inside the hand group */
   private heldRestPos = new THREE.Vector3();
+  /** resting scale of the held mesh */
+  private heldScale = 1;
+  /** the held item follows the vanilla hand rig (flat items + blocks) */
+  private heldVanilla = false;
+  /** right-hand position in view space (a field so harnesses can tune it) */
+  private armPos = ARM_POS.clone();
+  private rigM = new THREE.Matrix4();
+  private rigOp = new THREE.Matrix4();
   private heldId = -1;
   /** captured-mob kind for the held item (filled catcher), drives its sprite */
   private heldMob: string | undefined = undefined;
@@ -1412,6 +1390,9 @@ export class Renderer {
     this.bowStage = -1;
     this.heldIdleRot.set(0, 0, 0);
     this.heldRestPos.set(0, 0, 0);
+    this.heldScale = 1;
+    this.heldVanilla = false;
+    this.heldGroup.scale.setScalar(1);
     if (id !== 0 && hasDef(id) && (def(id).name === 'bed' || BLOCK_SPRITE_ICONS.has(def(id).name))) {
       // the bed holds as its extruded item sprite (a real little 3/4-view bed),
       // which reads far better in hand than a textured 9/16 slab
@@ -1427,20 +1408,13 @@ export class Renderer {
     } else if (id !== 0 && hasDef(id) && def(id).block && !def(id).opaque && !def(id).solid) {
       // cutout decorations (torch, flowers): hold the tile extruded like an item
       const d = def(id);
-      const tile = this.atlas.tileCanvas(d.faces!.sides);
-      const { mesh, zc } = this.buildExtrudedItem(tile, 0.4);
-      this.heldIdleRot.set(HELD_TILT, HELD_TURN, zc);
-      mesh.rotation.copy(this.heldIdleRot);
-      this.heldMesh = mesh;
+      this.heldMesh = this.vanillaItem(new THREE.Mesh(
+        extrudeSpriteGeometry(this.atlas.tileCanvas(d.faces!.sides), 1), this.itemMaterial()));
     } else if (id !== 0 && hasShapedItemModel(id)) {
       // slabs, stairs, fences, anvils ... hold as their real little model
       const mesh = new THREE.Mesh(shapedItemGeometry(id, this.atlas)!,
         new THREE.MeshLambertMaterial({ map: this.atlas.texture, alphaTest: 0.35, vertexColors: true }));
-      mesh.scale.setScalar(0.2);
-      this.heldRestPos.set(-0.02, 0.14, 0);
-      this.heldIdleRot.set(0.3, -1.12, 0);
-      mesh.rotation.copy(this.heldIdleRot);
-      this.heldMesh = mesh;
+      this.heldMesh = this.vanillaBlock(mesh);
     } else if (id !== 0 && hasDef(id) && def(id).block) {
       const d = def(id);
       const geo = new THREE.BoxGeometry(1, 1, 1);
@@ -1464,14 +1438,7 @@ export class Renderer {
       for (let f = 0; f < 6; f++) for (let v = 0; v < 4; v++) cols.push(faceShade[f], faceShade[f], faceShade[f]);
       geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
       const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: this.atlas.texture, alphaTest: 0.35, vertexColors: true }));
-      mesh.scale.setScalar(0.2);
-      this.heldRestPos.set(-0.02, 0.14, 0);
-      // Minecraft's held block: a corner turned toward the eye (the rig sits
-      // right of the view axis, so the turn is past 45 degrees) and tipped
-      // forward so the top and two side faces all show
-      this.heldIdleRot.set(0.3, -1.12, 0);
-      mesh.rotation.copy(this.heldIdleRot);
-      this.heldMesh = mesh;
+      this.heldMesh = this.vanillaBlock(mesh);
     } else if (id === I.MOB_CATCHER || id === I.MOB_CATCHER_FILLED) {
       // the capture orb is a real little 3D ball (layered glass dome, metal
       // band, glowing button; a filled one shows its captive inside), not a
@@ -1485,7 +1452,6 @@ export class Renderer {
       const sprite = this.atlas.sprite(spriteNameFor(id, this.heldMob) ?? def(id).sprite!);
       const isBow = !!def(id).bow;
       const isShield = def(id).name === 'shield';
-      let zc = 0;
       let mesh: THREE.Mesh;
       if (sprite && isShield) {
         // the shield is held upright at the right edge, its face turned a
@@ -1500,31 +1466,18 @@ export class Renderer {
         return;
       }
       if (sprite && !isBow) {
-        const built = this.buildExtrudedItem(sprite, 0.4, 0.3);
-        mesh = built.mesh;
-        zc = built.zc;
-        // compact items (food, gems, buckets) sit higher so the whole sprite
-        // shows instead of being clipped by the bottom of the screen
-        if (!spriteAxis(sprite).long) this.heldRestPos.set(-0.03, 0.08, 0);
+        mesh = new THREE.Mesh(extrudeSpriteGeometry(sprite, 1), this.itemMaterial());
       } else if (sprite) {
         // the bow keeps its idle sprite plus Minecraft's three pulling frames;
         // the draw pose swaps between them as the string comes back
         const frames = ['bow', 'bow_pulling_0', 'bow_pulling_1', 'bow_pulling_2'];
         this.bowGeos = frames.map((n) => extrudeSpriteGeometry(this.atlas.sprite(n) ?? sprite, 0.36));
         mesh = new THREE.Mesh(this.bowGeos[0], new THREE.MeshLambertMaterial({ vertexColors: true }));
-        zc = Math.PI / 4 - spriteAxis(sprite).angle;
-        this.heldRestPos.set(-0.1, 0.13, -0.04);
       } else {
-        mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.4), new THREE.MeshBasicMaterial({ color: 0xff00ff }));
+        mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ color: 0xff00ff }));
       }
-      // Minecraft first-person grip: the sprite's long axis is first spun to a
-      // 45-degree diagonal (zc), then the item is turned ~135 degrees about the
-      // vertical so its head points up, to the left and away from the player
-      // with the handle in the lower-right fist.
-      this.heldIdleRot.set(HELD_TILT, HELD_TURN, zc);
-
-      mesh.rotation.copy(this.heldIdleRot);
-      this.heldMesh = mesh;
+      this.heldMesh = this.vanillaItem(mesh);
+      if (isBow) { this.heldScale = ITEM_SCALE / 0.36; mesh.scale.setScalar(this.heldScale); }
     } else {
       // bare arm: a Steve-sleeve box poking in from the lower right
       const arm = new THREE.Group();
@@ -1592,6 +1545,7 @@ export class Renderer {
       const shake = pull >= 0.9 ? Math.sin(this.bobT * 9) * 0.004 : 0;
       this.heldGroup.position.set(0.17 + shake, -0.17 + bob * 0.1 - lower * 0.5, -0.56 + pull * 0.03);
       this.heldGroup.rotation.set(0, 0, 0);
+      this.heldGroup.scale.setScalar(1);
       if (mesh) {
         mesh.scale.setScalar(0.8 + pull * 0.05);
         mesh.rotation.set(-0.42, -0.52, 0.02);
@@ -1603,17 +1557,32 @@ export class Renderer {
     if (this.bowGeos.length && this.heldMesh) {
       const mesh = this.heldMesh as THREE.Mesh;
       if (this.bowStage !== 0) { mesh.geometry = this.bowGeos[0]; this.bowStage = 0; }
-      mesh.scale.setScalar(1);
+      mesh.scale.setScalar(this.heldScale);
       mesh.rotation.copy(this.heldIdleRot);
       mesh.position.copy(this.heldRestPos);
     }
 
     // eating: lift the food toward the mouth and nudge it with each chew
     this.eatAmt += (this.eatTarget - this.eatAmt) * Math.min(1, dt * 10);
+    if (this.eatAmt > 0.01 && this.heldVanilla) {
+      // vanilla applyEatTransform: swing the food in front of the mouth and
+      // bob it with each bite
+      this.eatPhase += dt * 22;
+      const e = this.eatAmt;
+      const bite = Math.abs(Math.cos(this.eatPhase * 0.7)) * 0.1 * e;
+      this.rigBegin();
+      this.rigT(0, bite + bob, 0);
+      this.rigT(0.6 * e, -0.5 * e, 0);
+      this.rigR('y', 90 * e); this.rigR('x', 10 * e); this.rigR('z', 30 * e);
+      this.rigT(this.armPos.x, this.armPos.y - lower * 1.5, this.armPos.z);
+      this.rigEnd();
+      return;
+    }
     if (this.eatAmt > 0.01) {
       this.eatPhase += dt * 22;
       const e = this.eatAmt;
       const chew = Math.sin(this.eatPhase) * 0.05 * e;            // quick bite jitter
+      this.heldGroup.scale.setScalar(1);
       this.heldGroup.position.set(
         0.36 - e * 0.2,
         -0.34 + bob - lower + e * 0.1 + chew,                     // rise toward the face
@@ -1632,6 +1601,7 @@ export class Renderer {
     this.blockAmt += (this.blockTarget - this.blockAmt) * Math.min(1, dt * 14);
     if (this.blockAmt > 0.01) {
       const b = this.blockAmt;
+      this.heldGroup.scale.setScalar(1);
       this.heldGroup.position.set(0.42 - b * 0.4, -0.36 + bob - lower - b * 0.04, -0.62 - b * 0.3);
       this.heldGroup.rotation.set(0, 0.25 + b * 0.15, 0);
       if (this.heldMesh) {
@@ -1641,7 +1611,22 @@ export class Renderer {
       return;
     }
 
+    if (this.heldVanilla) {
+      // vanilla renderArmWithItem: swing offset, arm position, then the
+      // attack arc (a 45 degree yaw in, roll + an 80 degree chop, yaw back)
+      const sq = Math.sqrt(s);
+      this.rigBegin();
+      this.rigT(-0.4 * Math.sin(sq * Math.PI) + bobX, 0.2 * Math.sin(sq * Math.PI * 2) + bob, -0.2 * Math.sin(s * Math.PI));
+      this.rigT(this.armPos.x, this.armPos.y - lower * 1.5, this.armPos.z);
+      this.rigR('y', 45 - 20 * Math.sin(s * s * Math.PI));
+      this.rigR('z', -20 * sw);
+      this.rigR('x', -80 * sw);
+      this.rigR('y', -45);
+      this.rigEnd();
+      return;
+    }
     // rest pose: lower-right of the view, like Minecraft's right hand
+    this.heldGroup.scale.setScalar(1);
     this.heldGroup.position.set(
       0.45 - sw * 0.22 + bobX,
       -0.4 + bob + sw2 * 0.06 - sw * 0.1 - lower,
@@ -1712,27 +1697,55 @@ export class Renderer {
     rig.halo.scale.setScalar(rig.R * (1 + pulse * 0.25 + flare * 0.8));
   }
 
-  /** Extruded pixel item with its pivot moved to the grip (the low end of the
-   *  sprite's long axis). Returns the in-plane spin `zc` that lays that axis on
-   *  the 45-degree diagonal Minecraft's own item sprites use, so vertical,
-   *  horizontal and diagonal sprites all sit the same way in the fist. */
-  private buildExtrudedItem(sprite: HTMLCanvasElement, size: number, roundSize = size): { mesh: THREE.Mesh; zc: number } {
+  /** Lambert (or a little Phong sheen for metal tools) with vertex colours. */
+  private itemMaterial(): THREE.Material {
     const name = this.heldId !== 0 && hasDef(this.heldId) ? def(this.heldId).name : '';
     // golden apples/carrots are food, not metal
     const isMetallic = !(hasDef(this.heldId) && def(this.heldId).food) &&
-      (name.includes('iron') || name.includes('gold') || name.includes('diamond'));
+      (name.includes('iron') || name.includes('gold') || name.includes('diamond') || name.includes('netherite'));
     // Lambert/Phong with vertex colors: lit by the overlay lights (a metallic
     // PBR material rendered black here — there is no environment to reflect)
-    const mat = isMetallic
+    return isMetallic
       ? new THREE.MeshPhongMaterial({ vertexColors: true, shininess: 60, specular: 0x4a4a4a })
       : new THREE.MeshLambertMaterial({ vertexColors: true });
-    const ax = spriteAxis(sprite);
-    // long tools/weapons hold large; compact items (food, gems) smaller
-    if (!ax.long) size = roundSize;
-    const geo = extrudeSpriteGeometry(sprite, size);
-    const s = size / sprite.width;
-    geo.translate(-ax.gx * s, -ax.gy * s, 0);
-    return { mesh: new THREE.Mesh(geo, mat), zc: Math.PI / 4 - ax.angle };
+  }
+
+  /** Pose a 1-unit flat item with vanilla's first-person display transform. */
+  private vanillaItem(mesh: THREE.Mesh): THREE.Mesh {
+    this.heldVanilla = true;
+    this.heldRestPos.copy(ITEM_POS);
+    this.heldIdleRot.copy(ITEM_ROT);
+    this.heldScale = ITEM_SCALE;
+    mesh.rotation.copy(ITEM_ROT);
+    mesh.scale.setScalar(ITEM_SCALE);
+    return mesh;
+  }
+
+  /** Pose a 1-unit block model with vanilla's block display transform. */
+  private vanillaBlock(mesh: THREE.Mesh): THREE.Mesh {
+    this.heldVanilla = true;
+    this.heldRestPos.set(0, 0.1, 0); // sit clear of the bottom of the view
+    this.heldIdleRot.copy(BLOCK_ROT);
+    this.heldScale = BLOCK_SCALE;
+    mesh.rotation.copy(BLOCK_ROT);
+    mesh.scale.setScalar(BLOCK_SCALE);
+    return mesh;
+  }
+
+  // PoseStack-style composition for the hand rig: ops multiply on the right,
+  // exactly like ItemInHandRenderer's translate/mulPose sequence.
+  private rigBegin(): void { this.rigM.identity(); }
+  private rigT(x: number, y: number, z: number): void { this.rigM.multiply(this.rigOp.makeTranslation(x, y, z)); }
+  private rigR(axis: 'x' | 'y' | 'z', deg: number): void {
+    const a = deg * DEG;
+    this.rigM.multiply(axis === 'x' ? this.rigOp.makeRotationX(a) : axis === 'y' ? this.rigOp.makeRotationY(a) : this.rigOp.makeRotationZ(a));
+  }
+  private rigEnd(): void {
+    this.rigM.decompose(this.heldGroup.position, this.heldGroup.quaternion, this.heldGroup.scale);
+    if (this.heldMesh) {
+      this.heldMesh.position.copy(this.heldRestPos);
+      this.heldMesh.rotation.copy(this.heldIdleRot);
+    }
   }
 
   /** A held capture orb (see CatcherOrb): a filled one carries a little
