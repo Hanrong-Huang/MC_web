@@ -1,0 +1,16 @@
+{
+  "name": "Voxelcraft",
+  "short_name": "Voxelcraft",
+  "description": "A from-scratch Minecraft-style sandbox in the browser.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "display_override": ["fullscreen", "standalone"],
+  "orientation": "landscape",
+  "background_color": "#2a1e15",
+  "theme_color": "#3a2a1d",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

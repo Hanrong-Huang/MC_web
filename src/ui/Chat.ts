@@ -38,17 +38,19 @@ export class Chat {
     this.input.maxLength = 256;
     this.input.placeholder = 'Say something… (/list, /help)';
     this.input.setAttribute('aria-label', 'Chat message');
+    // send / close buttons: a phone keyboard has no Esc (and Enter may say "Go")
+    const send = el('button', 'chat-btn chat-send', this.inputWrap);
+    send.type = 'button'; send.textContent = '➤'; send.title = 'Send'; send.setAttribute('aria-label', 'Send');
+    send.addEventListener('pointerdown', (e) => { e.preventDefault(); this.submit(); });
+    const x = el('button', 'chat-btn chat-close', this.inputWrap);
+    x.type = 'button'; x.textContent = '✕'; x.title = 'Close'; x.setAttribute('aria-label', 'Close chat');
+    x.addEventListener('pointerdown', (e) => { e.preventDefault(); this.close(); });
+    this.input.enterKeyHint = 'send';
     this.input.addEventListener('keydown', (e) => {
       e.stopPropagation();
       if (e.key === 'Enter') {
         e.preventDefault();
-        const text = this.input.value.trim();
-        if (text) {
-          this.history.unshift(text);
-          if (this.history.length > 50) this.history.pop();
-          this.onSend?.(text);
-        }
-        this.close();
+        this.submit();
       } else if (e.key === 'Escape') {
         e.preventDefault();
         this.close();
@@ -61,6 +63,16 @@ export class Chat {
       }
     });
     this.list = el('div', 'player-list hidden', parent);
+  }
+
+  private submit(): void {
+    const text = this.input.value.trim();
+    if (text) {
+      this.history.unshift(text);
+      if (this.history.length > 50) this.history.pop();
+      this.onSend?.(text);
+    }
+    this.close();
   }
 
   get isOpen(): boolean { return !this.inputWrap.classList.contains('hidden'); }
@@ -76,7 +88,9 @@ export class Chat {
     while (this.lines.length > 100) this.lines.shift()!.el.remove();
   }
 
-  open(onSend: (text: string) => void, onClose: () => void, prefill = ''): void {
+  /** `focusNow`: focus inside the opening tap (a phone only raises its
+   *  keyboard during a user gesture); a key-opened chat waits a tick instead. */
+  open(onSend: (text: string) => void, onClose: () => void, prefill = '', focusNow = false): void {
     this.onSend = onSend;
     this.onClose = onClose;
     this.histIdx = -1;
@@ -84,7 +98,8 @@ export class Chat {
     this.root.classList.add('open');
     this.input.value = prefill;
     // after the key that opened chat has been handled, so it isn't typed in
-    setTimeout(() => this.input.focus({ preventScroll: true }), 0);
+    if (focusNow) this.input.focus({ preventScroll: true });
+    else setTimeout(() => this.input.focus({ preventScroll: true }), 0);
   }
 
   close(): void {

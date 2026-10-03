@@ -10,7 +10,8 @@ import { def, CREATIVE_ITEMS, I, B, spriteNameFor, mobLabel, enchantLabel, DOOR_
 import { SaveSummary, SlotData } from '../engine/Persistence';
 import { AudioEngine, SfxName, MobVoice } from '../engine/Audio';
 import type { GameMode } from '../engine/Player';
-import { isTouchDevice } from './TouchControls';
+import { touchUI, onInputMode, enterFullscreen, exitFullscreen, needsHomeScreen } from './TouchControls';
+import { getControls, setControls } from '../engine/ControlsSettings';
 import { ACTIONS, Action, RESERVED, bindingFor, keyLabel, keySettings, normalizeCode, resetBindings, setBinding, setSneakToggle } from '../engine/Keybinds';
 import {
   pixelText, scaled, countCanvas, drawLogo, heartIcon, shankIcon, armorIcon, bubbleIcon,
@@ -64,6 +65,9 @@ export interface PauseHandlers {
   onTouchLook: (mult: number) => void;
   mouseSens: () => number;
   touchLook: () => number;
+  onAdvancements: () => void;
+  onScreenshot: () => void;
+  onHideHud: () => void;
 }
 
 /** Client-side display preferences (persisted in localStorage). */
@@ -257,8 +261,15 @@ export class HUD {
   private lastHotbarSel = -1;
   /** the white selection frame that slides along the hotbar */
   private hotbarSelEl: HTMLElement = el('div', 'hotbar-sel');
+  /** touch: the hotbar slot a finger is resting on (hold = drop), or -1 */
+  private hotbarHold = -1;
+  /** the held slot has dropped one and is counting down to the whole stack */
+  private hotbarHoldAll = false;
+  private hotbarHoldRaf = 0;
   private healUntil = 0;
   private hoverSlot: HoverSlot | null = null;
+  /** last touch tap on a slot, for double-tap quick-move */
+  private lastSlotTap: { arr: Slot[]; i: number; t: number; picked: boolean } | null = null;
   private recipeFilter: RecipeFilter = 'all';
   private recipeSearchQuery = '';
   private recipeSearchFocused = false;
@@ -314,7 +325,16 @@ export class HUD {
     this.airEl = el('div', 'stat-row', this.statsEl); this.airEl.id = 'air';
     this.heartsEl = el('div', 'stat-row', this.statsEl); this.heartsEl.id = 'hearts';
     this.hungerEl = el('div', 'stat-row', this.statsEl); this.hungerEl.id = 'hunger';
-    this.hotbarEl = el('div', '', this.bottomEl); this.hotbarEl.id = 'hotbar';
+    const hotbarWrap = el('div', '', this.bottomEl); hotbarWrap.id = 'hotbar-wrap';
+    this.hotbarEl = el('div', '', hotbarWrap); this.hotbarEl.id = 'hotbar';
+    this.wireHotbar();
+    // touch: Bedrock's "…" at the end of the hotbar opens the inventory
+    const more = el('button', 'hotbar-more', hotbarWrap) as HTMLButtonElement;
+    more.type = 'button';
+    more.setAttribute('aria-label', 'Inventory');
+    more.title = 'Inventory';
+    for (let i = 0; i < 3; i++) el('i', '', more);
+    more.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onHotbarMore(); });
     this.debugEl = el('div', 'hidden', this.hud); this.debugEl.id = 'debug';
     this.fpsEl = el('div', 'hidden', this.hud); this.fpsEl.id = 'fps';
     this.subsEl = el('div', '', this.hud); this.subsEl.id = 'subtitles';
@@ -343,6 +363,22 @@ export class HUD {
     this.pauseEl = el('div', 'overlay hidden', root); this.pauseEl.id = 'pause-overlay';
     this.deathEl = el('div', 'overlay hidden', root); this.deathEl.id = 'death-overlay';
     this.containerEl = el('div', 'overlay hidden', root); this.containerEl.id = 'container-screen';
+    // vanilla: a held stack let go of outside the panels is thrown — a left
+    // click / tap throws all of it, a right click one (a finger's only way to
+    // drop from a menu; Q over a slot needs a keyboard)
+    this.containerEl.addEventListener('pointerdown', (e) => {
+      const t = e.target as HTMLElement;
+      if (!this.view || !this.cursor || (t !== this.containerEl && !t.classList.contains('ctr-wrap'))) return;
+      e.preventDefault();
+      const c = this.cursor;
+      const n = e.button === 2 ? 1 : c.count;
+      this.onDropLeftover(c.id, n, c.dur, c.mob, c.ench);
+      c.count -= n;
+      if (c.count <= 0) this.cursor = null;
+      this.audio.play('whoosh');
+      this.renderContainer(this.viewMode);
+      this.renderCursor();
+    });
     this.loadingEl = el('div', 'overlay hidden', root); this.loadingEl.id = 'loading';
     this.toastEl = el('div', '', root); this.toastEl.id = 'toast';
     this.toastEl.setAttribute('role', 'status');
@@ -398,6 +434,7 @@ export class HUD {
     document.documentElement.style.setProperty('--btn-noise', `url(${this.noiseTile()})`);
     this.applyGuiScale();
     window.addEventListener('resize', () => this.applyGuiScale());
+    onInputMode(() => this.applyGuiScale()); // the touch layout caps it for the "…" button
   }
 
   private followCursor: (x: number, y: number) => void = () => {};
@@ -434,10 +471,14 @@ export class HUD {
     if (g === 3) return 1.25;
     // auto: shrink on short screens (landscape phones), grow on big monitors
     const h = window.innerHeight, w = window.innerWidth;
-    if (h < 460 || w < 420) return 0.8;
-    if (h < 640) return 0.9;
-    if (h > 1150 && w > 1700) return 1.25;
-    return 1;
+    let v = 1;
+    if (h < 460 || w < 420) v = 0.8;
+    else if (h < 640) v = 0.9;
+    else if (h > 1150 && w > 1700) v = 1.25;
+    // touch: the centred hotbar (9 × 46 px) plus the "…" hanging off its
+    // right end must fit a narrow portrait phone
+    if (touchUI()) v = Math.min(v, (w / 2 - 8) / 268);
+    return v;
   }
 
   private applyGuiScale(): void {
@@ -681,10 +722,11 @@ ${seedLine.textContent}`;
 
     // concise control hints (full details live in F3 / tooltips)
     const help = el('div', 'menu-help', inner);
-    if (isTouchDevice()) {
+    if (touchUI()) {
       help.innerHTML =
-        '<b>Left stick</b> move · <b>Drag right</b> look · <b>Jump / Sneak</b> buttons<br>' +
-        '<b>Dig</b> break · <b>Place</b> use · tap hotbar to switch · <b>Pause</b> top-left';
+        '<b>Left stick</b> move (push to the rim to sprint) · <b>Drag</b> look · <b>Jump / Sneak</b> buttons<br>' +
+        '<b>Tap</b> place / use / hit · <b>Hold</b> break · hold a hotbar slot, let go to drop · <b>…</b> inventory' +
+        (needsHomeScreen() ? '<br>Fullscreen on iPhone: <b>Share → Add to Home Screen</b>, then play from the icon' : '');
     } else {
       help.innerHTML =
         '<b>WASD</b> move · <b>Space</b> jump · <b>Shift</b> sneak · <b>W W</b> sprint · <b>F</b> fly · <b>E</b> inventory<br>' +
@@ -781,12 +823,32 @@ ${seedLine.textContent}`;
     };
     document.addEventListener('keydown', this.controlsKey, true);
     ov.addEventListener('pointerdown', (e) => { if (e.target === ov) done(); });
-    const touch = isTouchDevice();
+    const touch = touchUI();
     const K = (a: Action): string => keyLabel(bindingFor(a));
     const groups: [string, [string, string][]][] = touch ? [
-      ['Moving', [['Left stick', 'Walk (push far to sprint)'], ['▲', 'Jump / swim up'], ['▼', 'Sneak, dismount'], ['Fly', 'Toggle flight']]],
-      ['Looking & acting', [['Drag right side', 'Look around'], ['Dig', 'Hold to break blocks / attack'], ['Place', 'Place blocks, use items, interact']]],
-      ['Menus', [['Hotbar', 'Tap a slot to select it'], ['Items', 'Inventory + crafting'], ['Menu', 'Options, save, quit']]],
+      ['Moving', [
+        [getControls().touchScheme === 'dpad' ? 'D-pad' : 'Left stick', getControls().touchScheme === 'dpad' ? 'Walk · double-tap ▲ to sprint' : 'Walk · push to the rim to sprint'],
+        ['Jump', 'Jump · swim / fly up · double-tap: fly (creative)'],
+        ['Sneak', 'Toggle sneaking · descend while flying · dismount'],
+        ['Wings', 'Toggle flight']]],
+      ['Looking & acting', [
+        ['Drag', 'Look around'],
+        ['Tap', 'Place a block · use an item · open doors and chests · hit a mob'],
+        ['Hold', 'Break blocks · keep attacking · eat · draw a bow'],
+        ['Mob button', 'Ride, trade, feed or tame the mob in the middle'],
+        ['Pick', getControls().touchAim === 'tap' ? 'Pick block: press, then tap a block' : 'Pick the block at the crosshair']]],
+      ['Hotbar & screens', [
+        ['Tap / slide', 'Choose a hotbar slot'],
+        ['Hold a slot', 'Let go when white: drop one · when red: the whole stack'],
+        ['…', 'Inventory & crafting'],
+        ['Top left', 'Pause · chat · flight · pick · fullscreen'],
+        ['Pause menu', 'Advancements · screenshot · hide HUD']]],
+      ['In menus', [
+        ['Tap', 'Pick up / put down a stack'],
+        ['Hold', 'Split a stack / place one'],
+        ['Double-tap', 'Quick-move a stack'],
+        ['Hold result', 'Craft as many as possible'],
+        ['Tap outside', 'Throw the stack you hold']]],
     ] : [
       ['Movement', [
         [[K('forward'), K('left'), K('back'), K('right')].join(' '), 'Walk'],
@@ -799,7 +861,7 @@ ${seedLine.textContent}`;
         [K('chat'), 'Chat'], [K('players'), 'Player list (hold)']]],
       ['Screens', [[K('inventory'), 'Inventory & crafting'], [K('advancements'), 'Advancements'], ['Esc', 'Pause · close menus'], [K('controls'), 'This controls page']]],
       ['Display', [['F1', 'Hide the HUD'], ['F2', 'Save a screenshot'], ['F3', 'Debug info & coordinates']]],
-      ['In menus', [['Shift + click', 'Quick-move a stack'], ['Right click', 'Split a stack / place one'], ['1 – 9 over slot', 'Swap with hotbar'], ['Q over slot', 'Drop it']]],
+      ['In menus', [['Shift + click', 'Quick-move a stack'], ['Right click', 'Split a stack / place one'], ['1 – 9 over slot', 'Swap with hotbar'], ['Q over slot', 'Drop it'], ['Click outside', 'Throw the held stack (right click: one)']]],
     ];
     const grid = el('div', 'controls-grid', panel);
     for (const [name, rows] of groups) {
@@ -820,6 +882,11 @@ ${seedLine.textContent}`;
 
   /** Tapping a hotbar slot selects it (mobile-friendly; harmless on desktop). */
   onHotbarSelect: (i: number) => void = () => {};
+  /** Touch: a finger rested on hotbar slot `i`, then lifted: throw one item,
+   *  or (held past the red fill) the whole stack — desktop's Q / Ctrl+Q. */
+  onHotbarDrop: (i: number, all: boolean) => void = () => {};
+  /** Touch: the "…" button after the hotbar (opens the inventory). */
+  onHotbarMore: () => void = () => {};
   /** Close button on a container panel (so touch devices can close it). */
   onCloseContainer: () => void = () => {};
 
@@ -830,16 +897,92 @@ ${seedLine.textContent}`;
     for (const c of [...this.hotbarEl.children]) if (c !== this.hotbarSelEl) c.remove();
     for (let i = 0; i < 9; i++) {
       const picked = selChanged && i === inv.selected;
-      const s = el('div', `hotbar-slot${i === inv.selected ? ' selected' : ''}${picked ? ' picked' : ''}`, this.hotbarEl);
+      const s = el('div', `hotbar-slot${i === inv.selected ? ' selected' : ''}${picked ? ' picked' : ''}${i === this.hotbarHold ? (this.hotbarHoldAll ? ' holding holding-all' : ' holding') : ''}`, this.hotbarEl);
+      s.dataset.i = String(i);
       const item = inv.slots[i];
       if (item) {
         s.appendChild(this.iconCanvas(item));
         if (item.count > 1 && mode !== 'creative') this.countEl(s, item.count);
       }
-      s.addEventListener('pointerdown', (e) => { e.preventDefault(); this.onHotbarSelect(i); });
     }
     this.hotbarEl.appendChild(this.hotbarSelEl);
     this.placeHotbarSel();
+  }
+
+  /** Hotbar pointer handling, on the persistent bar (slots are rebuilt on
+   *  every inventory change, which would drop a per-slot timer): tap selects;
+   *  on touch, sliding along the bar scrolls the selection and resting on a
+   *  slot throws on release: the slot fills white (0.55 s: one item, desktop
+   *  Q), then red (1.3 s: the whole stack, Ctrl+Q). Judged by the press and
+   *  lift event timestamps — a slow phone can hand a lift over late, and a
+   *  timer or frame deciding "still held" would then throw the stack anyway.
+   *  A touch that slid to another slot, or was cancelled, throws nothing. */
+  private wireHotbar(): void {
+    const bar = this.hotbarEl;
+    let id = -1, cur = -1;
+    const slotAt = (x: number, y: number): number => {
+      const hit = document.elementFromPoint(x, y)?.closest('.hotbar-slot') as HTMLElement | null;
+      return hit && bar.contains(hit) ? Number(hit.dataset.i) : -1;
+    };
+    const mark = (i: number, all = false): void => {
+      this.hotbarHold = i;
+      this.hotbarHoldAll = all;
+      for (const c of bar.querySelectorAll('.hotbar-slot')) {
+        const on = Number((c as HTMLElement).dataset.i) === i;
+        c.classList.toggle('holding', on);
+        c.classList.toggle('holding-all', on && all);
+      }
+    };
+    // frames only drive the white → red fill; the throw is decided on release
+    let t0 = 0;
+    const stop = (): void => {
+      if (this.hotbarHoldRaf) { cancelAnimationFrame(this.hotbarHoldRaf); this.hotbarHoldRaf = 0; }
+      mark(-1);
+    };
+    const tick = (): void => {
+      this.hotbarHoldRaf = 0;
+      const i = this.hotbarHold;
+      if (i < 0) return;
+      if (performance.now() - t0 >= 550) { mark(i, true); return; }
+      this.hotbarHoldRaf = requestAnimationFrame(tick);
+    };
+    const arm = (i: number, at: number): void => {
+      stop();
+      mark(i);
+      t0 = at;
+      this.hotbarHoldRaf = requestAnimationFrame(tick);
+    };
+    bar.addEventListener('pointerdown', (e) => {
+      const i = slotAt(e.clientX, e.clientY);
+      if (i < 0) return;
+      e.preventDefault();
+      if (e.button !== 0) return;
+      this.onHotbarSelect(i);
+      if (e.pointerType !== 'touch') return;
+      id = e.pointerId;
+      cur = i;
+      bar.setPointerCapture(e.pointerId);
+      arm(i, e.timeStamp);
+    });
+    bar.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== id) return;
+      const i = slotAt(e.clientX, e.clientY);
+      // a slide only selects: once the finger has left its first slot this
+      // touch never drops (a slow swipe must not throw stacks on the way)
+      if (i >= 0 && i !== cur) { cur = i; this.onHotbarSelect(i); stop(); }
+    });
+    const end = (e: PointerEvent): void => {
+      if (e.pointerId !== id) return;
+      id = -1;
+      const i = this.hotbarHold; // -1 once the touch slid off its first slot
+      stop();
+      if (i < 0 || e.type !== 'pointerup') return;
+      const held = e.timeStamp - t0;
+      if (held >= 1300) this.onHotbarDrop(i, true);
+      else if (held >= 550) this.onHotbarDrop(i, false);
+    };
+    bar.addEventListener('pointerup', end);
+    bar.addEventListener('pointercancel', end);
   }
 
   private placeHotbarSel(): void {
@@ -1454,7 +1597,15 @@ ${seedLine.textContent}`;
       setTimeout(() => (this.pauseOptsEl?.querySelector('button, input') as HTMLElement | null)?.focus({ preventScroll: true }), 0);
     }, 'wide');
     void opts;
-    this.pauseButton(col, 'Controls…', () => this.toggleControls(), 'wide');
+    // Controls + Advancements side by side (the latter is L on a keyboard; on
+    // a phone this is the way in, as in Bedrock's pause menu)
+    const pair = el('div', 'pause-pair', col);
+    this.pauseButton(pair, 'Controls…', () => this.toggleControls());
+    this.pauseButton(pair, 'Advancements', () => this.pauseH?.onAdvancements());
+    // F2 / F1 as buttons (the only way on a phone)
+    const pair2 = el('div', 'pause-pair', col);
+    this.pauseButton(pair2, 'Screenshot', () => this.pauseH?.onScreenshot());
+    this.pauseButton(pair2, 'Hide HUD', () => this.pauseH?.onHideHud());
     const save = this.pauseButton(col, 'Save Game', () => {
       save.textContent = 'Saving...';
       save.disabled = true;
@@ -1543,6 +1694,11 @@ ${seedLine.textContent}`;
       this.syncPauseUi();
     });
     this.pauseSyncers.push(() => { sneakBtn.textContent = `Sneak: ${keySettings().sneakToggle ? 'Toggle' : 'Hold'}`; });
+    this.pauseButton(grid, 'Touch Controls…', () => {
+      optsEl.classList.add('hidden');
+      this.buildTouchSettings(optsEl);
+      this.audio.ui('swipe');
+    }, 'span2');
 
     // vanilla-style tooltips: a description line for whatever is hovered/focused
     const HINTS = [
@@ -1562,6 +1718,7 @@ ${seedLine.textContent}`;
       'How fast the camera turns when dragging on a touch screen.',
       'Change which key does what.',
       'Hold: sneak while the key is held. Toggle: press once to crouch, again to stand.',
+      'Phone and tablet layout: stick or D-pad, tap at the finger or the crosshair, button size.',
     ];
     const hint = el('div', 'opt-hint', optsEl);
     const idle = 'Hover an option to see what it does.';
@@ -1657,6 +1814,58 @@ ${seedLine.textContent}`;
       back.classList.remove('hidden');
       this.audio.ui('swipe');
     }, 'wide');
+  }
+
+  /** Options → Touch Controls: Bedrock's touch settings (movement scheme,
+   *  where a tap acts, button size/opacity, auto-jump, fullscreen). */
+  private buildTouchSettings(back: HTMLElement): void {
+    this.keyBindsCleanup?.();
+    const page = el('div', 'pause-screen touch-opts', this.pauseEl);
+    const t = el('h2', 'pause-title', page);
+    t.appendChild(scaled(pixelText('Touch Controls', '#ffffff'), 3));
+    t.setAttribute('aria-label', 'Touch Controls');
+    const grid = el('div', 'opt-grid', page);
+    const keep = this.pauseSyncers.length; // the page's sliders sync only while it lives
+    const toggle = (label: () => string, flip: () => void, cls = ''): void => {
+      const b = this.pauseButton(grid, '', () => { flip(); this.syncPauseUi(); }, cls);
+      this.pauseSyncers.push(() => { b.textContent = label(); });
+    };
+    toggle(() => `Movement: ${getControls().touchScheme === 'dpad' ? 'D-pad' : 'Joystick'}`,
+      () => setControls({ touchScheme: getControls().touchScheme === 'dpad' ? 'joystick' : 'dpad' }));
+    toggle(() => `Tap Acts: ${getControls().touchAim === 'tap' ? 'At Finger' : 'At Crosshair'}`,
+      () => setControls({ touchAim: getControls().touchAim === 'tap' ? 'crosshair' : 'tap' }));
+    this.mcSlider(grid, 70, 150, 5, () => Math.round(getControls().touchSize * 100),
+      (v) => `Button Size: ${v}%`, (v) => setControls({ touchSize: v / 100 }));
+    this.mcSlider(grid, 25, 100, 5, () => Math.round(getControls().touchOpacity * 100),
+      (v) => `Button Opacity: ${v}%`, (v) => setControls({ touchOpacity: v / 100 }));
+    this.mcSlider(grid, 60, 220, 5, () => Math.round(getControls().touchLook * 100),
+      (v) => `Look Speed: ${v}%`, (v) => setControls({ touchLook: v / 100 }), 'span2');
+    toggle(() => `Auto-Jump: ${getControls().autoJump ? 'ON' : 'OFF'}`,
+      () => { setControls({ autoJump: !getControls().autoJump }); this.audio.ui(getControls().autoJump ? 'toggleOn' : 'toggleOff'); });
+    toggle(() => needsHomeScreen() ? 'Fullscreen: Add to Home Screen' : `Fullscreen: ${getControls().fullscreen ? 'ON' : 'OFF'}`,
+      () => {
+        const on = !getControls().fullscreen;
+        setControls({ fullscreen: on });
+        this.audio.ui(on ? 'toggleOn' : 'toggleOff');
+        if (on) enterFullscreen(); else exitFullscreen(); // this click is a user gesture
+      });
+    toggle(() => `Show Coordinates: ${this.isDebugVisible() ? 'ON' : 'OFF'}`,
+      () => this.setDebugVisible(!this.isDebugVisible()), 'span2');
+    const hint = el('div', 'opt-hint on', page);
+    this.pauseSyncers.push(() => {
+      hint.textContent = getControls().touchAim === 'tap'
+        ? 'Tap where you want to place or use; hold where you want to break. Drag anywhere to look.'
+        : 'Aim with the crosshair; tap anywhere to place or use, hold to break.';
+    });
+    const col = el('div', 'menu-col pause-col', page);
+    this.keyBindsCleanup = () => { this.pauseSyncers.length = keep; page.remove(); this.keyBindsCleanup = null; };
+    this.pauseButton(col, 'Done', () => {
+      this.keyBindsCleanup?.();
+      back.classList.remove('hidden');
+      this.audio.ui('swipe');
+      this.syncPauseUi();
+    }, 'wide');
+    this.syncPauseUi();
   }
 
   private syncPauseUi(): void {
@@ -2153,7 +2362,9 @@ ${seedLine.textContent}`;
           pressTimer = null;
           longFired = true;
           s.classList.remove('pressing');
-          onClick(2, e.shiftKey);
+          // holding a result slot takes all of it (a touch shift-click: craft
+          // as many as fit / empty the furnace); elsewhere it splits a stack
+          onClick(2, e.shiftKey || /\bresult\b/.test(extra));
         }, 480);
       } else {
         mouseLmbPending = true;
@@ -2164,7 +2375,21 @@ ${seedLine.textContent}`;
       s.classList.remove('pressing');
       if (e.pointerType === 'touch') {
         cancelPress();
-        if (!longFired) onClick(0, e.shiftKey);
+        if (!longFired) {
+          // double-tap = quick-move (a touch shift-click): the first tap picked
+          // the stack up, so put it back and send it across
+          const now = e.timeStamp; // event time: a slow frame between taps still counts
+          const lt = this.lastSlotTap;
+          if (hover && lt && lt.arr === hover.arr && lt.i === hover.i && lt.picked && now - lt.t < 350) {
+            this.lastSlotTap = null;
+            onClick(0, false);
+            onClick(0, true);
+          } else {
+            const picked = !this.cursor && !!item;
+            onClick(0, e.shiftKey);
+            this.lastSlotTap = hover ? { arr: hover.arr, i: hover.i, t: now, picked } : null;
+          }
+        }
         longFired = false;
         return;
       }

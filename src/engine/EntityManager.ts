@@ -4635,6 +4635,40 @@ export class EntityManager {
     return null;
   }
 
+  /** What a right-click on `e` holding `heldId` would do, as a short label for
+   *  the touch context button (Bedrock's "Ride" / "Feed" / "Trade"), or null
+   *  when it would do nothing. Mirrors interactMob (and Player's milking)
+   *  without side effects. */
+  interactLabel(e: Entity, heldId: number): string | null {
+    if (e.kind === 'minecart') return e.ridden ? null : 'Ride';
+    if (e.remote && e.tamed) return null; // someone else's pet
+    if (this.isPet(e)) return e.sitting ? 'Follow' : 'Stay';
+    if (e.kind === 'cow' && heldId === I.BUCKET && !e.baby) return 'Milk';
+    if (e.kind === 'piglin' && heldId === I.GOLD_INGOT && !e.baby && e.admireT <= 0 && !e.tamed) return 'Barter';
+    if (e.kind === 'strider' && !e.baby) {
+      if (heldId === I.SADDLE && !e.saddled) return 'Saddle';
+      if (e.saddled && !this.canBreed(e, heldId)) return 'Ride';
+    }
+    const shears = (I as unknown as Record<string, number | undefined>).SHEARS;
+    if (e.kind === 'sheep' && shears !== undefined && heldId === shears && !e.sheared && !e.baby) return 'Shear';
+    if (this.canBreed(e, heldId)) return 'Feed';
+    if (e.kind === 'wolf') {
+      if (heldId === I.BONE && !e.tamed) return 'Tame';
+      return e.tamed ? (e.sitting ? 'Stand' : 'Sit') : null;
+    }
+    if (e.kind === 'cat') {
+      if ((heldId === I.RAW_FISH || heldId === I.COOKED_FISH) && !e.tamed) return 'Tame';
+      return e.tamed ? (e.sitting ? 'Stand' : 'Sit') : null;
+    }
+    if (e.kind === 'horse') {
+      if (e.tamed && heldId === I.SADDLE && !e.saddled) return 'Saddle';
+      if (e.tamed && heldId === I.HORSE_ARMOR && e.armorTier === 0) return 'Equip';
+      return e.ridden ? null : 'Ride';
+    }
+    if (e.kind === 'villager') return 'Trade';
+    return null;
+  }
+
   /** Breeding food: the fixed table, plus the nether fungi (registered by the
    *  nether-biome blocks, so looked up by name) for hoglins and striders. */
   private foodsFor(kind: MobKind): number[] | undefined {

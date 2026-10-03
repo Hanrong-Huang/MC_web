@@ -4,7 +4,7 @@ A Minecraft-style sandbox that runs in your browser. Explore, mine, craft, build
 
 ### ▶ [Play now: hanrong-huang.github.io/MC_web](https://hanrong-huang.github.io/MC_web/)
 
-Works in any modern desktop browser. Phones and tablets get touch controls. Textures, mobs and sounds are generated in code; the music is composed in code and played on a mix of synth voices and real sampled instruments (piano, harp, flute, cello, strings — see [CREDITS.md](CREDITS.md)).
+Works in any modern desktop browser. Phones and tablets get Bedrock-style touch controls (see [Phones and tablets](#phones-and-tablets)). Textures, mobs and sounds are generated in code; the music is composed in code and played on a mix of synth voices and real sampled instruments (piano, harp, flute, cello, strings — see [CREDITS.md](CREDITS.md)).
 
 ## Getting started
 
@@ -37,6 +37,44 @@ Your worlds are saved in your browser automatically (every 60 s, and when you ch
 | **Esc** | Pause, options and save |
 
 Every key above except the hotbar, Esc and F1–F3 can be rebound in **Options → Key Binds**. There is also **Sneak: Hold / Toggle**, and an optional Sprint key (unbound by default). Ctrl is deliberately not used for movement, because the browser closes the tab on Ctrl+W.
+
+### Phones and tablets
+
+The touch layout follows Minecraft Bedrock on a phone. Play in landscape. The game goes fullscreen (and locks landscape on Android) when you first lift your finger; if you leave fullscreen, the **⛶** button at the top left brings it back. **iPhone:** Safari does not let web pages go fullscreen. Tap **Share → Add to Home Screen** and start the game from that icon instead: it then runs fullscreen, without the browser bars.
+
+| Touch | Action |
+|---|---|
+| **Left stick** | Walk (a light push walks slowly). Push to the rim to sprint |
+| **Drag** anywhere else | Look around |
+| **Tap** | Place a block, use an item, open doors and chests, or hit the mob you tapped |
+| **Hold** | Break the block under your finger, keep attacking, eat, draw a bow, raise a shield |
+| **Jump** | Jump, swim up, fly up. Double-tap to fly (Creative) |
+| **Sneak** | Toggle sneaking. While flying or swimming it means *down*; while riding it dismounts |
+| **Mob button** (Feed / Ride / Trade / Tame…) | Appears when a mob is in the middle of the screen |
+| **Hotbar** | Tap or slide to choose. Hold a slot and let go to throw: once it has filled white, one item; once it has turned red, the whole stack. Sliding never drops. **…** opens the inventory |
+| **Top left** | Pause, chat, flight, **pick block** (press it, then tap a block; with crosshair aim it picks at once), fullscreen |
+| **Pause menu** | Options, controls, advancements, **screenshot** (opens the share sheet so you can save it to your photos), **hide HUD** (the eye button brings it back) |
+| In the inventory | Tap to pick up or put down. Hold to split. Double-tap to quick-move. Hold a crafting result to craft as many as you can. Tap outside the panels to throw the stack you are holding |
+
+**Options → Touch Controls** lets you switch to the classic **D-pad**, have taps act at the **crosshair** (Bedrock's split controls), and change button size and opacity, look speed, auto-jump, fullscreen and the coordinates display. On a laptop with a touch screen, the game switches to whichever you used last, finger or mouse.
+
+#### 手机 / 平板操作（中文）
+
+触屏布局参照手机版 Minecraft（基岩版）。请横屏游玩。手指第一次抬起时自动全屏（安卓上同时锁定横屏）；退出全屏后，左上角的 **⛶** 按钮可以重新进入。**iPhone：** Safari 不允许网页全屏，请点 **分享 → 添加到主屏幕**，之后从主屏幕图标启动，就是没有浏览器栏的全屏。
+
+- **左侧摇杆**：移动，轻推慢走，推到边缘冲刺
+- **其他区域拖动**：转动视角
+- **点按**：放置方块、使用物品、开门和箱子，点到生物就攻击
+- **长按**：挖掘手指下的方块、持续攻击、吃东西、拉弓、举盾
+- **跳跃键**：跳跃、上浮、飞行时上升，创造模式双击开启飞行
+- **潜行键**：切换潜行；飞行或游泳时为下降，骑乘时为下坐骑
+- **生物按钮**（喂食 / 骑乘 / 交易 / 驯服…）：生物在屏幕中央时出现
+- **快捷栏**：点按或滑动切换；按住格子再松手丢出：变白后松手丢一个，变红后松手丢整组；滑动时不会丢东西；**…** 打开背包
+- **左上角**：暂停、聊天、飞行、**选取方块**（先按它再点一个方块；准星模式下直接选取）、全屏
+- **暂停菜单**：选项、操作说明、进度、**截图**（弹出分享面板，可保存到相册）、**隐藏界面**（点眼睛按钮恢复）
+- **背包里**：点按拿起或放下，长按分堆，双击快速转移，长按合成结果一次合成全部，点面板外面把手上的物品丢出去
+
+在 **选项 → Touch Controls** 里可以切换经典 **十字键（D-pad）**、让点按作用于准星（基岩版的“分离控制”），以及调整按键大小、透明度、视角速度、自动跳跃、全屏和坐标显示。带触屏的笔记本会自动切换到你最近使用的方式（手指或鼠标）。
 
 ## What you can do
 

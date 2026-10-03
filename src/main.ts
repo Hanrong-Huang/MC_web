@@ -13,7 +13,7 @@ import { Input } from './engine/Input';
 import { EntityManager } from './engine/EntityManager';
 import { AudioEngine } from './engine/Audio';
 import type { AmbientEnv } from './engine/Audio';
-import { TouchControls, isTouchDevice } from './ui/TouchControls';
+import { TouchControls, isTouchDevice, touchUI, onInputMode, initInputMode, armFullscreen, needsHomeScreen } from './ui/TouchControls';
 import { HUD, ContainerView, recordWorldMeta, readWorldMeta } from './ui/HUD';
 import { StatusHUD } from './ui/StatusHUD';
 import type { LoadColumn } from './ui/LoadingScreen';
@@ -132,6 +132,7 @@ class Game {
   private wasUnderwater = false;
   private touch: TouchControls | null = null;
   private touchVisible = false;
+  private unsubInputMode: (() => void) | null = null;
   private ambientPT = 0;
   /** golden hearts, effect badges, attack meter, spyglass vignette */
   private status: StatusHUD;
@@ -517,8 +518,12 @@ class Game {
 
     this.wireInput();
     this.hud.onDropLeftover = (id, count, dur, mob, ench) => {
-      const p = this.player.pos;
-      this.entities.spawnDrop(p.x, p.y + 1, p.z, id, count, dur, mob, ench);
+      // tossed ahead with a pickup delay, as from the hotbar — dropped at the
+      // feet it was slurped straight back into the inventory
+      const p = this.player.pos, d = this.player.lookDir();
+      const e = this.entities.spawnDrop(p.x + d.x * 0.3, p.y + this.player.eyeHeight() - 0.3, p.z + d.z * 0.3, id, count, dur, mob, ench);
+      e.vel = { x: d.x * 5, y: d.y * 5 + 2, z: d.z * 5 };
+      e.age = -1.4;
     };
 
     if (net) this.startNet(net);
@@ -625,7 +630,9 @@ class Game {
     };
   }
 
-  private openChat(): void {
+  /** `fromTap`: opened by the touch button, so focus at once (phones only
+   *  raise the keyboard inside the tap). */
+  private openChat(fromTap = false): void {
     if (this.state !== 'playing') return;
     this.state = 'chat';
     this.input.exitLock();
@@ -641,7 +648,7 @@ class Game {
       this.state = 'playing';
       this.input.clearClicks();
       this.input.requestLock();
-    });
+    }, '', fromTap);
   }
 
   // --- commands --------------------------------------------------------------------
@@ -838,6 +845,19 @@ class Game {
     if (this.disposed) return;
     this.hud.showGameUI();
     this.state = 'playing';
+    // touch: the next lifted finger goes fullscreen again (if the setting is on);
+    // iPhone Safari has no fullscreen for pages — point at Add to Home Screen
+    if (touchUI()) {
+      armFullscreen();
+      if (needsHomeScreen()) {
+        let seen = 0;
+        try { seen = Number(localStorage.getItem('voxelcraft-homescreen-tip')) || 0; } catch { /* storage blocked */ }
+        if (seen < 3) {
+          this.hud.toast('Fullscreen on iPhone: Share → Add to Home Screen, then play from the icon');
+          try { localStorage.setItem('voxelcraft-homescreen-tip', String(seen + 1)); } catch { /* storage blocked */ }
+        }
+      }
+    }
     // sweep the camera down into the player's eyes (dev/test hooks skip it so
     // harness screenshots keep their framing)
     this.introT = /nointro|debug|test/.test(location.hash) ? INTRO_TIME : 0;
@@ -1027,6 +1047,7 @@ class Game {
     });
 
     this.input.onPointerLockChange = (locked) => {
+      if (!locked && this.input.touchActive) return; // switched to the touch layout
       if (!locked) {
         if (this.hud.isAdvancementsOpen()) {
           this.hud.hideAdvancements();
@@ -1068,11 +1089,7 @@ class Game {
           break;
         case 'F1':
           // hide the whole HUD (and the hand) for clean views
-          if (this.state === 'playing' || this.state === 'paused') {
-            const off = !this.hud.isHudHidden();
-            this.hud.setHudHidden(off);
-            this.renderer.setHeldVisible(!off);
-          }
+          if (this.state === 'playing' || this.state === 'paused') this.setHudHidden(!this.hud.isHudHidden());
           break;
         case 'F2':
           if (this.state !== 'loading') this.takeScreenshot();
@@ -1093,25 +1110,82 @@ class Game {
     // the container panel's ✕ button closes it (essential on touch — no Esc key)
     this.hud.onCloseContainer = () => this.closeContainer();
 
-    // on phones/tablets: on-screen joystick + look + action buttons, no pointer lock
+    // touch: holding a hotbar slot drops its items, "…" opens the inventory
+    this.hud.onHotbarDrop = (i, all) => {
+      if (this.state !== 'playing') return;
+      this.player.selectSlot(i);
+      this.capture(() => this.player.dropSelected(all));
+    };
+    this.hud.onHotbarMore = () => { if (this.state === 'playing') this.openInventory(); };
+
+    // on phones/tablets: Bedrock-style stick / D-pad, tap & hold on the world,
+    // jump / sneak / fly buttons — no pointer lock. A touch laptop flips
+    // between this and mouse + keyboard with whichever was used last.
     if (isTouchDevice()) {
-      this.input.touchActive = true;
       this.touch = new TouchControls(this.app.root, this.input, {
         onInventory: () => {
           if (this.state === 'playing') this.openInventory();
           else if (this.state === 'container') this.closeContainer();
         },
-        onFly: () => {
-          if (this.state !== 'playing') return;
-          this.player.toggleFly();
-          this.hud.toast(this.player.flying ? 'Flying enabled' : 'Flying disabled');
-        },
+        onFly: () => this.onAction('fly', false),
         onPause: () => {
           if (this.state === 'playing') this.openPause();
           else if (this.state === 'paused') this.resume();
         },
+        onChat: () => this.openChat(true),
+        onPlayers: () => {
+          if (this.input.keys.has('@players')) { this.input.keys.delete('@players'); return; }
+          this.input.keys.add('@players');
+          this.onAction('players', false);
+        },
+        onJumpDouble: () => this.onAction('jump', true),
+        onContext: () => { if (this.state === 'playing') this.input.queueRightClick(); },
+        onPick: () => { if (this.state === 'playing') this.capture(() => this.player.pickBlock()); },
+        onShowHud: () => this.setHudHidden(false),
+        tapAction: () => (this.player.touchTapAttacks() ? 'attack' : 'use'),
+        holdAction: () => (this.player.touchHoldUses() ? 'use' : 'mine'),
       });
+      this.setTouchMode(touchUI());
+      this.unsubInputMode = onInputMode((on) => this.setTouchMode(on));
     }
+  }
+
+  /** Hand the touch overlay this frame's state (button roles, the mob
+   *  context button, the breaking ring), and keep swinging at a mob while a
+   *  finger is held on it — each time the attack has recharged, as on Bedrock. */
+  private touchFrame(): void {
+    const t = this.touch!;
+    const p = this.player;
+    const centred = p.aimedEntity(p.lookDir());
+    t.frame({
+      flying: p.flying,
+      swimming: p.swimming,
+      riding: p.isRiding(),
+      breaking: p.breaking ? p.breaking.progress : -1,
+      context: centred ? this.entities.interactLabel(centred, p.heldId()) : null,
+      multiplayer: !!this.net,
+    });
+    if (t.mining && p.attackCharge() >= 1 && p.aimedEntity()) this.input.onMouseDown(0);
+  }
+
+  /** F1 / pause menu "Hide HUD": the HUD and the hand go (touch keeps an eye button to undo it). */
+  private setHudHidden(off: boolean): void {
+    this.hud.setHudHidden(off);
+    this.renderer.setHeldVisible(!off);
+  }
+
+  /** Switch between the touch layout and mouse + keyboard (pointer lock). */
+  private setTouchMode(on: boolean): void {
+    this.input.touchActive = on;
+    this.input.moveAxis = null;
+    this.input.aimNDC = null;
+    this.input.aimOff = false;
+    this.input.keys.delete('@players');
+    if (on) this.input.exitLock();
+    else this.touch?.clearSneak();
+    // hide now; the frame loop shows it again while playing in touch mode
+    this.touch?.setVisible(false);
+    this.touchVisible = false;
   }
 
   // --- UI state machine ---------------------------------------------------------------
@@ -1141,13 +1215,32 @@ class Game {
     const d = new Date();
     const pad = (n: number): string => String(n).padStart(2, '0');
     const name = `voxelcraft_${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}.${pad(d.getMinutes())}.${pad(d.getSeconds())}.png`;
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    this.hud.screenshotFlash(name);
+    const download = (): void => {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      this.hud.screenshotFlash(name);
+    };
+    // on a phone a download lands in a files folder (iOS just opens the
+    // image): the share sheet offers "Save Image" to the photo gallery
+    const nav = navigator as Navigator & { canShare?: (d: ShareData) => boolean };
+    if (touchUI() && nav.share && nav.canShare) {
+      const bin = atob(url.slice(url.indexOf(',') + 1));
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const file = new File([bytes], name, { type: 'image/png' });
+      if (nav.canShare({ files: [file] })) {
+        nav.share({ files: [file], title: 'Voxelcraft' }).then(
+          () => this.hud.screenshotFlash(name),
+          (err: Error) => { if (err?.name !== 'AbortError') download(); },
+        );
+        return;
+      }
+    }
+    download();
   }
 
   /** Title-card extras: a small thumbnail of the current view, play time, dimension. */
@@ -1207,6 +1300,9 @@ class Game {
       touchLook: () => getControls().touchLook,
       onMouseSens: (mult: number) => { setControls({ mouseSens: mult }); },
       onTouchLook: (mult: number) => { setControls({ touchLook: mult }); },
+      onAdvancements: () => this.hud.toggleAdvancements(this.adv.list()),
+      onScreenshot: () => this.takeScreenshot(),
+      onHideHud: () => { this.resume(); this.setHudHidden(true); },
     };
   }
 
@@ -1878,10 +1974,11 @@ class Game {
     this.elapsed += dt;
     this.fps = this.fps * 0.95 + (1 / Math.max(dt, 1e-4)) * 0.05;
 
-    // show the touch overlay only while actually playing
+    // show the touch overlay only while actually playing in touch mode
     if (this.touch) {
-      const tv = this.state === 'playing';
+      const tv = this.state === 'playing' && this.input.touchActive;
       if (tv !== this.touchVisible) { this.touchVisible = tv; this.touch.setVisible(tv); }
+      if (tv) this.touchFrame();
     }
 
     const paused = this.state === 'paused' && !this.net; // a shared world keeps running
@@ -2820,7 +2917,8 @@ class Game {
     this.world.dispose(); // stop the terrain-generation workers
     this.input.exitLock();
     this.input.dispose();
-    this.touch?.el.remove();
+    this.touch?.dispose();
+    this.unsubInputMode?.();
     this.audio.setRain('off');
     this.entities.clear();
     this.xpOrbs.clear();
@@ -2848,6 +2946,7 @@ class App {
 
   constructor() {
     this.root = document.getElementById('app')!;
+    initInputMode(); // phones start in the touch layout (the title screen reads it)
     this.hud = new HUD(this.root, this.atlas, this.audio);
     // resume audio on the first user gesture (mobile needs a touch to unlock the
     // AudioContext; the menu buttons help, but this guarantees it everywhere)

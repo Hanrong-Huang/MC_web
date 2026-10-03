@@ -375,7 +375,6 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
 }
 .sub-dir { width: 8px; flex: none; text-align: center; color: #ffff55; }
 .sub-text { flex: 1; text-align: center; white-space: nowrap; }
-@media (pointer: coarse) { #subtitles { bottom: auto; top: calc(80px + env(safe-area-inset-top, 0px)); } }
 
 #vignette {
   position: absolute; inset: 0; pointer-events: none;
@@ -1119,106 +1118,231 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   letter-spacing: 0.5px;
 }
 
-/* ---------- touch controls (phones / tablets) ---------- */
+/* ---------- touch controls (phones / tablets), Bedrock layout ---------- */
 
+/* sits just under the HUD (z 10) so the hotbar stays tappable above the
+   look surface; the HUD itself ignores pointers everywhere else */
 #touch-controls {
-  position: absolute; inset: 0; z-index: 24;
-  pointer-events: none;            /* sticks/buttons re-enable it */
+  --tb-s: 1;                       /* Options → Touch Controls → Button Size */
+  --tb-a: 0.7;                     /* … → Button Opacity */
+  --sl: env(safe-area-inset-left, 0px);
+  --sr: env(safe-area-inset-right, 0px);
+  --st: env(safe-area-inset-top, 0px);
+  --sb: env(safe-area-inset-bottom, 0px);
+  position: absolute; inset: 0; z-index: 9;
+  pointer-events: none;            /* the zones and buttons re-enable it */
   touch-action: none;
 }
+/* the whole screen: drag = look, tap = use / place, hold = break */
+#touch-controls .touch-look { position: absolute; inset: 0; pointer-events: auto; touch-action: none; }
 
-/* LEFT half: floating movement-joystick zone */
+/* bottom-left movement zone: the floating stick lands under the thumb */
 #touch-controls .touch-move-zone {
-  position: absolute; left: 0; top: 0; width: 46%; bottom: 0;
+  position: absolute; left: 0; bottom: 0; width: 42%; height: 66%;
   pointer-events: auto; touch-action: none;
 }
-/* RIGHT half: drag-to-look (clear of the bottom hotbar strip) */
-#touch-controls .touch-look {
-  position: absolute; right: 0; top: 0; width: 54%;
-  bottom: calc(70px + env(safe-area-inset-bottom, 0px));
-  pointer-events: auto; touch-action: none;
-}
-
-/* hint shown in the empty move zone until the first touch */
-#touch-controls .touch-hint {
-  position: absolute; left: calc(40px + env(safe-area-inset-left, 0px)); bottom: calc(110px + env(safe-area-inset-bottom, 0px));
-  width: 120px; height: 120px; margin: 0;
-  border-radius: 50%; border: 2px dashed rgba(255,255,255,0.22);
-  display: flex; align-items: center; justify-content: center;
-  color: rgba(255,255,255,0.55); font-size: 11px; text-align: center; text-shadow: 1px 1px #000;
-  pointer-events: none; transition: opacity 0.4s;
-}
-
-/* floating joystick base — positioned by JS at the touch point (margin centres it) */
 #touch-controls .touch-stick {
-  position: absolute; width: 132px; height: 132px; margin: -66px 0 0 -66px;
-  border-radius: 50%; pointer-events: none; touch-action: none;
-  background: radial-gradient(circle, rgba(255,255,255,0.14), rgba(255,255,255,0.04));
-  border: 2px solid rgba(255,255,255,0.32);
+  position: absolute;
+  left: calc(26px + var(--sl)); bottom: calc(26px + var(--sb));
+  width: calc(124px * var(--tb-s)); height: calc(124px * var(--tb-s));
+  border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, rgba(255,255,255,0.10) 0 55%, rgba(255,255,255,0.04) 70%);
+  border: 2px solid rgba(255,255,255,0.28);
+  opacity: calc(var(--tb-a) * 0.85);
+  transition: opacity 0.15s;
 }
+#touch-controls .touch-stick.active { bottom: auto; opacity: 1; }
+#touch-controls .touch-stick.sprint { border-color: rgba(140,220,255,0.85); box-shadow: 0 0 14px rgba(120,200,255,0.45); }
 #touch-controls .touch-knob {
-  position: absolute; left: 50%; top: 50%; width: 58px; height: 58px;
-  margin: -29px 0 0 -29px; border-radius: 50%; pointer-events: none;
-  background: rgba(255,255,255,0.34); border: 2px solid rgba(255,255,255,0.64);
+  position: absolute; left: 27%; top: 27%; width: 46%; height: 46%;
+  border-radius: 50%; pointer-events: none;
+  background: rgba(235,235,235,0.55); border: 2px solid rgba(255,255,255,0.8);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.35);
 }
+#touch-controls .touch-stick.sprint .touch-knob { background: rgba(170,225,255,0.75); }
+
+/* classic D-pad (Options → Touch Controls → Movement: D-pad) */
+#touch-controls .touch-dpad {
+  position: absolute; left: calc(18px + var(--sl)); bottom: calc(18px + var(--sb));
+  width: calc(156px * var(--tb-s)); height: calc(156px * var(--tb-s));
+  display: grid; grid-template: repeat(3, 1fr) / repeat(3, 1fr); gap: 3px;
+  pointer-events: auto; touch-action: none; opacity: var(--tb-a);
+}
+#touch-controls.scheme-joystick .touch-dpad,
+#touch-controls.scheme-dpad .touch-move-zone { display: none; }
+#touch-controls .dp-cell { position: relative; border-radius: 3px; }
+#touch-controls .dp-u, #touch-controls .dp-d, #touch-controls .dp-l, #touch-controls .dp-r,
+#touch-controls .dp-ul, #touch-controls .dp-ur {
+  background: rgba(40,40,40,0.5); border: 2px solid rgba(0,0,0,0.6);
+  box-shadow: inset 2px 2px 0 rgba(255,255,255,0.2), inset -2px -2px 0 rgba(0,0,0,0.3);
+}
+#touch-controls .dp-ul, #touch-controls .dp-ur { visibility: hidden; }
+#touch-controls .touch-dpad.fwd .dp-ul, #touch-controls .touch-dpad.fwd .dp-ur { visibility: visible; }
+#touch-controls .dp-cell.held { background: rgba(255,255,255,0.45); }
+#touch-controls .dp-arrow {
+  position: absolute; left: 50%; top: 50%; width: 0; height: 0; margin: -7px 0 0 -9px;
+  border: 9px solid transparent; border-top: 0; border-bottom: 13px solid #ece6d2;
+  filter: drop-shadow(1px 1px 0 rgba(0,0,0,0.6));
+}
+#touch-controls .dp-d .dp-arrow { transform: rotate(180deg); }
+#touch-controls .dp-l .dp-arrow { transform: rotate(-90deg); }
+#touch-controls .dp-r .dp-arrow { transform: rotate(90deg); }
+#touch-controls .dp-ul .dp-arrow { transform: rotate(-45deg) scale(0.8); }
+#touch-controls .dp-ur .dp-arrow { transform: rotate(45deg) scale(0.8); }
 
 /* pocket-edition style translucent square buttons with a bevel */
 #touch-controls .tb {
   position: absolute; pointer-events: auto; touch-action: none;
   display: flex; align-items: center; justify-content: center;
-  width: 62px; height: 62px; min-width: 44px; min-height: 44px; border-radius: 4px;
-  background: rgba(40,40,40,0.42);
+  width: calc(64px * var(--tb-s)); height: calc(64px * var(--tb-s));
+  min-width: 40px; min-height: 40px; border-radius: 4px;
+  background: rgba(40,40,40,0.45);
   border: 2px solid rgba(0,0,0,0.6);
   box-shadow: inset 2px 2px 0 rgba(255,255,255,0.22), inset -2px -2px 0 rgba(0,0,0,0.3);
-  transition: background 0.06s, transform 0.06s;
+  opacity: var(--tb-a);
+  transition: background 0.06s, transform 0.06s, opacity 0.1s;
 }
 #touch-controls .touch-pix {
-  width: 32px; height: 32px;
-  image-rendering: pixelated;
-  pointer-events: none;
+  width: 50%; height: 50%; max-width: 36px; max-height: 36px;
+  image-rendering: pixelated; pointer-events: none;
   filter: drop-shadow(1px 1px 0 rgba(0,0,0,0.6));
 }
 #touch-controls .tb.held {
-  background: rgba(255,255,255,0.42);
+  background: rgba(255,255,255,0.42); opacity: 1;
   box-shadow: inset 2px 2px 0 rgba(0,0,0,0.3), inset -2px -2px 0 rgba(255,255,255,0.2);
-  transform: scale(0.95);
+  transform: scale(0.94);
 }
-#touch-controls .tb.on { background: rgba(110,170,90,0.55); }
+#touch-controls .tb.on { background: rgba(110,170,90,0.6); opacity: 1; }
 
-/* action buttons on the RIGHT (the look thumb). Attack/mine and place share the
-   same x (stacked); jump/sneak form the inner column. */
-/* utility buttons top-LEFT, clear of the top-right minimap */
-#touch-controls .tb-pause {
-  left: calc(16px + env(safe-area-inset-left, 0px));
-  top: calc(16px + env(safe-area-inset-top, 0px));
-  width: 50px; height: 50px;
+/* right thumb: big jump in the corner, sneak beside it, raised clear of the hotbar */
+#touch-controls .tb-jump {
+  right: calc(22px + var(--sr)); bottom: calc(26px + var(--sb));
+  width: calc(76px * var(--tb-s)); height: calc(76px * var(--tb-s));
 }
-#touch-controls .tb-inv {
-  left: calc(74px + env(safe-area-inset-left, 0px));
-  top: calc(16px + env(safe-area-inset-top, 0px));
-  width: 50px; height: 50px;
+#touch-controls .tb-sneak {
+  right: calc(22px + var(--sr) + 86px * var(--tb-s)); bottom: calc(58px + var(--sb));
 }
-#touch-controls .tb-fly {
-  left: calc(132px + env(safe-area-inset-left, 0px));
-  top: calc(16px + env(safe-area-inset-top, 0px));
-  width: 50px; height: 50px;
+/* contextual mob action: a text button above jump */
+#touch-controls .tb-ctx {
+  right: calc(22px + var(--sr)); bottom: calc(40px + var(--sb) + 76px * var(--tb-s));
+  width: auto; height: calc(44px * var(--tb-s)); padding: 0 14px; opacity: 1;
+  color: #fff; font-size: 14px; text-shadow: 1px 1px #000; white-space: nowrap;
+  background: rgba(60,90,50,0.7); border-color: rgba(0,0,0,0.7);
+  animation: ctxin 0.14s ease-out both;
 }
-#touch-controls .tb-mine  { right: calc(26px + env(safe-area-inset-right, 0px)); bottom: calc(118px + env(safe-area-inset-bottom, 0px)); width: 68px; height: 68px; }
-#touch-controls .tb-place { right: calc(26px + env(safe-area-inset-right, 0px)); bottom: calc(42px + env(safe-area-inset-bottom, 0px)); width: 68px; height: 68px; }
-#touch-controls .tb-jump  { right: calc(106px + env(safe-area-inset-right, 0px)); bottom: calc(118px + env(safe-area-inset-bottom, 0px)); width: 68px; height: 68px; }
-#touch-controls .tb-down  { right: calc(106px + env(safe-area-inset-right, 0px)); bottom: calc(42px + env(safe-area-inset-bottom, 0px)); width: 68px; height: 68px; }
-#touch-controls .tb-label {
-  position: absolute; bottom: -15px; left: 50%; transform: translateX(-50%);
-  font-size: 9px; color: rgba(255,255,255,0.7); text-shadow: 1px 1px #000; white-space: nowrap;
-  pointer-events: none;
+@keyframes ctxin { from { transform: scale(0.85); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* top-left utility row (the minimap owns the top-right) */
+#touch-controls .touch-top {
+  position: absolute; left: calc(10px + var(--sl)); top: calc(8px + var(--st));
+  display: flex; gap: 8px; pointer-events: none;
+}
+#touch-controls .touch-top .tb {
+  position: relative; width: calc(46px * var(--tb-s)); height: calc(46px * var(--tb-s));
 }
 
-/* roomier hit targets for the on-screen hotbar on touch; make it tappable
-   (the HUD is pointer-events:none, so re-enable just the hotbar) */
+/* breaking progress ring under the finger (tap aim) */
+#touch-controls .touch-ring {
+  position: absolute; left: 0; top: 0; width: 64px; height: 64px; margin: -32px 0 0 -32px;
+  pointer-events: none; border-radius: 50%;
+}
+#touch-controls .touch-ring-fill {
+  --p: 0deg;
+  position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(rgba(255,255,255,0.9) var(--p), rgba(255,255,255,0.18) 0);
+  -webkit-mask: radial-gradient(circle, transparent 54%, #000 56%);
+  mask: radial-gradient(circle, transparent 54%, #000 56%);
+  filter: drop-shadow(0 0 2px rgba(0,0,0,0.7));
+}
+
+/* portrait phone: ask to turn sideways (dismissable) */
+#touch-controls .touch-rotate { display: none; }
+@media (orientation: portrait) and (max-width: 820px) {
+  #touch-controls:not(.rotate-ok) .touch-rotate {
+    display: flex; position: absolute; inset: 0; z-index: 5; pointer-events: auto;
+    flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+    background: rgba(12,12,16,0.88); color: #eee; font-size: 15px; text-align: center; padding: 24px;
+    text-shadow: 1px 1px #000;
+  }
+}
+#touch-controls .touch-rotate-icon {
+  width: 46px; height: 76px; border: 4px solid #ddd; border-radius: 8px;
+  animation: rotphone 1.8s ease-in-out infinite;
+}
+@keyframes rotphone { 0%, 30% { transform: none; } 60%, 100% { transform: rotate(-90deg); } }
+
+/* portrait (played anyway): the hotbar spans the width, so lift the thumb
+   controls above it */
+@media (orientation: portrait) {
+  #touch-controls .touch-stick { bottom: calc(96px + var(--sb)); }
+  #touch-controls .touch-dpad { bottom: calc(90px + var(--sb)); }
+  #touch-controls .tb-jump { bottom: calc(96px + var(--sb)); }
+  #touch-controls .tb-sneak { bottom: calc(128px + var(--sb)); }
+  #touch-controls .tb-ctx { bottom: calc(110px + var(--sb) + 76px * var(--tb-s)); }
+  #touch-controls .touch-move-zone { bottom: 80px; height: 55%; width: 50%; }
+}
+
+/* tap-aim: no crosshair (you act where you touch) */
+html.touch-ui.aim-tap #crosshair { display: none; }
+
+/* the hotbar: roomier slots, tappable, plus Bedrock's "…" inventory button */
+#hotbar-wrap { position: relative; }
+html.touch-ui #hotbar { pointer-events: auto; }
+.hotbar-more { display: none; }
+html.touch-ui .hotbar-more {
+  display: flex; position: absolute; left: 100%; bottom: 0; margin-left: 6px;
+  width: 46px; height: 46px; align-items: center; justify-content: center; gap: 4px;
+  pointer-events: auto; touch-action: none; cursor: pointer;
+  background: rgba(0,0,0,0.42); border: 2px solid rgba(0,0,0,0.85);
+  box-shadow: inset 0 0 0 2px rgba(150,150,150,0.4);
+}
+.hotbar-more i { width: 6px; height: 6px; background: #f2f2f2; box-shadow: 1px 1px 0 #000; }
+html.touch-ui .hotbar-more:active { background: rgba(255,255,255,0.35); }
+html.touch-ui #hotbar { touch-action: none; }
+html.touch-ui #hotbar .hotbar-slot { width: 46px; height: 46px; }
+/* resting a finger on a slot fills it, then drops the item */
+.hotbar-slot.holding::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 0;
+  background: rgba(255,255,255,0.35); pointer-events: none;
+  animation: holddrop 0.55s linear forwards;
+}
+@keyframes holddrop { to { height: 100%; } }
+/* …one item went; keep holding and the whole stack follows (red fill) */
+.hotbar-slot.holding-all::after {
+  height: 0; background: rgba(255,80,60,0.45);
+  animation: holddrop 0.75s linear forwards;
+}
+
+/* pick block armed (tap aim): the next tap on the world picks */
+#touch-controls .tb-pick.on { background: rgba(90,140,220,0.65); opacity: 1; }
+
+/* Hide HUD (F1 / pause menu): buttons fade out but keep working, and only an
+   eye button stays to bring the HUD back */
+#touch-controls .tb-showhud { display: none; }
+#app.hud-off #touch-controls .touch-top .tb { display: none; }
+#app.hud-off #touch-controls .touch-top .tb-showhud { display: flex; opacity: 0.5; }
+#app.hud-off #touch-controls .tb:not(.tb-showhud), #app.hud-off #touch-controls .touch-stick,
+#app.hud-off #touch-controls .touch-dpad { opacity: 0.12; }
+
+/* chat on touch: at the top, clear of the phone keyboard, with big buttons */
+html.touch-ui .chat-root { bottom: auto; top: calc(64px + env(safe-area-inset-top, 0px)); }
+html.touch-ui .chat-log { max-height: 30vh; }
+.chat-input { display: flex; gap: 4px; }
+.chat-input input { flex: 1; min-width: 0; }
+.chat-btn {
+  flex: none; width: 32px; border: 0; background: rgba(0,0,0,0.6); color: #fff;
+  font: 14px monospace; cursor: pointer; outline: 1px solid rgba(255,255,255,0.35);
+}
+html.touch-ui .chat-btn { width: 44px; min-height: 40px; font-size: 18px; }
+html.touch-ui .chat-input input { padding: 10px 8px; font-size: 16px; } /* 16px: no iOS zoom-in */
+
+/* pause menu: two buttons sharing a row */
+.pause-pair { display: flex; gap: 8px; }
+.pause-pair .mc-btn { flex: 1; min-width: 0; }
+
+/* roomier hit targets for menus on touch */
 @media (pointer: coarse) {
   :root { --slot: 44px; --slot-gap: 2px; }
-  #hotbar { pointer-events: auto; }
-  #hotbar .hotbar-slot { width: 46px; height: 46px; }
   .ctr-close, .ctr-book { width: 42px; height: 42px; min-width: 42px; min-height: 42px; font-size: 18px; }
   .recipe-filter {
     min-height: 34px;
@@ -1226,17 +1350,19 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
     font-size: 11px;
   }
   .creative-tab { width: 48px; height: 44px; }
-  #pet-strip {
-    left: auto;
-    right: calc(10px + env(safe-area-inset-right, 0px));
-    top: auto;
-    bottom: calc(210px + env(safe-area-inset-bottom, 0px));
-    transform: none;
-  }
+  .mc-btn { min-height: 44px; }
   #fps { left: 50%; transform: translateX(-50%); top: 4px; }
   .mc-slot:hover::after, .recipe-card:hover::after { display: none; } /* no sticky hover on touch */
   .mc-slot.pressing::after { display: block; }
 }
+html.touch-ui #pet-strip {
+  left: auto;
+  right: calc(10px + env(safe-area-inset-right, 0px));
+  top: auto;
+  bottom: calc(150px + env(safe-area-inset-bottom, 0px));
+  transform: none;
+}
+html.touch-ui #subtitles { bottom: auto; top: calc(80px + env(safe-area-inset-top, 0px)); }
 
 /* narrow screens: stack the title-screen cards and the recipe book */
 @media (max-width: 760px) {

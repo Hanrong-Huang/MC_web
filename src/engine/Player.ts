@@ -20,7 +20,7 @@ import { Inventory } from './Inventory';
 import type { EntityManager } from './EntityManager';
 import type { Entity } from './EntityManager';
 import type { RayHit } from './World';
-import { mouseLookSens } from './ControlsSettings';
+import { mouseLookSens, getControls } from './ControlsSettings';
 import { keySettings } from './Keybinds';
 import type { PlayerSave } from './Persistence';
 import { netheriteUpgrade, GATE_IDS, SHAPED, CLIMBABLE, HANGING_PLANTS, VINE_BLOCKS, vineDrops } from './Blocks';
@@ -263,6 +263,63 @@ export class Player {
     };
   }
 
+  /** The ray clicks act along: the view direction, or — touch tap-mode — the
+   *  ray through the finger's screen point (Input.aimNDC), so you break and
+   *  place what you touch, as on Bedrock. Orientation logic (block facing,
+   *  gliding, the bow) keeps using lookDir(). */
+  aimDir(): Vec3 {
+    const a = this.deps.input.aimNDC;
+    const f = this.lookDir();
+    if (!a) return f;
+    const cam = this.deps.renderer.camera;
+    const ty = Math.tan((cam.fov * Math.PI) / 360);
+    const tx = ty * cam.aspect;
+    // camera basis: right = (cos yaw, 0, -sin yaw), up = right × forward
+    const rx = Math.cos(this.yaw), rz = -Math.sin(this.yaw);
+    const ux = -rz * f.y, uy = rz * f.x - rx * f.z, uz = rx * f.y;
+    const dx = f.x + rx * a.x * tx + ux * a.y * ty;
+    const dy = f.y + uy * a.y * ty;
+    const dz = f.z + rz * a.x * tx + uz * a.y * ty;
+    const l = Math.hypot(dx, dy, dz) || 1;
+    return { x: dx / l, y: dy / l, z: dz / l };
+  }
+
+  /** The mob or cart a ray hits before any block, within melee reach. */
+  aimedEntity(dir: Vec3 = this.aimDir()): Entity | null {
+    const ey = this.pos.y + this.eyeHeight();
+    const block = this.deps.world.raycast(this.pos.x, ey, this.pos.z, dir.x, dir.y, dir.z, REACH);
+    const bd = block?.dist ?? Infinity;
+    const ent = this.deps.entities;
+    const m = ent.raycastMobs(this.pos.x, ey, this.pos.z, dir.x, dir.y, dir.z, 3.5);
+    const c = ent.raycastCarts(this.pos.x, ey, this.pos.z, dir.x, dir.y, dir.z, 3.5);
+    let best: { entity: Entity; dist: number } | null = null;
+    if (m && m.entity !== this.riding && m.dist < bd) best = m;
+    if (c && c.entity !== this.riding && c.dist < bd && (!best || c.dist < best.dist)) best = c;
+    return best?.entity ?? null;
+  }
+
+  /** Touch tap on the world: hit the mob under the finger (true), or use the
+   *  held item (false)? Weapons, tools, blocks and a bare hand hit; items made
+   *  for mobs (food, buckets, shears, catchers, saddles…) are used on them. */
+  touchTapAttacks(): boolean {
+    if (!this.aimedEntity()) return false;
+    const id = this.heldId();
+    if (!id) return true;
+    const d = def(id);
+    if (d.toolInfo?.kind === 'shears') return false;
+    return d.block || !!d.toolInfo;
+  }
+
+  /** Touch press-and-hold: keep using the held item (eat, draw a bow, raise
+   *  a shield, look through a spyglass) rather than break blocks? */
+  touchHoldUses(): boolean {
+    const s = this.inventory.getSelected();
+    if (!s) return false;
+    const d = def(s.id);
+    if (d.bow || s.id === I.SHIELD || s.id === I.SPYGLASS) return true;
+    return this.mode === 'survival' && !!(d.food || d.alwaysEdible) && (this.hunger < 20 || !!d.alwaysEdible);
+  }
+
   heldId(): number {
     return this.inventory.getSelected()?.id ?? 0;
   }
@@ -427,8 +484,15 @@ export class Player {
   /** Middle click: select the targeted block's item in the hotbar. Creative
    *  conjures a stack; survival pulls it out of the backpack if it's there. */
   pickBlock(): void {
-    if (this.dead || !this.target) return;
-    const id = pickItemFor(this.target.id);
+    if (this.dead) return;
+    // touch picks what is under the finger (cast now: the target is last frame's)
+    let t = this.target;
+    if (this.deps.input.aimNDC) {
+      const d = this.aimDir();
+      t = this.deps.world.raycast(this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z, d.x, d.y, d.z, REACH);
+    }
+    if (!t) return;
+    const id = pickItemFor(t.id);
     if (!id) return;
     const inv = this.inventory;
     for (let i = 0; i < 9; i++) {
@@ -501,6 +565,10 @@ export class Player {
       if (input.held('back')) fwd -= 1;
       if (input.held('left')) strafe -= 1;
       if (input.held('right')) strafe += 1;
+      // the touch stick is analog: a part push walks slower, like Bedrock (it
+      // also presses the '@' direction keys, which riding and sprint read)
+      const ax = input.moveAxis;
+      if (ax) { fwd = ax.y; strafe = ax.x; }
       space = input.held('jump');
       this.sneaking = this.sneakKeyDown() && !this.flying;
     }
@@ -657,7 +725,7 @@ export class Player {
 
     // auto-jump on touch: hop a 1-block step while walking into it, so phone
     // players don't have to tap jump for every ledge (matches Minecraft mobile)
-    if (input.touchActive && this.onGround && !this.flying && !this.sneaking &&
+    if (input.touchActive && getControls().autoJump && this.onGround && !this.flying && !this.sneaking &&
         (res.hitX || res.hitZ) && (wx !== 0 || wz !== 0) && this.canStepUp(world, wx, wz)) {
       this.vel.y = JUMP_VELOCITY;
       this.onGround = false;
@@ -1093,7 +1161,9 @@ export class Player {
   // --- targeting / breaking --------------------------------------------------
 
   private updateTarget(): void {
-    const d = this.lookDir();
+    // touch tap-mode between touches: nothing is aimed at, so no outline
+    if (this.deps.input.aimOff) { this.target = null; return; }
+    const d = this.aimDir();
     const ey = this.pos.y + this.eyeHeight();
     this.target = this.deps.world.raycast(this.pos.x, ey, this.pos.z, d.x, d.y, d.z, REACH);
   }
@@ -1415,7 +1485,7 @@ export class Player {
   /** Empty bucket: scoop the first full water source along the view ray. */
   private tryScoopWater(): boolean {
     const world = this.deps.world;
-    const d = this.lookDir();
+    const d = this.aimDir();
     const ex = this.pos.x, ey = this.pos.y + this.eyeHeight(), ez = this.pos.z;
     for (let t = 0; t <= 5; t += 0.1) {
       const bx = Math.floor(ex + d.x * t), by = Math.floor(ey + d.y * t), bz = Math.floor(ez + d.z * t);
@@ -1456,7 +1526,7 @@ export class Player {
   /** Empty bucket: scoop a lava source block. */
   private tryScoopLava(): boolean {
     const world = this.deps.world;
-    const d = this.lookDir();
+    const d = this.aimDir();
     const ex = this.pos.x, ey = this.pos.y + this.eyeHeight(), ez = this.pos.z;
     for (let t = 0; t <= 5; t += 0.1) {
       const bx = Math.floor(ex + d.x * t), by = Math.floor(ey + d.y * t), bz = Math.floor(ez + d.z * t);
@@ -1499,7 +1569,7 @@ export class Player {
   /** Glass bottle: fill from any water along the view ray (the water stays). */
   private tryFillBottle(): boolean {
     const world = this.deps.world;
-    const d = this.lookDir();
+    const d = this.aimDir();
     const ex = this.pos.x, ey = this.pos.y + this.eyeHeight(), ez = this.pos.z;
     for (let t = 0; t <= 5; t += 0.1) {
       const id = world.getBlock(Math.floor(ex + d.x * t), Math.floor(ey + d.y * t), Math.floor(ez + d.z * t));
@@ -1828,7 +1898,7 @@ export class Player {
         if (caught) { this.damageHeldTool(); this.deps.onFish(caught); }
       } else if (this.placeCooldown <= 0) {
         // cast toward where the player is looking
-        const d = this.lookDir();
+        const d = this.aimDir();
         const ey = this.pos.y + this.eyeHeight();
         this.bobber = this.deps.entities.castBobber(
           this.pos.x + d.x * 0.4, ey + d.y * 0.4 - 0.05, this.pos.z + d.z * 0.4,
@@ -1845,7 +1915,7 @@ export class Player {
     // at whatever you are aiming at (see EntityManager.throwCatcher)
     if (heldDef?.id === I.MOB_CATCHER && !this.sneaking && this.placeCooldown <= 0) {
       const ent = this.deps.entities;
-      const d = this.lookDir();
+      const d = this.aimDir();
       const hit = ent.raycastMobs(
         this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z, d.x, d.y, d.z, 3.5,
       );
@@ -1874,7 +1944,7 @@ export class Player {
 
     // bucket on a cow -> milk (shearing lives in EntityManager.interactMob)
     if (held?.id === I.BUCKET && this.placeCooldown <= 0) {
-      const d = this.lookDir();
+      const d = this.aimDir();
       const hit = this.deps.entities.raycastMobs(
         this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z, d.x, d.y, d.z, 3.5,
       );
@@ -1892,7 +1962,7 @@ export class Player {
 
     // a minecart: climb in
     if (!this.riding && !this.sneaking && this.placeCooldown <= 0) {
-      const d = this.lookDir();
+      const d = this.aimDir();
       const ch = this.deps.entities.raycastCarts(this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z, d.x, d.y, d.z, 3.5);
       if (ch && !ch.entity.ridden && ch.dist < (this.target?.dist ?? 4.5)) {
         this.placeCooldown = 0.4;
@@ -1903,9 +1973,9 @@ export class Player {
 
     // mob interaction: tame wolves / open villager trades (before generic use)
     if (!this.sneaking && this.placeCooldown <= 0) {
+      const ad = this.aimDir();
       const hit = this.deps.entities.raycastMobs(
-        this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z,
-        this.lookDir().x, this.lookDir().y, this.lookDir().z, 3.5,
+        this.pos.x, this.pos.y + this.eyeHeight(), this.pos.z, ad.x, ad.y, ad.z, 3.5,
       );
       if (hit && hit.dist < (this.target?.dist ?? 4.5)) {
         const woolly = hit.entity.kind === 'sheep' && !hit.entity.sheared;
@@ -2015,7 +2085,7 @@ export class Player {
     // never pops out stuck in a wall.
     if (held?.id === I.MOB_CATCHER_FILLED && held.mob) {
       const kind = held.mob;
-      const d = this.lookDir();
+      const d = this.aimDir();
       let fx = this.pos.x, fz = this.pos.z;
       for (const reach of [2, 1.4, 0.8, 0]) {
         const tx = this.pos.x + d.x * reach, tz = this.pos.z + d.z * reach;
@@ -2117,7 +2187,7 @@ export class Player {
 
     // throwables: warp pearls teleport you where they land, snowballs knock mobs back
     if (held && (held.id === I.WARP_PEARL || held.id === I.SNOWBALL) && this.deps.throwItem) {
-      const d = this.lookDir();
+      const d = this.aimDir();
       const ey = this.pos.y + this.eyeHeight();
       this.deps.throwItem(held.id, this.pos.x + d.x * 0.4, ey + d.y * 0.4 - 0.1, this.pos.z + d.z * 0.4, d.x, d.y, d.z);
       this.placeCooldown = held.id === I.WARP_PEARL ? 1 : 0.25;
@@ -2171,7 +2241,7 @@ export class Player {
         return;
       }
       if (this.deps.throwItem) {
-        const d = this.lookDir();
+        const d = this.aimDir();
         const ey = this.pos.y + this.eyeHeight();
         this.deps.throwItem(I.FIRE_CHARGE, this.pos.x + d.x * 0.5, ey + d.y * 0.5 - 0.1, this.pos.z + d.z * 0.5, d.x, d.y, d.z);
         audio.play('fireCharge');
@@ -2309,7 +2379,7 @@ export class Player {
     // click landed on the upper half of a side face (or a block's underside)
     const yawDeg = ((this.yaw * 180 / Math.PI) % 360 + 360) % 360;
     const facing = Math.round(yawDeg / 90) % 4; // 0=-z, 1=-x, 2=+z, 3=+x
-    const hitY = this.pos.y + this.eyeHeight() + this.lookDir().y * this.target.dist;
+    const hitY = this.pos.y + this.eyeHeight() + this.aimDir().y * this.target.dist;
     const upper = this.target.ny === -1 || (this.target.ny === 0 && hitY - this.target.y > 0.5);
     let meta = -1; // -1: no meta entry
     if (SLAB_IDS.has(held.id)) meta = upper ? 1 : 0;
@@ -2464,7 +2534,7 @@ export class Player {
     if ((doorRight && !doorLeft) || i < 0) return false;
     // the click point: which half of the doorway (across the player's view)
     const t = this.target!;
-    const d = this.lookDir();
+    const d = this.aimDir();
     const hx = this.pos.x + d.x * t.dist - px, hz = this.pos.z + d.z * t.dist - pz;
     const [fx, fz] = STEP[facing];
     const left = (fx >= 0 || hz >= 0.5) && (fx <= 0 || hz <= 0.5) && (fz >= 0 || hx <= 0.5) && (fz <= 0 || hx >= 0.5);
@@ -2523,7 +2593,7 @@ export class Player {
     this.deps.renderer.triggerSwing();
     const charge = this.attackCharge();
     this.attackTimer = 0;
-    const d = this.lookDir();
+    const d = this.aimDir();
     const ey = this.pos.y + this.eyeHeight();
     const blockDist = this.target?.dist ?? Infinity;
     const ent = this.deps.entities;

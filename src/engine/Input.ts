@@ -11,6 +11,14 @@ export class Input {
   pointerLocked = false;
   /** touch devices drive movement/look without pointer lock (see TouchControls) */
   touchActive = false;
+  /** Touch: aim through this screen point (NDC, -1..1, y up) instead of the
+   *  crosshair — Bedrock's "act where you touch". null = aim at the centre. */
+  aimNDC: { x: number; y: number } | null = null;
+  /** Touch tap-mode with no finger down: nothing is targeted (no outline). */
+  aimOff = false;
+  /** Touch: analog movement stick (x = strafe right, y = forward), each -1..1.
+   *  null while the stick is idle, so the keys drive movement. */
+  moveAxis: { x: number; y: number } | null = null;
   /** edge-triggered click queues so brief clicks survive slow frames */
   private rightClickQueued = false;
 
@@ -90,6 +98,9 @@ export class Input {
     this.rightDown = false;
     this.rightClickQueued = false;
   }
+
+  /** Is a click pending that the next player update hasn't consumed yet? */
+  get rightClickPending(): boolean { return this.rightClickQueued; }
 
   private mouseup = (e: MouseEvent): void => {
     if (e.button === 0) this.leftDown = false;
