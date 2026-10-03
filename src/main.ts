@@ -853,7 +853,7 @@ class Game {
         let seen = 0;
         try { seen = Number(localStorage.getItem('voxelcraft-homescreen-tip')) || 0; } catch { /* storage blocked */ }
         if (seen < 3) {
-          this.hud.toast('Fullscreen on iPhone: Share → Add to Home Screen, then play from the icon');
+          this.hud.toast('Fullscreen on iPhone: tap the ⛶ button (top left) for how');
           try { localStorage.setItem('voxelcraft-homescreen-tip', String(seen + 1)); } catch { /* storage blocked */ }
         }
       }
@@ -2950,8 +2950,12 @@ class App {
     this.hud = new HUD(this.root, this.atlas, this.audio);
     // resume audio on the first user gesture (mobile needs a touch to unlock the
     // AudioContext; the menu buttons help, but this guarantees it everywhere)
+    // A touch *press* grants no user activation (the lift does), so Safari
+    // only lets the audio start from touchend / pointerup / click.
     const unlock = (): void => { this.audio.ensure(); };
     window.addEventListener('pointerdown', unlock, { capture: true });
+    window.addEventListener('pointerup', unlock, { capture: true });
+    window.addEventListener('click', unlock, { capture: true });
     window.addEventListener('keydown', unlock, { capture: true });
     window.addEventListener('touchend', unlock, { capture: true });
     // resume audio when returning to the tab (mobile suspends it in the background)

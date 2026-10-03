@@ -192,6 +192,8 @@ export class AudioEngine {
   private netherBed: { src: AudioBufferSourceNode; g: GainNode; nodes: AudioNode[] } | null = null;
   private unlocked = false;
   private resuming = false;
+  /** older iOS: the looping silent <audio> that holds the playback session */
+  private silentEl: HTMLAudioElement | null = null;
   private level = 1;           // loudness of the effect being built (scales ducking)
 
   constructor() {
@@ -275,6 +277,7 @@ export class AudioEngine {
 
   /** Must be called from a user gesture at least once (safe to call repeatedly). */
   ensure(): void {
+    this.iosPlayback();
     const ctx = this.ctx;
     if (ctx && ctx.state === 'running' && this.unlocked) return;
     // resume synchronously too, so a call inside a user gesture always counts
@@ -289,6 +292,7 @@ export class AudioEngine {
 
   private async ensureRunning(): Promise<void> {
     if (!this.ctx) {
+      this.iosPlayback();
       let ctx: AudioContext;
       try { ctx = new AudioContext({ latencyHint: 'interactive' }); } catch { return; }
       if (!this.attachContext(ctx)) return;
@@ -309,6 +313,28 @@ export class AudioEngine {
       this.resuming = false;
     }
     if (ctx.state === 'running') this.unlock();
+  }
+
+  /** iPhone/iPad: Web Audio follows the ring/silent switch — in silent mode a
+   *  web game makes no sound at all, while videos still play. Declaring the
+   *  page's audio as media playback (Audio Session API, iOS 16.4+) lifts that;
+   *  older iOS gets the same from a looping silent <audio> started in a tap. */
+  private iosPlayback(): void {
+    if (typeof navigator === 'undefined') return;
+    const nav = navigator as Navigator & { audioSession?: { type: string } };
+    if (nav.audioSession) {
+      try { if (nav.audioSession.type !== 'playback') nav.audioSession.type = 'playback'; } catch { /* read-only here */ }
+      return;
+    }
+    const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+      (/Macintosh/.test(navigator.userAgent) && (navigator.maxTouchPoints ?? 0) > 1); // iPadOS reports a Mac
+    if (!ios || this.silentEl || typeof Audio === 'undefined') return;
+    try {
+      const a = new Audio(silentWavUrl());
+      a.loop = true;
+      a.setAttribute('playsinline', '');
+      a.play().then(() => { this.silentEl = a; }, () => { /* needs a tap: retried on the next one */ });
+    } catch { /* no media element */ }
   }
 
   /** iOS/Safari unlock trick: play a one-sample silent buffer while the context
@@ -3852,3 +3878,18 @@ const UI_GAIN: Partial<Record<UiSfx, number>> = {
   tab: 2.2, swipe: 1.6, created: 1.4, loaded: 1.5, shutter: 1.6,
 };
 const UI_GAP: Partial<Record<UiSfx, number>> = { hover: 0.04, pickup: 0.03, place: 0.03, tab: 0.05, open: 0.1, close: 0.1 };
+
+let silentUrl = '';
+/** A tenth of a second of silence as an 8-bit mono WAV (for iosPlayback). */
+function silentWavUrl(): string {
+  if (silentUrl) return silentUrl;
+  const n = 800, b = new Uint8Array(44 + n), v = new DataView(b.buffer);
+  const str = (o: number, t: string): void => { for (let i = 0; i < t.length; i++) b[o + i] = t.charCodeAt(i); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + n, true); str(8, 'WAVEfmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+  str(36, 'data'); v.setUint32(40, n, true);
+  b.fill(128, 44); // 8-bit PCM silence is the midpoint
+  silentUrl = URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
+  return silentUrl;
+}

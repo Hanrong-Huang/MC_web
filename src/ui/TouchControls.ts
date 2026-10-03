@@ -151,6 +151,39 @@ export function enterFullscreen(): void {
   } catch { /* unsupported */ }
 }
 
+/** iPhone: Safari gives web pages no fullscreen (only videos), so the ⛶
+ *  button explains the two ways to lose the browser bars instead. */
+export function showIphoneFullscreenHelp(): void {
+  if (document.getElementById('ios-fs-help')) return;
+  const ov = document.createElement('div');
+  ov.id = 'ios-fs-help';
+  ov.className = 'overlay';
+  const panel = document.createElement('div');
+  panel.className = 'mc-panel ios-fs-panel';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', 'Fullscreen on iPhone');
+  panel.innerHTML =
+    '<div class="ios-fs-title">Fullscreen on iPhone · iPhone 全屏</div>' +
+    '<ol>' +
+    '<li><b>Best: Add to Home Screen.</b> Tap <span class="ios-share" aria-label="Share"></span> <b>Share</b> → <b>Add to Home Screen</b>, then start Voxelcraft from the new icon: no browser bars at all.' +
+    '<div class="ios-zh">推荐：点 <b>分享</b> → <b>添加到主屏幕</b>，以后从主屏幕图标打开，完全没有浏览器栏。</div></li>' +
+    '<li><b>Quick: hide Safari\'s bars.</b> Tap the page menu at the left of the address bar (<b>aA</b> or <b>≡</b>) → <b>Hide Toolbar</b>.' +
+    '<div class="ios-zh">快速：点地址栏左边的页面菜单（<b>aA</b> 或 <b>≡</b>）→ <b>隐藏工具栏</b>。</div></li>' +
+    '</ol>' +
+    '<div class="ios-note">The home-screen app keeps its own saves: to take a world along, use <b>Export</b> on the title screen here, then <b>Import World</b> in the app.' +
+    '<div class="ios-zh">主屏幕应用的存档和 Safari 分开：要带走世界，先在这里的标题界面点 <b>Export</b>，再到应用里 <b>Import World</b>。</div></div>';
+  const ok = document.createElement('button');
+  ok.type = 'button';
+  ok.className = 'mc-btn wide';
+  ok.textContent = 'Got it · 知道了';
+  const close = (): void => ov.remove();
+  ok.addEventListener('click', close);
+  ov.addEventListener('pointerdown', (e) => { if (e.target === ov) close(); });
+  panel.appendChild(ok);
+  ov.appendChild(panel);
+  (document.getElementById('app') ?? document.body).appendChild(ov);
+}
+
 export function exitFullscreen(): void {
   const d = document as FsDoc;
   if (!isFullscreen()) return;
@@ -170,6 +203,26 @@ const HOLD_MS = 280;        // press this long without dragging = hold (break / 
 const SLOP_PX = 10;         // finger travel that turns a press into a look-drag
 const DOUBLE_MS = 300;      // double-tap window (jump → fly, forward → sprint)
 const DEAD = 0.16;          // stick dead zone (fraction of its throw)
+
+/** Follow one finger from its press to its lift, wherever it goes: moves and
+ *  the lift are read on `window`, filtered by pointer id, instead of on the
+ *  pressed element. iOS Safari doesn't reliably keep a touch captured to the
+ *  element it started on — a thumb drifting off Jump lifted over the look
+ *  surface, the button never heard it, and the player kept jumping. Returns
+ *  a function that stops following (without calling `onEnd`). */
+export function followPointer(id: number, onMove: (e: PointerEvent) => void, onEnd: (e: PointerEvent) => void): () => void {
+  const mv = (e: PointerEvent): void => { if (e.pointerId === id) onMove(e); };
+  const stop = (): void => {
+    window.removeEventListener('pointermove', mv, true);
+    window.removeEventListener('pointerup', end, true);
+    window.removeEventListener('pointercancel', end, true);
+  };
+  const end = (e: PointerEvent): void => { if (e.pointerId !== id) return; stop(); onEnd(e); };
+  window.addEventListener('pointermove', mv, true);
+  window.addEventListener('pointerup', end, true);
+  window.addEventListener('pointercancel', end, true);
+  return stop;
+}
 
 function el(tag: string, cls: string, parent: HTMLElement): HTMLElement {
   const e = document.createElement(tag);
@@ -368,6 +421,10 @@ export class TouchControls {
   /** primary look pointer: where it is, and what its press turned into */
   private primary: { id: number; x: number; y: number; mode: HoldMode; t0: number } | null = null;
   private unsub: () => void;
+  /** the last touch event said no finger is on the screen */
+  private allLifted = false;
+  private onTouchEnd = (e: TouchEvent): void => { if (e.touches.length === 0) this.allLifted = true; };
+  private onTouchStart = (): void => { this.allLifted = false; };
 
   constructor(root: HTMLElement, input: Input, hooks: TouchHooks) {
     this.input = input;
@@ -393,6 +450,11 @@ export class TouchControls {
 
     this.applySettings(getControls());
     this.unsub = onControlsChange((s) => this.applySettings(s));
+    // a backstop for lifts that never arrive as pointer events: once a touch
+    // event reports no fingers at all, the next frame lets go of everything
+    document.addEventListener('touchstart', this.onTouchStart, { capture: true, passive: true });
+    document.addEventListener('touchend', this.onTouchEnd, { capture: true, passive: true });
+    document.addEventListener('touchcancel', this.onTouchEnd, { capture: true, passive: true });
   }
 
   // --- settings -------------------------------------------------------------------
@@ -435,9 +497,11 @@ export class TouchControls {
     const releaseAim = (): void => { if (this.tapAim()) this.aimRelease = 2; };
     const endAction = (): void => this.endHold();
 
+    const unfollow = new Map<number, () => void>();
     look.addEventListener('pointerdown', (e) => {
       e.preventDefault();
-      look.setPointerCapture(e.pointerId);
+      unfollow.get(e.pointerId)?.();
+      unfollow.set(e.pointerId, followPointer(e.pointerId, move, up));
       if (this.primary) { others.set(e.pointerId, { x: e.clientX, y: e.clientY }); return; }
       this.primary = { id: e.pointerId, x: e.clientX, y: e.clientY, mode: 'pending', t0: e.timeStamp };
       sx = e.clientX; sy = e.clientY;
@@ -445,7 +509,7 @@ export class TouchControls {
       // the press becomes a hold in frame(), not on a timer: a frame runs only
       // after the browser has handed over any lift or drag already queued
     });
-    look.addEventListener('pointermove', (e) => {
+    const move = (e: PointerEvent): void => {
       const o = others.get(e.pointerId);
       const scale = touchLookSens();
       if (o) {
@@ -473,8 +537,9 @@ export class TouchControls {
       p.x = e.clientX; p.y = e.clientY;
       if (p.mode !== 'look') setAim(e.clientX, e.clientY);
       else if (this.tapAim()) { input.aimNDC = null; input.aimOff = true; }
-    });
+    };
     const up = (e: PointerEvent): void => {
+      unfollow.delete(e.pointerId);
       if (others.delete(e.pointerId)) return;
       const p = this.primary;
       if (!p || e.pointerId !== p.id) return;
@@ -499,9 +564,9 @@ export class TouchControls {
       this.ring.classList.add('hidden');
       releaseAim();
     };
-    look.addEventListener('pointerup', up);
-    look.addEventListener('pointercancel', up);
     this.resets.push(() => {
+      for (const stop of unfollow.values()) stop();
+      unfollow.clear();
       endAction();
       this.primary = null;
       others.clear();
@@ -540,6 +605,7 @@ export class TouchControls {
     const base = el('div', 'touch-stick', zone);
     const knob = el('div', 'touch-knob', base);
     let id = -1, cx = 0, cy = 0;
+    let unfollow: (() => void) | null = null;
     const radius = (): number => base.offsetWidth * 0.42 || 52;
     const rest = (): void => {
       base.classList.remove('active', 'sprint');
@@ -549,7 +615,8 @@ export class TouchControls {
     zone.addEventListener('pointerdown', (e) => {
       if (id >= 0) return;
       e.preventDefault();
-      id = e.pointerId; zone.setPointerCapture(e.pointerId);
+      id = e.pointerId;
+      unfollow = followPointer(id, move, end);
       const zr = zone.getBoundingClientRect();
       cx = e.clientX; cy = e.clientY;
       // the stick jumps under the thumb (kept fully on screen)
@@ -560,8 +627,7 @@ export class TouchControls {
       base.classList.add('active');
       this.setStick(0, 0);
     });
-    zone.addEventListener('pointermove', (e) => {
-      if (e.pointerId !== id) return;
+    const move = (e: PointerEvent): void => {
       let dx = e.clientX - cx, dy = e.clientY - cy;
       const R = radius();
       const d = Math.hypot(dx, dy);
@@ -569,14 +635,9 @@ export class TouchControls {
       knob.style.transform = `translate(${dx}px, ${dy}px)`;
       const sprint = this.setStick(dx / R, dy / R, d / R);
       base.classList.toggle('sprint', sprint);
-    });
-    const end = (e: PointerEvent): void => {
-      if (e.pointerId !== id) return;
-      id = -1; rest(); this.setStick(0, 0);
     };
-    zone.addEventListener('pointerup', end);
-    zone.addEventListener('pointercancel', end);
-    this.resets.push(() => { id = -1; rest(); this.setStick(0, 0); });
+    const end = (): void => { id = -1; unfollow = null; rest(); this.setStick(0, 0); };
+    this.resets.push(() => { unfollow?.(); end(); });
   }
 
   /** Stick vector (screen axes, -1..1) → analog movement + direction keys.
@@ -615,6 +676,7 @@ export class TouchControls {
       return cell;
     });
     let id = -1, lastFwdDown = -1e9, sprintLatch = false;
+    let unfollow: (() => void) | null = null;
     const keys = this.input.keys;
     const apply = (cell: number): void => {
       const n = names[cell] ?? '';
@@ -642,7 +704,8 @@ export class TouchControls {
     pad.addEventListener('pointerdown', (e) => {
       if (id >= 0) return;
       e.preventDefault();
-      id = e.pointerId; pad.setPointerCapture(e.pointerId);
+      id = e.pointerId;
+      unfollow = followPointer(id, (m) => apply(cellAt(m.clientX, m.clientY)), end);
       const cell = cellAt(e.clientX, e.clientY);
       if (cell === 1) {
         if (e.timeStamp - lastFwdDown < DOUBLE_MS) sprintLatch = true; // double-tap forward sprints
@@ -651,17 +714,8 @@ export class TouchControls {
       apply(cell);
       this.buzz(6);
     });
-    pad.addEventListener('pointermove', (e) => {
-      if (e.pointerId !== id) return;
-      apply(cellAt(e.clientX, e.clientY));
-    });
-    const end = (e: PointerEvent): void => {
-      if (e.pointerId !== id) return;
-      id = -1; sprintLatch = false; apply(4);
-    };
-    pad.addEventListener('pointerup', end);
-    pad.addEventListener('pointercancel', end);
-    this.resets.push(() => { id = -1; sprintLatch = false; apply(4); });
+    function end(): void { id = -1; unfollow = null; sprintLatch = false; apply(4); }
+    this.resets.push(() => { unfollow?.(); end(); });
   }
 
   // --- buttons -------------------------------------------------------------------------
@@ -676,7 +730,8 @@ export class TouchControls {
     this.tap(top, 'tb tb-fly', this.ico.fly, () => this.hooks.onFly(), 'Toggle flight');
     this.pickBtn = this.tap(top, 'tb tb-pick', this.ico.pick, () => this.pressPick(), 'Pick block');
     this.playersBtn = this.tap(top, 'tb tb-players hidden', this.ico.players, () => this.hooks.onPlayers(), 'Player list');
-    this.fsBtn = this.tap(top, 'tb tb-fs hidden', this.ico.fs, () => enterFullscreen(), 'Fullscreen', true);
+    this.fsBtn = this.tap(top, 'tb tb-fs hidden', this.ico.fs,
+      () => (needsHomeScreen() ? showIphoneFullscreenHelp() : enterFullscreen()), 'Fullscreen', true);
     this.tap(top, 'tb tb-showhud', this.ico.eye, () => this.hooks.onShowHud(), 'Show HUD');
 
     // jump: hold to jump / swim up / fly up; double-tap toggles creative flight
@@ -706,10 +761,8 @@ export class TouchControls {
       this.aimRelease = 0;
       this.input.aimNDC = null; this.input.aimOff = false;
       this.hooks.onContext();
+      followPointer(e.pointerId, () => {}, () => this.ctxBtn.classList.remove('held'));
     });
-    const ctxUp = (): void => this.ctxBtn.classList.remove('held');
-    this.ctxBtn.addEventListener('pointerup', ctxUp);
-    this.ctxBtn.addEventListener('pointercancel', ctxUp);
   }
 
   private sneakHoldMode(): boolean {
@@ -729,22 +782,22 @@ export class TouchControls {
     const b = el('div', cls, this.el);
     b.appendChild(icon);
     b.title = tip; b.setAttribute('aria-label', tip); b.setAttribute('role', 'button');
-    let id = -1;
-    b.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      if (id >= 0) return;
-      id = e.pointerId;
-      b.setPointerCapture(e.pointerId); b.classList.add('held'); this.buzz(); onDown(e);
-    });
-    const up = (e?: PointerEvent): void => {
-      if (e && e.pointerId !== id) return;
-      if (id < 0 && e) return;
-      id = -1;
+    let held = false;
+    let unfollow: (() => void) | null = null;
+    const up = (): void => {
+      if (!held) return;
+      held = false;
+      unfollow?.(); unfollow = null;
       b.classList.remove('held'); onUp();
     };
-    b.addEventListener('pointerup', up);
-    b.addEventListener('pointercancel', up);
-    this.resets.push(() => { if (id >= 0) up(); });
+    b.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      up(); // a press whose lift went missing never blocks the next one
+      held = true;
+      unfollow = followPointer(e.pointerId, () => {}, up);
+      b.classList.add('held'); this.buzz(); onDown(e);
+    });
+    this.resets.push(up);
     return b;
   }
 
@@ -755,17 +808,15 @@ export class TouchControls {
     b.appendChild(icon);
     b.title = tip; b.setAttribute('aria-label', tip); b.setAttribute('role', 'button');
     b.addEventListener('pointerdown', (e) => {
-      e.preventDefault(); b.setPointerCapture(e.pointerId); b.classList.add('held'); this.buzz();
+      e.preventDefault(); b.classList.add('held'); this.buzz();
       if (!onLift) onTap();
+      followPointer(e.pointerId, () => {}, (u) => {
+        b.classList.remove('held');
+        const r = b.getBoundingClientRect();
+        const inside = u.clientX >= r.left && u.clientX <= r.right && u.clientY >= r.top && u.clientY <= r.bottom;
+        if (onLift && inside && u.type === 'pointerup') onTap();
+      });
     });
-    b.addEventListener('pointerup', (e) => {
-      if (!b.classList.contains('held')) return;
-      b.classList.remove('held');
-      const r = b.getBoundingClientRect();
-      const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-      if (onLift && inside) onTap();
-    });
-    b.addEventListener('pointercancel', () => b.classList.remove('held'));
     return b;
   }
 
@@ -786,6 +837,9 @@ export class TouchControls {
 
   /** Called every rendered frame while playing: buttons follow the player's state. */
   frame(f: TouchFrame): void {
+    // every finger is off the screen: release anything a lost lift left held
+    // (pointer lifts are handled before this frame; this only mops up)
+    if (this.allLifted) { this.allLifted = false; this.releaseHeld(); }
     const pr = this.primary;
     if (pr && pr.mode === 'pending' && performance.now() - pr.t0 >= HOLD_MS) this.startHold();
     // a lifted finger stops aiming once its click has been used (tap aim)
@@ -806,7 +860,8 @@ export class TouchControls {
     const sneakTip = f.riding ? 'Dismount' : vertical ? 'Descend' : 'Sneak';
     if (this.sneakBtn.title !== sneakTip) { this.sneakBtn.title = sneakTip; this.sneakBtn.setAttribute('aria-label', sneakTip); }
     this.playersBtn.classList.toggle('hidden', !f.multiplayer);
-    this.fsBtn.classList.toggle('hidden', !canFullscreen() || isFullscreen());
+    // iPhone: always offer it, as the way to the Add to Home Screen guide
+    this.fsBtn.classList.toggle('hidden', !needsHomeScreen() && (!canFullscreen() || isFullscreen()));
 
     // contextual mob button
     const label = f.context;
@@ -826,8 +881,9 @@ export class TouchControls {
   /** The finger is held on the world, breaking / attacking (main repeats hits on mobs). */
   get mining(): boolean { return this.primary?.mode === 'mine'; }
 
-  /** Clear any held inputs (called when hiding / opening a menu). */
-  private reset(): void {
+  /** Let go of every held control (stick, D-pad, jump, sneak-hold, a
+   *  hold on the world) — the sneak latch and armed pick survive. */
+  private releaseHeld(): void {
     for (const r of this.resets) r();
     for (const c of ['@forward', '@back', '@left', '@right', '@jump', '@sprint']) this.input.keys.delete(c);
     this.input.moveAxis = null;
@@ -835,6 +891,11 @@ export class TouchControls {
     this.input.rightDown = false;
     this.sneakHeld = false;
     this.syncSneakKey();
+  }
+
+  /** Clear any held inputs (called when hiding / opening a menu). */
+  private reset(): void {
+    this.releaseHeld();
     this.pickArmed = false;
     this.pickBtn?.classList.remove('on');
     this.aimRelease = 0;
@@ -855,6 +916,9 @@ export class TouchControls {
   dispose(): void {
     this.setVisible(false);
     this.unsub();
+    document.removeEventListener('touchstart', this.onTouchStart, true);
+    document.removeEventListener('touchend', this.onTouchEnd, true);
+    document.removeEventListener('touchcancel', this.onTouchEnd, true);
     this.el.remove();
   }
 }

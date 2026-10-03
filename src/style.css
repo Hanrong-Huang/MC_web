@@ -19,6 +19,10 @@ html, body {
   -webkit-touch-callout: none;            /* no long-press menus on mobile */
   -webkit-tap-highlight-color: transparent; /* no blue tap flash */
   overscroll-behavior: none;              /* no pull-to-refresh / bounce */
+  /* iPhone Safari inflates text in landscape unless told not to: chat, HUD
+     and menus came out oversized */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 #app { width: 100%; height: 100%; position: relative; }
@@ -1282,6 +1286,33 @@ canvas.pix, .mc-slot canvas, .hotbar-slot canvas, #cursor-item canvas, .stat-ico
   #touch-controls .touch-move-zone { bottom: 80px; height: 55%; width: 50%; }
 }
 
+/* short landscape phones (iPhone Safari with its bars leaves ~290–340 px):
+   slimmer thumb buttons and minimap, so the right-hand column (minimap,
+   mob button, jump, sneak) fits without overlapping */
+@media (orientation: landscape) and (max-height: 420px) {
+  html.touch-ui .minimap canvas { width: 72px; height: 72px; }
+  html.touch-ui .compass-readout, html.touch-ui .clock-readout { width: 72px; font-size: 10px; }
+  #touch-controls .touch-stick {
+    left: calc(20px + var(--sl)); bottom: calc(20px + var(--sb));
+    width: calc(108px * var(--tb-s)); height: calc(108px * var(--tb-s));
+  }
+  #touch-controls .touch-dpad { width: calc(138px * var(--tb-s)); height: calc(138px * var(--tb-s)); }
+  #touch-controls .tb-jump {
+    right: calc(18px + var(--sr)); bottom: calc(20px + var(--sb));
+    width: calc(64px * var(--tb-s)); height: calc(64px * var(--tb-s));
+  }
+  #touch-controls .tb-sneak {
+    right: calc(18px + var(--sr) + 72px * var(--tb-s)); bottom: calc(46px + var(--sb));
+    width: calc(54px * var(--tb-s)); height: calc(54px * var(--tb-s));
+  }
+  #touch-controls .tb-ctx {
+    right: calc(18px + var(--sr)); bottom: calc(30px + var(--sb) + 64px * var(--tb-s));
+    height: calc(38px * var(--tb-s)); font-size: 13px;
+  }
+  #touch-controls .touch-top .tb { width: calc(40px * var(--tb-s)); height: calc(40px * var(--tb-s)); }
+  #touch-controls .touch-top { gap: 6px; }
+}
+
 /* tap-aim: no crosshair (you act where you touch) */
 html.touch-ui.aim-tap #crosshair { display: none; }
 
@@ -1325,8 +1356,20 @@ html.touch-ui #hotbar .hotbar-slot { width: 46px; height: 46px; }
 #app.hud-off #touch-controls .touch-dpad { opacity: 0.12; }
 
 /* chat on touch: at the top, clear of the phone keyboard, with big buttons */
-html.touch-ui .chat-root { bottom: auto; top: calc(64px + env(safe-area-inset-top, 0px)); }
+html.touch-ui .chat-root {
+  bottom: auto; top: calc(64px + env(safe-area-inset-top, 0px));
+  left: calc(8px + env(safe-area-inset-left, 0px));
+  width: min(480px, calc(100vw - 150px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px))); /* clear of the minimap */
+  font-size: 13px;
+}
 html.touch-ui .chat-log { max-height: 30vh; }
+/* short landscape phones (the keyboard takes half of it): a slimmer chat line */
+@media (max-height: 460px) {
+  html.touch-ui .chat-root.open { top: calc(8px + env(safe-area-inset-top, 0px)); } /* the buttons hide while typing */
+  html.touch-ui .chat-log { max-height: 24vh; }
+  html.touch-ui .chat-input input { padding: 6px 8px; }
+  html.touch-ui .chat-btn { width: 40px; min-height: 34px; font-size: 16px; }
+}
 .chat-input { display: flex; gap: 4px; }
 .chat-input input { flex: 1; min-width: 0; }
 .chat-btn {
@@ -1335,6 +1378,25 @@ html.touch-ui .chat-log { max-height: 30vh; }
 }
 html.touch-ui .chat-btn { width: 44px; min-height: 40px; font-size: 18px; }
 html.touch-ui .chat-input input { padding: 10px 8px; font-size: 16px; } /* 16px: no iOS zoom-in */
+
+/* iPhone fullscreen guide (the ⛶ button on iPhone) */
+#ios-fs-help { z-index: 80; background: rgba(8,10,14,0.78); padding: 12px; overflow-y: auto; justify-content: safe center; }
+.ios-fs-panel {
+  max-width: min(560px, 94vw); color: #3f3f3f; font-size: 13px; line-height: 1.45;
+  max-height: calc(100% - 4px); overflow-y: auto; /* short phones: scrolls inside, the button stays */
+}
+.ios-fs-panel > .mc-btn { position: sticky; bottom: 0; }
+@media (max-height: 420px) { .ios-fs-panel { font-size: 12px; line-height: 1.35; } .ios-fs-panel ol { gap: 4px; } }
+.ios-fs-title { font-size: 16px; color: #2a2a2a; margin-bottom: 8px; text-align: center; }
+.ios-fs-panel ol { margin: 0 0 8px 18px; display: flex; flex-direction: column; gap: 8px; }
+.ios-zh { color: #5a5a5a; }
+.ios-note { font-size: 12px; color: #555; margin-bottom: 10px; }
+.ios-share {
+  display: inline-block; width: 12px; height: 14px; vertical-align: -2px;
+  border: 2px solid #2f6fd6; border-top: 0; position: relative; margin: 0 2px;
+}
+.ios-share::before { content: ''; position: absolute; left: 50%; top: -7px; width: 2px; height: 11px; margin-left: -1px; background: #2f6fd6; }
+.ios-fs-link { margin-top: 8px; }
 
 /* pause menu: two buttons sharing a row */
 .pause-pair { display: flex; gap: 8px; }

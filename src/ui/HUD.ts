@@ -10,7 +10,7 @@ import { def, CREATIVE_ITEMS, I, B, spriteNameFor, mobLabel, enchantLabel, DOOR_
 import { SaveSummary, SlotData } from '../engine/Persistence';
 import { AudioEngine, SfxName, MobVoice } from '../engine/Audio';
 import type { GameMode } from '../engine/Player';
-import { touchUI, onInputMode, enterFullscreen, exitFullscreen, needsHomeScreen } from './TouchControls';
+import { touchUI, onInputMode, enterFullscreen, exitFullscreen, needsHomeScreen, showIphoneFullscreenHelp, followPointer } from './TouchControls';
 import { getControls, setControls } from '../engine/ControlsSettings';
 import { ACTIONS, Action, RESERVED, bindingFor, keyLabel, keySettings, normalizeCode, resetBindings, setBinding, setSneakToggle } from '../engine/Keybinds';
 import {
@@ -725,8 +725,13 @@ ${seedLine.textContent}`;
     if (touchUI()) {
       help.innerHTML =
         '<b>Left stick</b> move (push to the rim to sprint) · <b>Drag</b> look · <b>Jump / Sneak</b> buttons<br>' +
-        '<b>Tap</b> place / use / hit · <b>Hold</b> break · hold a hotbar slot, let go to drop · <b>…</b> inventory' +
-        (needsHomeScreen() ? '<br>Fullscreen on iPhone: <b>Share → Add to Home Screen</b>, then play from the icon' : '');
+        '<b>Tap</b> place / use / hit · <b>Hold</b> break · hold a hotbar slot, let go to drop · <b>…</b> inventory';
+      if (needsHomeScreen()) {
+        const b = el('button', 'mc-btn small ios-fs-link', help) as HTMLButtonElement;
+        b.type = 'button';
+        b.textContent = 'Fullscreen on iPhone… · iPhone 全屏…';
+        b.onclick = () => showIphoneFullscreenHelp();
+      }
     } else {
       help.innerHTML =
         '<b>WASD</b> move · <b>Space</b> jump · <b>Shift</b> sneak · <b>W W</b> sprint · <b>F</b> fly · <b>E</b> inventory<br>' +
@@ -919,7 +924,8 @@ ${seedLine.textContent}`;
    *  A touch that slid to another slot, or was cancelled, throws nothing. */
   private wireHotbar(): void {
     const bar = this.hotbarEl;
-    let id = -1, cur = -1;
+    let cur = -1;
+    let unfollow: (() => void) | null = null;
     const slotAt = (x: number, y: number): number => {
       const hit = document.elementFromPoint(x, y)?.closest('.hotbar-slot') as HTMLElement | null;
       return hit && bar.contains(hit) ? Number(hit.dataset.i) : -1;
@@ -959,21 +965,20 @@ ${seedLine.textContent}`;
       if (e.button !== 0) return;
       this.onHotbarSelect(i);
       if (e.pointerType !== 'touch') return;
-      id = e.pointerId;
+      unfollow?.();
       cur = i;
-      bar.setPointerCapture(e.pointerId);
+      // followed on window: iOS Safari may not keep the touch captured here
+      unfollow = followPointer(e.pointerId, move, end);
       arm(i, e.timeStamp);
     });
-    bar.addEventListener('pointermove', (e) => {
-      if (e.pointerId !== id) return;
+    const move = (e: PointerEvent): void => {
       const i = slotAt(e.clientX, e.clientY);
       // a slide only selects: once the finger has left its first slot this
       // touch never drops (a slow swipe must not throw stacks on the way)
       if (i >= 0 && i !== cur) { cur = i; this.onHotbarSelect(i); stop(); }
-    });
+    };
     const end = (e: PointerEvent): void => {
-      if (e.pointerId !== id) return;
-      id = -1;
+      unfollow = null;
       const i = this.hotbarHold; // -1 once the touch slid off its first slot
       stop();
       if (i < 0 || e.type !== 'pointerup') return;
@@ -981,8 +986,6 @@ ${seedLine.textContent}`;
       if (held >= 1300) this.onHotbarDrop(i, true);
       else if (held >= 550) this.onHotbarDrop(i, false);
     };
-    bar.addEventListener('pointerup', end);
-    bar.addEventListener('pointercancel', end);
   }
 
   private placeHotbarSel(): void {
@@ -1844,6 +1847,7 @@ ${seedLine.textContent}`;
       () => { setControls({ autoJump: !getControls().autoJump }); this.audio.ui(getControls().autoJump ? 'toggleOn' : 'toggleOff'); });
     toggle(() => needsHomeScreen() ? 'Fullscreen: Add to Home Screen' : `Fullscreen: ${getControls().fullscreen ? 'ON' : 'OFF'}`,
       () => {
+        if (needsHomeScreen()) { showIphoneFullscreenHelp(); return; } // no fullscreen for pages on iPhone
         const on = !getControls().fullscreen;
         setControls({ fullscreen: on });
         this.audio.ui(on ? 'toggleOn' : 'toggleOff');

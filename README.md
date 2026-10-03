@@ -40,7 +40,7 @@ Every key above except the hotbar, Esc and F1–F3 can be rebound in **Options �
 
 ### Phones and tablets
 
-The touch layout follows Minecraft Bedrock on a phone. Play in landscape. The game goes fullscreen (and locks landscape on Android) when you first lift your finger; if you leave fullscreen, the **⛶** button at the top left brings it back. **iPhone:** Safari does not let web pages go fullscreen. Tap **Share → Add to Home Screen** and start the game from that icon instead: it then runs fullscreen, without the browser bars.
+The touch layout follows Minecraft Bedrock on a phone. Play in landscape. The game goes fullscreen (and locks landscape on Android) when you first lift your finger; if you leave fullscreen, the **⛶** button at the top left brings it back. **iPhone:** Safari does not let web pages go fullscreen, so the **⛶** button opens a short guide instead. The best way is **Share → Add to Home Screen**, then start the game from that icon: it runs without any browser bars. (The home-screen app keeps its own saves; move a world with **Export** / **Import World**.) The quick way is the page menu at the left of the address bar → **Hide Toolbar**. Game sound plays even with the silent switch on.
 
 | Touch | Action |
 |---|---|
@@ -60,7 +60,7 @@ The touch layout follows Minecraft Bedrock on a phone. Play in landscape. The ga
 
 #### 手机 / 平板操作（中文）
 
-触屏布局参照手机版 Minecraft（基岩版）。请横屏游玩。手指第一次抬起时自动全屏（安卓上同时锁定横屏）；退出全屏后，左上角的 **⛶** 按钮可以重新进入。**iPhone：** Safari 不允许网页全屏，请点 **分享 → 添加到主屏幕**，之后从主屏幕图标启动，就是没有浏览器栏的全屏。
+触屏布局参照手机版 Minecraft（基岩版）。请横屏游玩。手指第一次抬起时自动全屏（安卓上同时锁定横屏）；退出全屏后，左上角的 **⛶** 按钮可以重新进入。**iPhone：** Safari 不允许网页全屏，所以 **⛶** 按钮会弹出说明。推荐：**分享 → 添加到主屏幕**，之后从主屏幕图标启动，完全没有浏览器栏（主屏幕应用的存档与 Safari 分开，可用 **Export / Import World** 转移世界）。快速：点地址栏左边的页面菜单 → **隐藏工具栏**。手机开着静音键也有游戏声音。
 
 - **左侧摇杆**：移动，轻推慢走，推到边缘冲刺
 - **其他区域拖动**：转动视角

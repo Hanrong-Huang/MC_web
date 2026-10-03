@@ -271,6 +271,33 @@ check('sneak toggles on', sneakOn);
 await tapEl('.tb-sneak');
 check('sneak toggles off', await until(() => !window.__game.player.sneaking));
 
+// --- jump never sticks: a thumb drifting off the button before lifting, and
+// a lift whose pointer event never arrives (iOS Safari can lose both); the
+// "no fingers left" backstop must let go of it
+{
+  const jb2 = await center('.tb-jump');
+  await down(11, jb2.x, jb2.y);
+  check('jump held while pressed', await until(() => window.__game.input.keys.has('@jump')));
+  await move(11, jb2.x - 160, jb2.y - 120); // drift over the look surface
+  await up(11);
+  check('jump lets go when the finger drifted off before lifting', await until(() => !window.__game.input.keys.has('@jump')));
+  await g(() => {
+    window.__swallow = (e) => { if (e.pointerType === 'touch') { e.stopImmediatePropagation(); window.removeEventListener('pointerup', window.__swallow, true); } };
+    window.addEventListener('pointerup', window.__swallow, true);
+  });
+  await down(12, jb2.x, jb2.y);
+  await until(() => window.__game.input.keys.has('@jump'));
+  await up(12); // its pointerup is swallowed: only the touchend backstop is left
+  check('jump lets go even when the lift event is lost', await until(() => !window.__game.input.keys.has('@jump') &&
+    !document.querySelector('.tb-jump').classList.contains('held')));
+  // land (game time runs slower than the wall clock here), then stay down: a
+  // stuck jump key would launch the player again within a few frames
+  const landed = await until(() => window.__game.player.onGround, 8000);
+  await g(() => { window.__airborne = false; const p = window.__game.player; const tick = () => { if (!p.onGround) window.__airborne = true; window.__ab = requestAnimationFrame(tick); }; tick(); });
+  await wait(1500);
+  check('…and the player stops jumping', landed && await g(() => { cancelAnimationFrame(window.__ab); return !window.__airborne; }));
+}
+
 // --- mobs: context button when centred, tap on it to hit it
 await g(() => {
   const gm = window.__game, p = gm.player, a = window.__arena;
@@ -349,7 +376,9 @@ check('the slot fills red while held past one item', await (async () => {
 check('held past red, then let go: the whole stack (Ctrl+Q)', await until(() => !window.__game.player.inventory.slots[3], 3000));
 await g(() => { const p = window.__game.player; p.inventory.slots[4] = { id: window.__B.DIRT, count: 10 }; p.inventory.onChange(); });
 await wait(200);
-const s4 = await slots.nth(4).boundingBox(); // after the rebuild that change caused
+// slots are rebuilt on every inventory change (a pickup can land mid-measure): retry
+let s4 = null;
+for (let k = 0; k < 20 && !s4; k++) { s4 = await slots.nth(4).boundingBox(); if (!s4) await wait(100); }
 await tap(s4.x + s4.width / 2, s4.y + s4.height / 2);
 await wait(400);
 check('a quick tap on a slot throws nothing', (await g(() => window.__game.player.inventory.slots[4]?.count)) === 10);
@@ -516,6 +545,107 @@ check('portrait hotbar (with "…") fits the screen', await g(() => {
 }));
 await shot('portrait-play');
 await page.setViewportSize({ width: W, height: H });
+
+// --- iPhone: Safari in landscape with its bars showing (812×292), no
+// fullscreen API for pages — the ⛶ button and the title screen explain Add to
+// Home Screen; chat must fit the short screen
+if (!process.env.SKIP_IPHONE) {
+  const ictx = await browser.newContext({
+    viewport: { width: 812, height: 292 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true,
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1',
+  });
+  const ip = await ictx.newPage();
+  ip.on('console', (m) => { if (m.type() === 'error') errors.push(`[iphone] ${m.text()}`); });
+  ip.on('pageerror', (e) => errors.push(`[iphone] PAGEERROR: ${e.message}`));
+  await ip.addInitScript(() => {
+    Object.defineProperty(Document.prototype, 'fullscreenEnabled', { get: () => false });
+    Object.defineProperty(Document.prototype, 'webkitFullscreenEnabled', { get: () => false });
+    window.__fsCalls = 0;
+    Element.prototype.requestFullscreen = function () { window.__fsCalls++; return Promise.reject(new TypeError('unsupported')); };
+    // Safari's Audio Session API (iOS 16.4+): the game must ask for 'playback'
+    // or the silent switch mutes it
+    navigator.audioSession = { type: 'auto' };
+  });
+  const icdp = await ictx.newCDPSession(ip);
+  const itap = async (sel) => {
+    const l = ip.locator(sel).first();
+    await l.scrollIntoViewIfNeeded().catch(() => {});
+    const b = await l.boundingBox();
+    if (!b) throw new Error(`no ${sel}`);
+    const pt = [{ x: b.x + b.width / 2, y: b.y + b.height / 2, id: 1 }];
+    const ts = Date.now() / 1000;
+    await Promise.all([
+      icdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: pt, timestamp: ts }),
+      icdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [], timestamp: ts + 0.06 }),
+    ]);
+  };
+  const iuntil = (fn, ms = 4000) => ip.waitForFunction(fn, null, { timeout: ms }).then(() => true, () => false);
+  await ip.goto(`http://localhost:${PORT}/#dev-nointro`, { waitUntil: 'domcontentloaded', timeout: 120000 });
+  await ip.waitForSelector('.create-btn', { timeout: 30000 });
+  await ip.waitForTimeout(800);
+  check('iPhone: page text is not inflated', await ip.evaluate(() => /100%/.test(getComputedStyle(document.documentElement).webkitTextSizeAdjust || getComputedStyle(document.documentElement).textSizeAdjust || '')));
+  check('iPhone: title offers the fullscreen guide', await ip.locator('.ios-fs-link').isVisible());
+  check('iPhone: audio session asks for playback after a tap (silent switch)', await iuntil(() => navigator.audioSession.type === 'playback'));
+  await itap('.ios-fs-link');
+  check('iPhone: guide explains Add to Home Screen', await iuntil(() => /Add to Home Screen/.test(document.getElementById('ios-fs-help')?.innerText ?? '')));
+  check('iPhone: the guide button is on screen', await ip.evaluate(() => { const r = document.querySelector('#ios-fs-help .mc-btn').getBoundingClientRect(); return r.bottom <= innerHeight && r.top >= 0; }));
+  if (SHOTS) await ip.screenshot({ path: `${DIR}/shot-mobile-iphone-guide.png` });
+  await itap('#ios-fs-help .mc-btn');
+  check('iPhone: guide closes', await iuntil(() => !document.getElementById('ios-fs-help')));
+  await itap('.create-btn');
+  await ip.waitForSelector('#loading.hidden', { timeout: 120000, state: 'attached' });
+  await ip.waitForFunction(() => !!window.__game, null, { timeout: 30000 });
+  await iuntil(() => !document.getElementById('touch-controls').classList.contains('hidden'), 10000);
+  check('iPhone: ⛶ button shown (no fullscreen API)', await ip.locator('.tb-fs').isVisible());
+  // a cow in front so the mob button shows too, then nothing on the right may overlap
+  await ip.evaluate(() => {
+    const gm = window.__game, p = gm.player;
+    p.mode = 'creative'; gm.onInventoryChange(); // the minimap shows in creative: include it
+    p.yaw = 0; p.pitch = -0.3; gm.input.consumeMouse();
+    const cow = gm.entities.spawnMob('cow', p.pos.x, p.pos.y, p.pos.z - 2.2);
+    cow.vel = { x: 0, y: 0, z: 0 };
+  });
+  await iuntil(() => !document.querySelector('.tb-ctx').classList.contains('hidden'), 6000);
+  await ip.waitForTimeout(300);
+  const clash = await ip.evaluate(() => {
+    const sels = ['.tb-jump', '.tb-sneak', '.tb-ctx', '.minimap', '#hotbar-wrap', '.hotbar-more', '.touch-top', '.touch-stick'];
+    const R = sels.map((s) => { const e = document.querySelector(s); const r = e && getComputedStyle(e).display !== 'none' ? e.getBoundingClientRect() : null; return [s, r]; })
+      .filter(([, r]) => r && r.width > 0);
+    const out = [];
+    for (let i = 0; i < R.length; i++) {
+      const [s, r] = R[i];
+      if (r.left < 0 || r.top < 0 || r.right > innerWidth + 0.5 || r.bottom > innerHeight + 0.5) out.push(s + ' off-screen');
+      for (let j = i + 1; j < R.length; j++) {
+        const [s2, r2] = R[j];
+        if ((s === '#hotbar-wrap' && s2 === '.hotbar-more')) continue; // the "…" sits on the bar
+        if (r.left < r2.right && r2.left < r.right && r.top < r2.bottom && r2.top < r.bottom) out.push(s + ' × ' + s2);
+      }
+    }
+    return out;
+  });
+  check('iPhone: thumb buttons, minimap and hotbar do not overlap at 812×292', clash.length === 0, clash.join(', '));
+  if (SHOTS) await ip.screenshot({ path: `${DIR}/shot-mobile-iphone-hud.png` });
+  await itap('.tb-fs');
+  check('iPhone: ⛶ opens the guide instead of failing', await iuntil(() => !!document.getElementById('ios-fs-help')));
+  await itap('#ios-fs-help .mc-btn');
+  await iuntil(() => !document.getElementById('ios-fs-help'));
+  await itap('.tb-chat');
+  check('iPhone: chat opens', await iuntil(() => window.__game.state === 'chat'));
+  await ip.evaluate(() => { window.__game.chat.add('You', 'hi'); });
+  const fit = await ip.evaluate(() => {
+    const r = document.querySelector('.chat-root').getBoundingClientRect();
+    const mm = document.querySelector('.minimap')?.getBoundingClientRect();
+    const inp = document.querySelector('.chat-input input');
+    return { right: r.right, bottom: r.bottom, top: r.top, w: innerWidth, h: innerHeight, mmLeft: mm && mm.width > 0 ? mm.left : innerWidth - 120 /* hidden while chatting: keep clear of where it sits */, font: parseFloat(getComputedStyle(inp).fontSize) };
+  });
+  check('iPhone: chat fits the short landscape screen, clear of the minimap',
+    fit.right <= fit.mmLeft && fit.top >= 0 && fit.bottom <= fit.h * 0.6, JSON.stringify(fit));
+  check('iPhone: chat input is 16px (Safari zooms into smaller inputs)', fit.font >= 16);
+  if (SHOTS) await ip.screenshot({ path: `${DIR}/shot-mobile-iphone-chat.png` });
+  await itap('.chat-close');
+  check('iPhone: chat closes', await iuntil(() => window.__game.state === 'playing'));
+  await ictx.close();
+}
 
 console.log('console errors:', errors.length ? errors.slice(0, 10).join('\n') : 'NONE');
 await browser.close();
