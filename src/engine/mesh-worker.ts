@@ -62,8 +62,9 @@ function makeWorld(job: MeshJob): MeshWorld {
     if (!c) return B.STONE;
     return c.data[(wx & 15) | ((wz & 15) << 4) | (y << 8)];
   };
-  const fluid = (m: Map<string, number>, f: number, wx: number, y: number, wz: number) =>
-    getBlock(wx, y + 1, wz) === f ? 0 : (m.get(`${wx},${y},${wz}`) ?? 0);
+  // raw levels (0 source, 1..7 flowing, 8 falling); the mesher reads the column above itself
+  const fluid = (m: Map<string, number>, _f: number, wx: number, y: number, wz: number) =>
+    m.get(`${wx},${y},${wz}`) ?? 0;
   return {
     getChunk,
     getBlockForMesh: getBlock,

@@ -5,7 +5,7 @@
 
 import * as THREE from 'three';
 import { World } from './World';
-import { moveEntity, inWater, rayAABB, Vec3, MoveResult } from './Physics';
+import { moveEntity, inWater, fluidPush, rayAABB, Vec3, MoveResult } from './Physics';
 import { B, I, def, hasDef, allDefs, CROSS_BLOCKS, spriteNameFor, CAPTURABLE, mobLabel, BLAST_PROOF } from './Blocks';
 import { isFireproof, RAIL_IDS, RAIL_ENDS, RAIL_Y, isSolid } from './Blocks';
 import { Atlas, extrudeSpriteGeometry, shapedItemGeometry, BLOCK_SPRITE_ICONS } from './Textures';
@@ -18,6 +18,8 @@ import { netherFX } from './NetherFX';
 import { MobModels, LimbSet, MOB_EXPOSURE, MAGMA_SIZES, rollVariant } from './MobModels';
 import { buildOrbRig, setOrbOpen, disposeOrb, orbGlowTexture, orbStarTexture, ORB_GLOW, ORB_IDLE_GLOW, OrbRig } from './CatcherOrb';
 
+/** scratch flow vector for water currents (drops, swimming mobs) */
+const FLOW_PUSH: Vec3 = { x: 0, y: 0, z: 0 };
 /** minecart physics: slope pull, powered-rail boost (m/s²), top speed (m/s) */
 const CART_SLOPE_G = 6, CART_BOOST = 14, CART_MAX = 8;
 
@@ -2250,7 +2252,9 @@ export class EntityManager {
     } else {
       e.vel.y -= GRAVITY * 0.55 * dt;
     }
-    if (inWater(this.world, e.pos, e.box)) e.vel.y = Math.max(e.vel.y, 1.2);
+    // water: items float up and ride the current (vanilla item streams)
+    const wet = fluidPush(this.world, B.WATER, e.pos, e.box, FLOW_PUSH, true);
+    if (wet) e.vel.y = Math.max(e.vel.y, FLOW_PUSH.y < -0.5 ? -2 : 1.2);
     // lava: netherite (and ancient debris) bobs on it, anything else burns up
     if (this.world.getBlock(Math.floor(e.pos.x), Math.floor(e.pos.y + 0.1), Math.floor(e.pos.z)) === B.LAVA) {
       if (isFireproof(e.itemId)) e.vel.y = Math.max(e.vel.y, 1.5);
@@ -2261,8 +2265,14 @@ export class EntityManager {
         return;
       }
     }
-    e.vel.x *= 1 - Math.min(1, 6 * dt);
-    e.vel.z *= 1 - Math.min(1, 6 * dt);
+    if (wet) {
+      const k = Math.min(1, 3 * dt);
+      e.vel.x += (FLOW_PUSH.x * 2.2 - e.vel.x) * k;
+      e.vel.z += (FLOW_PUSH.z * 2.2 - e.vel.z) * k;
+    } else {
+      e.vel.x *= 1 - Math.min(1, 6 * dt);
+      e.vel.z *= 1 - Math.min(1, 6 * dt);
+    }
     moveEntity(this.world, e.pos, e.vel, dt, e.box);
     if (e.age > 300) e.dead = true; // 5-minute despawn
 
@@ -2822,8 +2832,10 @@ export class EntityManager {
   private applyGroundMove(e: Entity, dt: number, wishX: number, wishZ: number, speed: number): MoveResult {
     const swimming = inWater(this.world, e.pos, e.box);
     const blend = Math.min(1, (e.onGround ? 10 : 3) * dt);
-    e.vel.x += (wishX * speed - e.vel.x) * blend;
-    e.vel.z += (wishZ * speed - e.vel.z) * blend;
+    let px = 0, pz = 0;
+    if (swimming && fluidPush(this.world, B.WATER, e.pos, e.box, FLOW_PUSH, true)) { px = FLOW_PUSH.x * 1.4; pz = FLOW_PUSH.z * 1.4; }
+    e.vel.x += (wishX * speed + px - e.vel.x) * blend;
+    e.vel.z += (wishZ * speed + pz - e.vel.z) * blend;
     if (swimming) {
       e.vel.y += (1.8 - e.vel.y) * Math.min(1, 4 * dt);
     } else {

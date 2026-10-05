@@ -1,8 +1,10 @@
-// Water effects: splash droplets, rising bubbles and expanding surface
-// ripples, all drawn as one instanced mesh (a single draw call, fixed-size
-// typed-array pools, no per-frame allocation). Also watches entities for
-// water entry (mobs / items / arrows splash too) and scans the neighbourhood
-// for moving water to drive the flowing-water ambience and waterfall spray.
+// Fluid effects: splash droplets, rising bubbles, expanding surface ripples,
+// lava pops (embers flung off open lava) and water/lava drips under blocks
+// with fluid above them (vanilla's dripping particles), all drawn as one
+// instanced mesh (a single draw call, fixed-size typed-array pools, no
+// per-frame allocation). Also watches entities for water entry (mobs / items
+// / arrows splash too) and scans the neighbourhood for moving water (spray
+// where falls plunge in), lava surfaces and drip spots.
 
 import * as THREE from 'three';
 import { B } from './Blocks';
@@ -10,9 +12,11 @@ import type { World } from './World';
 import type { AudioEngine } from './Audio';
 
 const MAX = 384;
-const K_DROP = 0, K_BUBBLE = 1, K_RIPPLE = 2;
+const K_DROP = 0, K_BUBBLE = 1, K_RIPPLE = 2, K_LAVA = 3, K_DRIP_W = 4, K_DRIP_L = 5;
 /** Resting height of the water surface inside its cell (matches the mesher + wave offset). */
-const SURFACE = 14 / 16 - 0.045;
+const SURFACE = 8 / 9 - 0.045;
+/** A drip hangs under its block this long (growing) before it lets go. */
+const DRIP_HANG = 1.1;
 
 const VERT = /* glsl */ `
 attribute vec3 iPos;
@@ -23,10 +27,11 @@ varying float vK;
 void main() {
   vC = position.xy * 2.0;
   // fade out right at the lens so your own splash doesn't paste squares on it
-  vA = iParam.y * (iParam.z > 1.5 ? 1.0 : smoothstep(0.35, 1.3, distance(cameraPosition, iPos)));
+  bool lying = iParam.z > 1.5 && iParam.z < 2.5;
+  vA = iParam.y * (lying ? 1.0 : smoothstep(0.35, 1.3, distance(cameraPosition, iPos)));
   vK = iParam.z;
   vec3 wp;
-  if (iParam.z > 1.5) {
+  if (lying) {
     wp = iPos + vec3(position.x, 0.0, position.y) * iParam.x; // ripples lie on the surface
   } else {
     vec3 right = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
@@ -56,11 +61,31 @@ void main() {
     if (r > 1.0) discard;
     a = smoothstep(0.6, 0.88, r) * 0.85 + 0.12 + step(length(vC - vec2(-0.35, 0.35)), 0.22) * 0.6;
     col = vec3(0.85, 0.95, 1.0);
-  } else {
+  } else if (vK < 2.5) {
     // ripple: a thin soft ring
     a = smoothstep(0.72, 0.88, r) * (1.0 - smoothstep(0.9, 1.0, r));
     if (a < 0.01) discard;
     col = vec3(0.9, 0.96, 1.0);
+  } else {
+    // pixel-square drips and embers; lava glows on its own
+    vec2 q = abs(vC);
+    if (max(q.x, q.y) > 1.0) discard;
+    a = 1.0;
+    float core = step(max(q.x, q.y), 0.5);
+    if (vK < 3.95) {
+      float life = fract(vK); // ember: yellow-hot, cooling to deep red
+      col = mix(vec3(0.75, 0.12, 0.02), mix(vec3(1.0, 0.55, 0.1), vec3(1.0, 0.92, 0.5), core), life);
+      gl_FragColor = vec4(col * 1.6, a * vA);
+      #include <colorspace_fragment>
+      return;
+    } else if (vK < 4.5) {
+      col = mix(vec3(0.25, 0.42, 0.95), vec3(0.6, 0.78, 1.0), core);
+    } else {
+      col = mix(vec3(0.95, 0.35, 0.05), vec3(1.0, 0.75, 0.3), core);
+      gl_FragColor = vec4(col * 1.4, a * vA);
+      #include <colorspace_fragment>
+      return;
+    }
   }
   gl_FragColor = vec4(col * uLight, a * vA);
   #include <colorspace_fragment>
@@ -90,6 +115,10 @@ export class WaterFX {
   private scanT = 0;
   private falls: number[] = []; // flat x,y,z triples of waterfall plunge points
   private fallSprayT = 0;
+  private lavaTops: number[] = []; // x,y,z of open lava surface cells nearby
+  private dripSpots: number[] = []; // x,y,z,fluid of block undersides fluid seeps through
+  private lavaAcc = 0;
+  private dripAcc = 0;
 
   /** Hook into the scene once; the world/audio can be swapped any time. */
   attach(scene: THREE.Scene, world: World, audio: AudioEngine): void {
@@ -97,6 +126,8 @@ export class WaterFX {
     this.audio = audio;
     this.n = 0;
     this.falls.length = 0;
+    this.lavaTops.length = 0;
+    this.dripSpots.length = 0;
     if (this.mesh) { scene.add(this.mesh); return; } // a new game's scene
     const g = new THREE.InstancedBufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute([-0.5, -0.5, 0, 0.5, -0.5, 0, 0.5, 0.5, 0, -0.5, 0.5, 0], 3));
@@ -216,6 +247,29 @@ export class WaterFX {
         if (Math.random() < 0.25) this.add(K_RIPPLE, fx, fy - 0.12, fz, 0, 0, 0, 1.1, 0.6, 1.8 + Math.random());
       }
     }
+    // lava pops: vanilla flings an ember off each open lava cell about once
+    // every 5 s (1/100 per tick)
+    const nLava = this.lavaTops.length / 3;
+    if (nLava) {
+      this.lavaAcc += dt * nLava * 0.2;
+      for (; this.lavaAcc >= 1; this.lavaAcc--) {
+        const j = ((Math.random() * nLava) | 0) * 3;
+        const a = Math.random() * Math.PI * 2, s = 0.3 + Math.random() * 0.9;
+        this.add(K_LAVA, this.lavaTops[j] + 0.2 + Math.random() * 0.6, this.lavaTops[j + 1] + 0.95, this.lavaTops[j + 2] + 0.2 + Math.random() * 0.6,
+          Math.cos(a) * s, 3 + Math.random() * 3.5, Math.sin(a) * s, 1.2 + Math.random() * 1.2, 0.09 + Math.random() * 0.05, 0.03);
+      }
+    }
+    // drips under blocks with water/lava on top, each spot every ~3 s
+    const nDrip = this.dripSpots.length / 4;
+    if (nDrip) {
+      this.dripAcc += dt * nDrip * 0.33;
+      for (; this.dripAcc >= 1; this.dripAcc--) {
+        const j = ((Math.random() * nDrip) | 0) * 4;
+        const lava = this.dripSpots[j + 3] === 1;
+        this.add(lava ? K_DRIP_L : K_DRIP_W, this.dripSpots[j] + 0.15 + Math.random() * 0.7, this.dripSpots[j + 1] - 0.02,
+          this.dripSpots[j + 2] + 0.15 + Math.random() * 0.7, 0, 0, 0, DRIP_HANG + 3, 0.02, 0.07);
+      }
+    }
 
     const P = this.iPos, Q = this.iParam;
     let i = 0;
@@ -245,6 +299,30 @@ export class WaterFX {
             if (this.n < MAX - 8) this.add(K_RIPPLE, this.px[i], sy + 0.01, this.pz[i], 0, 0, 0, 0.5, 0.05, 0.35);
           }
         }
+      } else if (!dead && k === K_LAVA) {
+        this.vy[i] -= 12 * dt;
+        this.px[i] += this.vx[i] * dt; this.py[i] += this.vy[i] * dt; this.pz[i] += this.vz[i] * dt;
+        const id = world.getBlock(Math.floor(this.px[i]), Math.floor(this.py[i]), Math.floor(this.pz[i]));
+        if (this.vy[i] < 0 && id !== B.AIR) dead = true; // lands back in the lava (or on rock)
+      } else if (!dead && (k === K_DRIP_W || k === K_DRIP_L)) {
+        const hung = this.maxLife[i] - this.life[i];
+        if (hung > DRIP_HANG) {
+          this.vy[i] -= 14 * dt;
+          this.py[i] += this.vy[i] * dt;
+          const bx = Math.floor(this.px[i]), by = Math.floor(this.py[i]), bz = Math.floor(this.pz[i]);
+          const id = world.getBlock(bx, by, bz);
+          if (id !== B.AIR) {
+            dead = true;
+            // landing: a ring on water, a couple of droplets/sparks on the ground
+            if (id === B.WATER) { if (this.n < MAX - 4) this.add(K_RIPPLE, this.px[i], by + SURFACE + 0.01, this.pz[i], 0, 0, 0, 0.7, 0.05, 0.45); }
+            else if (this.n < MAX - 4) {
+              for (let s = 0; s < 2; s++) {
+                this.add(k === K_DRIP_L ? K_LAVA : K_DROP, this.px[i], by + 1.02, this.pz[i], (Math.random() - 0.5) * 1.2, 1 + Math.random(), (Math.random() - 0.5) * 1.2,
+                  0.3 + Math.random() * 0.2, 0.035, 0.02);
+              }
+            }
+          }
+        }
       }
       if (dead) {
         // swap-remove (the swapped-in particle is processed this iteration)
@@ -253,10 +331,18 @@ export class WaterFX {
         continue;
       }
       const f = this.life[i] / this.maxLife[i]; // 1 -> 0
-      const size = this.size1[i] + (this.size0[i] - this.size1[i]) * f;
-      const alpha = k === K_RIPPLE ? f * f * 0.8 : k === K_BUBBLE ? Math.min(1, f * 3) : Math.min(1, f * 2.5);
+      let size = this.size1[i] + (this.size0[i] - this.size1[i]) * f;
+      let alpha = k === K_RIPPLE ? f * f * 0.8 : k === K_BUBBLE ? Math.min(1, f * 3) : Math.min(1, f * 2.5);
+      let kv: number = k;
+      if (k === K_LAVA) kv = 3 + Math.min(0.9, f * 1.2); // life rides in the fraction
+      else if (k === K_DRIP_W || k === K_DRIP_L) {
+        // swells while it hangs, then a plain falling bead
+        const hung = this.maxLife[i] - this.life[i];
+        size = hung < DRIP_HANG ? 0.03 + 0.05 * (hung / DRIP_HANG) : 0.075;
+        alpha = 1;
+      }
       P[i * 3] = this.px[i]; P[i * 3 + 1] = this.py[i]; P[i * 3 + 2] = this.pz[i];
-      Q[i * 3] = size; Q[i * 3 + 1] = alpha; Q[i * 3 + 2] = k;
+      Q[i * 3] = size; Q[i * 3 + 1] = alpha; Q[i * 3 + 2] = kv;
       i++;
     }
     this.geo.instanceCount = this.n;
@@ -306,13 +392,25 @@ export class WaterFX {
     const R = 10;
     let flow = 0, fall = 0;
     this.falls.length = 0;
+    this.lavaTops.length = 0;
+    this.dripSpots.length = 0;
     const W = B.WATER;
     for (let x = cx - R; x <= cx + R; x++) {
       for (let z = cz - R; z <= cz + R; z++) {
         const hd2 = (x - cx) * (x - cx) + (z - cz) * (z - cz);
         if (hd2 > R * R) continue;
         for (let y = cy - 7; y <= cy + 7; y++) {
-          if (world.getBlock(x, y, z) !== W) continue;
+          const id = world.getBlock(x, y, z);
+          if (id !== W && id !== B.LAVA) continue;
+          // fluid seeping through the block under it drips from its underside
+          if (this.dripSpots.length < 24 * 4 && world.getBlock(x, y - 2, z) === B.AIR) {
+            const under = world.getBlock(x, y - 1, z);
+            if (under !== B.AIR && under !== W && under !== B.LAVA && world.isSolidAt(x, y - 1, z)) this.dripSpots.push(x, y - 1, z, id === B.LAVA ? 1 : 0);
+          }
+          if (id === B.LAVA) {
+            if (this.lavaTops.length < 48 * 3 && world.getBlock(x, y + 1, z) === B.AIR) this.lavaTops.push(x, y, z);
+            continue;
+          }
           const d2 = hd2 + (y - cy) * (y - cy);
           const wgt = 1 / (1 + d2 / 25);
           const above = world.getBlock(x, y + 1, z) === W;

@@ -226,6 +226,40 @@ export function inWater(world: World, pos: Vec3, box: EntBox): boolean {
   return world.getBlock(Math.floor(pos.x), Math.floor(pos.y + box.h * 0.5), Math.floor(pos.z)) === B.WATER;
 }
 
+/** Center of the entity is inside lava? */
+export function inLava(world: World, pos: Vec3, box: EntBox): boolean {
+  return world.getBlock(Math.floor(pos.x), Math.floor(pos.y + box.h * 0.5), Math.floor(pos.z)) === B.LAVA;
+}
+
+const FLOW_TMP: Vec3 = { x: 0, y: 0, z: 0 };
+/**
+ * Vanilla fluid pushing: the summed flow of every cell of `fluid` the AABB
+ * overlaps, normalised into `out` (zero for still water). `cheap` samples
+ * only the cell at the box centre (drops, mobs). Returns whether the box
+ * touches the fluid at all.
+ */
+export function fluidPush(world: World, fluid: number, pos: Vec3, box: EntBox, out: Vec3, cheap = false): boolean {
+  out.x = 0; out.y = 0; out.z = 0;
+  const hw = box.w / 2;
+  const x0 = Math.floor(cheap ? pos.x : pos.x - hw), x1 = Math.floor(cheap ? pos.x : pos.x + hw - EPS);
+  const z0 = Math.floor(cheap ? pos.z : pos.z - hw), z1 = Math.floor(cheap ? pos.z : pos.z + hw - EPS);
+  const y0 = Math.floor(cheap ? pos.y + box.h * 0.5 : pos.y), y1 = Math.floor(cheap ? pos.y + box.h * 0.5 : pos.y + box.h - EPS);
+  let touched = false;
+  for (let y = y0; y <= y1; y++) {
+    for (let z = z0; z <= z1; z++) {
+      for (let x = x0; x <= x1; x++) {
+        if (world.getBlock(x, y, z) !== fluid) continue;
+        touched = true;
+        world.fluidFlow(fluid, x, y, z, FLOW_TMP);
+        out.x += FLOW_TMP.x; out.y += FLOW_TMP.y; out.z += FLOW_TMP.z;
+      }
+    }
+  }
+  const len = Math.hypot(out.x, out.y, out.z);
+  if (len > 1e-6) { out.x /= len; out.y /= len; out.z /= len; }
+  return touched;
+}
+
 export function eyeInWater(world: World, pos: Vec3, eyeHeight: number): boolean {
   return world.getBlock(Math.floor(pos.x), Math.floor(pos.y + eyeHeight), Math.floor(pos.z)) === B.WATER;
 }

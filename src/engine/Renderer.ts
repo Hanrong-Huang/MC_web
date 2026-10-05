@@ -201,7 +201,7 @@ float tileLum(vec4 r, vec2 p) {
   vec3 c = textureGrad(map, r.xy + fract(p) * sz, dFdx(p) * sz, dFdy(p) * sz).rgb;
   return dot(c, vec3(0.2126, 0.7152, 0.0722)) / uWaterLum;
 }
-const vec3 SHALLOW = vec3(0.045, 0.36, 0.50);
+const vec3 SHALLOW = vec3(0.05, 0.31, 0.56);
 const vec3 DEEP = vec3(0.007, 0.036, 0.19);
 const vec3 FOAM = vec3(0.86, 0.93, 0.97);
 void main() {
@@ -250,7 +250,7 @@ void main() {
     float spd = vFlow.y;
     vec2 q = vec2(vWorld.x + vWorld.z, vWorld.y + t * (0.35 + spd * 1.6));
     detail = tileLum(uFlowRect, q);
-    foam = spd * smoothstep(1.08, 1.4, detail) * 0.7;
+    foam = spd * smoothstep(1.15, 1.5, detail) * 0.35;
   } else {
     detail = tileLum(uStillRect, p + vec2(t * 0.03, 0.0));
   }
@@ -281,7 +281,8 @@ void main() {
     alpha = mix(0.92, 0.55, win);
   } else {
     // Fresnel: glassy looking down, a mirror of sky and clouds at grazing angles
-    float F = 0.02 + 0.98 * pow(1.0 - cv, 5.0);
+    // (capped: a full mirror at grazing angles washed whole lakes out to sky-white)
+    float F = min(0.6, 0.02 + 0.98 * pow(1.0 - cv, 5.0));
     if (kind > 0.5) F *= 0.35;
     vec3 r = reflect(-v, n);
     r.y = abs(r.y);
@@ -403,6 +404,8 @@ uniform vec3 uTintMul;
 uniform vec3 uSoulCol;
 uniform vec4 uNetherGlow; // rgb = lava-sea glow colour, a = strength (0 outside the Nether)
 uniform vec4 uHeat;
+uniform vec4 uLavaStill;
+uniform vec4 uLavaFlow;
 varying vec2 vLight;
 varying vec3 vTint;
 varying vec2 vUv2;
@@ -415,6 +418,39 @@ ${CAUSTIC_GLSL}
 // 4x4 ordered (Bayer) dither for the chunk fade-in (stays in the opaque pass)
 float bayer2(vec2 a) { a = floor(a); return fract(dot(a, vec2(0.5, a.y * 0.75))); }
 float bayer4(vec2 a) { return bayer2(0.5 * a) * 0.25 + bayer2(a); }
+// one atlas tile wrapped in world space (explicit gradients keep the mips
+// seam-free across the fract() wrap)
+vec3 lavaTex(vec4 r, vec2 p) {
+  vec2 sz = r.zw - r.xy;
+  return textureGrad(map, r.xy + fract(p) * sz, dFdx(p) * sz, dFdy(p) * sz).rgb;
+}
+// LAVA: vTint = (flow x, flow z | fall speed, face kind 0 top / 1 side / 2 under)
+vec3 lavaColor() {
+  float t = uTime;
+  float kind = vTint.z;
+  vec3 lc;
+  if (kind < 0.5) {
+    vec2 p = vWorld.xz;
+    float spd = length(vTint.xy);
+    vec2 fd = spd > 0.001 ? vTint.xy / spd : vec2(0.0, 1.0);
+    // still: two slow layers churning against each other
+    vec3 a = lavaTex(uLavaStill, p + vec2(t * 0.021, t * 0.013));
+    vec3 b = lavaTex(uLavaStill, p * 0.5 + vec2(0.31 - t * 0.016, 0.57 + t * 0.011));
+    vec3 still = max(a, b) * 0.62 + min(a, b) * 0.38;
+    // flowing: the streaked tile turned downstream, crawling along
+    vec2 q = vec2(dot(p, vec2(fd.y, -fd.x)), dot(p, fd) - t * (0.1 + spd * 0.22));
+    lc = mix(still, lavaTex(uLavaFlow, q), smoothstep(0.02, 0.35, spd));
+  } else if (kind < 1.5) {
+    // sides: sheets oozing down (faster where it pours off a ledge)
+    lc = lavaTex(uLavaFlow, vec2(vWorld.x + vWorld.z, vWorld.y + t * (0.08 + vTint.y * 0.3)));
+  } else {
+    lc = lavaTex(uLavaStill, vWorld.xz + vec2(t * 0.01, 0.0));
+  }
+  // the hottest spots throb brighter, slowly and out of step
+  float lum = dot(lc, vec3(0.3, 0.59, 0.11));
+  float throb = 0.5 + 0.5 * sin(t * 1.1 + vWorld.x * 0.7 + vWorld.z * 0.9 + lum * 4.0);
+  return lc * (0.96 + 0.24 * smoothstep(0.5, 0.85, lum) * throb);
+}
 void main() {
   if (uFade < 0.999 && bayer4(gl_FragCoord.xy) >= uFade) discard;
   vec4 tex = texture2D(map, vUv2);
@@ -434,11 +470,7 @@ void main() {
     light += uNetherGlow.rgb * uNetherGlow.a * (up * 0.55 + roof * 0.3);
   }
   vec3 col = tex.rgb * vTint * light;
-  if (vLava > 0.5) {
-    // lava glows on its own and slowly churns
-    float churn = sin(uTime * 1.3 + vWorld.x * 1.7 + vWorld.z * 1.1) * sin(uTime * 0.9 - vWorld.z * 1.9 + vWorld.x * 0.7);
-    col = tex.rgb * (1.05 + 0.18 * churn);
-  }
+  if (vLava > 0.5) col = lavaColor(); // self-lit, animated, follows its flow
   float alpha = tex.a * uOpacity;
   if (uUnder > 0.5 && vLava < 0.5) {
     // eye under water: sunlight caustics dance over everything in view
@@ -588,6 +620,9 @@ export class Renderer {
     uSoulCol: { value: SOUL_LIGHT.clone() } as U<THREE.Color>,
     uNetherGlow: { value: new THREE.Vector4(0, 0, 0, 0) } as U<THREE.Vector4>,
     uHeat: { value: new THREE.Vector4(0, 32, 0, 0) } as U<THREE.Vector4>,
+    // atlas rects (u0, v0, u1, v1) of the lava still / flowing tiles
+    uLavaStill: { value: new THREE.Vector4() } as U<THREE.Vector4>,
+    uLavaFlow: { value: new THREE.Vector4() } as U<THREE.Vector4>,
   };
   /** Nether air, steered per biome by NetherAtmosphere (main copies it in each frame). */
   readonly netherAir = {
@@ -909,6 +944,9 @@ export class Renderer {
     const s = this.atlas.rect('water'), f = this.atlas.rect('water_flow');
     (u.uStillRect.value as THREE.Vector4).set(s.u0, s.v0, s.u1, s.v1);
     (u.uFlowRect.value as THREE.Vector4).set(f.u0, f.v0, f.u1, f.v1);
+    const ls = this.atlas.rect('lava'), lf = this.atlas.rect('lava_flow');
+    this.env.uLavaStill.value.set(ls.u0, ls.v0, ls.u1, ls.v1);
+    this.env.uLavaFlow.value.set(lf.u0, lf.v0, lf.u1, lf.v1);
     const cv = this.atlas.canvas;
     const x0 = Math.round(s.u0 * cv.width), y0 = Math.round(s.v0 * cv.height);
     const w = Math.max(1, Math.round((s.u1 - s.u0) * cv.width)), h = Math.max(1, Math.round((s.v1 - s.v0) * cv.height));

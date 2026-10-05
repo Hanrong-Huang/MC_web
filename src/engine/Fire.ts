@@ -52,6 +52,32 @@ export class FireSystem {
     return true;
   }
 
+  /** Vanilla LavaFluid.randomTick: lava sets the air above it alight when
+   *  something flammable is beside that air — up to 3 cells up a random
+   *  walk — or, failing that, the top of a flammable block next to it. */
+  lavaTick(x: number, y: number, z: number): void {
+    const w = this.world;
+    const r3 = (): number => ((Math.random() * 3) | 0) - 1;
+    const n = (Math.random() * 3) | 0;
+    if (n > 0) {
+      let px = x, py = y, pz = z;
+      for (let i = 0; i < n; i++) {
+        px += r3(); py += 1; pz += r3();
+        if (!this.loaded(px, pz)) return;
+        const id = w.getBlock(px, py, pz);
+        if (id === B.AIR) {
+          if (this.flammableNear(px, py, pz)) { this.ignite(px, py, pz); return; }
+        } else if (isSolid(id)) return;
+      }
+    } else {
+      for (let i = 0; i < 3; i++) {
+        const px = x + r3(), pz = z + r3();
+        if (!this.loaded(px, pz)) return;
+        if (w.getBlock(px, y + 1, pz) === B.AIR && FLAMMABLE.has(w.getBlock(px, y, pz))) this.ignite(px, y + 1, pz);
+      }
+    }
+  }
+
   /** Is this flame fed forever (netherrack / magma underneath)? */
   private eternal(x: number, y: number, z: number): boolean {
     const below = this.world.getBlock(x, y - 1, z);

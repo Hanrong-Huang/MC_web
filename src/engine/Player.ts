@@ -6,7 +6,7 @@ import { World } from './World';
 import { Input } from './Input';
 import { Renderer } from './Renderer';
 import { AudioEngine } from './Audio';
-import { moveEntity, hasSupport, inWater, eyeInWater, boxIntersectsBlock, Vec3 } from './Physics';
+import { moveEntity, hasSupport, inWater, inLava, fluidPush, eyeInWater, boxIntersectsBlock, Vec3 } from './Physics';
 import { waterFX } from './WaterFX';
 import {
   B, I, def, hasDef, breakTime, attackDamage, isSolid, canHarvest, FLOOR_BLOCKS, SELF_STACKING, mobLabel,
@@ -31,6 +31,9 @@ import { RAIL_IDS, railShapeFor, railRelinks } from './Blocks';
 
 export type GameMode = 'survival' | 'creative';
 
+/** Speed a water current carries you at (blocks/s) when you don't swim. */
+const WATER_PUSH = 1.5;
+const FLOW: Vec3 = { x: 0, y: 0, z: 0 };
 const WALK_SPEED = 4.317;
 const SPRINT_SPEED = 5.612;
 const SNEAK_SPEED = 1.295;
@@ -588,7 +591,18 @@ export class Player {
     }
 
     const wasInWater = inWater(world, this.pos, BOX);
+    const wasInLava = !wasInWater && inLava(world, this.pos, BOX);
     this.swimming = wasInWater;
+    // vanilla fluid pushing: currents carry you downstream (and down a
+    // waterfall); lava pushes too, but barely
+    let pushX = 0, pushY = 0, pushZ = 0;
+    if (!this.flying && (wasInWater || wasInLava)) {
+      const fluid = wasInWater ? B.WATER : B.LAVA;
+      if (fluidPush(world, fluid, this.pos, BOX, FLOW)) {
+        const k = wasInWater ? WATER_PUSH : this.deps.world.dimension === 'nether' ? WATER_PUSH * 0.5 : WATER_PUSH * 0.17;
+        pushX = FLOW.x * k; pushY = FLOW.y * k; pushZ = FLOW.z * k;
+      }
+    }
     // ladder check: scan the body column for a ladder block
     this.onLadder = false;
     if (!this.flying) {
@@ -619,6 +633,7 @@ export class Player {
     else if (this.sprinting) speed = SPRINT_SPEED;
     else speed = WALK_SPEED;
     if (wasInWater && !this.flying) speed *= 0.5;
+    if (wasInLava && !this.flying) speed *= 0.3;
     if ((this.blocking || this.scoping) && !this.flying) speed *= 0.3;
     const swift = this.effects.get('speed');
     if (swift && !this.flying) speed *= 1 + 0.2 * (swift.amp + 1);
@@ -631,13 +646,13 @@ export class Player {
     // glider: a fresh jump press mid-fall deploys it; landing or water folds it
     const spaceEdge = space && !this.prevSpace;
     this.prevSpace = space;
-    if (!this.gliding && spaceEdge && this.canGlide() && !this.onGround && !wasInWater && !this.onLadder && !this.flying && this.vel.y < -1) {
+    if (!this.gliding && spaceEdge && this.canGlide() && !this.onGround && !wasInWater && !wasInLava && !this.onLadder && !this.flying && this.vel.y < -1) {
       this.gliding = true;
       this.glideWearT = 0;
       this.deps.audio.play('whoosh');
       this.deps.onAdvance?.('glide');
     }
-    if (this.gliding && (this.onGround || wasInWater || this.flying || this.onLadder || !this.canGlide())) {
+    if (this.gliding && (this.onGround || wasInWater || wasInLava || this.flying || this.onLadder || !this.canGlide())) {
       this.gliding = false;
       this.rocketT = 0;
     }
@@ -657,11 +672,11 @@ export class Player {
     // snappy acceleration with slight air control; a sprint-jumper keeps most of
     // the take-off boost through the air (that's what makes sprint-jumping fast)
     const accelK = this.flying ? 9 : this.onGround ? (onIce ? (underFeet === B.PACKED_ICE ? 0.8 : 1.3) : 16)
-      : wasInWater ? 7 : this.sprinting ? 1.8 : 4.2;
+      : wasInWater ? 7 : wasInLava ? 4 : this.sprinting ? 1.8 : 4.2;
     const blend = Math.min(1, accelK * dt);
     if (!this.gliding) {
-      this.vel.x += (wx * speed - this.vel.x) * blend;
-      this.vel.z += (wz * speed - this.vel.z) * blend;
+      this.vel.x += (wx * speed + pushX - this.vel.x) * blend;
+      this.vel.z += (wz * speed + pushZ - this.vel.z) * blend;
     }
 
     // vertical
@@ -673,8 +688,13 @@ export class Player {
       this.vel.y += (upWish - this.vel.y) * Math.min(1, 10 * dt);
       this.fallDist = 0;
     } else if (wasInWater) {
-      const targetVy = space ? 3.9 : -2.2;
+      const targetVy = (space ? 3.9 : -2.2) + pushY;
       this.vel.y += (targetVy - this.vel.y) * Math.min(1, 5 * dt);
+      this.fallDist = 0;
+    } else if (wasInLava) {
+      // lava is thick: you sink slowly and paddle up slowly
+      const targetVy = space ? 2.2 : -1.3;
+      this.vel.y += (targetVy - this.vel.y) * Math.min(1, 3 * dt);
       this.fallDist = 0;
     } else if (this.onLadder) {
       // ladder: hold to climb up, sneak to descend, otherwise slow slide
@@ -717,7 +737,7 @@ export class Player {
     this.updateWaterFx(dt, inWaterNow, preVy);
     // climb out of water: swimming into a 1-block ledge hops you up onto it (so you
     // don't get stuck bobbing), and holding jump against any wall pushes upward.
-    if (wasInWater && (res.hitX || res.hitZ)) {
+    if ((wasInWater || wasInLava) && (res.hitX || res.hitZ)) {
       if (this.canStepUp(world, wx, wz)) this.vel.y = Math.max(this.vel.y, JUMP_VELOCITY);
       else if (space) this.vel.y = Math.max(this.vel.y, 5.0);
     }
@@ -732,7 +752,7 @@ export class Player {
     }
 
     // fall damage + landing dust on hard impacts
-    if (!this.flying && !wasInWater && !inWaterNow) {
+    if (!this.flying && !wasInWater && !inWaterNow && !wasInLava) {
       if (this.vel.y < 0) this.fallDist += -this.vel.y * dt;
       if (this.onGround && this.fallDist > 0) {
         if (this.fallDist > 2.5) {
@@ -1513,6 +1533,15 @@ export class Player {
     const px = t.x + t.nx, py = t.y + t.ny, pz = t.z + t.nz;
     const dst = world.getBlock(px, py, pz);
     if (dst !== B.AIR && dst !== B.WATER) return false;
+    if (world.dimension === 'nether') {
+      // vanilla: water boils away in the Nether (the bucket still empties)
+      this.swapHeldBucket(I.BUCKET);
+      this.placeCooldown = 0.3;
+      this.deps.renderer.triggerSwing();
+      this.deps.audio.play('fizz');
+      for (let i = 0; i < 3; i++) this.deps.entities.spawnSmoke(px + 0.2 + Math.random() * 0.6, py + 0.3 + Math.random() * 0.5, pz + 0.2 + Math.random() * 0.6, 3);
+      return true;
+    }
     world.waterLevels.delete(`${px},${py},${pz}`); // absent = a permanent source
     if (!world.setBlock(px, py, pz, B.WATER)) return false;
     world.scheduleWater(px, py, pz);

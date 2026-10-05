@@ -51,6 +51,8 @@ export interface SaveState {
   beds?: Record<string, number>;
   water?: Record<string, number>;
   lava?: Record<string, number>;
+  /** fluid level scheme: 2 = vanilla (8 = falling, lava 2/4/6); absent = older saves */
+  fluidV?: number;
   redstonePower?: Record<string, number>;
   redstoneStates?: Record<string, { active: boolean; ticksLeft?: number; facing?: number }>;
   pistonFacings?: Record<string, number>;

@@ -93,8 +93,6 @@ class Game {
   private tradeVillager: Entity | null = null;
   private dayTime = 0.1; // mid-morning, fully lit
   private tickAcc = 0;
-  private waterTickAcc = 0;
-  private lavaTickAcc = 0;
   private elapsed = 0;
   private lastFrame = 0;
   private fps = 60;
@@ -295,6 +293,17 @@ class Game {
     };
 
     this.world.onChunkRemoved = (key) => this.renderer.removeChunk(key);
+    // flowing water pops plants/torches/dust off as items; lava burns them
+    this.world.onFluidWash = (x, y, z, id, fluid) => {
+      this.world.torchFacings.delete(`${x},${y},${z}`);
+      if (fluid === B.LAVA) { this.fluidFizz(x, y, z); return; }
+      if (id === B.FIRE) { this.fluidFizz(x, y, z); return; }
+      const d = def(id);
+      if (d.drop === null) return;
+      const drop = d.drop ?? { id, min: 1, max: 1 };
+      this.entities.spawnDrop(x + 0.5, y + 0.3, z + 0.5, drop.id, drop.min);
+    };
+    this.world.onFluidFizz = (x, y, z) => this.fluidFizz(x, y, z);
     this.world.onBlockChanged = (x, y, z, _oldId, newId) => {
       this.sync?.touch(x, y, z); // multiplayer: inside a capture this cell goes out
       this.nether.onBlockChanged(x, y, z, _oldId, newId); // broken frames collapse their portal
@@ -314,18 +323,6 @@ class Game {
       if (GRAVITY_BLOCKS.has(newId)) this.supportQueue.add(`${x},${y},${z}`);
       // covering grass smothers it
       if (newId !== B.AIR && def(newId).opaque) this.supportQueue.add(`${x},${y - 1},${z}`);
-      // fluid reaction: water + lava neighbors -> obsidian / cobblestone
-      if (newId === B.WATER || newId === B.LAVA) {
-        for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
-          const nb = this.world.getBlock(x + dx, y + dy, z + dz);
-          if (newId === B.WATER && nb === B.LAVA) {
-            // flowing water hitting lava: deep (y<11) -> obsidian, else cobble
-            this.world.setBlock(x + dx, y + dy, z + dz, y + dy < 11 ? B.OBSIDIAN : B.COBBLE);
-          } else if (newId === B.LAVA && nb === B.WATER) {
-            this.world.setBlock(x, y, z, y < 11 ? B.OBSIDIAN : B.COBBLE);
-          }
-        }
-      }
 
       if ((_oldId === B.PISTON || _oldId === B.STICKY_PISTON) && newId === B.AIR) {
         const facing = this.world.pistonFacings.get(`${x},${y},${z}`);
@@ -420,8 +417,11 @@ class Game {
       }
       for (const [k, v] of Object.entries(save.torches ?? {})) ow.torchFacings.set(k, v as number);
       for (const [k, v] of Object.entries(save.beds ?? {})) ow.bedFacings.set(k, v as number);
-      for (const [k, v] of Object.entries(save.water ?? {})) ow.waterLevels.set(k, v as number);
-      for (const [k, v] of Object.entries(save.lava ?? {})) ow.lavaLevels.set(k, v as number);
+      const oldFluids = !save.fluidV;
+      const waterLv = (v: number): number => oldFluids && v <= 0 ? 8 : v;
+      const lavaLv = (v: number): number => oldFluids ? (v <= 0 ? 8 : Math.min(7, v * 2)) : v;
+      for (const [k, v] of Object.entries(save.water ?? {})) ow.waterLevels.set(k, waterLv(v as number));
+      for (const [k, v] of Object.entries(save.lava ?? {})) ow.lavaLevels.set(k, lavaLv(v as number));
       for (const [k, v] of Object.entries(save.redstonePower ?? {})) ow.redstonePower.set(k, v as number);
       for (const [k, v] of Object.entries(save.redstoneStates ?? {})) ow.redstoneStates.set(k, v as any);
       for (const [k, v] of Object.entries(save.pistonFacings ?? {})) ow.pistonFacings.set(k, v as number);
@@ -447,8 +447,8 @@ class Game {
       }
       for (const [k, v] of Object.entries(save.torchesNether ?? {})) ne.torchFacings.set(k, v as number);
       for (const [k, v] of Object.entries(save.bedsNether ?? {})) ne.bedFacings.set(k, v as number);
-      for (const [k, v] of Object.entries(save.waterNether ?? {})) ne.waterLevels.set(k, v as number);
-      for (const [k, v] of Object.entries(save.lavaNether ?? {})) ne.lavaLevels.set(k, v as number);
+      for (const [k, v] of Object.entries(save.waterNether ?? {})) ne.waterLevels.set(k, waterLv(v as number));
+      for (const [k, v] of Object.entries(save.lavaNether ?? {})) ne.lavaLevels.set(k, lavaLv(v as number));
       for (const [k, v] of Object.entries(save.redstonePowerNether ?? {})) ne.redstonePower.set(k, v as number);
       for (const [k, v] of Object.entries(save.redstoneStatesNether ?? {})) ne.redstoneStates.set(k, v as any);
       for (const [k, v] of Object.entries(save.pistonFacingsNether ?? {})) ne.pistonFacings.set(k, v as number);
@@ -1898,6 +1898,7 @@ class Game {
       beds: mapToRecord(ow.bedFacings),
       water: mapToRecord(ow.waterLevels),
       lava: mapToRecord(ow.lavaLevels),
+      fluidV: 2,
       redstonePower: mapToRecord(ow.redstonePower),
       redstoneStates: mapToRecord(ow.redstoneStates),
       pistonFacings: mapToRecord(ow.pistonFacings),
@@ -2358,14 +2359,32 @@ class Game {
     }
 
     this.randomTicks();
-    // Water settles at ~5 Hz; lava uses the same rules but moves slower.
-    if (++this.waterTickAcc >= 4) { this.waterTickAcc = 0; this.world.tickWater(); }
-    if (++this.lavaTickAcc >= 12) { this.lavaTickAcc = 0; this.world.tickLava(); }
+    // fluids step on vanilla's clock: water every 5 ticks, lava every 30
+    // (every 10 in the Nether)
+    this.world.tickFluids();
+  }
+
+  /** Lava hardening / burning something: hiss + a puff of smoke (vanilla
+   *  fizz), heard within 16 blocks. */
+  private fluidFizz(x: number, y: number, z: number): void {
+    const p = this.player.pos;
+    const d = Math.hypot(x + 0.5 - p.x, y + 0.5 - p.y, z + 0.5 - p.z);
+    if (d < 16) this.audio.play('fizz', Math.min(1, 1.2 - d / 16) * 0.7);
+    if (d < 48) this.entities.spawnSmoke(x + 0.5, y + 0.9, z + 0.5, 4);
   }
 
   /** MC-style random ticks at the surface: saplings grow, wheat advances,
    *  and grass creeps onto exposed dirt. */
   private randomTicks(): void {
+    // lava random ticks (vanilla rate: 3 per 16x16x16 section per tick ≈ 12
+    // samples in this 32x16x32 box) can set flammable blocks nearby alight
+    const pp = this.player.pos;
+    for (let i = 0; i < 12; i++) {
+      const lx = Math.floor(pp.x + Math.random() * 32 - 16);
+      const ly = Math.floor(pp.y + Math.random() * 16 - 8);
+      const lz = Math.floor(pp.z + Math.random() * 32 - 16);
+      if (this.world.getBlock(lx, ly, lz) === B.LAVA) this.fire.lavaTick(lx, ly, lz);
+    }
     const pcx = Math.floor(this.player.pos.x / CX);
     const pcz = Math.floor(this.player.pos.z / CZ);
     for (let dz = -3; dz <= 3; dz++) {

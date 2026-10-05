@@ -9,7 +9,8 @@ const Y = 80;
 const isW = (x: number, y: number, z: number) => w.getBlock(x, y, z) === B.WATER;
 const settle = (n: number) => { for (let i = 0; i < n; i++) { w.tickWater(); w.tickLava(); } };
 
-// flat 9x9 stone platform with clear air above
+// flat 9x9 stone tub (walled, so the flow has no edges to seek) with clear air above
+for (let x = -1; x <= 9; x++) for (let z = -1; z <= 9; z++) { w.setBlock(x, Y, z, B.STONE); w.setBlock(x, Y + 1, z, B.STONE); w.setBlock(x, Y + 2, z, B.STONE); }
 for (let x = 0; x < 9; x++) for (let z = 0; z < 9; z++) {
   w.setBlock(x, Y, z, B.STONE);
   w.setBlock(x, Y + 1, z, B.AIR);

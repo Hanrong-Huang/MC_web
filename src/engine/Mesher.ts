@@ -68,8 +68,9 @@ const FACE_NORMALS = [
 // Squared-ish because the shader lights in linear space: a 0.6 multiplier in
 // linear reads as ~0.8 on screen, which flattened every hillside.
 const FACE_SHADE = [0.6, 0.6, 1.0, 0.5, 0.8, 0.8].map((s) => Math.pow(s, 1.7));
-const LIQUID_SOURCE_HEIGHT = 14 / 16;
-const LIQUID_EDGE_HEIGHT = 8 / 16;
+// vanilla fluid surface: amount / 9 (a source sits at 8/9, the last flowing
+// cell at 1/9); a cell under more of the same fluid is full
+const LIQUID_SOURCE_HEIGHT = 8 / 9;
 
 // origin + tangent axes with u x v = normal (CCW winding seen from outside)
 const FACE_GEO: { o: number[]; u: number[]; v: number[] }[] = [
@@ -391,28 +392,37 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
     if (y >= CY) return B.AIR;
     return world.getBlockForMesh(bx + x, y, bz + z);
   };
+  /** Vanilla LiquidBlockRenderer.getHeight: 1 under more of the fluid, the
+   *  surface height for the fluid itself, 0 for an open cell, -1 for a solid one. */
   const liquidCellHeight = (id: number, x: number, y: number, z: number): number => {
-    if (get(x, y, z) !== id) return 0;
+    const c = get(x, y, z);
+    if (c !== id) return c === B.AIR || !(OPAQUE_LUT[c] || (hasDef(c) && def(c).solid)) ? 0 : -1;
     if (get(x, y + 1, z) === id) return 1;
     const wx = bx + x, wz = bz + z;
     const level = id === B.LAVA ? world.lavaLevel(wx, y, wz) : world.waterLevel(wx, y, wz);
-    const maxLevel = id === B.LAVA ? 3 : 7;
-    if (level <= 0) return LIQUID_SOURCE_HEIGHT;
-    return LIQUID_SOURCE_HEIGHT - (LIQUID_SOURCE_HEIGHT - LIQUID_EDGE_HEIGHT) * Math.min(1, level / maxLevel);
+    if (level <= 0 || level >= 8) return LIQUID_SOURCE_HEIGHT;
+    return (8 - level) / 9;
   };
+  /** Vanilla calculateAverageHeight for one top corner: the cell, its two
+   *  side neighbours toward the corner and (when either holds fluid) the
+   *  diagonal; tall cells weigh 10x, solid ones don't count, open ones pull
+   *  the corner down to the floor. */
   const liquidCornerHeight = (id: number, x: number, y: number, z: number, px: number, pz: number): number => {
     const sx = px < 0.5 ? -1 : 1;
     const sz = pz < 0.5 ? -1 : 1;
-    let sum = 0;
-    let n = 0;
-    for (let k = 0; k < 4; k++) {
-      const dx = k === 1 || k === 3 ? sx : 0, dz = k >= 2 ? sz : 0;
-      const h = liquidCellHeight(id, x + dx, y, z + dz);
-      if (h <= 0) continue;
-      sum += h;
-      n++;
+    const h1 = liquidCellHeight(id, x + sx, y, z), h2 = liquidCellHeight(id, x, y, z + sz);
+    if (h1 >= 1 || h2 >= 1) return 1;
+    let sum = 0, w = 0;
+    const add = (h: number): void => {
+      if (h >= 0.8) { sum += h * 10; w += 10; } else if (h >= 0) { sum += h; w += 1; }
+    };
+    if (h1 > 0 || h2 > 0) {
+      const hd = liquidCellHeight(id, x + sx, y, z + sz);
+      if (hd >= 1) return 1;
+      add(hd);
     }
-    return n > 0 ? sum / n : LIQUID_EDGE_HEIGHT;
+    add(liquidCellHeight(id, x, y, z)); add(h1); add(h2);
+    return w > 0 ? sum / w : LIQUID_SOURCE_HEIGHT;
   };
   /** Water column depth from this cell down (cells of water, capped). */
   const waterDepth = (x: number, y: number, z: number): number => {
@@ -662,8 +672,8 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
         // water carries its own vertex data (see WATER VERTEX below): surface
         // flow / fall speed in atint, depth + shoreline in uv
         let flowX = 0, flowZ = 0, fall = 0, selfDepth = 0;
-        if (isWater) {
-          selfDepth = waterDepth(x, y, z);
+        if (isLiquid) {
+          if (isWater) selfDepth = waterDepth(x, y, z);
           fall = get(x, y + 1, z) === id || get(x, y - 1, z) === B.AIR ? 1 : 0;
           if (waterTopOpen) {
             // downhill gradient of the surface: toward lower neighbours and
@@ -673,7 +683,7 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
               const dx = d === 0 ? 1 : d === 1 ? -1 : 0, dz = d === 2 ? 1 : d === 3 ? -1 : 0;
               const nb = get(x + dx, y, z + dz);
               let diff: number;
-              if (nb === id) diff = hs - liquidCellHeight(id, x + dx, y, z + dz);
+              if (nb === id) diff = hs - Math.max(0, liquidCellHeight(id, x + dx, y, z + dz));
               else if (nb === B.AIR) {
                 const under = get(x + dx, y - 1, z + dz);
                 diff = under === B.AIR || under === id ? hs * 2 : hs * 0.5;
@@ -782,6 +792,14 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
             // soul-fire share of this corner's block light, in eighths (0..7)
             let soul = 0;
             if (hasSoul && !isLava && torch > 0.02) soul = soulEighths(cornerLight(WARM9, a, b), cornerLight(SOUL9, a, b));
+            if (isLava) {
+              // LAVA VERTEX: atint = (flow x, flow z | fall speed, face kind)
+              const kindF = face === 2 ? 0 : face === 3 ? 2 : 1;
+              const lr = kindF === 1 ? 0 : flowX, lg = kindF === 1 ? (fall ? 1 : Math.hypot(flowX, flowZ) * 0.5) : flowZ;
+              target.v(x + px, y + py, z + pz, k * sky, k * torch + flag, lr, lg, kindF,
+                a ? rect.u1 : rect.u0, b ? rect.v0 : rect.v1);
+              continue;
+            }
             target.v(x + px, y + py, z + pz, k * sky, k * torch + flag + soul * FLAG_SOUL,
               tint[0], tint[1], tint[2],
               a ? rect.u1 : rect.u0,

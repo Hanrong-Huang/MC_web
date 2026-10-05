@@ -558,6 +558,37 @@ function cropTile(c: Ctx, x: number, y: number, seed: number, leaf: string, ligh
 // Tile painters
 // ---------------------------------------------------------------------------
 
+/** Lava tile: Voronoi blobs whose cores glow yellow-hot and cool to deep
+ *  orange toward their rims, with thin dark crust veins where blobs meet,
+ *  over a soft fbm swirl. `flow` stretches everything along v (the shader
+ *  turns v downstream). Tileable. */
+function lavaPx(flow: boolean): Px {
+  const ramp = pal(['#5c1003', '#7e1c05', '#a52a07', '#c93b0a', '#e2540f', '#f17318', '#f99424', '#fdb534', '#ffd24c', '#ffe983']);
+  const f = flow
+    ? fbm(2099, [[4, 0.5, 1], [8, 0.3, 2], [16, 0.2, 4]], 1.8)
+    : fbm(1099, [[4, 0.55], [8, 0.3], [16, 0.15]], 1.8);
+  const r = mulberry32(flow ? 3199 : 2199);
+  const n = flow ? 7 : 9;
+  const pts: [number, number][] = [];
+  for (let i = 0; i < n; i++) pts.push([r() * 16, r() * 16]);
+  const sy = flow ? 0.3 : 1; // flowing: blobs drawn out into streaks
+  const grain = mulberry32(flow ? 3299 : 2299);
+  return new Px().fill((x, y) => {
+    let d1 = 1e9, d2 = 1e9;
+    for (const [px, py] of pts) {
+      let dx = Math.abs(x + 0.5 - px); if (dx > 8) dx = 16 - dx;
+      let dy = Math.abs(y + 0.5 - py); if (dy > 8) dy = 16 - dy;
+      const d = Math.sqrt(dx * dx + dy * dy * sy * sy);
+      if (d < d1) { d2 = d1; d1 = d; } else if (d < d2) d2 = d;
+    }
+    const core = Math.max(0, 1 - d1 / (flow ? 3.0 : 3.8));
+    let v = 0.26 + 0.4 * f(x, y) + 0.34 * core * core;
+    if (d2 - d1 < 0.75) v *= 0.62; // crust vein between blobs
+    v += (grain() - 0.5) * 0.06;
+    return ramp[Math.max(0, Math.min(ramp.length - 1, Math.floor(v * ramp.length)))];
+  });
+}
+
 const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = {
   stone: (c, x, y) => stonePx().put(c, x, y),
   dirt: (c, x, y) => dirtPx().put(c, x, y),
@@ -596,23 +627,13 @@ const TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => void> = 
     const r = mulberry32(3107);
     for (let i = 0; i < 9; i++) {
       const gx = (r() * 16) | 0, gy = (r() * 16) | 0, len = 3 + ((r() * 5) | 0);
-      for (let k = 0; k < len; k++) p.set(gx, gy + k, k === 0 || k === len - 1 ? '#6a8fe0' : '#93b1f0');
+      for (let k = 0; k < len; k++) p.set(gx, gy + k, k === 0 || k === len - 1 ? '#5f86dc' : '#7c9fea');
     }
     for (let i = 3; i < p.d.length; i += 4) p.d[i] = 200;
     p.put(c, x, y);
   },
-  lava: (c, x, y) => {
-    const ramp = pal(['#8a1f06', '#b3300a', '#d2450d', '#e86214', '#f5831e', '#fba62c', '#ffc93f', '#ffe36a']);
-    const f = fbm(1099, [[4, 0.55], [8, 0.3], [16, 0.15]], 2.2);
-    const p = rampFill(new Px(), ramp, f, 1100, 0.2);
-    // cooling crust flecks drifting on the surface
-    const r = mulberry32(2199);
-    for (let i = 0; i < 7; i++) {
-      const bx = (r() * 16) | 0, by = (r() * 16) | 0;
-      p.set(bx, by, ramp[0]); p.set(bx + 1, by, ramp[1]); p.set(bx, by - 1, ramp[6]);
-    }
-    p.put(c, x, y);
-  },
+  lava: (c, x, y) => lavaPx(false).put(c, x, y),
+  lava_flow: (c, x, y) => lavaPx(true).put(c, x, y),
   obsidian: (c, x, y) => {
     const ramp = pal(['#08060d', '#0f0b17', '#151020', '#1c1529', '#241b35', '#2f2244', '#3b2c55']);
     const f = fbm(1199, [[4, 0.5], [8, 0.3], [16, 0.2]], 2.0);
@@ -2348,6 +2369,7 @@ const PACK_MAP: Record<string, PackEntry> = {
   water: { paths: ['block/water_still'], tint: '#3f76e4', kind: 'tile' },
   water_flow: { paths: ['block/water_flow'], tint: '#3f76e4', kind: 'tile' },
   lava: { paths: ['block/lava_still', 'block/lava'], kind: 'tile' },
+  lava_flow: { paths: ['block/lava_flow'], kind: 'tile' },
   obsidian: { paths: ['block/obsidian'], kind: 'tile' },
   table_top: { paths: ['block/crafting_table_top'], kind: 'tile' },
   table_side: { paths: ['block/crafting_table_side'], kind: 'tile' },
