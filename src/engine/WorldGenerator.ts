@@ -10,7 +10,7 @@
 
 import { Simplex2, Simplex3, hash2, hash3, mulberry32, smoothstep, spline } from './Noise';
 import { Chunk, CX, CZ, CY } from './Chunk';
-import { B } from './Blocks';
+import { B, def, hasDef } from './Blocks';
 import type { DoorState } from './World';
 import { LM_CELL, planLandmark, drawLandmark, type Landmark } from './Landmarks';
 import { NetherGen, type NetherBiome } from './NetherGen';
@@ -157,6 +157,8 @@ export class WorldGenerator {
   private pendingDoors: [string, DoorState][] = [];
   private pendingTorches: [string, number][] = [];
   private pendingBeds: [string, number][] = [];
+  /** springs placed by generate(): x, y, z, fluid (0 water / 1 lava) quads */
+  private pendingSprings: number[] = [];
 
   // column cache (see CACHE_N)
   private cKx = new Int32Array(CACHE_N).fill(0x7fffffff);
@@ -219,6 +221,42 @@ export class WorldGenerator {
     this.pendingDoors.length = 0;
     this.pendingTorches.length = 0;
     this.pendingBeds.length = 0;
+  }
+
+  /** Hand over (and forget) the springs the last generate() calls placed; the
+   *  world schedules them once their chunk is installed. */
+  takeSprings(): number[] {
+    const s = this.pendingSprings;
+    this.pendingSprings = [];
+    return s;
+  }
+
+  /** Vanilla spring features: a lone water or lava source set into a rock
+   *  face — rock above, below and on three sides, open air on the fourth —
+   *  which the fluid engine turns into a waterfall / lavafall once the chunk
+   *  is in the world. Kept a block inside the chunk so the check never reads
+   *  a neighbour. */
+  private placeSprings(chunk: Chunk, bx: number, bz: number, maxH: number): void {
+    const S = this.seed ^ 0x5b21;
+    const rock = (id: number): boolean => id !== B.AIR && hasDef(id) && def(id).solid &&
+      (def(id).sound === 'stone' || id === B.DIRT || id === B.GRAVEL || id === B.GRASS);
+    const cx = chunk.cx, cz = chunk.cz;
+    for (let i = 0; i < 24; i++) {
+      const lava = i >= 16; // 16 water attempts, 8 lava (deep)
+      const x = 1 + Math.floor(hash3(S, cx, i, cz) * 14);
+      const z = 1 + Math.floor(hash3(S ^ 0x11, cx, i, cz) * 14);
+      const y = lava ? 6 + Math.floor(hash3(S ^ 0x22, cx, i, cz) * 34)
+        : 12 + Math.floor(hash3(S ^ 0x33, cx, i, cz) * Math.max(1, maxH - 12));
+      if (!rock(chunk.get(x, y, z)) || !rock(chunk.get(x, y + 1, z)) || !rock(chunk.get(x, y - 1, z))) continue;
+      let open = 0, solid = 0;
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const id = chunk.get(x + dx, y, z + dz);
+        if (id === B.AIR) open++; else if (rock(id)) solid++;
+      }
+      if (open !== 1 || solid !== 3) continue;
+      chunk.setRaw(x, y, z, lava ? B.LAVA : B.WATER);
+      this.pendingSprings.push(bx + x, y, bz + z, lava ? 1 : 0);
+    }
   }
 
   /** 0..1 strength of a rare, deep, meandering ravine slot at this column
@@ -1047,7 +1085,7 @@ export class WorldGenerator {
       }
     }
     this.placeVillages(chunk, bx, bz);
-
+    this.placeSprings(chunk, bx, bz, maxH);
 
     chunk.computeHeightmap();
     chunk.scanTorches();

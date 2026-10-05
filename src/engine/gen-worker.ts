@@ -16,6 +16,8 @@ export interface GenResult {
   tint: Float32Array;
   doors: [string, DoorState][]; torchFacings: [string, number][]; beds: [string, number][];
   spawns: { x: number; y: number; z: number }[];
+  /** springs to wake once installed: x, y, z, fluid (0 water / 1 lava) quads */
+  springs: number[];
 }
 
 let gen: WorldGenerator | null = null;
@@ -53,6 +55,7 @@ ctx.onmessage = (e: MessageEvent) => {
     data: chunk.data, heightmap: chunk.heightmap, torches, glowers, tint,
     doors: [...sink.doorStates], torchFacings: [...sink.torchFacings], beds: [...sink.bedFacings],
     spawns,
+    springs: gen.takeSprings(),
   };
   ctx.postMessage({ type: 'done', res }, [chunk.data.buffer, chunk.heightmap.buffer, torches.buffer, glowers.buffer, tint.buffer]);
 };

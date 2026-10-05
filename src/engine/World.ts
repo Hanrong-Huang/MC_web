@@ -253,12 +253,14 @@ export class World {
       this.generator.generate(chunk);
       this.generator.drainStates(this);
     }
+    const springs = this.generator.takeSprings();
     this.chunks.set(key, chunk);
     this.chunksChanged();
     this.dirtySet.add(key);
     this.scanRedstoneInChunk(chunk);
     this.markDirty(cx - 1, cz); this.markDirty(cx + 1, cz);
     this.markDirty(cx, cz - 1); this.markDirty(cx, cz + 1);
+    this.wakeFluids(chunk, springs);
     this.onChunkInstalled(cx, cz);
     return chunk;
   }
@@ -912,7 +914,7 @@ export class World {
         const chunk = new Chunk(job.cx, job.cz);
         if (saved) {
           chunk.data = decodeSaved(saved, chunk.data.length);
-      chunk.version = nextChunkVersion();
+          chunk.version = nextChunkVersion();
           chunk.computeHeightmap();
           chunk.scanTorches();
           chunk.ready = true;
@@ -921,7 +923,7 @@ export class World {
           this.generator.generate(chunk);
           this.generator.drainStates(this);
         }
-        this.installChunk(key, chunk);
+        this.installChunk(key, chunk, this.generator.takeSprings());
       }
     }
 
@@ -945,12 +947,42 @@ export class World {
    *  neighborsReady), so none of them was meshed without this one — they are
    *  either still waiting in dirtySet or were meshed while an identical copy
    *  of it was loaded. */
-  private installChunk(key: string, chunk: Chunk): void {
+  private installChunk(key: string, chunk: Chunk, springs: number[] = []): void {
     this.chunks.set(key, chunk);
     this.chunksChanged();
     this.dirtySet.add(key);
     this.scanRedstoneInChunk(chunk);
+    this.wakeFluids(chunk, springs);
     this.onChunkInstalled(chunk.cx, chunk.cz);
+  }
+
+  /** A chunk just came in: start its generated springs, and wake the flowing
+   *  fluid along every seam it shares with a loaded neighbour (a waterfall that
+   *  reached an unloaded chunk stopped at the border; now it can go on). */
+  private wakeFluids(chunk: Chunk, springs: number[]): void {
+    for (let i = 0; i < springs.length; i += 4) {
+      this.scheduleFluid(springs[i + 3] ? B.LAVA : B.WATER, springs[i], springs[i + 1], springs[i + 2]);
+    }
+    if (this.waterLevels.size === 0 && this.lavaLevels.size === 0) return;
+    for (const [dx, dz] of World.DIRS) {
+      const nb = this.getChunk(chunk.cx + dx, chunk.cz + dz);
+      if (!nb || !nb.ready) continue;
+      // the seam's two columns: this chunk's edge and the neighbour's edge
+      for (let k = 0; k < 16; k++) {
+        for (const [c, lx, lz] of [
+          [chunk, dx > 0 ? 15 : dx < 0 ? 0 : k, dz > 0 ? 15 : dz < 0 ? 0 : k],
+          [nb, dx > 0 ? 0 : dx < 0 ? 15 : k, dz > 0 ? 0 : dz < 0 ? 15 : k],
+        ] as [Chunk, number, number][]) {
+          const base = lx | (lz << 4);
+          for (let y = 1; y < CY; y++) {
+            const id = c.data[base | (y << 8)];
+            if (id !== B.WATER && id !== B.LAVA) continue;
+            const wx = c.cx * CX + lx, wz = c.cz * CZ + lz;
+            if (this.levelsFor(id).has(`${wx},${y},${wz}`)) this.scheduleFluid(id, wx, y, wz);
+          }
+        }
+      }
+    }
   }
 
   /** Lazily start the generation workers (null when Workers are unavailable). */
@@ -1010,7 +1042,7 @@ export class World {
     for (const s of res.spawns) {
       if (!vs.some((o) => o.x === s.x && o.y === s.y && o.z === s.z)) vs.push(s);
     }
-    this.installChunk(key, chunk);
+    this.installChunk(key, chunk, res.springs ?? []);
   }
 
   /** A fresh copy of a chunk's per-column biome tint (256 x rgb, index
