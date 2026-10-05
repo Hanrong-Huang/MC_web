@@ -85,10 +85,14 @@ The touch layout follows Minecraft Bedrock on a phone. Play in landscape. The ga
 - **Build** with bricks, stone bricks, slabs, stairs, fences, glass panes, colored wool, terracotta, ice, lanterns and more. Wire up redstone: levers, buttons, pressure plates, torches, repeaters, comparators, observers, daylight detectors, lamps, pistons and tunable note blocks. Open iron doors with a button, or light the TNT. Lay rails (powered, detector and activator too) and ride minecarts.
 - **Farm and tame**: grow wheat, pumpkins and melons, bake cake, breed animals, tame wolves and cats, ride horses, shear sheep and chase rabbits.
 - **Catch mobs** with the Mob Catcher: throw the orb, watch it wobble and click, then release the mob as a loyal pet that fights beside you.
-- **Swim** in water that streams downhill and down waterfalls, reflects the sky and splashes when you dive in.
+- **Swim** in water that flows like Minecraft's: sources spread 7 blocks and seek the nearest drop, pour over ledges into waterfalls, carry you, mobs and dropped items downstream, and fill in between two sources for an infinite supply. Its colour follows the climate (murky in swamps, turquoise where it's hot), it reflects the sky and splashes when you dive in. Lava creeps slowly (faster in the Nether), sets nearby wood alight, and turns to obsidian, cobblestone or stone where it meets water. Springs in cliffs and caves feed natural waterfalls and lavafalls.
 - **Glide, map and warp**: fly with a glider and fireworks, chart the land with a map and teleport with warp pearls.
 - **Venture to the Nether** through an obsidian portal of any size. Cross lava oceans in the Nether Wastes, Crimson and Warped Forests, Soul Sand Valley and Basalt Deltas. Raid fortresses and bastions, barter gold with piglins, ride striders over lava, and face blazes, wither skeletons, hoglins and magma cubes. Climb weeping and twisting vines (shears keep them whole, bone meal grows them), saw crimson and warped stems into fireproof planks for slabs, stairs, fences, gates, doors and trapdoors, mine ancient debris for netherite gear, and set your Nether spawn with a respawn anchor.
 - **Relax** to music and ambient sound that follow the biome, weather and time of day: cozy rain, howling blizzards, waves, birdsong and echoing caves. The music is composed live and played on real sampled piano, harp, flute, cello and strings.
+
+### Graphics and performance
+
+Options → Video has **Render Scale** (Auto lowers the resolution while the frame rate drops and raises it again when there's headroom, or pick 100 / 75 / 50 %) and **Graphics: Fancy / Fast** (Fast skips water caustics and reflections, underwater light and heat haze). Fancy on a desktop also smooths block edges (MSAA, from the next world you open). Lowering Render Distance helps most on older phones.
 
 ## Play together (multiplayer)
 
