@@ -671,7 +671,15 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
         const flag = isLava ? FLAG_LAVA : isLeaf ? FLAG_SWAY : 0;
         // water carries its own vertex data (see WATER VERTEX below): surface
         // flow / fall speed in atint, depth + shoreline in uv
-        let flowX = 0, flowZ = 0, fall = 0, selfDepth = 0;
+        let flowX = 0, flowZ = 0, fall = 0, selfDepth = 0, waterTint = 0;
+        if (isWater) {
+          // the column's biome tint rides along (packed 4 bits a channel) so
+          // the shader can colour the water by climate, like vanilla's swamp
+          // / warm / cold waters
+          const tc = tintAt(x, z);
+          const q = (v: number, lo: number, hi: number): number => Math.max(0, Math.min(15, Math.round((v - lo) / (hi - lo) * 15)));
+          waterTint = q(tc[0], 0.6, 1.25) + 16 * q(tc[1], 0.75, 1.05) + 256 * q(tc[2], 0.3, 1.05);
+        }
         if (isLiquid) {
           if (isWater) selfDepth = waterDepth(x, y, z);
           fall = get(x, y + 1, z) === id || get(x, y - 1, z) === B.AIR ? 1 : 0;
@@ -767,7 +775,8 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
             if (isLava) torch = 1 / k; // self-lit: full brightness after shading
             if (isWater) {
               // WATER VERTEX: atint = (flow x, flow z | fall speed, face kind
-              // 0 top / 1 side / 2 underside), uv = (depth below, shoreline)
+              // 0 top / 1 side / 2 underside + 4 x packed biome tint),
+              // uv = (depth below, shoreline)
               let wr = flowX, wg = flowZ, wu = selfDepth, wv = 0;
               const kindF = face === 2 ? 0 : face === 3 ? 2 : 1;
               if (face === 2) {
@@ -780,13 +789,14 @@ export function buildChunkGeometry(world: MeshWorld, chunk: MeshChunk, atlas: Me
                   if (qid === id) {
                     sum += waterDepth(qx, y, qz); cnt++;
                     if (get(qx, y + 1, qz) === id) shore = 1; // whitewater where a fall plunges in
-                  } else if (qid !== B.AIR) { cnt++; shore = 1; }
+                  } else if (qid === B.ICE || qid === B.PACKED_ICE) cnt++; // ice sits flush: no surf against it
+                  else if (qid !== B.AIR) { cnt++; shore = 1; }
                 }
                 wu = cnt ? sum / cnt : selfDepth; wv = shore;
               } else if (kindF === 1) {
                 wr = 0; wg = fall ? 1 : Math.hypot(flowX, flowZ) * 0.5;
               }
-              target.v(x + px, y + py, z + pz, k * sky, k * torch, wr, wg, kindF, wu, wv);
+              target.v(x + px, y + py, z + pz, k * sky, k * torch, wr, wg, kindF + 4 * waterTint, wu, wv);
               continue;
             }
             // soul-fire share of this corner's block light, in eighths (0..7)

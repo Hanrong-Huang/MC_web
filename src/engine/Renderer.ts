@@ -146,11 +146,22 @@ varying vec3 vFlow;
 varying vec2 vDS;
 varying vec3 vWorld;
 varying vec4 vFog;
+varying vec3 vClimate; // warm, cold, murk 0..1 from the column's biome tint
 ${WOBBLE_GLSL}
 ${SKY_GLSL}
 void main() {
   vLight = alight;
-  vFlow = atint;
+  // atint.z = face kind + 4 x packed biome tint (4 bits per channel)
+  float packed = floor(atint.z / 4.0);
+  vFlow = vec3(atint.xy, atint.z - packed * 4.0);
+  vec3 gt = vec3(mod(packed, 16.0) / 15.0 * 0.65 + 0.6,
+    mod(floor(packed / 16.0), 16.0) / 15.0 * 0.3 + 0.75,
+    floor(packed / 256.0) / 15.0 * 0.75 + 0.3);
+  // vanilla-style water colours by climate: dry/hot -> turquoise, cold ->
+  // deep blue, swampy/dark woods -> murky olive
+  vClimate = vec3(clamp((gt.r - gt.b - 0.25) * 2.0, 0.0, 1.0),
+    clamp((gt.b - 0.8) * 4.0, 0.0, 1.0),
+    clamp((0.97 - gt.g) * 9.0, 0.0, 1.0));
   vDS = uv;
   vec4 wp = modelMatrix * vec4(position, 1.0);
   // long crossing swells (a function of world position, so shared corners stay
@@ -191,6 +202,7 @@ varying vec3 vFlow;
 varying vec2 vDS;
 varying vec3 vWorld;
 varying vec4 vFog;
+varying vec3 vClimate;
 ${SKY_GLSL}
 ${CAUSTIC_GLSL}
 float bayer2(vec2 a) { a = floor(a); return fract(dot(a, vec2(0.5, a.y * 0.75))); }
@@ -202,13 +214,17 @@ float tileLum(vec4 r, vec2 p) {
   vec3 c = textureGrad(map, r.xy + fract(p) * sz, dFdx(p) * sz, dFdy(p) * sz).rgb;
   return dot(c, vec3(0.2126, 0.7152, 0.0722)) / uWaterLum;
 }
-const vec3 SHALLOW = vec3(0.05, 0.31, 0.56);
-const vec3 DEEP = vec3(0.007, 0.036, 0.19);
+const vec3 SHALLOW0 = vec3(0.05, 0.31, 0.56);
+const vec3 DEEP0 = vec3(0.007, 0.036, 0.19);
 const vec3 FOAM = vec3(0.86, 0.93, 0.97);
 void main() {
   if (uFade < 0.999 && bayer4(gl_FragCoord.xy) >= uFade) discard;
   float t = uTime;
   float kind = vFlow.z;
+  vec3 SHALLOW = mix(mix(mix(SHALLOW0, vec3(0.06, 0.5, 0.6), vClimate.x), vec3(0.04, 0.2, 0.55), vClimate.y),
+    vec3(0.17, 0.25, 0.16), vClimate.z * 0.85);
+  vec3 DEEP = mix(mix(mix(DEEP0, vec3(0.01, 0.09, 0.26), vClimate.x), vec3(0.01, 0.02, 0.15), vClimate.y),
+    vec3(0.03, 0.055, 0.035), vClimate.z * 0.85);
   vec2 p = vWorld.xz;
   vec3 toCam = cameraPosition - vWorld;
   float dist = length(toCam);
@@ -306,10 +322,13 @@ void main() {
     float sunUp = smoothstep(-0.05, 0.1, uSunDir.y);
     vec3 hs = normalize(uSunDir + v);
     float ns = max(dot(n, hs), 0.0);
-    // the sharp term only fires on the texture's crests, so the sun path
-    // breaks into pixel glitter instead of a blown-out blob
-    float glitter = smoothstep(0.95, 1.35, detail);
-    float spec = (pow(ns, 700.0) * 3.5 * glitter + pow(ns, 160.0) * 0.12) * uGlint * sunUp;
+    // the sharp term only fires on scattered twinkling texels, so the sun
+    // path breaks into pixel glitter (tying it to the texture's crest lines
+    // drew a white web across the water seen from above)
+    vec2 gc = floor(p * 8.0);
+    float gh = fract(sin(dot(gc, vec2(12.9898, 78.233)) + floor(t * 3.0 + fract(gc.x * 0.37 + gc.y * 0.61) * 7.0)) * 43758.5453);
+    float glitter = step(0.9, gh) * smoothstep(0.85, 1.2, detail);
+    float spec = (pow(ns, 700.0) * 2.6 * glitter + pow(ns, 160.0) * 0.12) * uGlint * sunUp;
     vec3 hm = normalize(-uSunDir + v);
     float moon = pow(max(dot(n, hm), 0.0), 300.0) * 1.6 * (1.0 - uGlint) * step(uSunDir.y, 0.0);
     col += (uSkyLight * spec + vec3(0.55, 0.62, 0.8) * moon) * skyVis;
@@ -722,7 +741,14 @@ export class Renderer {
 
   constructor(parent: HTMLElement, atlas: Atlas) {
     this.atlas = atlas;
-    this.three = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+    // Fancy graphics on a desktop get MSAA (smooth block silhouettes); phones
+    // and headless test browsers keep the cheaper aliased path. The renderer is
+    // rebuilt per world, so a changed setting applies from the next world.
+    let fancy = true;
+    try { fancy = (JSON.parse(localStorage.getItem('voxelcraft.ui') ?? '{}') as { fancy?: boolean }).fancy !== false; } catch { /* default */ }
+    const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+    const msaa = fancy && !coarse && !navigator.webdriver;
+    this.three = new THREE.WebGLRenderer({ antialias: msaa, powerPreference: 'high-performance' });
     this.three.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.three.setSize(window.innerWidth, window.innerHeight);
     this.three.autoClear = false;
@@ -912,7 +938,11 @@ export class Renderer {
 
   /** Graphics: Fancy (water caustics + cloud reflections, underwater light,
    *  heat haze) or Fast. */
-  setFancy(on: boolean): void { this.env.uFancy.value = on ? 1 : 0; }
+  setFancy(on: boolean): void {
+    // (no anisotropic filtering: its wide footprint samples across the atlas'
+    // tile borders and painted neighbouring tiles' colours into block seams)
+    this.env.uFancy.value = on ? 1 : 0;
+  }
 
   /** The current render scale (0.5..1) for the debug overlay. */
   renderScale(): number { return this.scale; }

@@ -289,8 +289,8 @@ function stonePx(seed = 101): Px {
 }
 
 function paintStone(seed: number): Px {
-  const f = fbm(seed, [[4, 0.22], [8, 0.46], [16, 0.32]], 2.0);
-  const p = rampFill(new Px(), STONE_R, f, seed + 1, 0.22);
+  const f = fbm(seed, [[4, 0.14], [8, 0.46], [16, 0.4]], 1.55);
+  const p = rampFill(new Px(), STONE_R, f, seed + 1, 0.26);
   // vanilla stone's faint horizontal chisel strokes: dark dash, lit pixel above
   const r = mulberry32(seed + 2);
   for (let i = 0; i < 7; i++) {
@@ -304,8 +304,8 @@ function paintStone(seed: number): Px {
 }
 
 function dirtPx(seed = 102): Px {
-  const f = fbm(seed, [[4, 0.45], [8, 0.35], [16, 0.2]], 1.9);
-  const p = rampFill(new Px(), DIRT_R, f, seed + 1, 0.3);
+  const f = fbm(seed, [[4, 0.28], [8, 0.42], [16, 0.3]], 1.55);
+  const p = rampFill(new Px(), DIRT_R, f, seed + 1, 0.32);
   const r = mulberry32(seed + 2);
   // little buried pebbles + clods, each lit on top
   for (let i = 0; i < 7; i++) {
@@ -3457,12 +3457,11 @@ const DECOR_TILE_PAINTERS: Record<string, (ctx: Ctx, x: number, y: number) => vo
     p.put(c, x, y);
   },
   ice: (c, x, y) => {
-    const f = fbm(8830, [[2, 0.5, 4], [4, 0.3], [16, 0.2]], 1.4);
-    const p = rampFill(new Px(), ICE_R, f, 8831, 0.18);
-    // long diagonal glints + a few frozen bubbles
-    for (let i = 0; i < 6; i++) { p.set(3 + i, 12 - i, '#e6f0ff'); p.set(9 + i, 14 - i, '#dce9fe'); }
-    for (let i = 0; i < 3; i++) p.set(10 + i, 4 - i, '#eef5ff');
-    cracksOver(p, 8832, 2, hex('#6b93dc'), hex('#d7e6fd'));
+    const f = fbm(8830, [[2, 0.5, 4], [8, 0.3], [16, 0.2]], 0.7);
+    const p = rampFill(new Px(), ICE_R, f, 8831, 0.12);
+    // two soft diagonal glints, lit on their upper edge
+    for (let i = 0; i < 5; i++) { p.set(2 + i, 11 - i, ICE_R[4]); p.set(2 + i, 10 - i, ICE_R[5]); }
+    for (let i = 0; i < 3; i++) { p.set(10 + i, 6 - i, ICE_R[4]); p.set(11 + i, 6 - i, ICE_R[5]); }
     p.put(c, x, y);
   },
   packed_ice: (c, x, y) => {
