@@ -10,7 +10,11 @@ import { CX, CY, chunkKey } from './Chunk';
 
 export interface MeshChunkSnap {
   cx: number; cz: number;
-  data: Uint16Array; heightmap: Uint8Array;
+  /** Chunk.version of the block data. The worker keeps every chunk it has
+   *  been sent (until a 'drop'), so data/heightmap only travel when the
+   *  version changed — a 3x3 job usually ships one chunk, not nine. */
+  ver: number;
+  data?: Uint16Array; heightmap?: Uint8Array;
   torches: Uint32Array; glowers: Uint32Array;
 }
 export interface MeshJob {
@@ -30,13 +34,26 @@ type Rects = Record<string, { u0: number; v0: number; u1: number; v1: number }>;
 let RECTS: Rects = {};
 const atlasShim = { rect: (name: string) => RECTS[name] };
 
+const CACHE = new Map<string, { ver: number; data: Uint16Array; heightmap: Uint8Array }>();
+/** Fill a snapshot's block data from the cache (or cache what it brought);
+ *  false when the cache can't supply that version (main resends). */
+function resolve(s: MeshChunkSnap): boolean {
+  const key = chunkKey(s.cx, s.cz);
+  if (s.data && s.heightmap) { CACHE.set(key, { ver: s.ver, data: s.data, heightmap: s.heightmap }); return true; }
+  const c = CACHE.get(key);
+  if (!c || c.ver !== s.ver) return false;
+  s.data = c.data; s.heightmap = c.heightmap;
+  return true;
+}
+
 function makeChunk(s: MeshChunkSnap): MeshChunk {
+  const data = s.data!, heightmap = s.heightmap!;
   return {
     cx: s.cx, cz: s.cz, ready: true,
-    data: s.data, heightmap: s.heightmap,
+    data, heightmap,
     torches: new Set<number>(s.torches), glowers: new Set<number>(s.glowers),
     skyLight(lx: number, y: number, lz: number): number {
-      const h = s.heightmap[lz * CX + lx];
+      const h = heightmap[lz * CX + lx];
       if (y >= h) return 1;
       return Math.max(0.25, 1 - 0.1 * (h - y));
     },
@@ -96,8 +113,12 @@ const ctx = self as unknown as {
 ctx.onmessage = (e: MessageEvent) => {
   const msg = e.data;
   if (msg.type === 'init') { RECTS = msg.rects as Rects; return; }
+  if (msg.type === 'drop') { CACHE.delete(msg.key as string); return; }
   if (msg.type !== 'job') return;
   const job: MeshJob = msg.job;
+  let miss = false;
+  for (const s of job.chunks) if (s && !resolve(s)) miss = true;
+  if (miss) { ctx.postMessage({ type: 'done', id: job.id, key: job.key, cx: job.cx, cz: job.cz, ms: 0, solid: null, water: null, miss: true }); return; }
   const t0 = performance.now();
   const center = makeChunk(job.chunks[4]!); // index 4 = local (0,0)
   const out = buildChunkGeometry(makeWorld(job), center, atlasShim);

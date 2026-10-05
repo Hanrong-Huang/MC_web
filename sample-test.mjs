@@ -1,4 +1,4 @@
-// Sampled-instrument harness (Tone.js Samplers over public/audio):
+// Sampled-instrument harness (native buffer-source voices over public/audio):
 //  1. offline loudness match: each sampled instrument vs its synth voice, same
 //     phrase, rendered in OfflineAudioContexts (prints RMS + brightness ratios)
 //  2. live title screen: unlock audio, wait for the samples, check the title

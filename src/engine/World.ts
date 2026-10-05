@@ -1,7 +1,7 @@
 // World: chunk map + streaming, block get/set with dirty propagation,
 // DDA voxel raycasting, skylight lookups, and furnace block-entities.
 
-import { Chunk, chunkKey, CX, CZ, CY, isGlower } from './Chunk';
+import { Chunk, chunkKey, CX, CZ, CY, isGlower, nextChunkVersion } from './Chunk';
 import { WorldGenerator } from './WorldGenerator';
 import { B, isSolid, def, hasDef, DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, doorBox, trapdoorBox, REDSTONE_IDS, PLATE_IDS, POLL_IDS, RAIL_IDS } from './Blocks';
 import { CROSS_BLOCKS, CLIMBABLE } from './Blocks';
@@ -215,8 +215,19 @@ export class World {
     };
   }
 
+  // one-chunk lookup cache: block reads cluster (physics boxes, fluid and
+  // light scans, raycasts), and building the string key for every read was a
+  // top cost — and garbage — in profiles. Reset on every change to the map.
+  private cacheCx = NaN;
+  private cacheCz = NaN;
+  private cacheChunk: Chunk | undefined;
+  private chunksChanged(): void { this.cacheCx = NaN; this.cacheChunk = undefined; }
+
   getChunk(cx: number, cz: number): Chunk | undefined {
-    return this.chunks.get(chunkKey(cx, cz));
+    if (cx === this.cacheCx && cz === this.cacheCz) return this.cacheChunk;
+    const c = this.chunks.get(chunkKey(cx, cz));
+    this.cacheCx = cx; this.cacheCz = cz; this.cacheChunk = c;
+    return c;
   }
 
   /** Force a chunk into existence synchronously. The async streamer normally
@@ -233,6 +244,7 @@ export class World {
     const saved = this.savedChunks.get(key);
     if (saved) {
       chunk.data = decodeSaved(saved, chunk.data.length);
+      chunk.version = nextChunkVersion();
       chunk.computeHeightmap();
       chunk.scanTorches();
       chunk.ready = true;
@@ -242,6 +254,7 @@ export class World {
       this.generator.drainStates(this);
     }
     this.chunks.set(key, chunk);
+    this.chunksChanged();
     this.dirtySet.add(key);
     this.scanRedstoneInChunk(chunk);
     this.markDirty(cx - 1, cz); this.markDirty(cx + 1, cz);
@@ -253,7 +266,7 @@ export class World {
   getBlock(wx: number, wy: number, wz: number): number {
     if (wy < 0) return B.BEDROCK;
     if (wy >= CY) return B.AIR;
-    const c = this.chunks.get(chunkKey(Math.floor(wx / CX), Math.floor(wz / CZ)));
+    const c = this.getChunk(Math.floor(wx / CX), Math.floor(wz / CZ));
     if (!c || !c.ready) return B.AIR;
     return c.data[(wx & 15) | ((wz & 15) << 4) | (wy << 8)];
   }
@@ -262,7 +275,7 @@ export class World {
   getBlockForMesh(wx: number, wy: number, wz: number): number {
     if (wy < 0) return B.BEDROCK;
     if (wy >= CY) return B.AIR;
-    const c = this.chunks.get(chunkKey(Math.floor(wx / CX), Math.floor(wz / CZ)));
+    const c = this.getChunk(Math.floor(wx / CX), Math.floor(wz / CZ));
     if (!c || !c.ready) return B.STONE;
     return c.data[(wx & 15) | ((wz & 15) << 4) | (wy << 8)];
   }
@@ -273,7 +286,7 @@ export class World {
 
   skyLight(wx: number, wy: number, wz: number): number {
     if (wy >= CY) return 1;
-    const c = this.chunks.get(chunkKey(Math.floor(wx / CX), Math.floor(wz / CZ)));
+    const c = this.getChunk(Math.floor(wx / CX), Math.floor(wz / CZ));
     if (!c || !c.ready) return 1;
     return c.skyLight(wx & 15, Math.max(0, wy), wz & 15);
   }
@@ -281,7 +294,7 @@ export class World {
   setBlock(wx: number, wy: number, wz: number, id: number): boolean {
     if (wy < 0 || wy >= CY) return false;
     const cx = Math.floor(wx / CX), cz = Math.floor(wz / CZ);
-    const c = this.chunks.get(chunkKey(cx, cz));
+    const c = this.getChunk(cx, cz);
     if (!c || !c.ready) return false;
     const lx = wx & 15, lz = wz & 15;
     const oldId = c.get(lx, wy, lz);
@@ -899,6 +912,7 @@ export class World {
         const chunk = new Chunk(job.cx, job.cz);
         if (saved) {
           chunk.data = decodeSaved(saved, chunk.data.length);
+      chunk.version = nextChunkVersion();
           chunk.computeHeightmap();
           chunk.scanTorches();
           chunk.ready = true;
@@ -919,6 +933,7 @@ export class World {
         if (c.modified) this.savedChunks.set(key, rleEncode(c.data));
         this.forgetRedstoneInChunk(c.cx, c.cz);
         this.chunks.delete(key);
+        this.chunksChanged();
         this.dirtySet.delete(key);
         this.onChunkRemoved(key);
       }
@@ -932,6 +947,7 @@ export class World {
    *  of it was loaded. */
   private installChunk(key: string, chunk: Chunk): void {
     this.chunks.set(key, chunk);
+    this.chunksChanged();
     this.dirtySet.add(key);
     this.scanRedstoneInChunk(chunk);
     this.onChunkInstalled(chunk.cx, chunk.cz);
@@ -980,6 +996,7 @@ export class World {
     if (dx * dx + dz * dz > R * R + 1) return;
     const chunk = new Chunk(res.cx, res.cz);
     chunk.data = res.data;
+    chunk.version = nextChunkVersion();
     chunk.heightmap = res.heightmap;
     for (const t of res.torches) chunk.torches.add(t);
     for (const t of res.glowers) chunk.glowers.add(t);
@@ -1069,6 +1086,7 @@ export class World {
       this.onChunkRemoved(key);
     }
     this.chunks.clear();
+    this.chunksChanged();
     this.dirtySet.clear();
     this.genQueue.length = 0;
     this.queued.clear();

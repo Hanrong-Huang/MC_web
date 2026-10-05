@@ -230,6 +230,8 @@ export class Entity {
   walkCycle = 0;
   limbs: LimbSet | null = null;
   hurtFlash = 0;
+  /** tintMob: 1 once the plain (unhurt, unlit) tint is on the materials */
+  tintPlain = 0;
   attackCooldown = 0;
   angryT = 0;        // spiders stay aggressive a while after being hit
   fuseT = 0;         // creeper / tnt
@@ -422,6 +424,12 @@ const NET_KINDS = new Set<string>([...MOB_KINDS, 'drop', 'arrow', 'tnt', 'mineca
 
 export class EntityManager {
   entities: Entity[] = [];
+  /** the mobs among `entities`, rebuilt each frame and tick: the per-mob scans
+   *  (nearest cat, breeding partner, pet quarry ...) walk this, not every
+   *  drop, arrow and particle as well */
+  private mobList: Entity[] = [];
+  /** shared block-fleck quads: "<tile>#<variant>" -> geometry */
+  private fleckGeos = new Map<string, THREE.BufferGeometry>();
   private scene: THREE.Scene;
   private world: World;
   private atlas: Atlas;
@@ -679,7 +687,7 @@ export class EntityManager {
   private catcherTarget(e: Entity): Entity | null {
     const slack = EntityManager.CATCH_SLACK;
     let best: Entity | null = null, bestD = Infinity, bestOk = false;
-    for (const m of this.entities) {
+    for (const m of this.mobList) {
       if (!this.isMob(m) || m.dead) continue;
       const hw = m.box.w / 2 + slack;
       const dx = e.pos.x - m.pos.x, dz = e.pos.z - m.pos.z;
@@ -1433,15 +1441,22 @@ export class EntityManager {
       mat = new THREE.MeshBasicMaterial({ map: this.atlas.texture, side: THREE.DoubleSide });
       this.particleMats.set(tile, mat);
     }
-    const rect = this.atlas.rect(tile);
-    const geo = new THREE.PlaneGeometry(0.13, 0.13);
-    const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
-    const u = rect.u0 + Math.random() * (rect.u1 - rect.u0) * 0.75;
-    const v = rect.v0 + Math.random() * (rect.v1 - rect.v0) * 0.75;
-    const du = (rect.u1 - rect.u0) * 0.25, dv = (rect.v1 - rect.v0) * 0.25;
-    uv.setXY(0, u, v); uv.setXY(1, u + du, v); uv.setXY(2, u, v + dv); uv.setXY(3, u + du, v + dv);
-    const mesh = new THREE.Group();
-    mesh.add(new THREE.Mesh(geo, mat));
+    // a random quarter-size patch of the tile, from 16 shared variants
+    const vi = (Math.random() * 16) | 0;
+    const gk = `${tile}#${vi}`;
+    let geo = this.fleckGeos.get(gk);
+    if (!geo) {
+      const rect = this.atlas.rect(tile);
+      geo = new THREE.PlaneGeometry(1, 1);
+      geo.userData.shared = true;
+      const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
+      const u = rect.u0 + ((vi & 3) / 4) * 0.75 * (rect.u1 - rect.u0);
+      const v = rect.v0 + ((vi >> 2) / 4) * 0.75 * (rect.v1 - rect.v0);
+      const du = (rect.u1 - rect.u0) * 0.25, dv = (rect.v1 - rect.v0) * 0.25;
+      uv.setXY(0, u, v); uv.setXY(1, u + du, v); uv.setXY(2, u, v + dv); uv.setXY(3, u + du, v + dv);
+      this.fleckGeos.set(gk, geo);
+    }
+    const mesh = quadParticle(mat, 0.13, geo);
     const e = new Entity('particle', { x, y, z }, { w: 0.08, h: 0.08 }, mesh);
     e.vel = vel;
     e.maxLife = e.life = life;
@@ -1533,8 +1548,7 @@ export class EntityManager {
       });
       this.particleMats.set('ember', mat);
     }
-    const mesh = new THREE.Group();
-    mesh.add(new THREE.Mesh(new THREE.PlaneGeometry(0.07, 0.07), mat));
+    const mesh = quadParticle(mat, 0.07);
     const e = new Entity('particle',
       { x: x + (Math.random() - 0.5) * 0.12, y, z: z + (Math.random() - 0.5) * 0.12 },
       { w: 0.03, h: 0.03 }, mesh);
@@ -1561,9 +1575,7 @@ export class EntityManager {
       mat = new THREE.MeshBasicMaterial({ map: tex, color: 0xd8f08a, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false });
       this.particleMats.set('firefly', mat);
     }
-    const geo = new THREE.PlaneGeometry(0.08, 0.08);
-    const mesh = new THREE.Group();
-    mesh.add(new THREE.Mesh(geo, mat));
+    const mesh = quadParticle(mat, 0.08);
     const e = new Entity('particle', { x, y, z }, { w: 0.05, h: 0.05 }, mesh);
     e.vel = {
       x: (Math.random() - 0.5) * 0.5,
@@ -1640,7 +1652,7 @@ export class EntityManager {
       }
     }
     this.net?.send({ t: 'fx', fx: { k: 'boom', x, y, z, power, cause } });
-    for (const e of this.entities) {
+    for (const e of this.mobList) {
       if (!this.isMob(e) || e.dead) continue;
       const d = Math.hypot(e.pos.x - x, e.pos.y + e.box.h / 2 - y, e.pos.z - z);
       if (d < range) {
@@ -1660,7 +1672,7 @@ export class EntityManager {
         p.applyKnockback(p.pos.x - x, p.pos.z - z, 6);
       }
     }
-    for (const e of this.entities) {
+    for (const e of this.mobList) {
       if (!this.isMob(e) || e.dead) continue;
       const d = Math.hypot(e.pos.x - x, e.pos.y + e.box.h / 2 - y, e.pos.z - z);
       if (d < range) this.hurt(e, 8, e.pos.x - x, e.pos.z - z);
@@ -2165,8 +2177,15 @@ export class EntityManager {
 
   // --- per-frame update ---------------------------------------------------------
 
+  private refreshMobList(): void {
+    const l = this.mobList;
+    l.length = 0;
+    for (const e of this.entities) if (this.isMob(e) && !e.dead) l.push(e);
+  }
+
   update(dt: number, elapsed: number, camQ: THREE.Quaternion): void {
     if (this.net) this.netDimCheck();
+    this.refreshMobList();
     for (const e of this.entities) {
       e.age += dt;
       if (e.remote) { this.updatePuppet(e, dt, elapsed, camQ); continue; }
@@ -2387,7 +2406,7 @@ export class EntityManager {
           return;
         }
         // pets fight on the player's side, so hostile shots wound them too
-        for (const m of this.entities) {
+        for (const m of this.mobList) {
           if (!this.isPet(m) || m.dead) continue;
           const mw = m.box.w / 2;
           if (e.pos.x > m.pos.x - mw && e.pos.x < m.pos.x + mw &&
@@ -2401,7 +2420,7 @@ export class EntityManager {
           }
         }
       } else {
-        for (const m of this.entities) {
+        for (const m of this.mobList) {
           if (!this.isMob(m) || m.dead) continue;
           if (fromPet && this.isPet(m)) continue; // pets don't shoot each other
           const hw = m.box.w / 2;
@@ -2766,6 +2785,10 @@ export class EntityManager {
     let ember = -1;
     if (!hurt && e.kind === 'blaze') ember = 0.3 + 0.06 * Math.sin(e.age * 7) + (e.chargeT > 0 || e.burst > 0 ? 0.3 : 0);
     if (!hurt && e.kind === 'magma_cube') ember = 0.05 + 0.025 * Math.sin(e.age * 3.2 + e.variant);
+    // the plain look is static: write it once, not to every material every frame
+    const plain = !hurt && er === 0 && eg === 0 && eb === 0 && ember < 0 && !netherGlow;
+    if (plain && e.tintPlain === 1) return;
+    e.tintPlain = plain ? 1 : 0;
     // hurt = vanilla's red overlay: tint the albedo as well as glowing a little
     const gb = hurt ? MOB_EXPOSURE * 0.5 : MOB_EXPOSURE;
     for (const m of e.materials) {
@@ -3146,7 +3169,7 @@ export class EntityManager {
   /** In love mode: find a nearby same-kind mate, spawn a baby, set cooldowns. */
   private tryBreed(e: Entity): void {
     if (e.loveT <= 0) return;
-    for (const m of this.entities) {
+    for (const m of this.mobList) {
       if (m === e || m.kind !== e.kind || m.baby || m.loveT <= 0) continue;
       const dx = m.pos.x - e.pos.x, dz = m.pos.z - e.pos.z;
       if (dx * dx + dz * dz > 6.25) continue; // within 2.5 blocks
@@ -3167,7 +3190,7 @@ export class EntityManager {
   private wWolfCombat(e: Entity, dt: number): void {
     e.attackCooldown = Math.max(0, e.attackCooldown - dt);
     if (e.attackCooldown > 0 || e.sitting) return;
-    for (const m of this.entities) {
+    for (const m of this.mobList) {
       if (m === e || !this.isMob(m) || m.dead || m.tamed) continue; // never the owner's own
       const stats = MOB_STATS[m.kind as MobKind];
       if (!stats.hostile) continue;
@@ -3206,7 +3229,7 @@ export class EntityManager {
     // a wild mob that singled this pet out is fair game even if the owner
     // hasn't swung yet (it is already being attacked)
     if (!e.target) {
-      for (const m of this.entities) {
+      for (const m of this.mobList) {
         if (m.foe === e && !m.dead && this.isMob(m)) { e.target = m; break; }
       }
     }
@@ -3444,7 +3467,7 @@ export class EntityManager {
     e.attackCooldown = Math.max(0, e.attackCooldown - dt);
     if (e.attackCooldown > 0 || e.sitting) return;
     if (e.target) return; // handled by petChase when a target is set
-    for (const m of this.entities) {
+    for (const m of this.mobList) {
       // skip itself and every other tamed mob: a pet is a hostile *kind*, so
       // without this a released pet chewed on itself (3 dmg/0.7s) until it died
       if (m === e || !this.isMob(m) || m.dead || m.tamed) continue;
@@ -3650,6 +3673,7 @@ export class EntityManager {
   tick(isNight: boolean): void {
     const me = this.player;
     if (!me) return;
+    this.refreshMobList();
     this.tickWither();
 
     for (const e of this.entities) {
@@ -3703,7 +3727,7 @@ export class EntityManager {
         if (e.foe && (e.foe.dead || !this.isPet(e.foe)
           || Math.hypot(e.foe.pos.x - e.pos.x, e.foe.pos.z - e.pos.z) > 18)) e.foe = null;
         if (!e.foe) {
-          for (const pet of this.entities) {
+          for (const pet of this.mobList) {
             if (!this.isPet(pet) || pet.dead || pet.target !== e) continue;
             e.foe = pet;
             break;
@@ -4034,7 +4058,7 @@ export class EntityManager {
    *  one of its kind nearby turns hostile, clouding over angrily. */
   private provoke(e: Entity): void {
     const r = e.kind === 'zombified_piglin' ? 24 : 16;
-    for (const o of this.entities) {
+    for (const o of this.mobList) {
       if (o.kind !== e.kind || o.tamed || o.dead) continue;
       if (o !== e && Math.hypot(o.pos.x - e.pos.x, o.pos.z - e.pos.z) > r) continue;
       if (o.angryT <= 0) this.spawnAngry(o.pos.x, o.pos.y + o.box.h + 0.2, o.pos.z);
@@ -4049,7 +4073,7 @@ export class EntityManager {
    *  strayed more than 5 blocks from it; null when it is already among them. */
   private herdCentre(e: Entity): { x: number; z: number } | null {
     let sx = 0, sz = 0, n = 0;
-    for (const o of this.entities) {
+    for (const o of this.mobList) {
       if (o === e || o.kind !== e.kind || o.dead) continue;
       const dx = o.pos.x - e.pos.x, dz = o.pos.z - e.pos.z;
       if (dx * dx + dz * dz > 256) continue;
@@ -4063,7 +4087,7 @@ export class EntityManager {
   /** Nearest wild mob of `kind` within `r` blocks of `e` (pets don't count). */
   private nearestOf(e: Entity, kind: MobKind, r: number): Entity | null {
     let best: Entity | null = null, bestD = r * r;
-    for (const o of this.entities) {
+    for (const o of this.mobList) {
       if (o === e || o.kind !== kind || o.dead || (o.tamed && kind !== 'cat')) continue;
       const d = (o.pos.x - e.pos.x) ** 2 + (o.pos.z - e.pos.z) ** 2;
       if (d < bestD) { bestD = d; best = o; }
@@ -4081,7 +4105,7 @@ export class EntityManager {
 
   private nearestAdult(e: Entity): Entity | null {
     let best: Entity | null = null, bestD = 16 * 16;
-    for (const o of this.entities) {
+    for (const o of this.mobList) {
       if (o === e || o.kind !== e.kind || o.baby || o.dead) continue;
       const d = (o.pos.x - e.pos.x) ** 2 + (o.pos.z - e.pos.z) ** 2;
       if (d < bestD) { bestD = d; best = o; }
@@ -4376,7 +4400,7 @@ export class EntityManager {
   raycastMobs(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number):
     { entity: Entity; dist: number } | null {
     let best: { entity: Entity; dist: number } | null = null;
-    for (const e of this.entities) {
+    for (const e of this.mobList) {
       if (!this.isMob(e) || e.dead) continue;
       const hw = e.box.w / 2 + 0.1;
       const t = rayAABB(
@@ -4413,7 +4437,7 @@ export class EntityManager {
     this.audio.mobSound(e.kind as string, 0.85, e.hp <= 0 ? 'death' : 'hurt');
     if (e.kind === 'wolf' && !e.tamed && attacker === this.player) {
       // strike a wild wolf and the whole pack turns on you (vanilla)
-      for (const o of this.entities) {
+      for (const o of this.mobList) {
         if (o.kind !== 'wolf' || o.tamed || o.dead) continue;
         if (o !== e && Math.hypot(o.pos.x - e.pos.x, o.pos.z - e.pos.z) > 16) continue;
         if (o.angryT <= 0) this.spawnAngry(o.pos.x, o.pos.y + o.box.h + 0.2, o.pos.z);
@@ -4435,7 +4459,7 @@ export class EntityManager {
     const byOwner = attacker === this.player
       || (attacker !== undefined && this.isMob(attacker as Entity) && (attacker as Entity).tamed);
     if (byOwner && !this.isPet(e)) {
-      for (const pet of this.entities) {
+      for (const pet of this.mobList) {
         if (this.isPet(pet) && !pet.target && !pet.sitting) pet.target = e;
       }
     }
@@ -4479,7 +4503,7 @@ export class EntityManager {
   /** The player was hurt by `source` -> all idle pets retaliate against it. */
   onOwnerHurt(source: Entity): void {
     if (!this.isMob(source)) return;
-    for (const pet of this.entities) {
+    for (const pet of this.mobList) {
       if (this.isPet(pet) && !pet.target && !pet.sitting) pet.target = source;
     }
   }
@@ -4535,7 +4559,7 @@ export class EntityManager {
   /** Any living hostile mob within `r` blocks of (x,y,z)? Gates sleeping. */
   hostileNear(x: number, y: number, z: number, r: number): boolean {
     const r2 = r * r;
-    for (const e of this.entities) {
+    for (const e of this.mobList) {
       if (!this.isMob(e) || e.dead) continue;
       if (!MOB_STATS[e.kind as MobKind].hostile) continue;
       const dx = e.pos.x - x, dy = e.pos.y - y, dz = e.pos.z - z;
@@ -4546,7 +4570,7 @@ export class EntityManager {
 
   /** Used to block placement inside mobs. */
   anyMobIntersecting(bx: number, by: number, bz: number): boolean {
-    for (const e of this.entities) {
+    for (const e of this.mobList) {
       if (!this.isMob(e)) continue;
       const hw = e.box.w / 2;
       if (e.pos.x + hw > bx && e.pos.x - hw < bx + 1 &&
@@ -4876,8 +4900,7 @@ export class EntityManager {
       this.particleMats.set('heart', mat);
     }
     for (let i = 0; i < 5; i++) {
-      const mesh = new THREE.Group();
-      mesh.add(new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.22), mat));
+      const mesh = quadParticle(mat, 0.22);
       const e = new Entity('particle',
         { x: x + (Math.random() - 0.5) * 0.5, y: y + Math.random() * 0.4, z: z + (Math.random() - 0.5) * 0.5 },
         { w: 0.05, h: 0.05 }, mesh);
@@ -4905,9 +4928,7 @@ export class EntityManager {
       this.particleMats.set(key, mat);
     }
     for (let i = 0; i < n; i++) {
-      const mesh = new THREE.Group();
-      const sz = size * (0.8 + Math.random() * 0.4);
-      mesh.add(new THREE.Mesh(new THREE.PlaneGeometry(sz, sz), mat));
+      const mesh = quadParticle(mat, size * (0.8 + Math.random() * 0.4));
       const e = new Entity('particle',
         { x: x + (Math.random() - 0.5) * spread, y: y + Math.random() * spread * 0.5, z: z + (Math.random() - 0.5) * spread },
         { w: 0.05, h: 0.05 }, mesh);
@@ -5154,8 +5175,7 @@ export class EntityManager {
       this.particleMats.set('crit', mat);
     }
     for (let i = 0; i < 8; i++) {
-      const mesh = new THREE.Group();
-      mesh.add(new THREE.Mesh(new THREE.PlaneGeometry(0.14, 0.14), mat));
+      const mesh = quadParticle(mat, 0.14);
       const e = new Entity('particle',
         { x: x + (Math.random() - 0.5) * 0.4, y: y + (Math.random() - 0.5) * 0.4, z: z + (Math.random() - 0.5) * 0.4 },
         { w: 0.04, h: 0.04 }, mesh);
@@ -5187,8 +5207,7 @@ export class EntityManager {
     }
     // particles spiral up out of the capture point in a tight amethyst ring
     for (let i = 0; i < n; i++) {
-      const mesh = new THREE.Group();
-      mesh.add(new THREE.Mesh(new THREE.PlaneGeometry(0.16, 0.16), mat));
+      const mesh = quadParticle(mat, 0.16);
       const a = n === 1 ? Math.random() * Math.PI * 2 : (i / n) * Math.PI * 2;
       const sp = 1.2 + Math.random() * 0.6;
       const rad = n === 1 ? 0.12 : 0.5; // trail sparks hug the orb
@@ -5254,6 +5273,7 @@ export class EntityManager {
       disposeGroup(e.mesh);
     }
     this.entities = [];
+    this.mobList = [];
     for (const c of this.corpses) {
       this.scene.remove(c.mesh);
       disposeGroup(c.mesh);
@@ -5319,8 +5339,23 @@ export class EntityManager {
 function disposeGroup(g: THREE.Object3D): void {
   g.traverse((o) => {
     const m = o as THREE.Mesh;
-    if (m.geometry) m.geometry.dispose();
+    if (m.geometry && !m.geometry.userData.shared) m.geometry.dispose();
   });
+}
+
+/** One unit quad shared by every billboard particle (sized by the mesh's
+ *  scale): a particle used to build — upload, then free — its own buffer,
+ *  which showed up as GPU-buffer churn and GC in busy scenes. */
+const UNIT_QUAD = new THREE.PlaneGeometry(1, 1);
+UNIT_QUAD.userData.shared = true;
+/** A billboard of side `size` on the shared quad, in its own group (the
+ *  group carries position / facing / the fade-out scale). */
+function quadParticle(mat: THREE.Material, size: number, geo: THREE.BufferGeometry = UNIT_QUAD): THREE.Group {
+  const g = new THREE.Group();
+  const m = new THREE.Mesh(geo, mat);
+  m.scale.setScalar(size);
+  g.add(m);
+  return g;
 }
 
 /** Thrown-catcher phases + the capture/release/recall effects' state. */

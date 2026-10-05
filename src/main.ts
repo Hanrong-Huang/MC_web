@@ -102,6 +102,10 @@ class Game {
   private meshWorkerTried = false;
   private meshJobId = 0;
   private meshInFlight = new Set<string>(); // chunk keys being meshed off-thread
+  /** chunk key -> Chunk.version the mesh worker holds a copy of */
+  private meshSent = new Map<string, number>();
+  /** minimap biome tints per 8x8-block cell (hashed key) */
+  private minimapTints = new Map<number, [number, number, number]>();
   private raf = 0;
   private disposed = false;
   /** bed respawn point, if set */
@@ -292,7 +296,11 @@ class Game {
       while ((t = this.adv.popToast())) { this.hud.showAdvancementToast(t.icon, t.label); this.audio.play('advancement'); }
     };
 
-    this.world.onChunkRemoved = (key) => this.renderer.removeChunk(key);
+    this.world.onChunkRemoved = (key) => {
+      this.renderer.removeChunk(key);
+      // the mesh worker's copy of the chunk goes too
+      if (this.meshSent.delete(key)) this.meshWorker?.postMessage({ type: 'drop', key });
+    };
     // flowing water pops plants/torches/dust off as items; lava burns them
     this.world.onFluidWash = (x, y, z, id, fluid) => {
       this.world.torchFacings.delete(`${x},${y},${z}`);
@@ -2120,6 +2128,10 @@ class Game {
     this.renderer.setEating(this.player.eating);
     this.renderer.setBlocking(this.player.blocking && this.state === 'playing');
     this.renderer.updateChunkFades(dt);
+    // video settings + the auto render scale (fed while actually in game)
+    this.renderer.setRenderScale(this.hud.settings.scale);
+    this.renderer.setFancy(this.hud.settings.fancy);
+    if (!paused && this.state !== 'loading') this.renderer.adaptResolution(dt);
     this.renderer.updateHeld(dt, this.player.isMoving());
     if (this.state === 'playing') {
       const br = this.player.breaking;
@@ -2175,14 +2187,33 @@ class Game {
     if (showMinimap && this.minimapT <= 0) {
       this.minimapT = 0.22;
       const p = this.player.pos;
+      // the column sampler walks rows, so cache the chunk it is in
+      let lcx = NaN, lcz = NaN;
+      let lc: ReturnType<World['getChunk']>;
+      const tint = { r: 1, g: 1, b: 1 };
       this.hud.updateMinimap(
         p.x, p.z, this.player.yaw,
-        (wx, wz) => {
-          // sample the highest non-air block at this column
-          const c = this.world.getChunk(Math.floor(wx / 16), Math.floor(wz / 16));
-          if (!c || !c.ready) return 0;
-          const h = c.heightmap[(wz & 15) * 16 + (wx & 15)];
-          return this.world.getBlock(wx, h - 1, wz);
+        (wx, wz, out) => {
+          const cx = Math.floor(wx / 16), cz = Math.floor(wz / 16);
+          if (cx !== lcx || cz !== lcz) { lcx = cx; lcz = cz; lc = this.world.getChunk(cx, cz); }
+          if (!lc || !lc.ready) return false;
+          const h = lc.heightmap[(wz & 15) * 16 + (wx & 15)];
+          const id = h > 0 ? lc.data[(wx & 15) | ((wz & 15) << 4) | ((h - 1) << 8)] : B.BEDROCK;
+          const c = this.mapOverlay.colorOf(id);
+          out.h = h;
+          if (this.mapOverlay.tintedTop(id)) {
+            // biome tint on a coarse 8-block grid, cached (smooth, but costly noise)
+            const gk = (wx >> 3) * 1048576 + (wz >> 3);
+            let tc = this.minimapTints.get(gk);
+            if (!tc) {
+              if (this.minimapTints.size > 8192) this.minimapTints.clear();
+              this.world.generator.grassTint(wx & ~7, wz & ~7, tint);
+              tc = [tint.r, tint.g, tint.b];
+              this.minimapTints.set(gk, tc);
+            }
+            out.r = c[0] * tc[0]; out.g = c[1] * tc[1]; out.b = c[2] * tc[2];
+          } else { out.r = c[0]; out.g = c[1]; out.b = c[2]; }
+          return true;
         },
         this.dayTime,
         this.player.inventory.count(I.COMPASS) > 0 || this.player.mode === 'creative',
@@ -2718,6 +2749,7 @@ class Game {
       w.onerror = () => {
         // fall back to synchronous meshing; requeue anything in flight
         this.meshWorker = null;
+        this.meshSent.clear();
         for (const k of this.meshInFlight) this.world.dirtySet.add(k);
         this.meshInFlight.clear();
       };
@@ -2728,8 +2760,14 @@ class Game {
     return this.meshWorker;
   }
 
-  private onMeshDone(data: { key: string; cx: number; cz: number; ms: number; solid: GeoArrays | null; water: GeoArrays | null }): void {
+  private onMeshDone(data: { key: string; cx: number; cz: number; ms: number; solid: GeoArrays | null; water: GeoArrays | null; miss?: boolean }): void {
     this.meshInFlight.delete(data.key);
+    if (data.miss) {
+      // the worker lacked a chunk version we thought it had: resend everything
+      this.meshSent.clear();
+      this.world.dirtySet.add(data.key);
+      return;
+    }
     this.meshMs = this.meshMs * 0.9 + data.ms * 0.1;
     // edited mid-flight (re-dirtied) or unloaded -> discard this (now stale) result
     if (this.world.dirtySet.has(data.key)) return;
@@ -2749,12 +2787,19 @@ class Game {
       for (let dx = -1; dx <= 1; dx++) {
         const c = this.world.getChunk(cx + dx, cz + dz);
         if (c && c.ready) {
-          const data = c.data.slice();
-          const heightmap = c.heightmap.slice();
           const torches = Uint32Array.from(c.torches);
           const glowers = Uint32Array.from(c.glowers);
-          chunks.push({ cx: cx + dx, cz: cz + dz, data, heightmap, torches, glowers });
-          transfers.push(data.buffer, heightmap.buffer, torches.buffer, glowers.buffer);
+          const key = chunkKey(cx + dx, cz + dz);
+          if (this.meshSent.get(key) === c.version) {
+            chunks.push({ cx: cx + dx, cz: cz + dz, ver: c.version, torches, glowers }); // worker has it
+          } else {
+            const data = c.data.slice();
+            const heightmap = c.heightmap.slice();
+            chunks.push({ cx: cx + dx, cz: cz + dz, ver: c.version, data, heightmap, torches, glowers });
+            transfers.push(data.buffer, heightmap.buffer);
+            this.meshSent.set(key, c.version);
+          }
+          transfers.push(torches.buffer, glowers.buffer);
         } else {
           chunks.push(null);
         }

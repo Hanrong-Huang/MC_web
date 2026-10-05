@@ -6,7 +6,7 @@ Working notes for AI agents in this repo. Player-facing feature docs live in `RE
 
 A Minecraft clone in **TypeScript + Three.js + Vite**. Three.js is the WebGL wrapper; chunking, meshing, lighting, physics, mob AI, crafting and persistence are hand-written, and most textures/sounds are generated procedurally in code.
 
-**No restrictions on dependencies or assets.** Use whatever makes the game better: npm libraries (e.g. Tone.js), third-party asset files (audio samples, images, fonts, models) or procedural generation — pick per case. Practical notes: large assets go in `public/` and should load lazily with a procedural/silent fallback so the game still starts fast; record the source and license of any third-party asset in `CREDITS.md`.
+**No restrictions on dependencies or assets.** Use whatever makes the game better: npm libraries, third-party asset files (audio samples, images, fonts, models) or procedural generation — pick per case. Practical notes: large assets go in `public/` and should load lazily with a procedural/silent fallback so the game still starts fast; record the source and license of any third-party asset in `CREDITS.md`.
 
 Solo project. Commits go straight to `main`.
 
@@ -53,6 +53,8 @@ Always run `npm run build` (or at least `npx tsc --noEmit`) before committing �
 | `src/engine/Inventory.ts` | Slots, shaped recipes, furnace + chest state |
 
 ## Key invariants & gotchas
+
+- **Performance rules** (`perf-profile.mjs` measures them: per-system ms per frame, long tasks, draw calls; `PROFILE=1` adds a CPU sampling profile, `SCEN=` picks scenarios — SwiftShader makes GPU time meaningless, so read it for CPU): `World.getChunk` keeps a one-chunk cache (`chunksChanged()` must run on every change to `chunks`) because building the string key per block read was a top cost and GC source — read blocks through `getBlock`/`getChunk`, never `chunks.get(chunkKey(...))` in hot code. Per-mob scans in `EntityManager` walk `mobList` (rebuilt each frame/tick), not `entities` (drops, arrows and particles too). `tintMob` writes materials only when the tint changes (`Entity.tintPlain`). Billboard particles share `UNIT_QUAD` / per-tile fleck quads (`userData.shared` geometries are never disposed) — don't build a geometry per particle. The mesh worker caches chunk copies by `Chunk.version` (a global counter bumped on every write; `main.meshSent` mirrors what it holds, `drop` on unload), so a job ships only changed chunks — any new path that rewrites `chunk.data` must assign `nextChunkVersion()`. The HUD minimap fills an `ImageData` from a chunk-caching sampler (block colours from `MapOverlay.colorOf`, cached biome tints). Sampled music voices are native buffer sources (`AudioSamples.ts`; Tone.js was removed — its per-note objects caused 100 ms+ hitches). Rain/snow `seed()` only scatters drops added since the last count. **Render Scale** (Options → Video, `UiSettings.scale`: Auto / 100 / 75 / 50 %) — Auto (`Renderer.adaptResolution`) lowers the pixel ratio in 10 % steps while frames run over ~21 ms and undoes a step that didn't help (CPU-bound), disabled under `navigator.webdriver` so harness shots stay full-res; **Graphics: Fancy/Fast** (`uFancy` uniform) skips water caustics + cloud reflections, underwater caustics and heat haze.
 
 - **Two clocks**: logic runs at a fixed 20 Hz tick; rendering is rAF. Don't put gameplay state changes in render code.
 - **GameUIState** (`main.ts`): `loading | playing | paused | container | dead | sleeping`. `isUIOpen()` is `state !== 'playing'`, which gates player input. Add new modal states here, not ad-hoc flags.
@@ -145,7 +147,7 @@ Earlier polish passes: chunk fade-in, 3D extruded held/dropped items, wall-mount
 
 Backlog ideas, roughly highest-value first — confirm scope with the user before large ones:
 
-- **Performance**: the chunk mesher and lighting flood-fill run on the main thread; moving meshing to a Web Worker would cut frame hitches at higher render distance. The bundle is ~730 kB — consider code-splitting if startup matters.
+- **Performance**: draw calls per mob (box limbs are separate meshes) and per particle are the next costs; an instanced particle system and merged mob meshes would cut them. The bundle is large — consider code-splitting if startup matters.
 - **More mob fidelity**: idle head-tracking for passive mobs, baby-animal proportions/sounds, mob sounds on breed, drowning/falling mob reactions.
 - **World depth**: villages with villager trading UI, mineshafts/ravines, more biomes (jungle, mesa, swamp), structures with loot tables.
 - **Redstone-lite**: levers/buttons/doors wiring, pressure plates (doors already exist).

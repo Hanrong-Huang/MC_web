@@ -4,7 +4,7 @@
 // pointing back to where you last died).
 
 import type { Atlas } from '../engine/Textures';
-import { B, def, hasDef } from '../engine/Blocks';
+import { B, def, hasDef, TINTED_TILES } from '../engine/Blocks';
 
 export interface MapMarkers {
   x: number; z: number; yaw: number;
@@ -52,8 +52,9 @@ export class MapOverlay {
     root.appendChild(this.compassEl);
   }
 
-  /** Average colour of a block's top tile (cached). */
-  private colorOf(id: number): [number, number, number] {
+  /** Average colour of a block's top tile (cached). Grass and leaves come
+   *  back untinted (their tiles are grey; the caller applies the biome tint). */
+  colorOf(id: number): [number, number, number] {
     let c = this.colors.get(id);
     if (c) return c;
     c = [217, 200, 156];
@@ -65,10 +66,14 @@ export class MapOverlay {
       let r = 0, g = 0, b = 0, n = 0;
       for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 100) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
       if (n) c = [r / n, g / n, b / n];
-      if (id === B.GRASS || def(id).name.endsWith('leaves')) c = [c[0] * 0.85, c[1] * 1.02, c[2] * 0.7];
     }
     this.colors.set(id, c);
     return c;
+  }
+
+  /** Does this block's top take the biome grass/foliage tint? */
+  tintedTop(id: number): boolean {
+    return id !== B.AIR && hasDef(id) && !!def(id).faces && TINTED_TILES.has(def(id).faces!.top);
   }
 
   update(dt: number, showMap: boolean, showCompass: boolean, m: MapMarkers,
@@ -100,13 +105,15 @@ export class MapOverlay {
           continue;
         }
         const c = this.colorOf(s.id);
+        const tinted = this.tintedTop(s.id);
         // vanilla-style relief: brighter where the ground rises to the north-west
         const up = prevRow[i] ?? -1;
         const k = up < 0 ? 1 : s.h > up ? 1.12 : s.h < up ? 0.84 : 1;
         // blend toward parchment so it reads as a drawn map
-        d[o] = Math.min(255, c[0] * k * 0.82 + 217 * 0.18);
-        d[o + 1] = Math.min(255, c[1] * k * 0.82 + 200 * 0.18);
-        d[o + 2] = Math.min(255, c[2] * k * 0.82 + 156 * 0.18);
+        const tr = tinted ? 0.62 : 1, tg = tinted ? 0.92 : 1, tb = tinted ? 0.42 : 1;
+        d[o] = Math.min(255, c[0] * tr * k * 0.82 + 217 * 0.18);
+        d[o + 1] = Math.min(255, c[1] * tg * k * 0.82 + 200 * 0.18);
+        d[o + 2] = Math.min(255, c[2] * tb * k * 0.82 + 156 * 0.18);
         d[o + 3] = 255;
       }
       prevRow = row;

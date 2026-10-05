@@ -142,7 +142,7 @@ export class AudioEngine {
   // held so the effect graph isn't garbage-collected mid-session
   private fx: AudioNode[] = [];
   private pumpTimer = 0;
-  // sampled instruments (AudioSamples.ts, lazily imported with Tone.js)
+  // sampled instruments (AudioSamples.ts, imported lazily)
   private samples: SampleBank | null = null;
   private samplesAt = -1;       // ctx time sample loading was requested (-1 = never)
   private samplesLoad: Promise<void> | null = null;
@@ -473,7 +473,7 @@ export class AudioEngine {
     }
   }
 
-  /** Load the sampled music instruments (Tone.js + public/audio). Called by
+  /** Load the sampled music instruments (public/audio). Called by
    *  itself on a live context; harnesses call it on an offline one. Resolves
    *  to the instruments that ended up sampled. */
   async loadSamples(only?: readonly SampledInst[]): Promise<string[]> {

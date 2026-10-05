@@ -84,10 +84,15 @@ export interface UiSettings {
   book: boolean;
   /** captions for sounds, bottom-right (accessibility) */
   subs: boolean;
+  /** render resolution: 0 = auto, else a fixed fraction (1, 0.75, 0.5) */
+  scale: number;
+  /** Graphics: Fancy (water caustics/reflections, underwater light, heat haze) or Fast */
+  fancy: boolean;
 }
 
 const UI_KEY = 'voxelcraft.ui';
-const UI_DEFAULTS: UiSettings = { fov: 70, gui: 0, bob: true, fps: false, book: true, subs: false };
+const UI_DEFAULTS: UiSettings = { fov: 70, gui: 0, bob: true, fps: false, book: true, subs: false, scale: 0, fancy: true };
+const SCALE_STEPS = [0, 1, 0.75, 0.5];
 const GUI_NAMES = ['Auto', 'Small', 'Normal', 'Large'];
 
 function loadUiSettings(): UiSettings {
@@ -102,6 +107,8 @@ function loadUiSettings(): UiSettings {
         fps: typeof p.fps === 'boolean' ? p.fps : UI_DEFAULTS.fps,
         book: typeof p.book === 'boolean' ? p.book : UI_DEFAULTS.book,
         subs: typeof p.subs === 'boolean' ? p.subs : UI_DEFAULTS.subs,
+        scale: SCALE_STEPS.includes(p.scale as number) ? p.scale as number : UI_DEFAULTS.scale,
+        fancy: typeof p.fancy === 'boolean' ? p.fancy : UI_DEFAULTS.fancy,
       };
     }
   } catch { /* private mode / corrupt value: fall back to defaults */ }
@@ -1270,38 +1277,40 @@ ${seedLine.textContent}`;
 
   /** Redraw the minimap: a top-down block sample around the player, a facing
    *  arrow, and compass/clock text readouts. */
+  private minimapImg: ImageData | null = null;
+  private minimapHeights = new Int16Array(96);
+  private compassText = '';
+  private clockText = '';
   updateMinimap(
     px: number, pz: number, yaw: number,
-    sample: (wx: number, wz: number) => number,
+    /** surface at a column: writes rgb (0..255) + height into `out`; false = not loaded */
+    sample: (wx: number, wz: number, out: { r: number; g: number; b: number; h: number }) => boolean,
     dayTime: number,
     hasCompass: boolean, hasClock: boolean,
   ): void {
     const ctx = this.minimapCanvas.getContext('2d')!;
     const W = 96, RADIUS = 48, SCALE = 2; // 1 pixel per 2 blocks -> 96-block view
-    ctx.clearRect(0, 0, W, W);
-    // color map for block ids
-    const color = (id: number): string => {
-      switch (id) {
-        case 0: return '#3a5a8a'; // air/water-ish (we sample surface, so treat as water)
-        case 10: return '#2f52a5'; // water
-        case 5: return '#dbd3a0'; // sand
-        case 14: return '#f4fcfc'; // snow
-        case 1: return '#5d9b3d'; // grass
-        case 2: return '#866043'; // dirt
-        case 3: case 4: return '#747474'; // stone/cobble
-        case 6: case 31: case 32: return '#5d4222'; // logs
-        case 8: case 33: case 34: return '#2f6b1e'; // leaves
-        default: return '#5a5a5a';
-      }
-    };
+    const img = this.minimapImg ??= ctx.createImageData(W, W);
+    const d = img.data;
+    const up = this.minimapHeights; // the row above (north), for relief shading
+    const s = { r: 0, g: 0, b: 0, h: 0 };
+    const x0 = Math.floor(px) - RADIUS * SCALE, z0 = Math.floor(pz) - RADIUS * SCALE;
     for (let py = 0; py < W; py++) {
+      const wz = z0 + py * SCALE;
       for (let pxx = 0; pxx < W; pxx++) {
-        const wx = Math.floor(px + (pxx - RADIUS) * SCALE);
-        const wz = Math.floor(pz + (py - RADIUS) * SCALE);
-        ctx.fillStyle = color(sample(wx, wz));
-        ctx.fillRect(pxx, py, 1, 1);
+        const o = (py * W + pxx) * 4;
+        if (!sample(x0 + pxx * SCALE, wz, s)) {
+          d[o] = 40; d[o + 1] = 40; d[o + 2] = 44; d[o + 3] = 255; up[pxx] = -1;
+          continue;
+        }
+        // vanilla map relief: lighter where the ground rises from the north
+        const prev = py > 0 ? up[pxx] : -1;
+        const k = prev < 0 ? 1 : s.h > prev ? 1.14 : s.h < prev ? 0.82 : 1;
+        up[pxx] = s.h;
+        d[o] = Math.min(255, s.r * k); d[o + 1] = Math.min(255, s.g * k); d[o + 2] = Math.min(255, s.b * k); d[o + 3] = 255;
       }
     }
+    ctx.putImageData(img, 0, 0);
     // player arrow at center (pointing the look direction)
     const ang = yaw; // player yaw; 0 = -z (north)
     ctx.save();
@@ -1331,7 +1340,8 @@ ${seedLine.textContent}`;
     if (hasCompass) {
       const yawDeg = ((yaw * 180 / Math.PI) % 360 + 360) % 360;
       const dirs = ['N', 'W', 'S', 'E'];
-      this.compassEl.textContent = `Compass ${dirs[Math.round(yawDeg / 90) % 4]}`;
+      const txt = `Compass ${dirs[Math.round(yawDeg / 90) % 4]}`;
+      if (txt !== this.compassText) { this.compassText = txt; this.compassEl.textContent = txt; }
       this.compassEl.title = 'Compass: carry one to show your heading on the minimap';
       this.compassEl.style.display = 'block';
     } else {
@@ -1343,7 +1353,8 @@ ${seedLine.textContent}`;
       const h = Math.floor(hours);
       const m = Math.floor((hours - h) * 60);
       const night = hours < 6 || hours >= 18.5;
-      this.clockEl.textContent = `${night ? '☾' : '☀'} ${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+      const txt = `${night ? '☾' : '☀'} ${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+      if (txt !== this.clockText) { this.clockText = txt; this.clockEl.textContent = txt; }
       this.clockEl.title = 'Clock: carry one to show world time';
       this.clockEl.style.display = 'block';
     } else {
@@ -1658,6 +1669,22 @@ ${seedLine.textContent}`;
       this.saveSettings(); this.syncPauseUi();
     });
     this.pauseSyncers.push(() => { fpsBtn.textContent = `Show FPS: ${this.settings.fps ? 'ON' : 'OFF'}`; });
+    const scaleBtn = this.pauseButton(grid, '', () => {
+      const i = SCALE_STEPS.indexOf(this.settings.scale);
+      this.settings.scale = SCALE_STEPS[(i + 1) % SCALE_STEPS.length];
+      this.audio.ui('tab'); this.saveSettings(); this.syncPauseUi();
+    });
+    scaleBtn.title = 'Auto lowers the resolution while the frame rate drops (phones, big screens) and raises it again when there is headroom';
+    this.pauseSyncers.push(() => {
+      const s = this.settings.scale;
+      scaleBtn.textContent = `Render Scale: ${s === 0 ? 'Auto' : `${Math.round(s * 100)}%`}`;
+    });
+    const fancyBtn = this.pauseButton(grid, '', () => {
+      this.settings.fancy = !this.settings.fancy;
+      this.audio.ui(this.settings.fancy ? 'toggleOn' : 'toggleOff'); this.saveSettings(); this.syncPauseUi();
+    });
+    fancyBtn.title = 'Fast skips water caustics and reflections, underwater light and heat haze';
+    this.pauseSyncers.push(() => { fancyBtn.textContent = `Graphics: ${this.settings.fancy ? 'Fancy' : 'Fast'}`; });
     this.pauseButton(grid, 'Resource Pack…', () => { this.packHandler = this.pauseH!.onPack; this.packInput.click(); });
 
     section('Music & Sounds');

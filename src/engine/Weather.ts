@@ -102,8 +102,12 @@ class DropField {
 
   /** Fill `n` drops in a box around the camera at the given height band. */
   seed(n: number, cx: number, cy: number, cz: number, span: number): void {
+    // the count follows the fading intensity every frame: only scatter the
+    // drops that are new (reseeding them all cost a full refill + upload per
+    // frame and made the rain jump about)
+    const from = Math.min(this.count, n);
     this.count = n;
-    for (let i = 0; i < n; i++) {
+    for (let i = from; i < n; i++) {
       this.pos[i * 3] = cx + (Math.random() - 0.5) * span;
       this.pos[i * 3 + 1] = cy + Math.random() * 24 - 4;
       this.pos[i * 3 + 2] = cz + (Math.random() - 0.5) * span;

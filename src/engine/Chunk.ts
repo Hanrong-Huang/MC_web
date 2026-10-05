@@ -33,10 +33,17 @@ export function blockIndex(x: number, y: number, z: number): number {
   return x | (z << 4) | (y << 8);
 }
 
+let chunkSeq = 0;
+/** A fresh, never-reused content version (see Chunk.version). */
+export function nextChunkVersion(): number { return ++chunkSeq; }
+
 export class Chunk {
   readonly cx: number;
   readonly cz: number;
   data: BlockData = new Uint16Array(CHUNK_VOLUME);
+  /** bumped on every write (globally unique, so a reloaded chunk never
+   *  matches an old number): the mesh worker caches block data by it */
+  version = nextChunkVersion();
   /** heightmap[z*16+x] = y of first free block above the highest non-air block */
   heightmap = new Uint8Array(CX * CZ);
   /** packed local indices of torch blocks (light sources) */
@@ -72,6 +79,7 @@ export class Chunk {
     if (isGlower(old)) this.glowers.delete(idx);
     if (isGlower(id)) this.glowers.add(idx);
     this.data[idx] = id;
+    this.version = ++chunkSeq;
     this.updateColumnHeight(x, z);
   }
 
@@ -79,6 +87,7 @@ export class Chunk {
   setRaw(x: number, y: number, z: number, id: number): void {
     if (y < 0 || y >= CY) return;
     this.data[x | (z << 4) | (y << 8)] = id;
+    this.version = ++chunkSeq;
   }
 
   updateColumnHeight(x: number, z: number): void {

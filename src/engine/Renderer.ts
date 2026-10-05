@@ -185,6 +185,7 @@ uniform vec3 uAmbient;
 uniform vec3 uTintMul;
 uniform vec3 uCloudCol;
 uniform vec3 uCloudInfo; // layer origin x, z, visibility
+uniform float uFancy;    // Graphics: Fancy (1) / Fast (0)
 varying vec2 vLight;
 varying vec3 vFlow;
 varying vec2 vDS;
@@ -259,7 +260,7 @@ void main() {
   float depth = vDS.x;
   float dk = 1.0 - exp(-depth * 0.42);
   vec3 body = mix(SHALLOW, DEEP, dk) * light * mix(0.8, 1.25, clamp(detail - 0.3, 0.0, 1.0));
-  if (kind < 0.5) body += SHALLOW * light * caustic(p * 0.22, t * 0.5) * (1.0 - dk) * 0.9 * skyVis;
+  if (kind < 0.5 && uFancy > 0.5) body += SHALLOW * light * caustic(p * 0.22, t * 0.5) * (1.0 - dk) * 0.9 * skyVis;
   else if (kind < 1.5) body = mix(body, SHALLOW * light * 1.7, 0.4 * vFlow.y); // aerated falls
   float alpha = kind < 0.5 ? mix(0.42, 0.9, dk) : kind < 1.5 ? 0.78 : 0.7;
 
@@ -287,7 +288,7 @@ void main() {
     vec3 r = reflect(-v, n);
     r.y = abs(r.y);
     vec3 refl = skyColor(r);
-    if (r.y > 0.015 && uCloudInfo.z > 0.0) {
+    if (r.y > 0.015 && uCloudInfo.z > 0.0 && uFancy > 0.5) {
       // the real cloud layer, intersected along the reflected ray
       float th = (172.0 - vWorld.y) / r.y;
       vec2 hit = vWorld.xz + r.xz * th;
@@ -338,6 +339,7 @@ uniform float uFogNear;
 uniform float uFogFar;
 uniform float uFogVert;
 uniform vec4 uHeat; // Nether heat haze: x = strength, y = lava-sea level
+uniform float uFancy;
 varying vec2 vLight;
 varying vec3 vTint;
 varying vec2 vUv2;
@@ -369,7 +371,7 @@ void main() {
   gl_Position = projectionMatrix * viewMatrix * wp;
   gl_Position.xy += underwaterWobble(gl_Position, uTime) * uUnder;
   vec3 toV = wp.xyz - cameraPosition;
-  if (uHeat.x > 0.0) {
+  if (uHeat.x > 0.0 && uFancy > 0.5) {
     // heat haze: whatever sits in the hot air over the lava sea ripples a
     // little once it's a few blocks off (up close it would read as a quake)
     float band = 1.0 - smoothstep(0.0, 14.0, wp.y - uHeat.y);
@@ -406,6 +408,7 @@ uniform vec4 uNetherGlow; // rgb = lava-sea glow colour, a = strength (0 outside
 uniform vec4 uHeat;
 uniform vec4 uLavaStill;
 uniform vec4 uLavaFlow;
+uniform float uFancy;
 varying vec2 vLight;
 varying vec3 vTint;
 varying vec2 vUv2;
@@ -474,7 +477,7 @@ void main() {
   float alpha = tex.a * uOpacity;
   if (uUnder > 0.5 && vLava < 0.5) {
     // eye under water: sunlight caustics dance over everything in view
-    float c = caustic(vWorld.xz * 0.2 + vWorld.y * 0.05, uTime * 0.6);
+    float c = uFancy > 0.5 ? caustic(vWorld.xz * 0.2 + vWorld.y * 0.05, uTime * 0.6) : 0.35;
     col += tex.rgb * vTint * uSkyLight * max(vLight.x, 0.3) * c * 2.2;
   }
   col *= uTintMul; // e.g. the blue cast when the eye is under water
@@ -623,6 +626,7 @@ export class Renderer {
     // atlas rects (u0, v0, u1, v1) of the lava still / flowing tiles
     uLavaStill: { value: new THREE.Vector4() } as U<THREE.Vector4>,
     uLavaFlow: { value: new THREE.Vector4() } as U<THREE.Vector4>,
+    uFancy: { value: 1 } as U<number>, // Graphics: Fancy (1) / Fast (0)
   };
   /** Nether air, steered per biome by NetherAtmosphere (main copies it in each frame). */
   readonly netherAir = {
@@ -883,6 +887,68 @@ export class Renderer {
     }
 
     window.addEventListener('resize', this.onResize);
+  }
+
+  // --- render resolution ------------------------------------------------------
+  // Render Scale: a fixed fraction of the (2x-capped) device pixel ratio, or
+  // auto: the scale steps down while frames run slow and back up when there
+  // is headroom. A step that didn't make frames faster (CPU-bound, not fill-
+  // bound) is undone and auto stops lowering for a while, so a slow CPU never
+  // just blurs the picture for nothing.
+  private scaleMode = 0; // 0 = auto, else a fixed fraction (1, 0.75, 0.5)
+  private scale = 1;
+  private frameEma = 16;
+  private adaptT = 0;
+  private lastStep: { from: number; ms: number } | null = null;
+  private noDropT = 0;
+
+  /** 0 = auto, otherwise a fixed fraction of the device pixel ratio. */
+  setRenderScale(mode: number): void {
+    if (mode === this.scaleMode) return;
+    this.scaleMode = mode;
+    this.applyScale(mode > 0 ? mode : 1);
+    this.lastStep = null;
+  }
+
+  /** Graphics: Fancy (water caustics + cloud reflections, underwater light,
+   *  heat haze) or Fast. */
+  setFancy(on: boolean): void { this.env.uFancy.value = on ? 1 : 0; }
+
+  /** The current render scale (0.5..1) for the debug overlay. */
+  renderScale(): number { return this.scale; }
+
+  private applyScale(s: number): void {
+    this.scale = s;
+    this.three.setPixelRatio(Math.min(window.devicePixelRatio, 2) * s);
+    this.three.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  /** Feed the frame time (s) while in game; steers the auto scale. */
+  adaptResolution(dt: number): void {
+    if (this.scaleMode !== 0 || dt <= 0 || dt >= 0.1) return;
+    // headless test browsers render in software: keep their output stable
+    if (navigator.webdriver) return;
+    this.frameEma += (dt * 1000 - this.frameEma) * 0.05;
+    this.noDropT = Math.max(0, this.noDropT - dt);
+    if ((this.adaptT += dt) < 1.5) return;
+    this.adaptT = 0;
+    const ms = this.frameEma;
+    if (this.lastStep) {
+      // judge the last step down: no real gain means we're not fill-bound
+      const st = this.lastStep;
+      this.lastStep = null;
+      if (st.from > this.scale && ms > st.ms * 0.92) {
+        this.applyScale(st.from);
+        this.noDropT = 30;
+        return;
+      }
+    }
+    if (ms > 21 && this.scale > 0.5 && this.noDropT <= 0) {
+      this.lastStep = { from: this.scale, ms };
+      this.applyScale(Math.max(0.5, Math.round((this.scale - 0.1) * 100) / 100));
+    } else if (ms < 13 && this.scale < 1) {
+      this.applyScale(Math.min(1, Math.round((this.scale + 0.05) * 100) / 100));
+    }
   }
 
   private onResize = (): void => {

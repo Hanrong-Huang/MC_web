@@ -1,9 +1,9 @@
-// Sampled acoustic instruments for the music: Tone.js Samplers over real
-// recordings in public/audio/ (sources + licenses in CREDITS.md). This module
-// (and Tone.js with it) is imported lazily once the audio context runs, so it
-// never touches startup. Audio.ts keeps its synth voice for every instrument
-// that isn't ready yet (still loading, offline, 404) — decided per piece, so a
-// piece never changes timbre halfway through.
+// Sampled acoustic instruments for the music: real recordings in
+// public/audio/ (sources + licenses in CREDITS.md), played with plain Web
+// Audio nodes. This module is imported lazily once the audio context runs, so
+// it never touches startup. Audio.ts keeps its synth voice for every
+// instrument that isn't ready yet (still loading, offline, 404) — decided per
+// piece, so a piece never changes timbre halfway through.
 //
 // What is sampled and why: the acoustic instruments whose synth versions
 // sounded thin — piano, harp, flute, cello and the string ensemble. The pads,
@@ -11,14 +11,19 @@
 // (a near-sine anyway) and the tense combat layer stay procedural, as do all
 // SFX and ambience (they're parameter-driven and react to the world).
 //
-// Routing: one Sampler per (instrument, destination, pan bucket) sharing the
-// decoded buffers, so a piece's own output gain (crossfades, the title-screen
-// warmth filter) and per-note panning still apply. Everything lands on the
-// same native music nodes as the synths, so volume, ducking, reverb, delay,
-// the underwater filter and the limiter all still work.
+// Routing: one voice group (lowpass → panner) per (instrument, destination,
+// pan bucket); each note is a buffer source + an envelope gain feeding it, so
+// a piece's own output gain (crossfades, the title-screen warmth filter) and
+// per-note panning still apply. Everything lands on the same native music
+// nodes as the synths, so volume, ducking, reverb, delay, the underwater
+// filter and the limiter all still work.
+//
+// (This used to sit on Tone.js Samplers. Their per-note option merging and
+// the Sampler objects built and disposed with every piece cost tens of ms on
+// the main thread — visible hitches when a new piece started — so the few
+// things Tone did here are done directly: nearest-sample repitch, a linear
+// velocity gain, an instant or linear attack and an exponential release.)
 
-import type { Sampler } from 'tone/build/esm/instrument/Sampler.js';
-import type { ToneAudioBuffer } from 'tone/build/esm/core/context/ToneAudioBuffer.js';
 import type { Inst } from './AudioMusic';
 
 export type SampledInst = 'piano' | 'harp' | 'cello' | 'strings' | 'flute';
@@ -45,16 +50,13 @@ const NAMES = ['C', 'Cs', 'D', 'Ds', 'E', 'F', 'Fs', 'G', 'Gs', 'A', 'As', 'B'];
 const noteName = (m: number): string => NAMES[m % 12] + (Math.floor(m / 12) - 1);
 const clamp = (v: number, a: number, b: number): number => Math.max(a, Math.min(b, v));
 
-interface Group { s: Sampler; nodes: AudioNode[] }
-type ToneMods = {
-  Sampler: typeof Sampler;
-  ToneAudioBuffer: typeof ToneAudioBuffer;
-};
+interface Group { input: AudioNode; nodes: AudioNode[] }
+/** loaded samples of one instrument, sorted by pitch */
+interface Bank { midi: number[]; buf: AudioBuffer[] }
 
 export class SampleBank {
-  private tone: ToneMods | null = null;
   private state: Record<SampledInst, State> = { piano: 'idle', harp: 'idle', flute: 'idle', cello: 'idle', strings: 'idle' };
-  private bufs: Partial<Record<SampledInst, Record<number, ToneAudioBuffer>>> = {};
+  private banks: Partial<Record<SampledInst, Bank>> = {};
   private groups = new Map<AudioNode, Map<string, Group>>();
   private ends: number[] = [];   // end times of the voices in flight (polyphony cap)
   played = 0;                    // sampled notes triggered (harness stat)
@@ -64,21 +66,6 @@ export class SampleBank {
   /** Fetch + decode every instrument (piano first). Resolves when all settle;
    *  failures leave that instrument on its synth voice. */
   async load(only: readonly SampledInst[] = SAMPLED_ORDER): Promise<void> {
-    try {
-      const w = globalThis as { TONE_SILENCE_LOGGING?: boolean };
-      w.TONE_SILENCE_LOGGING = true;
-      const [g, s, b] = await Promise.all([
-        import('tone/build/esm/core/Global.js'),
-        import('tone/build/esm/instrument/Sampler.js'),
-        import('tone/build/esm/core/context/ToneAudioBuffer.js'),
-      ]);
-      // Tone runs on the game's own context (never a second AudioContext)
-      g.setContext(this.ctx as AudioContext);
-      this.tone = { Sampler: s.Sampler, ToneAudioBuffer: b.ToneAudioBuffer };
-    } catch {
-      for (const k of only) this.state[k] = 'failed';
-      return;
-    }
     for (const k of only) this.state[k] = 'loading';
     const first = only.includes('piano') ? this.loadInst('piano') : Promise.resolve();
     await first;
@@ -86,20 +73,20 @@ export class SampleBank {
   }
 
   private async loadInst(k: SampledInst): Promise<void> {
-    const T = this.tone!;
-    const got: Record<number, ToneAudioBuffer> = {};
+    const got: [number, AudioBuffer][] = [];
     const res = await Promise.allSettled(SPECS[k].notes.map(async (m) => {
       const r = await fetch(`${this.base}${k}/${noteName(m)}.mp3`);
       if (!r.ok) throw new Error(`${r.status}`);
       const ab = await this.ctx.decodeAudioData(await r.arrayBuffer());
-      const tb = new T.ToneAudioBuffer();
-      tb.set(this.trim(ab));
-      got[m] = tb;
+      got.push([m, this.trim(ab)]);
     }));
     const ok = res.filter((x) => x.status === 'fulfilled').length;
     // a few missing files just widen the repitch; most missing → synth fallback
-    if (ok >= Math.ceil(SPECS[k].notes.length * 0.75)) { this.bufs[k] = got; this.state[k] = 'ready'; }
-    else this.state[k] = 'failed';
+    if (ok >= Math.ceil(SPECS[k].notes.length * 0.75)) {
+      got.sort((a, b) => a[0] - b[0]);
+      this.banks[k] = { midi: got.map((g) => g[0]), buf: got.map((g) => g[1]) };
+      this.state[k] = 'ready';
+    } else this.state[k] = 'failed';
   }
 
   /** Cut decoder padding / leading silence so sampled notes speak on time. */
@@ -126,7 +113,13 @@ export class SampleBank {
     for (const k of SAMPLED_ORDER) if (this.state[k] === 'ready') s.add(k);
     return s;
   }
-  voices(now: number): number { this.ends = this.ends.filter((t) => t > now); return this.ends.length; }
+  voices(now: number): number {
+    // drop finished voices in place (no new array per call)
+    let n = 0;
+    for (let i = 0; i < this.ends.length; i++) if (this.ends[i] > now) this.ends[n++] = this.ends[i];
+    this.ends.length = n;
+    return n;
+  }
 
   private group(k: SampledInst, dest: AudioNode, pan: number): Group {
     let byDest = this.groups.get(dest);
@@ -134,62 +127,76 @@ export class SampleBank {
     const key = `${k}:${pan}`;
     let g = byDest.get(key);
     if (g) return g;
-    const T = this.tone!;
-    const urls: Record<number, ToneAudioBuffer> = {};
-    for (const [m, b] of Object.entries(this.bufs[k]!)) urls[+m] = b;
-    const s = new T.Sampler({ urls, curve: 'exponential' });
     const lp = this.ctx.createBiquadFilter();
     lp.type = 'lowpass';
     lp.frequency.value = SPECS[k].lp;
     lp.Q.value = 0.5;
     const pn = this.ctx.createStereoPanner();
     pn.pan.value = pan;
-    s.connect(lp);
     lp.connect(pn).connect(dest);
-    g = { s, nodes: [lp, pn] };
+    g = { input: lp, nodes: [lp, pn] };
     byDest.set(key, g);
     return g;
+  }
+
+  /** The loaded sample nearest a pitch (ties go up) and its playback rate. */
+  private pick(k: SampledInst, midi: number): { buf: AudioBuffer; rate: number } {
+    const b = this.banks[k]!;
+    let best = 0;
+    for (let i = 1; i < b.midi.length; i++) if (Math.abs(b.midi[i] - midi) <= Math.abs(b.midi[best] - midi)) best = i;
+    return { buf: b.buf[best], rate: Math.pow(2, (midi - b.midi[best]) / 12) };
+  }
+
+  /** One voice: the sample from \`at\`, rising to \`vel\` over \`atk\` (0 =
+   *  struck), held for \`dur\`, then an exponential release. Returns its end. */
+  private voice(buf: AudioBuffer, rate: number, input: AudioNode, at: number, vel: number, atk: number, dur: number, rel: number): number {
+    const ctx = this.ctx;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.playbackRate.value = rate;
+    const g = ctx.createGain();
+    const p = g.gain;
+    if (atk > 0) { p.setValueAtTime(0, at); p.linearRampToValueAtTime(vel, at + atk); } else p.setValueAtTime(vel, at);
+    const off = at + Math.max(dur, atk);
+    p.setValueAtTime(vel, off);
+    p.setTargetAtTime(0, off, Math.max(0.01, rel / 3)); // ~exponential decay, -60 dB by ~2 rel
+    const end = Math.min(off + rel * 2.5, at + buf.duration / rate);
+    src.connect(g).connect(input);
+    src.start(at);
+    src.stop(end + 0.02);
+    src.onended = () => g.disconnect();
+    return end;
   }
 
   /** Play one scored note. Returns false when the caller should use its synth
    *  voice instead; true when handled (or dropped at the polyphony cap). */
   play(k: SampledInst, at: number, midi: number, v: number, hold: number, pan: number, dest: AudioNode): boolean {
-    if (this.state[k] !== 'ready' || !this.tone) return false;
+    if (this.state[k] !== 'ready') return false;
     const now = this.ctx.currentTime;
     if (this.voices(now) >= MAX_VOICES) return true;
     const spec = SPECS[k];
     const g = this.group(k, dest, Math.round(clamp(pan, -0.6, 0.6) * 5) / 5);
-    const f = 440 * Math.pow(2, (midi - 69) / 12);
     const vel = spec.gain * v * (0.96 + Math.random() * 0.08); // a touch of human unevenness
-    const s = g.s;
+    const { buf, rate } = this.pick(k, midi);
     if (!spec.bowed) {
       // struck/plucked: ring for the hold like a pedalled note, then damp smoothly
       const ring = k === 'harp' ? hold + 0.9 : hold + 0.25;
-      s.attack = 0;
-      s.release = k === 'harp' ? 0.7 : clamp(0.25 + hold * 0.06, 0.3, 0.8);
-      s.triggerAttackRelease(f, ring, at, vel);
-      this.ends.push(at + ring + s.release * 3);
+      const rel = k === 'harp' ? 0.7 : clamp(0.25 + hold * 0.06, 0.3, 0.8);
+      this.ends.push(this.voice(buf, rate, g.input, at, vel, 0, ring, rel));
     } else {
       // bowed / blown: swell in, hold, fade — re-bow if longer than the sample
       const short = hold < 0.5;
       const atk = k === 'strings' ? clamp(hold * 0.3, 0.12, 1.1) : k === 'flute' ? 0.05 : short ? 0.02 : 0.1;
       const rel = k === 'strings' ? clamp(hold * 0.3, 0.15, 1.2) : k === 'flute' ? 0.2 : short ? 0.12 : 0.35;
-      // the sample the Sampler will pick (nearest loaded; ties go up, like Tone)
-      const bufs = this.bufs[k]!;
-      const nearest = Object.keys(bufs).map(Number).reduce((a, b) => (Math.abs(b - midi) <= Math.abs(a - midi) ? b : a));
-      const rate = Math.pow(2, (midi - nearest) / 12);
-      const usable = Math.max(1.5, (bufs[nearest].duration - 1.6) / rate);
+      const usable = Math.max(1.5, (buf.duration - 1.6) / rate);
       const xf = 0.9;
       let t = at;
       let left = Math.max(0.12, hold);
       let first = true;
       while (left > 0) {
         const seg = left + rel <= usable ? left : usable - xf;
-        s.attack = first ? atk : xf;
-        s.release = left === seg ? rel : xf;
-        s.triggerAttackRelease(f, seg, t, vel);
-        this.ends.push(t + seg + s.release * 3);
         // the next bow swells in while this one fades out
+        this.ends.push(this.voice(buf, rate, g.input, t, vel, first ? atk : xf, seg, left === seg ? rel : xf));
         first = false;
         t += seg;
         left -= seg;
@@ -204,10 +211,7 @@ export class SampleBank {
   drop(dest: AudioNode): void {
     const byDest = this.groups.get(dest);
     if (!byDest) return;
-    for (const g of byDest.values()) {
-      g.s.dispose();
-      for (const n of g.nodes) n.disconnect();
-    }
+    for (const g of byDest.values()) for (const n of g.nodes) n.disconnect();
     this.groups.delete(dest);
   }
 }

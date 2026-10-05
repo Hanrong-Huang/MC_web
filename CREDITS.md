@@ -8,7 +8,6 @@ instruments) is generated procedurally in code.
 | Library | License | Use |
 |---|---|---|
 | [three.js](https://threejs.org/) | MIT | WebGL rendering |
-| [Tone.js](https://tonejs.github.io/) | MIT | `Sampler` playback of the sampled music instruments (loaded lazily) |
 
 ## Audio samples (`public/audio/`)
 
