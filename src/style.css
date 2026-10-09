@@ -1417,6 +1417,18 @@ html.touch-ui .chat-input input { padding: 10px 8px; font-size: 16px; } /* 16px:
   .mc-slot:hover::after, .recipe-card:hover::after { display: none; } /* no sticky hover on touch */
   .mc-slot.pressing::after { display: block; }
 }
+/* Hybrid devices can enter the touch layout even when their primary pointer is
+   still reported as fine. Mirror the coarse-pointer sizing in that mode. */
+html.touch-ui { --slot: 44px; --slot-gap: 2px; }
+html.touch-ui .ctr-close, html.touch-ui .ctr-book {
+  width: 42px; height: 42px; min-width: 42px; min-height: 42px; font-size: 18px;
+}
+html.touch-ui .recipe-filter { min-height: 34px; padding: 6px 9px; font-size: 11px; }
+html.touch-ui .creative-tab { width: 48px; height: 44px; }
+html.touch-ui .mc-btn { min-height: 44px; }
+html.touch-ui #fps { left: 50%; transform: translateX(-50%); top: 4px; }
+html.touch-ui .mc-slot:hover::after, html.touch-ui .recipe-card:hover::after { display: none; }
+html.touch-ui .mc-slot.pressing::after { display: block; }
 html.touch-ui #pet-strip {
   left: auto;
   right: calc(10px + env(safe-area-inset-right, 0px));

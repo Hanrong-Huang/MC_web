@@ -60,7 +60,7 @@ await page.mouse.move(640, 430);
 await page.waitForTimeout(300);
 await page.screenshot({ path: 'shot-catch-pet.png' });
 
-// 3) recall the pet back into a fresh filled catcher (no consumption of empty).
+// 3) simulate recalling the pet; gameplay converts one empty catcher to filled.
 const recall = await page.evaluate(() => {
   const g = window.__game;
   const pet = g.entities.entities.find((e) => g.entities.isPet(e));

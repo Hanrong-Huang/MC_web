@@ -9,6 +9,9 @@ export interface FurnaceSave {
   type?: 'furnace';
   input: MaybeSlot; fuel: MaybeSlot; output: MaybeSlot;
   burn: number; burnTotal: number; cook: number;
+  /** Rewards wait in the furnace until a real player removes smelted output. */
+  pendingXp?: number;
+  pendingIron?: boolean;
 }
 
 export interface ChestSave {
@@ -17,6 +20,15 @@ export interface ChestSave {
 }
 
 export type BlockEntitySave = FurnaceSave | ChestSave;
+
+/** A single-player item entity. Optional motion/lifetime fields keep imported
+ *  or older hand-written saves compatible while current saves retain them. */
+export interface GroundDropSave extends SlotData {
+  x: number; y: number; z: number;
+  vx?: number; vy?: number; vz?: number;
+  age?: number;
+  dim?: 'overworld' | 'nether';
+}
 
 export interface PlayerSave {
   x: number; y: number; z: number;
@@ -42,6 +54,9 @@ export interface SaveState {
   gameMode: 'survival' | 'creative';
   player: PlayerSave;
   inventory: { slots: MaybeSlot[]; selected: number; armor?: MaybeSlot[] };
+  /** Items temporarily held by an open UI or a non-persistent catcher entity
+   *  when the snapshot was taken. They are returned to inventory on load. */
+  pendingItems?: SlotData[];
   dimension?: 'overworld' | 'nether';
   /** chunk key "cx,cz" -> RLE bytes */
   world: Record<string, Uint8Array>;
@@ -75,6 +90,8 @@ export interface SaveState {
   spawn?: { x: number; y: number; z: number };
   /** captured pets following the player (wild mobs are not persisted) */
   pets?: { kind: string; x: number; y: number; z: number; hp: number; sitting: boolean }[];
+  /** single-player ground item entities; multiplayer drops live on the server */
+  drops?: GroundDropSave[];
   /** placed minecarts (each remembers its dimension) */
   carts?: { x: number; y: number; z: number; dim: string }[];
   /** unlocked advancement ids */

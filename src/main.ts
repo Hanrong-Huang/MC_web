@@ -18,7 +18,7 @@ import { HUD, ContainerView, recordWorldMeta, readWorldMeta } from './ui/HUD';
 import { StatusHUD } from './ui/StatusHUD';
 import type { LoadColumn } from './ui/LoadingScreen';
 import { SaveDB, SaveState, ChestSave, FurnaceSave, exportWorld, importWorld } from './engine/Persistence';
-import type { BlockEntitySave } from './engine/Persistence';
+import type { BlockEntitySave, SlotData } from './engine/Persistence';
 import { FurnaceState, ChestState } from './engine/Inventory';
 import type { BlockEntity } from './engine/Inventory';
 import type { Slot } from './engine/Inventory';
@@ -88,8 +88,18 @@ class Game {
   private atlas: Atlas;
 
   private state: GameUIState = 'loading';
+  /** Opening an in-game overlay intentionally releases pointer lock; its
+   *  resulting event must not be interpreted as an Esc/pause request. */
+  private suppressPauseOnUnlock = false;
   private container: ContainerView | null = null;
   private containerPos: string | null = null;
+  /** Multiplayer dimension whose server lease protects containerPos. */
+  private containerDim: Dim | null = null;
+  /** Only one asynchronous multiplayer container-open request at a time. */
+  private openingContainer: string | null = null;
+  /** Coalesces inventory persistence into a microtask; an immediate container
+   *  commit increments this value and cancels the queued duplicate. */
+  private inventorySaveGeneration = 0;
   private tradeVillager: Entity | null = null;
   private dayTime = 0.1; // mid-morning, fully lit
   private tickAcc = 0;
@@ -211,6 +221,8 @@ class Game {
     this.entities = new EntityManager(this.renderer.scene, this.world, this.atlas, this.audio);
     // multiplayer: mobs, animals, drops, arrows, TNT and carts are shared by ownership
     if (net) this.entities.net = { myId: net.id, myName: net.name, send: (m) => net.send(m) };
+    this.entities.canDestroyBlock = (x, y, z) =>
+      !this.sync?.isContainerProtected(this.world.dimension, `${x},${y},${z}`);
     this.entities.setPlayer(this.player);
     waterFX.attach(this.renderer.scene, this.world, this.audio);
     this.entities.onKill = (kind) => {
@@ -288,8 +300,10 @@ class Game {
       cartAt: (x, y, z) => this.entities.cartAt(x, y, z),
     });
     this.fire = new FireSystem(this.world, {
+      canAdvance: (x, z) => this.isSimulationAuthority(x, z),
       rainingAt: (x, y, z) => this.isRainingOn(x, y, z),
       igniteTnt: (x, y, z) => this.entities.spawnTnt(x, y, z),
+      burnBlock: (x, y, z, id) => this.burnBlockFromFire(x, y, z, id),
     });
     this.adv.onChange = () => {
       let t: { id: string; label: string; icon: string } | null;
@@ -315,6 +329,15 @@ class Game {
     this.world.onBlockChanged = (x, y, z, _oldId, newId) => {
       this.sync?.touch(x, y, z); // multiplayer: inside a capture this cell goes out
       this.nether.onBlockChanged(x, y, z, _oldId, newId); // broken frames collapse their portal
+      if (_oldId === B.FIRE && newId !== B.FIRE) this.fire.forget(x, y, z);
+      // A fire/explosion/remote edit can destroy a container while its panel is
+      // open. Close it before the detached block entity can still be looted.
+      if (this.state === 'container' && this.containerPos === `${x},${y},${z}`) {
+        const stillPresent = this.container?.kind === 'furnace'
+          ? newId === B.FURNACE || newId === B.FURNACE_LIT
+          : newId === B.CHEST || newId === B.CHEST_LOOT || newId === B.BARREL;
+        if (!stillPresent) this.dismissContainer(true);
+      }
       // a removed block exposes whatever sat on it; a placed gravity block may drop
       if (newId === B.AIR) {
         this.supportQueue.add(`${x},${y + 1},${z}`);
@@ -363,6 +386,8 @@ class Game {
         this.adv.unlock('creeper');
       },
       useDoor: (_x, _y, _z) => this.adv.unlock('door'),
+      containerLocked: (x, y, z) =>
+        this.sync?.isContainerProtected(this.world.dimension, `${x},${y},${z}`) ?? false,
       onBreak: (id) => {
         if (id === B.LOG || id === B.BIRCH_LOG || id === B.SPRUCE_LOG) this.adv.unlock('punch_wood');
         if (id === B.DIAMOND_ORE) this.adv.unlock('diamonds');
@@ -392,6 +417,7 @@ class Game {
       useAnchor: (x, y, z, held) => this.nether.useAnchor(x, y, z, held, this.player.mode === 'creative'),
     });
 
+    let restoredPendingItems = false;
     if (save) {
       this.player.mode = save.gameMode;
       this.player.load(save.player);
@@ -481,6 +507,13 @@ class Game {
       // captured pets come back with the player (wild mobs respawn naturally)
       if (save.pets?.length) this.entities.loadPets(save.pets);
       if (save.carts?.length) this.entities.loadCarts(save.carts);
+      // Shared multiplayer drops are restored by the server, never by a
+      // player's save. Local worlds own and restore their ground items here.
+      if (!net && save.drops?.length) this.entities.loadDrops(save.drops);
+      if (save.pendingItems?.length) {
+        this.restorePendingItems(save.pendingItems);
+        restoredPendingItems = true;
+      }
     } else {
       this.player.mode = fresh!.mode;
       const spawn = this.world.generator.findSpawn();
@@ -523,6 +556,19 @@ class Game {
       }
     };
     this.hud.onTrade = () => { this.adv.unlock('trade'); this.adv.unlock('village'); };
+    this.hud.onFurnaceReward = (xp, iron) => {
+      if (xp > 0 && this.player.mode === 'survival') {
+        this.player.addXp(xp);
+        this.audio.play('pop', 0.6);
+      }
+      if (iron) this.adv.unlock('iron_age');
+    };
+    this.hud.onContainerChange = () => {
+      this.inventorySaveGeneration++;
+      const pos = this.containerPos;
+      const dim = this.containerDim;
+      if (pos && dim) this.sync?.commitContainer(dim, pos, this.buildPlayerSave());
+    };
 
     this.wireInput();
     this.hud.onDropLeftover = (id, count, dur, mob, ench) => {
@@ -534,7 +580,16 @@ class Game {
       e.age = -1.4;
     };
 
-    if (net) this.startNet(net);
+    if (net) {
+      this.startNet(net);
+      // pendingItems are a load-only handoff. Commit the restored inventory at
+      // once so reconnecting before the next autosave cannot claim them twice.
+      if (save?.pendingItems?.length) net.send({ t: 'save', save: this.buildPlayerSave() });
+    } else if (restoredPendingItems) {
+      // Clear the load-only handoff immediately. Overflow is safe too: those
+      // stacks materialized as ground drops, which this snapshot now persists.
+      void this.saveGame();
+    }
 
     void this.pregenerate();
   }
@@ -571,6 +626,8 @@ class Game {
       case 'leave': this.remotes?.remove(m.id); break;
       case 'pose': this.remotes?.pose(m.id, m.p); break;
       case 'cells': this.sync?.applyRemote(m.cells); break;
+      case 'container': this.sync?.handleContainer(m); break;
+      case 'containerLock': this.sync?.handleContainerLock(m); break;
       case 'chat':
         this.chat.add(m.from, m.text);
         if (m.from !== null) this.audio.ui('hover');
@@ -615,7 +672,8 @@ class Game {
     const pose: Pose = {
       x: Math.round(p.pos.x * 100) / 100, y: Math.round(p.pos.y * 100) / 100, z: Math.round(p.pos.z * 100) / 100,
       yaw: Math.round(p.yaw * 1000) / 1000, pitch: Math.round(p.pitch * 1000) / 1000,
-      dim: this.world.dimension, sneak: p.sneaking, held: p.heldId(), swing: this.swingCount,
+      dim: this.world.dimension, view: this.world.viewDist,
+      sneak: p.sneaking, held: p.heldId(), swing: this.swingCount,
       dead: p.dead, riding: p.isRiding(), sleeping: this.state === 'sleeping', mode: p.mode,
     };
     const key = JSON.stringify(pose);
@@ -626,11 +684,13 @@ class Game {
   }
 
   /** The per-player part of the save, kept by the server under your name. */
-  private buildPlayerSave(): PlayerSave {
+  private buildPlayerSave(includeActiveCatchers = false): PlayerSave {
+    const pendingItems = this.pendingSaveItems(includeActiveCatchers);
     return {
       gameMode: this.player.mode,
       player: this.player.serialize(),
       inventory: this.player.inventory.serialize(),
+      ...(pendingItems.length ? { pendingItems } : {}),
       dimension: this.world.dimension,
       ...(this.spawnPoint ? { spawn: { ...this.spawnPoint } } : {}),
       advancements: this.adv.serialize(),
@@ -709,6 +769,7 @@ class Game {
   private teleportTo(x: number, y: number | undefined, z: number, dim: Dim): void {
     const p = this.player;
     if (p.dead) return;
+    if (this.state === 'container') this.dismissContainer(true);
     if (this.state === 'sleeping') this.leaveBed();
     if (p.isRiding()) p.dismount(false);
     this.entities.spawnPoof(p.pos.x, p.pos.y + 1, p.pos.z);
@@ -1049,6 +1110,9 @@ class Game {
   // --- input wiring --------------------------------------------------------------
 
   private wireInput(): void {
+    this.hud.onCloseAdvancements = () => {
+      if (!this.disposed && this.state === 'playing') this.input.requestLock();
+    };
     this.renderer.canvas.addEventListener('mousedown', () => {
       this.audio.ensure();
       if (this.state === 'playing' && !this.input.pointerLocked) this.input.requestLock();
@@ -1057,11 +1121,8 @@ class Game {
     this.input.onPointerLockChange = (locked) => {
       if (!locked && this.input.touchActive) return; // switched to the touch layout
       if (!locked) {
-        if (this.hud.isAdvancementsOpen()) {
-          this.hud.hideAdvancements();
-          this.input.requestLock();
-          return;
-        }
+        if (this.suppressPauseOnUnlock) { this.suppressPauseOnUnlock = false; return; }
+        if (this.hud.isAdvancementsOpen()) return;
         if (this.hud.isControlsOpen()) return; // the controls page freed the mouse
         if (this.state === 'playing') this.openPause();
       }
@@ -1344,6 +1405,7 @@ class Game {
       case 'advancements':
         if (this.hud.isAdvancementsOpen()) this.hud.hideAdvancements();
         else if (playing) {
+          this.suppressPauseOnUnlock = this.input.pointerLocked;
           this.input.exitLock();
           this.hud.toggleAdvancements(this.adv.list());
         }
@@ -1385,15 +1447,52 @@ class Game {
       trades: [],
     };
     this.containerPos = null;
+    this.containerDim = null;
     this.state = 'container';
     this.input.clearClicks();
     this.input.exitLock();
     this.hud.openContainer(this.container, this.player.inventory, this.player.mode);
   }
 
-  private openBlockContainer(kind: 'table' | 'furnace' | 'chest', x: number, y: number, z: number): void {
+  private openBlockContainer(
+    kind: 'table' | 'furnace' | 'chest', x: number, y: number, z: number, leasedDim: Dim | null = null,
+  ): void {
     if (kind === 'furnace' || kind === 'chest') {
       const key = `${x},${y},${z}`;
+      if (this.sync && leasedDim === null) {
+        if (this.openingContainer) return;
+        const dim = this.world.dimension;
+        const request = `${dim}|${key}`;
+        this.openingContainer = request;
+        void this.sync.acquireContainer(dim, key).then((lease) => {
+          const stillRequested = this.openingContainer === request;
+          if (stillRequested) this.openingContainer = null;
+          if (!lease.ok) {
+            if (!this.disposed && stillRequested) {
+              this.hud.toast(lease.owner ? `${lease.owner} is using that container` : 'Could not open container');
+            }
+            return;
+          }
+          const id = this.world.getBlock(x, y, z);
+          const stillThere = kind === 'furnace'
+            ? id === B.FURNACE || id === B.FURNACE_LIT
+            : id === B.CHEST || id === B.CHEST_LOOT || id === B.BARREL;
+          const near = Math.hypot(
+            this.player.pos.x - (x + 0.5), this.player.pos.y + this.player.eyeHeight() - (y + 0.5),
+            this.player.pos.z - (z + 0.5),
+          ) <= 6;
+          if (this.disposed || !stillRequested || this.state !== 'playing' || this.world.dimension !== dim || !stillThere || !near) {
+            this.sync?.releaseContainer(dim, key);
+            if (!this.disposed && stillRequested && !stillThere) this.hud.toast('That container is no longer there');
+            else if (!this.disposed && stillRequested && !near) this.hud.toast('Too far away from container');
+            return;
+          }
+          // The original input capture ended while awaiting the server. Start
+          // a fresh one so a first-open loot roll and the baseline BE are sent.
+          this.capture(() => this.openBlockContainer(kind, x, y, z, dim));
+        });
+        return;
+      }
       let st = this.world.blockEntities.get(key);
       if (!st || (kind === 'furnace' ? st.type !== 'furnace' : st.type !== 'chest')) {
         st = kind === 'furnace' ? new FurnaceState() : new ChestState();
@@ -1416,9 +1515,14 @@ class Game {
         trades: [],
       };
       this.containerPos = key;
+      this.containerDim = leasedDim;
+      // Always publish a baseline after a grant. The server may not have seen
+      // an untouched/generated container before it issued the lease.
+      if (leasedDim) this.sync?.commitContainer(leasedDim, key, this.buildPlayerSave());
     } else {
       this.container = { kind: 'table', craftW: 3, craftGrid: new Array(9).fill(null), furnace: null, chest: null, trades: [] };
       this.containerPos = null;
+      this.containerDim = null;
     }
     this.state = 'container';
     this.input.clearClicks();
@@ -1438,6 +1542,7 @@ class Game {
       trades: villager.trades,
     };
     this.containerPos = null;
+    this.containerDim = null;
     this.tradeVillager = villager;
     this.state = 'container';
     this.input.clearClicks();
@@ -1639,12 +1744,76 @@ class Game {
     return this.world.skyLight(Math.floor(x), Math.floor(y) + 1, Math.floor(z)) >= 0.99;
   }
 
+  /** Elect one client to advance shared world simulation. With a cell position,
+   *  only players expected to have that chunk loaded participate, so a distant
+   *  lower-id client cannot freeze a furnace it cannot see. */
+  private isSimulationAuthority(x?: number, z?: number): boolean {
+    if (!this.net) return true;
+    let owner = this.net.id;
+    const cx = x === undefined ? 0 : Math.floor(x / CX);
+    const cz = z === undefined ? 0 : Math.floor(z / CZ);
+    for (const other of this.remotes?.list() ?? []) {
+      const pose = other.pose;
+      if (!pose) {
+        // A just-joined lower id is included briefly until its first pose, which
+        // avoids two simulators during initial synchronization.
+        owner = Math.min(owner, other.id);
+        continue;
+      }
+      if (pose.dim !== this.world.dimension) continue;
+      if (x !== undefined && z !== undefined) {
+        const radius = Math.max(2, Math.min(32, Math.floor(pose.view ?? 8))) + 3;
+        const dx = Math.floor(pose.x / CX) - cx;
+        const dz = Math.floor(pose.z / CZ) - cz;
+        if (dx * dx + dz * dz > radius * radius) continue;
+      }
+      owner = Math.min(owner, other.id);
+    }
+    return owner === this.net.id;
+  }
+
+  /** Random lava ticks are sampled only within 16 blocks of each player. Use
+   *  that actual coverage, rather than chunk view distance, when suppressing a
+   *  duplicate sample from another nearby client. */
+  private isRandomTickAuthority(x: number, z: number): boolean {
+    if (!this.net) return true;
+    let owner = this.net.id;
+    for (const other of this.remotes?.list() ?? []) {
+      const pose = other.pose;
+      if (!pose) { owner = Math.min(owner, other.id); continue; }
+      if (pose.dim !== this.world.dimension || Math.abs(pose.x - (x + 0.5)) > 17 ||
+        Math.abs(pose.z - (z + 0.5)) > 17) continue;
+      owner = Math.min(owner, other.id);
+    }
+    return owner === this.net.id;
+  }
+
+  /** Fire consumes block entities through the same lifecycle as other block
+   *  destruction, preserving all per-stack metadata in the spilled drops. */
+  private burnBlockFromFire(x: number, y: number, z: number, id: number): void {
+    if (this.world.getBlock(x, y, z) !== id) return;
+    const key = `${x},${y},${z}`;
+    if (this.sync?.isContainerProtected(this.world.dimension, key)) return;
+    const be = this.world.blockEntities.get(key);
+    if (be) {
+      // FireSystem invokes this only for a source flame owned by this client.
+      // Do not elect again at the adjacent target: a chunk-boundary difference
+      // could otherwise destroy the block entity without spilling its items.
+      const spill = be.type === 'furnace' ? [be.input, be.fuel, be.output] : be.slots;
+      for (const s of spill) {
+        if (s) this.entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, s.id, s.count, s.dur, s.mob, s.ench);
+      }
+      this.world.blockEntities.delete(key);
+    }
+    this.world.setBlock(x, y, z, B.AIR);
+  }
+
   /** Fire upkeep at 20 Hz: flames spread/burn out, mobs standing in fire
    *  scorch, and rain puts out a burning player. */
   private tickFire(dt: number): void {
     this.fireAcc += dt;
     if (this.fireAcc >= 0.25) {
-      this.fire.tick(this.fireAcc);
+      this.capture(() => this.fire.tick(this.fireAcc));
       this.fireAcc = 0;
     }
     const p = this.player;
@@ -1697,19 +1866,37 @@ class Game {
 
   private closeContainer(): void {
     if (this.state !== 'container') return;
-    // multiplayer: the chest / furnace contents go to everyone
+    this.dismissContainer(true);
+  }
+
+  /** Close the UI and return cursor/crafting items. Death uses resume=false so
+   *  it cannot briefly reacquire pointer lock before the death screen opens. */
+  private dismissContainer(resume: boolean): void {
+    // Return a cursor stack first, then atomically pair the final container
+    // snapshot with the matching player inventory before releasing the lease.
     const pos = this.containerPos;
-    if (pos) this.capture(() => this.sync?.touchKey(pos));
+    const dim = this.containerDim;
     this.hud.closeContainer();
+    if (pos && dim) {
+      this.inventorySaveGeneration++;
+      this.sync?.commitContainer(dim, pos, this.buildPlayerSave());
+      this.sync?.releaseContainer(dim, pos);
+    }
     if (this.container?.kind === 'chest') this.audio.play('chestClose');
     this.container = null;
     this.containerPos = null;
-    this.state = 'playing';
+    this.containerDim = null;
     this.input.clearClicks();
-    this.input.requestLock();
+    if (resume) {
+      this.state = 'playing';
+      this.input.requestLock();
+    }
   }
 
   private onDeath(): void {
+    // Return the cursor and crafting-grid stacks before the inventory spills.
+    // This also closes any chest/furnace overlay left open during an attack.
+    if (this.state === 'container') this.dismissContainer(false);
     const deathPos = { ...this.player.pos };
     this.dropPlayerInventory(deathPos);
     // experience spills out as orbs; the recovery compass remembers the spot
@@ -1769,6 +1956,7 @@ class Game {
 
   /** Portal travel: linking, landing and the transition live in NetherController. */
   private teleportPlayerDimension(): void {
+    if (this.state === 'container') this.dismissContainer(true);
     this.nether.travel();
   }
 
@@ -1859,11 +2047,93 @@ class Game {
       this.lastHeldId = heldId;
       this.lastHeldMob = heldMob;
     }
+    // Entity pickup/drop and remote /give can happen while a leased panel is
+    // open without a container-slot callback. Pair that inventory change with
+    // the cell after the current synchronous action finishes.
+    if (this.net && this.containerPos && this.containerDim) {
+      const generation = ++this.inventorySaveGeneration;
+      queueMicrotask(() => {
+        if (this.disposed || generation !== this.inventorySaveGeneration || !this.net) return;
+        const pos = this.containerPos;
+        const dim = this.containerDim;
+        if (pos && dim) this.sync?.commitContainer(dim, pos, this.buildPlayerSave());
+      });
+    }
   }
 
   // --- save ----------------------------------------------------------------------
 
-  private buildSave(): SaveState {
+  /** Items that live outside the inventory while a UI/projectile is active.
+   *  Snapshot them without mutating the live UI, so autosave is invisible. */
+  private pendingSaveItems(includeActiveCatchers: boolean): SlotData[] {
+    const out: SlotData[] = [];
+    const copy = (s: SlotData): SlotData => ({
+      id: s.id,
+      count: s.count,
+      ...(s.dur !== undefined ? { dur: s.dur } : {}),
+      ...(s.mob !== undefined ? { mob: s.mob } : {}),
+      ...(s.ench ? { ench: { ...s.ench } } : {}),
+    });
+    if (this.state === 'container' && this.container) {
+      for (const s of this.container.craftGrid) if (s) out.push(copy(s));
+      // The creative inventory deliberately discards its synthetic cursor item.
+      if (this.hud.cursor && this.container.kind !== 'creative') out.push(copy(this.hud.cursor));
+    }
+    // Creative throws do not consume their empty source item, so restoring an
+    // empty projectile would duplicate it. A filled one still owns a captured
+    // mob and must survive. Ground drops are single-player only; in multiplayer
+    // they are shared network entities, not player-save contents.
+    if (includeActiveCatchers) {
+      for (const s of this.entities.pendingCatcherItems()) {
+        if (this.player.mode === 'survival' || s.id === I.MOB_CATCHER_FILLED) out.push(copy(s));
+      }
+    }
+    return out;
+  }
+
+  /** Return save-only transient stacks to the inventory. If a chest cursor made
+   *  the inventory genuinely overflow, materialize the remainder at the
+   *  player's feet rather than deleting it. */
+  private restorePendingItems(items: SlotData[]): boolean {
+    const inv = this.player.inventory;
+    let allStored = true;
+    for (const raw of items) {
+      if (!raw || !hasDef(raw.id) || !Number.isFinite(raw.count) || raw.count <= 0) continue;
+      let left = Math.floor(raw.count);
+      const max = def(raw.id).stack;
+      const plain = raw.dur === undefined && raw.mob === undefined && !raw.ench;
+      if (plain) {
+        for (const s of inv.slots) {
+          if (left <= 0) break;
+          if (!s || s.id !== raw.id || s.dur !== undefined || s.mob !== undefined || s.ench || s.count >= max) continue;
+          const take = Math.min(max - s.count, left);
+          s.count += take;
+          left -= take;
+        }
+      }
+      for (let i = 0; i < inv.slots.length && left > 0; i++) {
+        if (inv.slots[i]) continue;
+        const take = Math.min(max, left);
+        inv.slots[i] = {
+          id: raw.id,
+          count: take,
+          ...(raw.dur !== undefined ? { dur: raw.dur } : {}),
+          ...(raw.mob !== undefined ? { mob: raw.mob } : {}),
+          ...(raw.ench ? { ench: { ...raw.ench } } : {}),
+        };
+        left -= take;
+      }
+      if (left > 0) {
+        allStored = false;
+        this.entities.spawnDrop(this.player.pos.x, this.player.pos.y + 1, this.player.pos.z,
+          raw.id, left, raw.dur, raw.mob, raw.ench);
+      }
+    }
+    inv.onChange();
+    return allStored;
+  }
+
+  private buildSave(includeActiveCatchers = false): SaveState {
     this.world.stashModified();
 
     const serializeBEs = (beMap: Map<string, BlockEntity>) => {
@@ -1890,6 +2160,10 @@ class Game {
 
     const ow = this.world.dimData.overworld;
     const ne = this.world.dimData.nether;
+    // Ground catchers are ordinary saved drops now; only a still-flying orb
+    // needs the pending-item recovery path.
+    const pendingItems = this.pendingSaveItems(includeActiveCatchers);
+    const drops = this.entities.saveDrops();
 
     return {
       version: SAVE_VERSION,
@@ -1897,6 +2171,7 @@ class Game {
       gameMode: this.player.mode,
       player: this.player.serialize(),
       inventory: this.player.inventory.serialize(),
+      ...(pendingItems.length ? { pendingItems } : {}),
       dimension: this.world.dimension,
       
       world: mapToRecord(ow.savedChunks),
@@ -1925,6 +2200,7 @@ class Game {
       environment: { dayTime: this.dayTime },
       villageSpawns: this.world.generator.villageSpawns.map((s) => ({ ...s })),
       pets: this.entities.savePets(),
+      ...(drops.length ? { drops } : {}),
       carts: this.entities.saveCarts(),
       advancements: this.adv.serialize(),
       ...(this.fire.count > 0 ? { fires: this.fire.serialize() } : {}),
@@ -1937,19 +2213,21 @@ class Game {
   }
 
   /** Save without quitting (pause-menu Save button + autosave). */
-  async saveGame(): Promise<boolean> {
+  async saveGame(includeActiveCatchers = false): Promise<boolean> {
     // a save already in flight was built from older state (say an autosave
     // just before Save & Quit): let it land, then write the current state
     while (this.saving) await this.saving;
     if (this.net) {
       // multiplayer: the world lives on the server; send our player's part
-      this.net.send({ t: 'save', save: this.buildPlayerSave() });
-      return true;
+      return this.net.send({ t: 'save', save: this.buildPlayerSave(includeActiveCatchers) });
     }
     const run = (async (): Promise<boolean> => {
       if (this.state !== 'loading') this.recordWorldCard();
       try {
-        await this.app.db.save(this.slot, this.buildSave());
+        // Ground drops are part of the world snapshot. A still-flying catcher
+        // additionally needs the pending-item handoff because its animation is
+        // intentionally not resumed after loading.
+        await this.app.db.save(this.slot, this.buildSave(true));
         return true;
       } catch (err) {
         console.error('Save failed', err);
@@ -1961,10 +2239,30 @@ class Game {
   }
 
   private async saveAndQuit(): Promise<void> {
-    if (this.state === 'container') this.hud.closeContainer();
-    const ok = await this.saveGame();
-    if (!ok) this.hud.toast('Save failed — see console');
-    if (this.net) await new Promise((r) => setTimeout(r, 150)); // let the save frame leave
+    if (this.state === 'container') {
+      this.dismissContainer(false);
+      this.state = 'paused';
+    }
+    const ok = await this.saveGame(true);
+    // A multiplayer disconnect can dispose the game while the save promise is
+    // yielding; its close handler already returned to the title screen.
+    if (this.disposed) return;
+    if (!ok) {
+      this.hud.hideLoading();
+      this.hud.toast('Save failed — still in game; see console');
+      // The pause menu disables its quit button while saving. Reopen it so the
+      // player can retry after a failed IndexedDB write.
+      if (this.state === 'paused') {
+        this.hud.hidePause();
+        this.hud.showPause(this.pauseHandlers(), this.player.mode, this.world.viewDist);
+      }
+      return;
+    }
+    if (this.net) {
+      this.entities.discardActiveCatchers();
+      await new Promise((r) => setTimeout(r, 150)); // let the save frame leave
+      if (this.disposed) return;
+    }
     this.dispose();
     void this.app.showMenu();
   }
@@ -2267,26 +2565,42 @@ class Game {
       }
     }
 
-    // furnaces tick wherever their chunk is loaded
-    for (const [key, st] of this.world.blockEntities) {
-      if (st.type !== 'furnace') continue;
-      const [x, y, z] = key.split(',').map(Number);
-      const cur = this.world.getBlock(x, y, z);
-      if (cur !== B.FURNACE && cur !== B.FURNACE_LIT) continue;
-      const outBefore = st.output?.count ?? 0;
-      st.tick(0.05);
-      // advancement: first iron ingot smelted
-      if (st.output && st.output.id === I.IRON_INGOT && st.output.count > outBefore) {
-        this.adv.unlock('iron_age');
+    // One client advances each unleased multiplayer furnace. A player holding
+    // its edit lease takes over while the panel is open; everyone else follows
+    // the authoritative cell updates instead of independently producing fuel,
+    // output, and experience.
+    const tickFurnaces = (): void => {
+      for (const [key, st] of this.world.blockEntities) {
+        if (st.type !== 'furnace') continue;
+        const [x, y, z] = key.split(',').map(Number);
+        const cur = this.world.getBlock(x, y, z);
+        if (cur !== B.FURNACE && cur !== B.FURNACE_LIT) continue;
+        if (this.openingContainer === `${this.world.dimension}|${key}`) continue;
+        const leasedHere = this.containerPos === key && this.containerDim === this.world.dimension;
+        if (this.sync && !leasedHere &&
+          (!this.isSimulationAuthority(x, z) || this.sync.isContainerLockedByOther(this.world.dimension, key))) continue;
+
+        const before = JSON.stringify(st.serialize());
+        const itemsBefore = leasedHere ? JSON.stringify([st.input, st.fuel, st.output]) : '';
+        st.tick(0.05);
+        const itemsChanged = !!itemsBefore && itemsBefore !== JSON.stringify([st.input, st.fuel, st.output]);
+        const want = st.burning ? B.FURNACE_LIT : B.FURNACE;
+        if (cur !== want) this.world.setBlock(x, y, z, want);
+
+        if (this.sync && (before !== JSON.stringify(st.serialize()) || cur !== want)) {
+          // Slot transitions while open must remain atomic with the player's
+          // inventory. Progress-only and closed-furnace changes need just the
+          // cell snapshot; the surrounding capture batches all active furnaces.
+          if (leasedHere && itemsChanged) {
+            this.sync.commitContainer(this.world.dimension, key, this.buildPlayerSave());
+          } else {
+            this.sync.touchKey(key);
+          }
+        }
       }
-      // every finished smelt leaves a little experience by the furnace
-      if (st.output && st.output.count > outBefore && Math.random() < 0.7) {
-        const hot = st.output.id === I.GOLD_INGOT || st.output.id === I.DIAMOND ? 2 : 1;
-        this.xpOrbs.spawn(x + 0.5, y + 1.1, z + 0.5, hot);
-      }
-      const want = st.burning ? B.FURNACE_LIT : B.FURNACE;
-      if (cur !== want) this.world.setBlock(x, y, z, want);
-    }
+    };
+    if (this.sync) this.capture(tickFurnaces);
+    else tickFurnaces();
 
     // campfires: cook what's on them, smoke, and scorch anyone standing in them
     this.campfires.tick(0.05, this.world.dimension, this.world,
@@ -2414,7 +2728,9 @@ class Game {
       const lx = Math.floor(pp.x + Math.random() * 32 - 16);
       const ly = Math.floor(pp.y + Math.random() * 16 - 8);
       const lz = Math.floor(pp.z + Math.random() * 32 - 16);
-      if (this.world.getBlock(lx, ly, lz) === B.LAVA) this.fire.lavaTick(lx, ly, lz);
+      if (this.world.getBlock(lx, ly, lz) === B.LAVA && this.isRandomTickAuthority(lx, lz)) {
+        this.capture(() => this.fire.lavaTick(lx, ly, lz));
+      }
     }
     const pcx = Math.floor(this.player.pos.x / CX);
     const pcz = Math.floor(this.player.pos.z / CZ);
@@ -2895,7 +3211,7 @@ class Game {
       if (id === B.AIR || id === B.WATER || id === B.LAVA) {
         break;
       }
-      if (id === B.BEDROCK || id === B.OBSIDIAN || id === B.PORTAL || id === B.FURNACE || id === B.FURNACE_LIT || id === B.CHEST || id === B.CHEST_LOOT) {
+      if (id === B.BEDROCK || id === B.OBSIDIAN || id === B.PORTAL || id === B.FURNACE || id === B.FURNACE_LIT || id === B.CHEST || id === B.CHEST_LOOT || id === B.BARREL) {
         pushable = false;
         break;
       }
@@ -2953,7 +3269,7 @@ class Game {
       if (baseId === B.STICKY_PISTON) {
         const pullX = x + 2 * dx, pullY = y + 2 * dy, pullZ = z + 2 * dz;
         const pullId = this.world.getBlock(pullX, pullY, pullZ);
-        if (pullId !== B.AIR && pullId !== B.BEDROCK && pullId !== B.OBSIDIAN && pullId !== B.PORTAL && pullId !== B.FURNACE && pullId !== B.FURNACE_LIT && pullId !== B.CHEST && pullId !== B.CHEST_LOOT) {
+        if (pullId !== B.AIR && pullId !== B.BEDROCK && pullId !== B.OBSIDIAN && pullId !== B.PORTAL && pullId !== B.FURNACE && pullId !== B.FURNACE_LIT && pullId !== B.CHEST && pullId !== B.CHEST_LOOT && pullId !== B.BARREL) {
           const p = this.player.pos;
           if (p.x + 0.3 > pullX && p.x - 0.3 < pullX + 1 &&
               p.y + 1.8 > pullY && p.y < pullY + 1 &&
@@ -3079,6 +3395,7 @@ class App {
       player: you.player as SaveState['player'], inventory: you.inventory as SaveState['inventory'],
       dimension: you.dimension, world: {}, blockEntities: {},
       environment: { dayTime: w.dayTime },
+      ...(Array.isArray(you.pendingItems) ? { pendingItems: you.pendingItems as SlotData[] } : {}),
       ...(you.spawn ? { spawn: you.spawn } : {}),
       ...(Array.isArray(you.advancements) ? { advancements: you.advancements as string[] } : {}),
       ...(Array.isArray(you.pets) ? { pets: you.pets as SaveState['pets'] } : {}),

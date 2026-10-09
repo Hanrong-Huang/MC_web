@@ -13,10 +13,14 @@ const NEIGHBOURS: [number, number, number][] = [
 ];
 
 export interface FireHooks {
+  /** In multiplayer, exactly one client advances each loaded fire cell. */
+  canAdvance?: (x: number, z: number) => boolean;
   /** is it raining on this column (open sky)? */
   rainingAt: (x: number, y: number, z: number) => boolean;
   /** flames reached a TNT block */
   igniteTnt: (x: number, y: number, z: number) => void;
+  /** Consume a flammable block, including any block-entity cleanup. */
+  burnBlock: (x: number, y: number, z: number, id: number) => void;
 }
 
 export class FireSystem {
@@ -27,8 +31,24 @@ export class FireSystem {
 
   get count(): number { return this.fires.size; }
 
+  /** Forget a flame removed by a remote cell update or another block action. */
+  forget(x: number, y: number, z: number): void {
+    this.fires.delete(this.key(x, y, z));
+  }
+
   private key(x: number, y: number, z: number): string {
     return `${this.world.dimension}|${x},${y},${z}`;
+  }
+
+  /** Every client derives the same initial lifetime for a fire cell. This keeps
+   *  a later simulation-authority handoff from restarting it with a new roll. */
+  private initialLife(x: number, y: number, z: number): number {
+    let h = (this.world.seed | 0) ^ Math.imul(x, 0x45d9f3b) ^ Math.imul(y, 0x119de1f3) ^ Math.imul(z, 0x27d4eb2d);
+    if (this.world.dimension === 'nether') h ^= 0x6d2b79f5;
+    h ^= h >>> 16;
+    h = Math.imul(h, 0x7feb352d);
+    h ^= h >>> 15;
+    return 3 + ((h >>> 0) / 0x100000000) * 5;
   }
 
   private flammableNear(x: number, y: number, z: number): boolean {
@@ -45,10 +65,18 @@ export class FireSystem {
 
   /** Light a fire in an air cell; false if it can't burn there. */
   ignite(x: number, y: number, z: number): boolean {
-    if (this.world.getBlock(x, y, z) !== B.AIR || !this.canBurnAt(x, y, z)) return false;
+    const current = this.world.getBlock(x, y, z);
+    // A remote authoritative cell may install FIRE before asking us to track
+    // it. Register that existing block without rewriting it or echoing a cell.
+    if (current === B.FIRE) {
+      const k = this.key(x, y, z);
+      if (!this.fires.has(k) && this.fires.size < MAX_FIRES) this.fires.set(k, this.initialLife(x, y, z));
+      return true;
+    }
+    if (current !== B.AIR || !this.canBurnAt(x, y, z)) return false;
     if (this.fires.size >= MAX_FIRES) return false;
     if (!this.world.setBlock(x, y, z, B.FIRE)) return false;
-    this.fires.set(this.key(x, y, z), 3 + Math.random() * 5);
+    this.fires.set(this.key(x, y, z), this.initialLife(x, y, z));
     return true;
   }
 
@@ -104,6 +132,16 @@ export class FireSystem {
       const [x, y, z] = k.slice(bar + 1).split(',').map(Number);
       if (!this.loaded(x, z)) continue; // frozen until its chunk streams back in
       if (w.getBlock(x, y, z) !== B.FIRE) { this.fires.delete(k); continue; }
+      if (this.hooks.canAdvance && !this.hooks.canAdvance(x, z)) {
+        // Keep passive clocks near the authority's value without performing
+        // random spread, block destruction, or world writes. Clamp at zero so
+        // the tracker survives until an authoritative AIR update arrives.
+        if (!this.eternal(x, y, z)) {
+          const next = left - (this.flammableNear(x, y, z) ? dt * 0.35 : dt);
+          this.fires.set(k, Math.max(0.001, next));
+        }
+        continue;
+      }
       if (!this.canBurnAt(x, y, z)) { this.extinguish(k, x, y, z); continue; }
       if (this.hooks.rainingAt(x, y, z) && Math.random() < 0.35) { this.extinguish(k, x, y, z); continue; }
       const eternal = this.eternal(x, y, z);
@@ -119,7 +157,7 @@ export class FireSystem {
           this.hooks.igniteTnt(nx, ny, nz);
           continue;
         }
-        w.setBlock(nx, ny, nz, B.AIR);
+        this.hooks.burnBlock(nx, ny, nz, id);
         if (Math.random() < 0.6) this.ignite(nx, ny, nz);
       }
 

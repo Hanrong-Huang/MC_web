@@ -90,7 +90,15 @@ function collideAxis(world: World, pos: Vec3, box: EntBox, axis: 'x' | 'y' | 'z'
         const boxes = cellBoxes(world, bx, by, bz);
         for (const b of boxes) {
           const bx0 = bx + b[0], bx1 = bx + b[3], by0 = by + b[1], by1 = by + b[4], bz0 = bz + b[2], bz1 = bz + b[5];
-          if (!(bx1 > minX && bx0 < maxX && by1 > minY && by0 < maxY && bz1 > minZ && bz0 < maxZ)) continue;
+          // The moving axis uses strict overlap so even a tiny penetration is
+          // resolved. Perpendicular axes use the same tolerance as
+          // `overlapsAny`: otherwise a sub-EPS scrape along a wall can be
+          // mistaken for a floor by the next Y pass, lifting the entity to the
+          // top of the highest wall box it intersects.
+          const overlapX = bx1 > minX + (axis === 'x' ? 0 : EPS) && bx0 < maxX - (axis === 'x' ? 0 : EPS);
+          const overlapY = by1 > minY + (axis === 'y' ? 0 : EPS) && by0 < maxY - (axis === 'y' ? 0 : EPS);
+          const overlapZ = bz1 > minZ + (axis === 'z' ? 0 : EPS) && bz0 < maxZ - (axis === 'z' ? 0 : EPS);
+          if (!(overlapX && overlapY && overlapZ)) continue;
           const lo = axis === 'x' ? bx0 : axis === 'y' ? by0 : bz0;
           const hi = axis === 'x' ? bx1 : axis === 'y' ? by1 : bz1;
           if (d > 0) { if (!hit || lo < limit) limit = lo; }
@@ -211,6 +219,45 @@ export function hasSupport(world: World, pos: Vec3, box: EntBox, depth = 0.6): b
     }
   }
   return false;
+}
+
+/** Is the collision shape just ahead a jumpable ledge with room to stand on
+ *  it? Used by touch auto-jump and by the water-edge helper. Unlike a block-id
+ *  check, this respects slabs/stairs, 1.5-block fences, and shaped headroom. */
+export function canHopUp(
+  world: World, pos: Vec3, box: EntBox, wx: number, wz: number, maxRise: number,
+): boolean {
+  if (Math.hypot(wx, wz) < 0.1 || maxRise <= 0) return false;
+  const probe = box.w / 2 + 0.3;
+  const target: Vec3 = {
+    x: pos.x + (Math.abs(wx) > Math.abs(wz) ? Math.sign(wx) * probe : 0),
+    y: pos.y,
+    z: pos.z + (Math.abs(wz) >= Math.abs(wx) ? Math.sign(wz) * probe : 0),
+  };
+  if (!overlapsAny(world, target, box)) return false;
+
+  const hw = box.w / 2;
+  const minX = target.x - hw, maxX = target.x + hw;
+  const minZ = target.z - hw, maxZ = target.z + hw;
+  const x0 = Math.floor(minX), x1 = Math.floor(maxX - EPS / 2);
+  const z0 = Math.floor(minZ), z1 = Math.floor(maxZ - EPS / 2);
+  const y0 = Math.floor(pos.y) - 1, y1 = Math.floor(pos.y + maxRise);
+  let landingY = -Infinity;
+  for (let by = y0; by <= y1; by++) {
+    for (let bz = z0; bz <= z1; bz++) {
+      for (let bx = x0; bx <= x1; bx++) {
+        for (const b of cellBoxes(world, bx, by, bz)) {
+          if (bx + b[3] <= minX + EPS || bx + b[0] >= maxX - EPS ||
+              bz + b[5] <= minZ + EPS || bz + b[2] >= maxZ - EPS) continue;
+          const top = by + b[4] + EPS;
+          if (top > pos.y + EPS && top <= pos.y + maxRise + EPS) landingY = Math.max(landingY, top);
+        }
+      }
+    }
+  }
+  if (!Number.isFinite(landingY)) return false;
+  target.y = landingY;
+  return !overlapsAny(world, target, box);
 }
 
 /** Does the entity AABB overlap the given block cell? */

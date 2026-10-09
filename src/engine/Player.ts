@@ -6,7 +6,7 @@ import { World } from './World';
 import { Input } from './Input';
 import { Renderer } from './Renderer';
 import { AudioEngine } from './Audio';
-import { moveEntity, hasSupport, inWater, inLava, fluidPush, eyeInWater, boxIntersectsBlock, Vec3 } from './Physics';
+import { moveEntity, hasSupport, inWater, inLava, fluidPush, eyeInWater, boxIntersectsBlock, canHopUp, Vec3 } from './Physics';
 import { waterFX } from './WaterFX';
 import {
   B, I, def, hasDef, breakTime, attackDamage, isSolid, canHarvest, FLOOR_BLOCKS, SELF_STACKING, mobLabel,
@@ -113,6 +113,8 @@ export interface PlayerDeps {
   useBed: (x: number, y: number, z: number) => void;
   igniteTnt: (x: number, y: number, z: number) => void;
   useDoor: (x: number, y: number, z: number) => void;
+  /** Multiplayer lease guard: true when another player has this container open. */
+  containerLocked?: (x: number, y: number, z: number) => boolean;
   onBreak: (blockId: number) => void;
   onPlantSeed: () => void;
   /** Apply bone meal at a block; returns true if something grew. */
@@ -338,6 +340,23 @@ export class Player {
     const idx = this.inventory.firstEmpty();
     if (idx >= 0) this.inventory.slots[idx] = { id: I.MOB_CATCHER_FILLED, count: 1, mob: kind };
     else this.deps.entities.spawnDrop(this.pos.x, this.pos.y + 1, this.pos.z, I.MOB_CATCHER_FILLED, 1, undefined, kind);
+  }
+
+  /** Turn one held empty catcher into a filled one. Survival conserves the
+   *  physical orb; creative keeps its infinite source stack and grants a
+   *  separate filled catcher, matching other non-consuming creative items. */
+  private fillHeldCatcher(kind: string): void {
+    const held = this.inventory.getSelected();
+    if (this.mode !== 'survival' || !held || held.id !== I.MOB_CATCHER) {
+      this.giveFilledCatcher(kind);
+      return;
+    }
+    if (held.count <= 1) {
+      this.inventory.slots[this.inventory.selected] = { id: I.MOB_CATCHER_FILLED, count: 1, mob: kind };
+      return;
+    }
+    held.count--;
+    this.giveFilledCatcher(kind);
   }
 
   toggleFly(): void {
@@ -1004,17 +1023,7 @@ export class Player {
 
   /** Is there a single-block ledge in the wish direction we can hop onto? */
   private canStepUp(world: World, wx: number, wz: number): boolean {
-    if (Math.hypot(wx, wz) < 0.1) return false;
-    const solid = (id: number): boolean =>
-      id !== B.AIR && id !== B.WATER && hasDef(id) && def(id).solid;
-    const hw = BOX.w / 2;
-    // sample the cell just ahead on the dominant axis at foot level
-    const fx = Math.floor(this.pos.x + (Math.abs(wx) > Math.abs(wz) ? Math.sign(wx) * (hw + 0.3) : 0));
-    const fz = Math.floor(this.pos.z + (Math.abs(wz) >= Math.abs(wx) ? Math.sign(wz) * (hw + 0.3) : 0));
-    const feetY = Math.floor(this.pos.y + 0.1);
-    return solid(world.getBlock(fx, feetY, fz)) &&
-      !solid(world.getBlock(fx, feetY + 1, fz)) &&
-      !solid(world.getBlock(fx, feetY + 2, fz));
+    return canHopUp(world, this.pos, BOX, wx, wz, 1.25);
   }
 
   // --- horse riding ----------------------------------------------------------
@@ -1260,15 +1269,20 @@ export class Player {
     const { world, entities, audio } = this.deps;
     const id = world.getBlock(x, y, z);
     if (id === B.AIR || def(id).hardness < 0) return;
+    if (this.deps.containerLocked?.(x, y, z)) {
+      this.deps.toast('That container is in use');
+      return;
+    }
     if (id === B.TORCH || id === B.SOUL_TORCH) world.torchFacings.delete(`${x},${y},${z}`);
 
     // container contents spill out
     const beKey = `${x},${y},${z}`;
     const be = world.blockEntities.get(beKey);
+    const furnaceReward = be?.type === 'furnace' ? be.claimRewards() : null;
     if (be) {
       const spill = be.type === 'furnace' ? [be.input, be.fuel, be.output] : be.slots;
       for (const s of spill) {
-        if (s) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, s.id, s.count);
+        if (s) entities.spawnDrop(x + 0.5, y + 0.5, z + 0.5, s.id, s.count, s.dur, s.mob, s.ench);
       }
       world.blockEntities.delete(beKey);
     }
@@ -1317,6 +1331,10 @@ export class Player {
     }
     if (withDrops && this.mode === 'survival') {
       // what the block was holding comes out with it
+      if (furnaceReward) {
+        if (furnaceReward.xp > 0) this.deps.onXp?.(x + 0.5, y + 0.5, z + 0.5, furnaceReward.xp);
+        if (furnaceReward.iron) this.deps.onAdvance?.('iron_age');
+      }
       if (id === B.FLOWER_POT && meta && hasDef(meta)) entities.spawnDrop(x + 0.5, y + 0.6, z + 0.5, meta, 1);
       if (id === B.COMPOSTER && meta >= 8) entities.spawnDrop(x + 0.5, y + 0.6, z + 0.5, I.BONE_MEAL, 1);
       if (id === B.SNOW_GRASS) entities.spawnDrop(x + 0.5, y + 0.6, z + 0.5, I.SNOWBALL, 1 + (Math.random() < 0.5 ? 1 : 0));
@@ -1952,7 +1970,7 @@ export class Player {
       if (hit && hit.dist < (this.target?.dist ?? 4.5) && ent.isPet(hit.entity)) {
         const kind = ent.recallPet(hit.entity);
         if (kind) {
-          this.giveFilledCatcher(kind);
+          this.fillHeldCatcher(kind);
           this.placeCooldown = 0.4;
           this.deps.renderer.triggerSwing();
           this.deps.toast(`Recalled ${mobLabel(kind)}`);
@@ -2125,7 +2143,10 @@ export class Player {
       this.deps.entities.releaseMob(kind as never, fx, this.pos.y, fz, this.yaw);
       this.placeCooldown = 0.4;
       this.deps.renderer.triggerSwing();
-      if (this.mode === 'survival') this.inventory.consumeSelected();
+      // Releasing consumes the captured contents, not the reusable orb. This
+      // conversion also applies in creative so one filled catcher cannot clone
+      // the same pet indefinitely.
+      this.inventory.slots[this.inventory.selected] = { id: I.MOB_CATCHER, count: 1 };
       this.deps.toast(`Released ${mobLabel(kind)} — it will fight for you`);
       this.inventory.onChange();
       return;

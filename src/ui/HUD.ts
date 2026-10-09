@@ -198,6 +198,17 @@ function playTime(sec: number): string {
 /** Hovered player slot, for 1-9 hotbar swaps and Q drops. */
 interface HoverSlot { arr: Slot[]; i: number }
 
+interface MouseSlotDrag {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  sourceAction: (button: number, shift: boolean) => void;
+  sourceHadItem: boolean;
+  hadCursor: boolean;
+  shift: boolean;
+  dragging: boolean;
+}
+
 export class HUD {
   private root: HTMLElement;
   private atlas: Atlas;
@@ -275,6 +286,9 @@ export class HUD {
   private hotbarHoldRaf = 0;
   private healUntil = 0;
   private hoverSlot: HoverSlot | null = null;
+  /** Desktop pointer drag in progress; slot actions survive container rerenders. */
+  private mouseSlotDrag: MouseSlotDrag | null = null;
+  private readonly slotActions = new WeakMap<HTMLElement, (button: number, shift: boolean) => void>();
   /** last touch tap on a slot, for double-tap quick-move */
   private lastSlotTap: { arr: Slot[]; i: number; t: number; picked: boolean } | null = null;
   private recipeFilter: RecipeFilter = 'all';
@@ -309,6 +323,12 @@ export class HUD {
   onCraft: (id: number) => void = () => {};
   /** fired when the player completes a villager trade */
   onTrade: () => void = () => {};
+  /** fired after an open chest/furnace's item slots may have changed */
+  onContainerChange: () => void = () => {};
+  /** rewards released when a player actually removes furnace output */
+  onFurnaceReward: (xp: number, iron: boolean) => void = () => {};
+  /** fired whenever the advancement overlay closes */
+  onCloseAdvancements: () => void = () => {};
 
   constructor(root: HTMLElement, atlas: Atlas, audio: AudioEngine) {
     this.root = root;
@@ -382,6 +402,10 @@ export class HUD {
       this.onDropLeftover(c.id, n, c.dur, c.mob, c.ench);
       c.count -= n;
       if (c.count <= 0) this.cursor = null;
+      // A leased container snapshot may currently own this cursor stack via
+      // pendingItems. Commit its removal together with the unchanged container
+      // before an abrupt disconnect can restore a second copy.
+      if (this.view.kind === 'chest' || this.view.kind === 'furnace') this.onContainerChange();
       this.audio.play('whoosh');
       this.renderContainer(this.viewMode);
       this.renderCursor();
@@ -428,7 +452,12 @@ export class HUD {
       this.cursorEl.style.top = `${y - 18}px`;
     };
     document.addEventListener('mousemove', (e) => followCursor(e.clientX, e.clientY));
-    document.addEventListener('pointermove', (e) => followCursor(e.clientX, e.clientY));
+    document.addEventListener('pointermove', (e) => {
+      followCursor(e.clientX, e.clientY);
+      this.moveMouseSlotDrag(e);
+    });
+    document.addEventListener('pointerup', (e) => this.finishMouseSlotDrag(e));
+    document.addEventListener('pointercancel', (e) => this.cancelMouseSlotDrag(e));
     this.followCursor = followCursor;
 
     // container hotkeys: 1-9 swaps the hovered slot with that hotbar slot, Q
@@ -1478,7 +1507,10 @@ ${seedLine.textContent}`;
   }
 
   hideAdvancements(): void {
-    if (this.advPanel) { this.advPanel.remove(); this.advPanel = null; }
+    if (!this.advPanel) return;
+    this.advPanel.remove();
+    this.advPanel = null;
+    this.onCloseAdvancements();
   }
 
   isAdvancementsOpen(): boolean { return this.advPanel !== null; }
@@ -2007,6 +2039,7 @@ ${seedLine.textContent}`;
     this.view = null;
     this.inv = null;
     this.hoverSlot = null;
+    this.mouseSlotDrag = null;
     this.containerEl.classList.add('hidden');
     this.cursorEl.classList.add('hidden');
     this.hideTooltip();
@@ -2042,6 +2075,7 @@ ${seedLine.textContent}`;
       arr[i] = b; inv.slots[h] = a;
       this.audio.play('click');
       inv.onChange();
+      if (this.view.kind === 'chest' || this.view.kind === 'furnace') this.onContainerChange();
       this.renderContainer(this.viewMode);
     } else if (normalizeCode(e.code) === bindingFor('drop') && !this.cursor) {
       const s = arr[i];
@@ -2052,6 +2086,9 @@ ${seedLine.textContent}`;
         s.count -= n;
         if (s.count <= 0) arr[i] = null;
         inv.onChange();
+        // The drop entity and the saved player snapshot must agree even when Q
+        // was pressed over a player-inventory slot in a container screen.
+        if (this.view.kind === 'chest' || this.view.kind === 'furnace') this.onContainerChange();
         this.renderContainer(this.viewMode);
       }
     }
@@ -2203,6 +2240,32 @@ ${seedLine.textContent}`;
     if (this.cursor.count > 1) this.countEl(this.cursorEl, this.cursor.count);
   }
 
+  /** Number of plain items that Inventory.add can still accept. */
+  private inventorySpaceFor(inv: Inventory, id: number): number {
+    const max = def(id).stack;
+    let room = 0;
+    for (const s of inv.slots) {
+      if (!s) room += max;
+      else if (s.id === id && s.count < max) room += max - s.count;
+    }
+    return room;
+  }
+
+  /** Output capacity after the trade's payment has been removed. */
+  private inventorySpaceAfterRemoving(inv: Inventory, id: number, removeId: number, count: number): number {
+    const max = def(id).stack;
+    let room = this.inventorySpaceFor(inv, id);
+    let left = count;
+    for (const s of inv.slots) {
+      if (!s || s.id !== removeId || left <= 0) continue;
+      const take = Math.min(left, s.count);
+      if (s.id === id) room += take;
+      else if (take === s.count) room += max;
+      left -= take;
+    }
+    return room;
+  }
+
   /** Shift-click quick-move: shove src[i]'s whole stack into dst[lo..hi),
    *  merging into matching stacks first, then filling empty slots. */
   private transfer(src: Slot[], i: number, dst: Slot[], lo: number, hi: number): boolean {
@@ -2278,9 +2341,12 @@ ${seedLine.textContent}`;
     if (takeOnly) {
       if (!s) return;
       if (!this.cursor) { arr[i] = null; this.cursor = s; }
-      else if (this.cursor.id === s.id && this.cursor.count + s.count <= def(s.id).stack) {
-        this.cursor.count += s.count;
-        arr[i] = null;
+      else if (this.cursor.id === s.id) {
+        const take = Math.min(def(s.id).stack - this.cursor.count, s.count);
+        if (take <= 0) return;
+        this.cursor.count += take;
+        s.count -= take;
+        if (s.count <= 0) arr[i] = null;
       }
       return;
     }
@@ -2336,9 +2402,41 @@ ${seedLine.textContent}`;
     inv.onChange();
   }
 
+  private moveMouseSlotDrag(e: PointerEvent): void {
+    const drag = this.mouseSlotDrag;
+    if (!drag || e.pointerId !== drag.pointerId || drag.dragging) return;
+    if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < 5) return;
+    drag.dragging = true;
+    // Pick the source up once movement proves this is a drag. A plain click is
+    // still handled on pointerup, so the established click-to-pick UI remains.
+    if (!drag.hadCursor && drag.sourceHadItem) drag.sourceAction(0, false);
+  }
+
+  private finishMouseSlotDrag(e: PointerEvent): void {
+    const drag = this.mouseSlotDrag;
+    if (!drag || e.pointerId !== drag.pointerId) return;
+    this.mouseSlotDrag = null;
+    if (!drag.dragging) {
+      drag.sourceAction(0, drag.shift);
+      return;
+    }
+    if (!drag.hadCursor && !drag.sourceHadItem) return;
+    const hit = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+    const target = hit?.closest('.mc-slot') as HTMLElement | null;
+    const targetAction = target ? this.slotActions.get(target) : undefined;
+    // If the source action could no longer pick anything up, do not turn a
+    // drag into an accidental click on the destination.
+    if (targetAction && this.cursor) targetAction(0, false);
+  }
+
+  private cancelMouseSlotDrag(e: PointerEvent): void {
+    if (this.mouseSlotDrag?.pointerId === e.pointerId) this.mouseSlotDrag = null;
+  }
+
   private slotEl(parent: HTMLElement, item: Slot, onClick: (button: number, shift: boolean) => void,
     extra = '', hover?: HoverSlot): HTMLElement {
     const s = el('div', `mc-slot${extra ? ` ${extra}` : ''}`, parent);
+    this.slotActions.set(s, onClick);
     if (item) {
       s.appendChild(this.iconCanvas(item));
       if (item.count > 1) this.countEl(s, item.count);
@@ -2362,7 +2460,7 @@ ${seedLine.textContent}`;
     // cursor to the tap point first so it's visible where the finger is
     let pressTimer: ReturnType<typeof setTimeout> | null = null;
     let longFired = false;
-    let mouseLmbPending = false;
+    let touchMoved = false;
     let touchOx = 0;
     let touchOy = 0;
     const TOUCH_LONG_PRESS_CANCEL_PX = 12;
@@ -2382,8 +2480,8 @@ ${seedLine.textContent}`;
       }
       if (e.button !== 0) return;
       longFired = false;
-      mouseLmbPending = false;
       if (e.pointerType === 'touch') {
+        touchMoved = false;
         touchOx = e.clientX;
         touchOy = e.clientY;
         s.classList.add('pressing');
@@ -2398,52 +2496,58 @@ ${seedLine.textContent}`;
           onClick(2, e.shiftKey || /\bresult\b/.test(extra));
         }, 480);
       } else {
-        mouseLmbPending = true;
+        this.mouseSlotDrag = {
+          pointerId: e.pointerId,
+          startX: e.clientX,
+          startY: e.clientY,
+          sourceAction: onClick,
+          sourceHadItem: !!item,
+          hadCursor: !!this.cursor,
+          shift: e.shiftKey,
+          dragging: false,
+        };
       }
     });
     s.addEventListener('pointerup', (e) => {
-      if (e.button !== 0) return;
+      if (e.button !== 0 || e.pointerType !== 'touch') return;
       s.classList.remove('pressing');
-      if (e.pointerType === 'touch') {
-        cancelPress();
-        if (!longFired) {
-          // double-tap = quick-move (a touch shift-click): the first tap picked
-          // the stack up, so put it back and send it across
-          const now = e.timeStamp; // event time: a slow frame between taps still counts
-          const lt = this.lastSlotTap;
-          if (hover && lt && lt.arr === hover.arr && lt.i === hover.i && lt.picked && now - lt.t < 350) {
-            this.lastSlotTap = null;
-            onClick(0, false);
-            onClick(0, true);
-          } else {
-            const picked = !this.cursor && !!item;
-            onClick(0, e.shiftKey);
-            this.lastSlotTap = hover ? { arr: hover.arr, i: hover.i, t: now, picked } : null;
-          }
+      cancelPress();
+      if (!longFired && !touchMoved) {
+        // double-tap = quick-move (a touch shift-click): the first tap picked
+        // the stack up, so put it back and send it across
+        const now = e.timeStamp; // event time: a slow frame between taps still counts
+        const lt = this.lastSlotTap;
+        if (hover && lt && lt.arr === hover.arr && lt.i === hover.i && lt.picked && now - lt.t < 350) {
+          this.lastSlotTap = null;
+          onClick(0, false);
+          onClick(0, true);
+        } else {
+          const picked = !this.cursor && !!item;
+          onClick(0, e.shiftKey);
+          this.lastSlotTap = hover ? { arr: hover.arr, i: hover.i, t: now, picked } : null;
         }
-        longFired = false;
-        return;
       }
-      if (mouseLmbPending && !longFired) onClick(0, e.shiftKey);
-      mouseLmbPending = false;
+      longFired = false;
+      touchMoved = false;
     });
     s.addEventListener('pointermove', (e) => {
       if (e.pointerType !== 'touch' || pressTimer === null) return;
       if (Math.hypot(e.clientX - touchOx, e.clientY - touchOy) > TOUCH_LONG_PRESS_CANCEL_PX) {
+        touchMoved = true;
         cancelPress();
         s.classList.remove('pressing');
       }
     });
-    s.addEventListener('pointerleave', () => {
+    s.addEventListener('pointerleave', (e) => {
       cancelPress();
       s.classList.remove('pressing');
-      mouseLmbPending = false;
+      if (e.pointerType === 'touch') touchMoved = true;
     });
     s.addEventListener('pointercancel', () => {
       cancelPress();
       s.classList.remove('pressing');
-      mouseLmbPending = false;
       longFired = false;
+      touchMoved = false;
     });
     return s;
   }
@@ -2456,13 +2560,17 @@ ${seedLine.textContent}`;
 
   /** How many of an ingredient the player holds for recipe `out`, counting tag
    *  alternatives (any planks) unless the output is a particular wood's own. */
-  private haveCount(inv: Inventory, id: number, out: number): number {
-    return ingredientOptions(id, out).reduce((n, alt) => n + inv.count(alt), 0);
+  private haveCount(inv: Inventory, id: number, out: number, craftGrid: Slot[] = []): number {
+    const options = new Set(ingredientOptions(id, out));
+    let count = [...options].reduce((n, alt) => n + inv.count(alt), 0);
+    for (const s of craftGrid) if (s && options.has(s.id)) count += s.count;
+    return count;
   }
 
-  private canFillRecipe(r: RecipeView, inv: Inventory, craftW: number): boolean {
+  private canFillRecipe(r: RecipeView, inv: Inventory, craftW: number, craftGrid: Slot[] = []): boolean {
     if (r.out === B.PORTAL) return false;
-    return this.recipeFitsGrid(r, craftW) && r.counts.every((need) => this.haveCount(inv, need.id, r.out) >= need.count);
+    return this.recipeFitsGrid(r, craftW) &&
+      r.counts.every((need) => this.haveCount(inv, need.id, r.out, craftGrid) >= need.count);
   }
 
   private recipeCategory(r: RecipeView): Exclude<RecipeFilter, 'all' | 'ready'> {
@@ -2473,7 +2581,7 @@ ${seedLine.textContent}`;
     return 'utility';
   }
 
-  private recipeVisible(r: RecipeView, inv: Inventory, craftW: number): boolean {
+  private recipeVisible(r: RecipeView, inv: Inventory, craftW: number, craftGrid: Slot[]): boolean {
     if (this.recipeSearchQuery) {
       const label = def(r.out).label.toLowerCase();
       if (!label.includes(this.recipeSearchQuery)) return false;
@@ -2482,16 +2590,16 @@ ${seedLine.textContent}`;
     // crafting table are still listed (and explain themselves when clicked), so
     // the book is a complete catalogue. "ready" stays limited to craftable-now.
     if (this.recipeFilter === 'all') return true;
-    if (this.recipeFilter === 'ready') return this.canFillRecipe(r, inv, craftW);
+    if (this.recipeFilter === 'ready') return this.canFillRecipe(r, inv, craftW, craftGrid);
     return this.recipeCategory(r) === this.recipeFilter;
   }
 
-  private recipeBlockedReason(r: RecipeView, inv: Inventory, craftW: number): string {
+  private recipeBlockedReason(r: RecipeView, inv: Inventory, craftW: number, craftGrid: Slot[] = []): string {
     if (r.out === B.PORTAL) return 'Build 4x5 Obsidian frame & ignite with Flint & Steel. Teleports to the Nether map. (1:8 coordinates)';
     if (!this.recipeFitsGrid(r, craftW)) return 'Requires crafting table';
     if (this.cursor) return 'Clear cursor first';
     const missing = r.counts
-      .map((need) => ({ ...need, have: this.haveCount(inv, need.id, r.out) }))
+      .map((need) => ({ ...need, have: this.haveCount(inv, need.id, r.out, craftGrid) }))
       .filter((need) => need.have < need.count);
     if (missing.length === 0) return 'Ready';
     return `Missing ${missing.map((need) => `${need.count - need.have} ${def(need.id).label}`).join(', ')}`;
@@ -2511,13 +2619,34 @@ ${seedLine.textContent}`;
     return need === 0;
   }
 
-  private returnCraftGrid(view: ContainerView, inv: Inventory): void {
-    for (let i = 0; i < view.craftGrid.length; i++) {
-      const s = view.craftGrid[i];
+  private returnCraftGrid(view: ContainerView, inv: Inventory): boolean {
+    for (const s of view.craftGrid) {
       if (!s) continue;
-      this.stow(inv, s);
-      view.craftGrid[i] = null;
+      if (s.dur !== undefined || s.mob !== undefined || s.ench) {
+        const free = inv.firstEmpty();
+        if (free < 0) return false;
+        inv.slots[free] = { ...s };
+        continue;
+      }
+      let left = s.count;
+      const max = def(s.id).stack;
+      for (const dst of inv.slots) {
+        if (left <= 0) break;
+        if (!dst || dst.id !== s.id || dst.count >= max) continue;
+        const give = Math.min(max - dst.count, left);
+        dst.count += give;
+        left -= give;
+      }
+      for (let i = 0; i < inv.slots.length && left > 0; i++) {
+        if (inv.slots[i]) continue;
+        const give = Math.min(max, left);
+        inv.slots[i] = { id: s.id, count: give };
+        left -= give;
+      }
+      if (left > 0) return false;
     }
+    view.craftGrid.fill(null);
+    return true;
   }
 
   /** Put a loose stack back in the inventory (or drop it), keeping its wear,
@@ -2535,9 +2664,16 @@ ${seedLine.textContent}`;
 
   private fillRecipe(r: RecipeView, view: ContainerView, inv: Inventory): boolean {
     if (r.out === B.PORTAL) return false;
-    if (this.cursor || !this.canFillRecipe(r, inv, view.craftW)) return false;
-    this.returnCraftGrid(view, inv);
-    if (!this.canFillRecipe(r, inv, view.craftW)) return false;
+    if (this.cursor || !this.canFillRecipe(r, inv, view.craftW, view.craftGrid)) return false;
+    const invBefore = inv.slots.map((s) => s ? { ...s } : null);
+    const gridBefore = view.craftGrid.map((s) => s ? { ...s } : null);
+    const restore = (): false => {
+      for (let i = 0; i < inv.slots.length; i++) inv.slots[i] = invBefore[i];
+      for (let i = 0; i < view.craftGrid.length; i++) view.craftGrid[i] = gridBefore[i];
+      return false;
+    };
+    if (!this.returnCraftGrid(view, inv)) return restore();
+    if (!this.canFillRecipe(r, inv, view.craftW)) return restore();
     // tagged ingredients (any planks) prefer one variant that covers every
     // cell, so a chest comes out of one wood; wood-specific recipes (oak
     // stairs, crimson door ...) only ever take their own planks
@@ -2554,7 +2690,7 @@ ${seedLine.textContent}`;
         const pref = prefer.get(id);
         const got = pref !== undefined && inv.count(pref) > 0 ? pref
           : ingredientOptions(id, r.out).find((alt) => inv.count(alt) > 0) ?? id;
-        if (!this.takeFromInventory(inv, got, 1)) return false;
+        if (!this.takeFromInventory(inv, got, 1)) return restore();
         view.craftGrid[y * view.craftW + x] = { id: got, count: 1 };
       }
     }
@@ -2573,17 +2709,18 @@ ${seedLine.textContent}`;
     }
   }
 
-  private recipeNeedsEl(r: RecipeView, inv: Inventory, parent: HTMLElement): void {
+  private recipeNeedsEl(r: RecipeView, inv: Inventory, craftGrid: Slot[], parent: HTMLElement): void {
     const needs = el('div', 'recipe-needs', parent);
     for (const need of r.counts) {
-      const have = this.haveCount(inv, need.id, r.out);
+      const have = this.haveCount(inv, need.id, r.out, craftGrid);
       const chip = el('span', have >= need.count ? 'need-ok' : 'need-miss', needs);
       chip.textContent = `${Math.min(have, need.count)}/${need.count} ${def(need.id).label}`;
     }
   }
 
   /** Detail readout at the foot of the recipe book for the hovered recipe. */
-  private showRecipeDetail(box: HTMLElement, r: RecipeView | null, inv: Inventory, craftW: number): void {
+  private showRecipeDetail(box: HTMLElement, r: RecipeView | null, inv: Inventory,
+    craftW: number, craftGrid: Slot[]): void {
     box.innerHTML = '';
     if (!r) {
       el('div', 'recipe-hint', box).textContent = 'Hover a recipe to see its ingredients. Click to fill the grid.';
@@ -2600,8 +2737,8 @@ ${seedLine.textContent}`;
     const name = el('div', 'recipe-title', text);
     name.textContent = def(r.out).label + (r.n > 1 ? ` x${r.n}` : '');
     name.style.color = this.itemAccent(r.out);
-    this.recipeNeedsEl(r, inv, text);
-    const why = this.recipeBlockedReason(r, inv, craftW);
+    this.recipeNeedsEl(r, inv, craftGrid, text);
+    const why = this.recipeBlockedReason(r, inv, craftW, craftGrid);
     const st = el('div', `recipe-status${why === 'Ready' ? ' ok' : ''}`, text);
     st.textContent = why === 'Ready' ? 'Click to place in the grid' : why;
   }
@@ -2660,20 +2797,20 @@ ${seedLine.textContent}`;
     const fillGrid = (): void => {
       bookGrid.innerHTML = '';
       const recipes = allRecipes()
-        .filter((r) => this.recipeVisible(r, inv, view.craftW))
+        .filter((r) => this.recipeVisible(r, inv, view.craftW, view.craftGrid))
         .sort((a, b) => {
-          const ar = this.canFillRecipe(a, inv, view.craftW) ? 0 : this.recipeFitsGrid(a, view.craftW) ? 1 : 2;
-          const br = this.canFillRecipe(b, inv, view.craftW) ? 0 : this.recipeFitsGrid(b, view.craftW) ? 1 : 2;
+          const ar = this.canFillRecipe(a, inv, view.craftW, view.craftGrid) ? 0 : this.recipeFitsGrid(a, view.craftW) ? 1 : 2;
+          const br = this.canFillRecipe(b, inv, view.craftW, view.craftGrid) ? 0 : this.recipeFitsGrid(b, view.craftW) ? 1 : 2;
           return ar - br || def(a.out).label.localeCompare(def(b.out).label);
         });
       if (recipes.length === 0) {
         const empty = el('div', 'recipe-empty', bookGrid);
         empty.textContent = this.recipeFilter === 'ready' ? 'Nothing craftable yet - gather more materials!' : 'No recipes match';
       }
-      const ready = recipes.filter((r) => this.canFillRecipe(r, inv, view.craftW)).length;
+      const ready = recipes.filter((r) => this.canFillRecipe(r, inv, view.craftW, view.craftGrid)).length;
       countLbl.textContent = `${ready} craftable`;
       for (const r of recipes) {
-        const canMake = this.canFillRecipe(r, inv, view.craftW);
+        const canMake = this.canFillRecipe(r, inv, view.craftW, view.craftGrid);
         const fits = this.recipeFitsGrid(r, view.craftW);
         const cell = el('button', `recipe-card${canMake ? ' avail' : fits ? ' missing' : ' locked'}`, bookGrid);
         cell.type = 'button';
@@ -2686,8 +2823,8 @@ ${seedLine.textContent}`;
         // screen-reader / harness friendly name (visually the icon speaks for it)
         const name = el('span', 'recipe-name sr-only', cell);
         name.textContent = def(r.out).label;
-        cell.setAttribute('aria-label', `${def(r.out).label}: ${this.recipeBlockedReason(r, inv, view.craftW)}`);
-        const show = (): void => this.showRecipeDetail(detail, r, inv, view.craftW);
+        cell.setAttribute('aria-label', `${def(r.out).label}: ${this.recipeBlockedReason(r, inv, view.craftW, view.craftGrid)}`);
+        const show = (): void => this.showRecipeDetail(detail, r, inv, view.craftW, view.craftGrid);
         cell.addEventListener('pointerenter', show);
         cell.addEventListener('focus', show);
         cell.onclick = (): void => {
@@ -2695,14 +2832,14 @@ ${seedLine.textContent}`;
             this.audio.play('select');
           } else {
             this.audio.play('fail');
-            this.toast(this.recipeBlockedReason(r, inv, view.craftW));
+            this.toast(this.recipeBlockedReason(r, inv, view.craftW, view.craftGrid));
           }
           rerender();
         };
       }
     };
     fillGrid();
-    this.showRecipeDetail(detail, null, inv, view.craftW);
+    this.showRecipeDetail(detail, null, inv, view.craftW, view.craftGrid);
   }
 
   /** Stop in-game hotkeys (E closes, digits swap…) firing while typing. */
@@ -2782,6 +2919,7 @@ ${seedLine.textContent}`;
       this.slotEl(parent, inv.slots[i], (btn, shift) => {
         if (shift) this.quickMovePlayer(view, inv, i);
         else { this.clickSlot(inv.slots, i, btn); inv.onChange(); }
+        if (view.kind === 'chest' || view.kind === 'furnace') this.onContainerChange();
         rerender();
       }, '', { arr: inv.slots, i });
     };
@@ -2793,8 +2931,10 @@ ${seedLine.textContent}`;
       for (let i = 0; i < view.trades.length; i++) {
         const t = view.trades[i];
         const lockedOut = t.uses >= t.max;
-        const canAfford = !lockedOut && inv.count(t.give) >= t.giveCount;
-        const row = el('div', `trade-row${lockedOut ? ' locked' : canAfford ? ' ok' : ' poor'}`, list);
+        const canAfford = inv.count(t.give) >= t.giveCount;
+        const hasRoom = this.inventorySpaceAfterRemoving(inv, t.get, t.give, t.giveCount) >= t.getCount;
+        const canTrade = !lockedOut && canAfford && hasRoom;
+        const row = el('div', `trade-row${lockedOut ? ' locked' : canTrade ? ' ok' : ' poor'}`, list);
         // give slot
         const giveSlot = el('div', 'mc-slot', row);
         giveSlot.appendChild(this.iconCanvas({ id: t.give, count: t.giveCount }));
@@ -2806,12 +2946,21 @@ ${seedLine.textContent}`;
         if (t.getCount > 1) this.countEl(getSlot, t.getCount);
         const info = el('div', 'trade-info', row);
         el('div', 'trade-name', info).textContent = def(t.get).label;
-        el('div', 'trade-uses', info).textContent = lockedOut ? 'Out of stock' : `${t.max - t.uses} trades left · you have ${inv.count(t.give)} ${def(t.give).label}`;
-        if (canAfford) {
+        el('div', 'trade-uses', info).textContent = lockedOut ? 'Out of stock'
+          : !hasRoom ? 'Inventory full'
+          : `${t.max - t.uses} trades left · you have ${inv.count(t.give)} ${def(t.give).label}`;
+        if (canTrade) {
           row.style.cursor = 'pointer';
           row.tabIndex = 0;
           const doTrade = (): void => {
-            // perform the trade: remove give, add get
+            // Recheck both sides before charging: rapid input must not buy an
+            // item that has sold out or no longer fits in the inventory.
+            if (t.uses >= t.max || inv.count(t.give) < t.giveCount ||
+              this.inventorySpaceAfterRemoving(inv, t.get, t.give, t.giveCount) < t.getCount) {
+              this.audio.play('fail');
+              rerender();
+              return;
+            }
             let need = t.giveCount;
             for (let s = 0; s < inv.slots.length && need > 0; s++) {
               const sl = inv.slots[s];
@@ -2821,7 +2970,12 @@ ${seedLine.textContent}`;
                 if (sl.count <= 0) inv.slots[s] = null;
               }
             }
-            inv.add(t.get, t.getCount);
+            const left = inv.add(t.get, t.getCount);
+            if (left > 0) {
+              // The capacity check above makes this unreachable in the current
+              // single-threaded UI, but never silently discard an item.
+              this.onDropLeftover(t.get, left);
+            }
             t.uses++;
             this.audio.play('level');
             this.onTrade();
@@ -2845,6 +2999,7 @@ ${seedLine.textContent}`;
           if (shift) this.transfer(chest.slots, i, inv.slots, 0, 36);
           else this.clickSlot(chest.slots, i, btn);
           inv.onChange();
+          this.onContainerChange();
           rerender();
         }, '', { arr: chest.slots, i });
       }
@@ -2902,8 +3057,13 @@ ${seedLine.textContent}`;
           // makes the same item and there's room — the classic bulk-craft
           let made = false;
           while (matchRecipe(view.craftGrid, view.craftW)?.id === result.id) {
+            if (this.inventorySpaceFor(inv, result.id) < result.count) break;
             const n = craftOnce();
-            if (inv.add(result.id, n) > 0) break; // inventory full
+            const left = inv.add(result.id, n);
+            if (left > 0) {
+              this.onDropLeftover(result.id, left);
+              break;
+            }
             made = true;
           }
           if (made) { this.audio.play('craft'); inv.onChange(); }
@@ -2933,6 +3093,7 @@ ${seedLine.textContent}`;
         else this.clickSlot(arr, 0, btn);
         f.input = arr[0];
         inv.onChange();
+        this.onContainerChange();
         rerender();
       }).title = 'Item to smelt';
       const flame = el('div', 'furnace-flame', left);
@@ -2944,6 +3105,7 @@ ${seedLine.textContent}`;
         else this.clickSlot(arr, 0, btn);
         f.fuel = arr[0];
         inv.onChange();
+        this.onContainerChange();
         rerender();
       }).title = 'Fuel';
 
@@ -2953,11 +3115,17 @@ ${seedLine.textContent}`;
 
       const right = el('div', 'furnace-col', sec);
       this.slotEl(right, f.output, (btn, shift) => {
+        const before = f.output?.count ?? 0;
         const arr: Slot[] = [f.output];
         if (shift) this.transfer(arr, 0, inv.slots, 0, 36);
         else this.clickSlot(arr, 0, btn, true);
         f.output = arr[0];
+        if ((f.output?.count ?? 0) < before) {
+          const reward = f.claimRewards();
+          this.onFurnaceReward(reward.xp, reward.iron);
+        }
         inv.onChange();
+        this.onContainerChange();
         rerender();
       }, 'result');
       this.furnaceSnapshot = JSON.stringify([f.input, f.fuel, f.output]);

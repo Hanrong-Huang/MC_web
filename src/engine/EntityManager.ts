@@ -17,6 +17,7 @@ import { ENT_FLAGS, type EntState, type GoneWhy, type PlayerHit, type NetFx, typ
 import { netherFX } from './NetherFX';
 import { MobModels, LimbSet, MOB_EXPOSURE, MAGMA_SIZES, rollVariant } from './MobModels';
 import { buildOrbRig, setOrbOpen, disposeOrb, orbGlowTexture, orbStarTexture, ORB_GLOW, ORB_IDLE_GLOW, OrbRig } from './CatcherOrb';
+import type { GroundDropSave } from './Persistence';
 
 /** scratch flow vector for water currents (drops, swimming mobs) */
 const FLOW_PUSH: Vec3 = { x: 0, y: 0, z: 0 };
@@ -223,6 +224,8 @@ export class Entity {
   mob?: string;
   /** enchantments carried by a dropped item (mirrors SlotData.ench) */
   ench?: Record<string, number>;
+  /** dimension containing a ground item; inactive-dimension drops stay frozen */
+  dropDim: Dim = 'overworld';
   // mob fields
   state: 'idle' | 'wander' | 'flee' | 'chase' | 'fuse' = 'idle';
   stateTime = 0;
@@ -443,6 +446,8 @@ export class EntityManager {
   onCapture: ((mobKind: string) => void) | null = null;
   /** fired when the player damages a mob (hit marker + damage number feedback) */
   onPlayerHit: ((pos: Vec3, dmg: number, crit: boolean, killed: boolean) => void) | null = null;
+  /** Multiplayer lease guard. False leaves a locked container untouched by explosions. */
+  canDestroyBlock: ((x: number, y: number, z: number) => boolean) | null = null;
   private models = new MobModels();
   /** dying mobs' meshes playing the topple-over before their poof */
   private corpses: { mesh: THREE.Group; mats: THREE.MeshLambertMaterial[]; t: number; w: number; x: number; y: number; z: number }[] = [];
@@ -480,11 +485,13 @@ export class EntityManager {
 
   // --- spawning ---------------------------------------------------------------
 
-  spawnDrop(x: number, y: number, z: number, itemId: number, count: number, dur?: number, mob?: string, ench?: Record<string, number>): Entity {
+  spawnDrop(x: number, y: number, z: number, itemId: number, count: number, dur?: number, mob?: string,
+    ench?: Record<string, number>, dim: Dim = this.world.dimension): Entity {
     const mesh = this.buildDropMesh(itemId, mob);
     const e = new Entity('drop', { x, y, z }, { w: 0.25, h: 0.25 }, mesh);
     e.itemId = itemId;
     e.count = count;
+    e.dropDim = dim;
     if (dur !== undefined) e.dmg = dur; // reuse field for tool durability passthrough
     if (mob !== undefined) e.mob = mob;
     if (ench) e.ench = ench;
@@ -492,6 +499,53 @@ export class EntityManager {
     this.register(e);
     this.scene.add(mesh);
     return e;
+  }
+
+  /** Snapshot local ground items. Callers deliberately use this only for
+   *  single-player saves; network drops are authoritative shared entities. */
+  saveDrops(): GroundDropSave[] {
+    const out: GroundDropSave[] = [];
+    for (const e of this.entities) {
+      if (e.kind !== 'drop' || e.dead || e.remote || !hasDef(e.itemId) || e.count <= 0) continue;
+      out.push({
+        id: e.itemId,
+        count: Math.floor(e.count),
+        x: e.pos.x, y: e.pos.y, z: e.pos.z,
+        vx: e.vel.x, vy: e.vel.y, vz: e.vel.z,
+        age: e.age,
+        dim: e.dropDim,
+        ...(e.dmg > 0 ? { dur: e.dmg } : {}),
+        ...(e.mob !== undefined ? { mob: e.mob } : {}),
+        ...(e.ench ? { ench: { ...e.ench } } : {}),
+      });
+    }
+    return out;
+  }
+
+  /** Restore valid entries from a single-player save. Malformed entries are
+   *  ignored rather than creating unusable or immortal entities. */
+  loadDrops(list: GroundDropSave[]): void {
+    const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+    for (const s of list) {
+      if (!s || !Number.isInteger(s.id) || !hasDef(s.id) || !finite(s.count) || s.count <= 0 ||
+        !finite(s.x) || !finite(s.y) || !finite(s.z)) continue;
+      if (finite(s.age) && s.age >= 300) continue;
+      const dim: Dim = s.dim === 'nether' ? 'nether' : 'overworld';
+      const e = this.spawnDrop(s.x, s.y, s.z, s.id, Math.floor(s.count),
+        finite(s.dur) ? Math.max(0, s.dur) : undefined,
+        typeof s.mob === 'string' ? s.mob : undefined,
+        s.ench && typeof s.ench === 'object' ? { ...s.ench } : undefined,
+        dim);
+      e.vel = {
+        x: finite(s.vx) ? s.vx : 0,
+        y: finite(s.vy) ? s.vy : 0,
+        z: finite(s.vz) ? s.vz : 0,
+      };
+      // Negative age is the intentional post-throw pickup delay.
+      e.age = finite(s.age) ? Math.max(-10, s.age) : 0;
+      e.mesh.visible = dim === this.world.dimension &&
+        !!this.world.getChunk(Math.floor(e.pos.x / 16), Math.floor(e.pos.z / 16))?.ready;
+    }
   }
 
   /** Spawn a mob. `variant` picks a coat/outfit (random when omitted). */
@@ -666,6 +720,31 @@ export class EntityManager {
     this.scene.add(wrap);
     this.audio.play('orbThrow');
     return e;
+  }
+
+  /** Item form of in-flight catcher entities, which cannot be resumed midway
+   *  through their animation. Ground catchers use normal drop persistence. */
+  pendingCatcherItems(): { id: number; count: number; mob?: string }[] {
+    const out: { id: number; count: number; mob?: string }[] = [];
+    for (const e of this.entities) {
+      if (e.dead) continue;
+      if (e.kind === 'catcher') {
+        const mob = e.orb?.mob;
+        out.push(mob
+          ? { id: I.MOB_CATCHER_FILLED, count: 1, mob }
+          : { id: I.MOB_CATCHER, count: 1 });
+      }
+    }
+    return out;
+  }
+
+  /** Stop local-only catcher projectiles after their item forms have been sent
+   *  in a multiplayer player save, so the 150 ms disconnect grace period
+   *  cannot also resolve one into a shared ground drop. */
+  discardActiveCatchers(): void {
+    for (const e of [...this.entities]) {
+      if (e.kind === 'catcher' && !e.dead) this.killOrbEntity(e);
+    }
   }
 
   /** The thrown orb: wrapper at the orb's centre -> pivot at its ground contact
@@ -1612,6 +1691,7 @@ export class EntityManager {
           const bxp = cx + dx, byp = cy + dy, bzp = cz + dz;
           const id = this.world.getBlock(bxp, byp, bzp);
           if (id === B.AIR || id === B.WATER || BLAST_PROOF.has(id)) continue;
+          if (this.canDestroyBlock && !this.canDestroyBlock(bxp, byp, bzp)) continue;
           if (id === B.TNT) {
             this.world.setBlock(bxp, byp, bzp, B.AIR);
             this.spawnTnt(bxp, byp, bzp, 0.3 + Math.random() * 0.6);
@@ -1623,7 +1703,7 @@ export class EntityManager {
           if (be) {
             const spill = be.type === 'furnace' ? [be.input, be.fuel, be.output] : be.slots;
             for (const s of spill) {
-              if (s) this.spawnDrop(bxp + 0.5, byp + 0.5, bzp + 0.5, s.id, s.count);
+              if (s) this.spawnDrop(bxp + 0.5, byp + 0.5, bzp + 0.5, s.id, s.count, s.dur, s.mob, s.ench);
             }
             this.world.blockEntities.delete(beKey);
           }
@@ -1781,7 +1861,8 @@ export class EntityManager {
   private netState(e: Entity, full: boolean): EntState {
     const r2 = (v: number): number => Math.round(v * 100) / 100;
     const s: EntState = {
-      n: e.nid!, k: e.kind, d: (e.kind === 'minecart' ? e.cartDim : this.world.dimension) as Dim,
+      n: e.nid!, k: e.kind,
+      d: (e.kind === 'minecart' ? e.cartDim : e.kind === 'drop' ? e.dropDim : this.world.dimension) as Dim,
       x: r2(e.pos.x), y: r2(e.pos.y), z: r2(e.pos.z), yw: r2(e.yaw),
     };
     let f = e.onGround ? ENT_FLAGS.ground : 0;
@@ -1868,7 +1949,9 @@ export class EntityManager {
     }
   }
 
-  /** Switched dimension: puppets from the old one go; our mobs there are left behind. */
+  /** Switched dimension: puppets from the old one go; our mobs there are left behind.
+   *  Owned drops remain ours and freeze in their recorded dimension until an
+   *  in-dimension player takes ownership or we return. */
   private netDimCheck(): void {
     const dim = this.world.dimension;
     if (dim === this.lastDim) return;
@@ -1878,7 +1961,7 @@ export class EntityManager {
     for (const e of this.entities) {
       if (!e.nid || e.dead) continue;
       if (e.remote) { e.dead = true; e.netSilent = true; continue; }
-      if (e.kind === 'minecart' || (e.tamed && e.ownerName === 'player')) continue;
+      if (e.kind === 'drop' || e.kind === 'minecart' || (e.tamed && e.ownerName === 'player')) continue;
       e.dead = true;
     }
     this.remoteTargets.clear();
@@ -1910,7 +1993,7 @@ export class EntityManager {
       if (MOB_KINDS.has(st.k as MobKind)) {
         e = this.spawnMob(st.k as MobKind, st.x, st.y, st.z, st.v ?? 0);
       } else if (st.k === 'drop' && st.i !== undefined && hasDef(st.i)) {
-        e = this.spawnDrop(st.x, st.y, st.z, st.i, st.c ?? 1, st.du, st.mob, st.en);
+        e = this.spawnDrop(st.x, st.y, st.z, st.i, st.c ?? 1, st.du, st.mob, st.en, st.d);
         e.vel = { x: 0, y: 0, z: 0 };
       } else if (st.k === 'arrow') {
         const [proj = 'arrow', owner = 'mob', shooter = 'skeleton'] = (st.pj ?? '').split('|');
@@ -1992,6 +2075,7 @@ export class EntityManager {
       this.applyExtras(e, st);
     } else if (e.kind === 'drop') {
       if (st.c !== undefined) e.count = st.c;
+      e.dropDim = st.d;
     } else if (e.kind === 'arrow') {
       e.vel = { x: st.vx ?? 0, y: st.vy ?? 0, z: st.vz ?? 0 };
       e.stuckT = has(ENT_FLAGS.stuck) ? Math.max(0, e.stuckT) : -1;
@@ -2187,6 +2271,12 @@ export class EntityManager {
     if (this.net) this.netDimCheck();
     this.refreshMobList();
     for (const e of this.entities) {
+      if (e.kind === 'drop') {
+        const here = e.dropDim === this.world.dimension;
+        const loaded = here && !!this.world.getChunk(Math.floor(e.pos.x / 16), Math.floor(e.pos.z / 16))?.ready;
+        e.mesh.visible = loaded;
+        if (!loaded) continue;
+      }
       e.age += dt;
       if (e.remote) { this.updatePuppet(e, dt, elapsed, camQ); continue; }
       switch (e.kind) {
@@ -3933,11 +4023,11 @@ export class EntityManager {
     }
     // a gold ingot on the ground: go and get it (babies too, and even mid-fight)
     const l = e.lure;
-    if (l && (l.dead || l.itemId !== I.GOLD_INGOT)) e.lure = null;
+    if (l && (!this.dropReadyHere(l) || l.itemId !== I.GOLD_INGOT)) e.lure = null;
     if (!e.lure && Math.random() < 0.25) {
       let best: Entity | null = null, bestD = 64;
       for (const o of this.entities) {
-        if (o.kind !== 'drop' || o.dead || o.itemId !== I.GOLD_INGOT || o.age < 0.8) continue;
+        if (!this.dropReadyHere(o) || o.itemId !== I.GOLD_INGOT || o.age < 0.8) continue;
         const dd = (o.pos.x - e.pos.x) ** 2 + (o.pos.z - e.pos.z) ** 2;
         if (dd < bestD && Math.abs(o.pos.y - e.pos.y) < 3) { bestD = dd; best = o; }
       }
@@ -3958,6 +4048,12 @@ export class EntityManager {
       e.stateTime = 1;
       e.yaw = Math.atan2(-dx, -dz);
     }
+  }
+
+  /** Ground item that may participate in current-dimension gameplay. */
+  private dropReadyHere(e: Entity): boolean {
+    if (e.kind !== 'drop' || e.dead || e.dropDim !== this.world.dimension) return false;
+    return !!this.world.getChunk(Math.floor(e.pos.x / 16), Math.floor(e.pos.z / 16))?.ready;
   }
 
   /** A piglin takes a gold ingot and turns it over for six seconds. */
@@ -4588,6 +4684,7 @@ export class EntityManager {
   anyEntityOnBlock(bx: number, by: number, bz: number, mobsOnly = false): boolean {
     for (const e of this.entities) {
       if (!this.isMob(e) && (mobsOnly || (e.kind !== 'drop' && e.kind !== 'arrow'))) continue;
+      if (e.kind === 'drop' && e.dropDim !== this.world.dimension) continue;
       const hw = e.box.w / 2;
       if (e.pos.x + hw > bx && e.pos.x - hw < bx + 1 &&
         e.pos.y + e.box.h > by && e.pos.y < by + 0.5 &&

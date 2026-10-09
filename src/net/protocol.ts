@@ -18,7 +18,7 @@
 // damage to someone else's player travels as a `phurt`. Weather and the day
 // clock are the server's.
 
-export const PROTOCOL = 2;
+export const PROTOCOL = 5;
 /** Default port for `npm run server` (HTTP + WebSocket on /ws). */
 export const DEFAULT_PORT = 8080;
 /** Real seconds per in-game day (keep in step with main.ts DAY_LENGTH). */
@@ -56,6 +56,8 @@ export interface Pose {
   x: number; y: number; z: number;
   yaw: number; pitch: number;
   dim: Dim;
+  /** Client chunk view radius, used to elect one simulator for loaded cells. */
+  view?: number;
   sneak: boolean;
   /** item id in hand (0 = empty) */
   held: number;
@@ -86,6 +88,8 @@ export interface PlayerSave {
   gameMode: NetMode;
   player: unknown;
   inventory: unknown;
+  /** items held by a transient UI/projectile when this snapshot was taken */
+  pendingItems?: unknown;
   dimension: Dim;
   spawn?: { x: number; y: number; z: number };
   advancements?: unknown;
@@ -161,6 +165,11 @@ export type ClientMsg =
   | { t: 'hello'; v: number; name: string }
   | { t: 'pose'; p: Pose }
   | { t: 'cells'; cells: CellState[] }
+  /** Acquire/release the exclusive edit lease for a chest or furnace. */
+  | { t: 'container'; op: 'open'; d: Dim; k: string; req: number }
+  | { t: 'container'; op: 'close'; d: Dim; k: string }
+  /** Atomically commit both sides of a leased container transfer. */
+  | { t: 'containerCommit'; cell: CellState; save: PlayerSave }
   | { t: 'chat'; text: string }
   | { t: 'save'; save: PlayerSave }
   | { t: 'sleep'; on: boolean }
@@ -187,6 +196,11 @@ export type ServerMsg =
   | { t: 'pose'; id: number; p: Pose }
   /** a peer's edits (`from` = their id), or 0: the edit log, sent in batches after `welcome` */
   | { t: 'cells'; from: number; cells: CellState[] }
+  /** Result of a container edit-lease request. `cell` is the authoritative
+   *  server snapshot, when that cell has already been edited. */
+  | { t: 'container'; d: Dim; k: string; req: number; ok: boolean; owner?: string; cell?: CellState }
+  /** Live lease state, broadcast to every client. `owner: null` unlocks it. */
+  | { t: 'containerLock'; d: Dim; k: string; owner: number | null }
   | { t: 'chat'; from: string | null; text: string }
   /** clock sync; `skip` = everyone slept, the night is over */
   | { t: 'time'; dayTime: number; skip?: boolean }

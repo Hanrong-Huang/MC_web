@@ -87,8 +87,15 @@ export class NetClient {
     for (const m of q) handler(m);
   }
 
-  send(m: ClientMsg): void {
-    if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m));
+  /** Queue a message on an open socket. False means nothing was sent. */
+  send(m: ClientMsg): boolean {
+    if (this.ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      this.ws.send(JSON.stringify(m));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   close(): void {

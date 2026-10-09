@@ -1,6 +1,6 @@
 // Node-side logic tests (no DOM): RLE codec, crafting matcher, furnace, break times.
 import { rleEncode, rleDecode, rleIsLegacy, rleEncodeLegacy } from './src/engine/Persistence.ts';
-import { matchRecipe, FurnaceState, ChestState, Slot, smeltResult, furnaceSlotFor } from './src/engine/Inventory.ts';
+import { matchRecipe, FurnaceState, ChestState, Slot, smeltResult, furnaceSlotFor, SMELT_TIME } from './src/engine/Inventory.ts';
 import {
   B, B2, I, breakTime, canHarvest, attackCooldown, attackStrength, foodSaturation, pickItemFor, def,
   CREATIVE_ITEMS, shapeBoxes, slabFullBlock, connectsTo, enchantsFor, enchantLabel, repairMaterial,
@@ -11,6 +11,8 @@ import { craftRemainders, ingredientOptions, isWoodSpecific } from './src/engine
 import { xpForLevel } from './src/engine/Player.ts';
 import { campfireCooks } from './src/engine/Campfires.ts';
 import { migrateLegacyChunk } from './src/engine/World.ts';
+import * as THREE from 'three';
+import { Entity, EntityManager } from './src/engine/EntityManager.ts';
 
 let failures = 0;
 function check(name: string, cond: boolean): void {
@@ -92,6 +94,21 @@ check('sand smelted to glass', f.output?.id === B.GLASS && f.output.count === 1)
 check('fuel consumed', f.fuel === null);
 for (let t = 0; t < 10 / 0.05; t++) f.tick(0.05);
 check('burn limited by fuel', (f.output?.count ?? 0) === 1 && f.input?.count === 1);
+
+const rewardFurnace = new FurnaceState();
+rewardFurnace.input = { id: B.IRON_ORE, count: 1 };
+rewardFurnace.fuel = { id: B.PLANKS, count: 1 };
+rewardFurnace.tick(SMELT_TIME, () => 0); // force the existing 70% XP roll to pass
+check('furnace stores smelting rewards', rewardFurnace.pendingXp === 1 && rewardFurnace.pendingIron);
+const rewardRestored = FurnaceState.from(rewardFurnace.serialize());
+check('furnace reward roundtrip', rewardRestored.pendingXp === 1 && rewardRestored.pendingIron);
+const claimedReward = rewardRestored.claimRewards();
+check('furnace rewards claim once', claimedReward.xp === 1 && claimedReward.iron &&
+  rewardRestored.pendingXp === 0 && !rewardRestored.pendingIron && rewardRestored.claimRewards().xp === 0);
+const legacyFurnace = FurnaceState.from({
+  type: 'furnace', input: null, fuel: null, output: null, burn: 0, burnTotal: 0, cook: 0,
+});
+check('legacy furnace save has no pending rewards', legacyFurnace.pendingXp === 0 && !legacyFurnace.pendingIron);
 
 // --- chest ---
 const chest = new ChestState();
@@ -344,6 +361,124 @@ check('pick stone -> stone', pickItemFor(B.STONE) === B.STONE);
   check('legacy hanging roots -> weeping vines', legDec[ix(1, 49, 1)] === B.WEEPING_VINES && legDec[ix(1, 48, 1)] === B.WEEPING_VINES);
   check('legacy floor roots stay roots', legDec[ix(2, 11, 2)] === B.CRIMSON_ROOTS && legDec[ix(4, 11, 4)] === B.WARPED_ROOTS);
   check('legacy stacked warped roots -> twisting vines', legDec[ix(3, 11, 3)] === B.TWISTING_VINES && legDec[ix(3, 12, 3)] === B.TWISTING_VINES);
+}
+
+// --- single-player ground-drop persistence (no DOM / renderer) ---
+{
+  let chunkReady = false, pickupCalls = 0;
+  const chunkWorld = {
+    dimension: 'overworld' as const,
+    getChunk: () => ({ ready: chunkReady }),
+    getBlock: () => B.AIR,
+    fluidFlow: () => undefined,
+    doorStates: new Map(),
+    bedFacings: new Map(),
+    doorShape: () => null,
+  };
+  const chunkManager = new EntityManager(new THREE.Scene(), chunkWorld as never, {} as never, {} as never);
+  (chunkManager as unknown as { buildDropMesh: () => THREE.Group }).buildDropMesh = () => new THREE.Group();
+  chunkManager.setPlayer({
+    pos: { x: 4, y: 63.1, z: 4 }, dead: false,
+    inventory: { add: (_id: number, count: number) => { pickupCalls++; return count; } },
+  } as never);
+  const unloadedDrop = chunkManager.spawnDrop(4, 64, 4, I.STICK, 1);
+  unloadedDrop.age = 10;
+  unloadedDrop.vel = { x: 1, y: 2, z: 3 };
+  chunkManager.update(2, 2, new THREE.Quaternion());
+  check('drop in unloaded chunk is hidden and fully frozen', !unloadedDrop.mesh.visible && unloadedDrop.age === 10 &&
+    unloadedDrop.pos.x === 4 && unloadedDrop.pos.y === 64 && unloadedDrop.pos.z === 4 &&
+    unloadedDrop.vel.x === 1 && unloadedDrop.vel.y === 2 && unloadedDrop.vel.z === 3 && pickupCalls === 0);
+  chunkReady = true;
+  (chunkManager as unknown as { player: { pos: { x: number; y: number; z: number } } }).player.pos = { x: 100, y: 64, z: 100 };
+  chunkManager.update(0, 2, new THREE.Quaternion());
+  check('drop becomes visible when its chunk is ready', unloadedDrop.mesh.visible && unloadedDrop.age === 10);
+
+  const netWorld = {
+    dimension: 'nether' as 'overworld' | 'nether',
+    getChunk: () => ({ ready: true }),
+    getBlock: () => B.AIR,
+    fluidFlow: () => undefined,
+    doorStates: new Map(),
+    bedFacings: new Map(),
+    doorShape: () => null,
+  };
+  const netManager = new EntityManager(new THREE.Scene(), netWorld as never, {} as never, {} as never);
+  (netManager as unknown as { buildDropMesh: () => THREE.Group }).buildDropMesh = () => new THREE.Group();
+  const sent: unknown[] = [];
+  netManager.net = { myId: 7, myName: 'Tester', send: (msg) => { sent.push(msg); } };
+  netManager.setPlayer({
+    pos: { x: 100, y: 64, z: 100 }, dead: false,
+    inventory: { add: (_id: number, count: number) => count },
+  } as never);
+  const ownedDrop = netManager.spawnDrop(4, 64, 4, I.STICK, 1);
+  ownedDrop.age = 12;
+  netManager.update(0, 0, new THREE.Quaternion()); // establish the starting dimension
+  netWorld.dimension = 'overworld';
+  netManager.update(1, 1, new THREE.Quaternion());
+  const sentDrop = (sent as { t?: string; list?: { n: string; d: string }[] }[])
+    .flatMap((msg) => msg.t === 'ents' ? (msg.list ?? []) : []).find((s) => s.n === ownedDrop.nid);
+  check('owned network drop survives dimension switch frozen in its original dimension',
+    !ownedDrop.dead && netManager.entities.includes(ownedDrop) && !ownedDrop.mesh.visible &&
+    ownedDrop.age === 12 && ownedDrop.dropDim === 'nether' && sentDrop?.d === 'nether');
+
+  const readyChunks = new Set<number>([1]);
+  const pigWorld = {
+    dimension: 'nether' as const,
+    getChunk: (cx: number) => ({ ready: readyChunks.has(cx) }),
+  };
+  const pigManager = new EntityManager(new THREE.Scene(), pigWorld as never, {} as never, {} as never);
+  (pigManager as unknown as { buildDropMesh: () => THREE.Group }).buildDropMesh = () => new THREE.Group();
+  const unloadedGold = pigManager.spawnDrop(15, 64, 0, I.GOLD_INGOT, 2);
+  const loadedGold = pigManager.spawnDrop(20, 64, 0, I.GOLD_INGOT, 2);
+  unloadedGold.age = loadedGold.age = 1;
+  const piglin = new Entity('piglin', { x: 17, y: 64, z: 0 }, { w: 0.6, h: 1.95 }, new THREE.Group());
+  const tickPiglin = (pigManager as unknown as { tickPiglin(e: Entity): void }).tickPiglin.bind(pigManager);
+  const random = Math.random;
+  try {
+    Math.random = () => 0;
+    tickPiglin(piglin);
+    check('piglin lure selection skips drops in unloaded chunks', piglin.lure === loadedGold);
+    readyChunks.clear();
+    piglin.pos.x = loadedGold.pos.x;
+    tickPiglin(piglin);
+    check('piglin does not consume a lure after its chunk unloads', piglin.lure === null && loadedGold.count === 2 && !loadedGold.dead);
+  } finally {
+    Math.random = random;
+  }
+
+  const world = { dimension: 'nether' as const, getChunk: () => ({ ready: true }) };
+  const manager = new EntityManager(new THREE.Scene(), world as never, {} as never, {} as never);
+  (manager as unknown as { buildDropMesh: () => THREE.Group }).buildDropMesh = () => new THREE.Group();
+  const drop = manager.spawnDrop(1.25, 64.5, -3.75, I.MOB_CATCHER_FILLED, 1, undefined, 'pig', undefined, 'nether');
+  drop.vel = { x: 1.5, y: -0.25, z: 2.75 };
+  drop.age = -1.4;
+
+  // A drop left in the other dimension remains hidden and does not age away.
+  (world as { dimension: 'overworld' | 'nether' }).dimension = 'overworld';
+  manager.update(1, 1, new THREE.Quaternion());
+  check('inactive-dimension drop is frozen', drop.age === -1.4 && !drop.mesh.visible);
+
+  const tool = manager.spawnDrop(8, 70, 9, I.DIAMOND_SWORD, 1, 37, undefined, { sharpness: 3 }, 'overworld');
+  tool.vel = { x: -0.5, y: 0, z: 0.25 };
+  tool.age = 42;
+
+  const saved = manager.saveDrops();
+  const savedOrb = saved.find((s) => s.id === I.MOB_CATCHER_FILLED);
+  const savedTool = saved.find((s) => s.id === I.DIAMOND_SWORD);
+  check('drop snapshot preserves payload and motion', saved.length === 2 && savedOrb?.mob === 'pig' &&
+    savedOrb.dim === 'nether' && savedOrb.vx === 1.5 && savedOrb.vy === -0.25 && savedOrb.vz === 2.75 && savedOrb.age === -1.4);
+  check('drop snapshot preserves durability and enchantments', savedTool?.dur === 37 && savedTool.ench?.sharpness === 3 &&
+    savedTool.dim === 'overworld' && savedTool.age === 42);
+
+  const loaded = new EntityManager(new THREE.Scene(), world as never, {} as never, {} as never);
+  (loaded as unknown as { buildDropMesh: () => THREE.Group }).buildDropMesh = () => new THREE.Group();
+  loaded.loadDrops(saved);
+  const restoredOrb = loaded.entities.find((e) => e.itemId === I.MOB_CATCHER_FILLED)!;
+  const restoredTool = loaded.entities.find((e) => e.itemId === I.DIAMOND_SWORD)!;
+  check('drop snapshot restores metadata and dimension', loaded.entities.length === 2 && restoredOrb.mob === 'pig' &&
+    restoredOrb.dropDim === 'nether' && restoredOrb.vel.z === 2.75 && restoredOrb.age === -1.4 && !restoredOrb.mesh.visible);
+  check('drop snapshot restores durability and enchantments', restoredTool.dmg === 37 && restoredTool.ench?.sharpness === 3 &&
+    restoredTool.dropDim === 'overworld' && restoredTool.age === 42 && restoredTool.mesh.visible);
 }
 
 console.log(failures ? `\n${failures} FAILURES` : '\nALL PASS');

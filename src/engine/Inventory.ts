@@ -549,6 +549,13 @@ export function furnaceSlotFor(id: number): 'input' | 'fuel' | null {
 }
 
 export const SMELT_TIME = 10; // seconds per item, per the spec
+/** One output stack holds at most 64 smelts, each worth at most two XP here. */
+export const MAX_PENDING_FURNACE_XP = 128;
+
+export interface FurnaceRewards {
+  xp: number;
+  iron: boolean;
+}
 
 export class FurnaceState {
   readonly type = 'furnace';
@@ -558,11 +565,14 @@ export class FurnaceState {
   burn = 0;       // seconds of fuel remaining
   burnTotal = 0;  // total seconds of the current fuel item (for the flame bar)
   cook = 0;       // seconds into the current smelt
+  /** Rewards are claimed atomically with the player's output-slot transfer. */
+  pendingXp = 0;
+  pendingIron = false;
 
   get burning(): boolean { return this.burn > 0; }
 
   /** Advance by dt seconds. Returns true if the lit-state may have changed. */
-  tick(dt: number): boolean {
+  tick(dt: number, random: () => number = Math.random): boolean {
     const wasLit = this.burning;
     const canSmelt = this.canSmelt();
 
@@ -591,6 +601,11 @@ export class FurnaceState {
         else this.output.count++;
         this.input!.count--;
         if (this.input!.count <= 0) this.input = null;
+        if (random() < 0.7) {
+          const xp = out === I.GOLD_INGOT || out === I.DIAMOND ? 2 : 1;
+          this.pendingXp = Math.min(MAX_PENDING_FURNACE_XP, this.pendingXp + xp);
+        }
+        if (out === I.IRON_INGOT) this.pendingIron = true;
       }
     } else {
       this.cook = Math.max(0, this.cook - dt * 2);
@@ -606,7 +621,17 @@ export class FurnaceState {
     return true;
   }
 
-  isEmpty(): boolean { return !this.input && !this.fuel && !this.output && this.burn <= 0; }
+  /** Remove rewards only after the output slot actually gave an item to a player. */
+  claimRewards(): FurnaceRewards {
+    const reward = { xp: this.pendingXp, iron: this.pendingIron };
+    this.pendingXp = 0;
+    this.pendingIron = false;
+    return reward;
+  }
+
+  isEmpty(): boolean {
+    return !this.input && !this.fuel && !this.output && this.burn <= 0 && this.pendingXp <= 0 && !this.pendingIron;
+  }
 
   serialize(): FurnaceSave {
     return {
@@ -615,6 +640,8 @@ export class FurnaceState {
       fuel: this.fuel ? { ...this.fuel } : null,
       output: this.output ? { ...this.output } : null,
       burn: this.burn, burnTotal: this.burnTotal, cook: this.cook,
+      ...(this.pendingXp > 0 ? { pendingXp: this.pendingXp } : {}),
+      ...(this.pendingIron ? { pendingIron: true } : {}),
     };
   }
 
@@ -624,6 +651,9 @@ export class FurnaceState {
     f.fuel = s.fuel ? { ...s.fuel } : null;
     f.output = s.output ? { ...s.output } : null;
     f.burn = s.burn; f.burnTotal = s.burnTotal; f.cook = s.cook;
+    f.pendingXp = Number.isInteger(s.pendingXp) && s.pendingXp! > 0
+      ? Math.min(MAX_PENDING_FURNACE_XP, s.pendingXp!) : 0;
+    f.pendingIron = s.pendingIron === true;
     return f;
   }
 }

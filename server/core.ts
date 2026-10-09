@@ -11,6 +11,7 @@ import {
   ENT_FLAGS,
   type CellState, type ClientMsg, type ServerMsg, type Pose, type PlayerSave, type NetMode, type NetWeather, type EntState,
 } from '../src/net/protocol';
+import { B, I, CAPTURABLE, ENCHANTS, def, hasDef } from '../src/engine/Blocks';
 import { runCommand } from './commands';
 
 export interface Socket {
@@ -92,14 +93,143 @@ export function newWorld(seed: number, mode: NetMode): WorldData {
   return { seed, mode, dayTime: 0.1, cells: new Map(), players: new Map(), homes: new Map(), weather: 'clear', weatherLeft: 300 };
 }
 
+type ContainerKind = 'chest' | 'furnace';
+
+const SLOT_KEYS = new Set(['id', 'count', 'dur', 'mob', 'ench']);
+const FURNACE_KEYS = new Set([
+  'type', 'input', 'fuel', 'output', 'burn', 'burnTotal', 'cook', 'pendingXp', 'pendingIron',
+]);
+const CHEST_SIZE = 27;
+const MAX_FURNACE_BURN = 1000; // lava bucket, the longest registered fuel
+const MAX_FURNACE_COOK = 10;
+const MAX_FURNACE_XP = 128; // one full output stack at this game's maximum XP per smelt
+
+function objectRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function containerKind(id: number): ContainerKind | null {
+  if (id === B.CHEST || id === B.CHEST_LOOT || id === B.BARREL) return 'chest';
+  if (id === B.FURNACE || id === B.FURNACE_LIT) return 'furnace';
+  return null;
+}
+
+/** Strict wire validation keeps a malformed stack from reaching def() calls
+ *  in the HUD/furnace after the cell is replayed to every client. */
+function validSlot(value: unknown): boolean {
+  if (value === null) return true;
+  if (!objectRecord(value) || Object.keys(value).some((key) => !SLOT_KEYS.has(key))) return false;
+  const id = value.id;
+  const count = value.count;
+  if (typeof id !== 'number' || !Number.isInteger(id) || id <= B.AIR || !hasDef(id)) return false;
+  const item = def(id);
+  if (typeof count !== 'number' || !Number.isInteger(count) || count < 1 || count > item.stack) return false;
+
+  if (value.dur !== undefined) {
+    if (!item.durability || typeof value.dur !== 'number' || !Number.isInteger(value.dur) ||
+      value.dur < 1 || value.dur > item.durability) return false;
+  }
+
+  if (value.mob !== undefined) {
+    if (id !== I.MOB_CATCHER_FILLED || typeof value.mob !== 'string' || !CAPTURABLE.has(value.mob)) return false;
+  } else if (id === I.MOB_CATCHER_FILLED) return false;
+
+  if (value.ench !== undefined) {
+    if (!objectRecord(value.ench)) return false;
+    const entries = Object.entries(value.ench);
+    if (entries.length > ENCHANTS.length) return false;
+    for (const [enchId, level] of entries) {
+      const enchant = ENCHANTS.find((candidate) => candidate.id === enchId);
+      if (!enchant || !enchant.fits(item) || typeof level !== 'number' || !Number.isInteger(level) ||
+        level < 1 || level > enchant.max) return false;
+    }
+  }
+  return true;
+}
+
+function validBlockEntity(be: unknown, kind: ContainerKind): boolean {
+  if (!objectRecord(be)) return false;
+  if (kind === 'chest') {
+    if (Object.keys(be).some((key) => key !== 'type' && key !== 'slots') ||
+      be.type !== 'chest' || !Array.isArray(be.slots) || be.slots.length > CHEST_SIZE) return false;
+    return be.slots.every(validSlot);
+  }
+
+  if (Object.keys(be).some((key) => !FURNACE_KEYS.has(key)) || be.type !== 'furnace' ||
+    !validSlot(be.input) || !validSlot(be.fuel) || !validSlot(be.output)) return false;
+  const burn = be.burn;
+  const burnTotal = be.burnTotal;
+  const cook = be.cook;
+  const pendingXp = be.pendingXp;
+  const pendingIron = be.pendingIron;
+  return typeof burn === 'number' && Number.isFinite(burn) && burn >= 0 && burn <= MAX_FURNACE_BURN &&
+    typeof burnTotal === 'number' && Number.isFinite(burnTotal) && burnTotal >= 0 && burnTotal <= MAX_FURNACE_BURN &&
+    burn <= burnTotal && typeof cook === 'number' && Number.isFinite(cook) && cook >= 0 && cook <= MAX_FURNACE_COOK &&
+    (pendingXp === undefined || (typeof pendingXp === 'number' && Number.isInteger(pendingXp) &&
+      pendingXp >= 0 && pendingXp <= MAX_FURNACE_XP)) &&
+    (pendingIron === undefined || typeof pendingIron === 'boolean');
+}
+
 function validCell(c: unknown): c is CellState {
   const o = c as CellState;
-  return !!o && (o.d === 'overworld' || o.d === 'nether') && typeof o.k === 'string' &&
-    /^-?\d+,-?\d+,-?\d+$/.test(o.k) && Number.isInteger(o.id) && o.id >= 0 && o.id < 4096;
+  if (!o || (o.d !== 'overworld' && o.d !== 'nether') || typeof o.k !== 'string' ||
+    !/^-?\d+,-?\d+,-?\d+$/.test(o.k) || !Number.isInteger(o.id) || o.id < 0 || o.id >= 4096) return false;
+  if (o.be !== undefined) {
+    const kind = containerKind(o.id);
+    if (!kind || !validBlockEntity(o.be, kind)) return false;
+  }
+  return true;
+}
+
+function validContainerCommit(cell: CellState, current: CellState | undefined, save: unknown): save is PlayerSave {
+  if (!objectRecord(save) || (save.gameMode !== 'survival' && save.gameMode !== 'creative') ||
+    save.dimension !== cell.d || !objectRecord(save.player) || !objectRecord(save.inventory)) return false;
+
+  // Destruction legitimately snapshots AIR with no block entity, but only
+  // after this lease has established that the authoritative cell is a container.
+  if (cell.id === B.AIR) return cell.be === undefined && !!current && containerKind(current.id) !== null;
+
+  const nextKind = containerKind(cell.id);
+  if (!nextKind || !cell.be || !validBlockEntity(cell.be, nextKind)) return false;
+  if (!current) return true; // first baseline for an untouched generated container
+
+  const currentKind = containerKind(current.id);
+  if (!currentKind || currentKind !== nextKind) return false;
+  // Chests can shed their generated-loot marker; barrels never turn into chests.
+  if ((current.id === B.BARREL) !== (cell.id === B.BARREL)) return false;
+  return true;
+}
+
+/** Progress updates from the lease owner may use the ordinary cell stream, but
+ *  that stream must never destroy or replace the leased container. Inventory
+ *  transfers and intentional destruction use containerCommit instead. */
+function validLeasedCellUpdate(cell: CellState, current: CellState | undefined): boolean {
+  if (!current || !cell.be) return false;
+  const currentKind = containerKind(current.id);
+  const nextKind = containerKind(cell.id);
+  if (!currentKind || currentKind !== nextKind) return false;
+  if ((current.id === B.BARREL) !== (cell.id === B.BARREL)) return false;
+  // Chests have no background state to advance. An identical flush after the
+  // initial atomic baseline is harmless, but every actual inventory edit must
+  // stay paired with the player's save in containerCommit.
+  if (currentKind === 'chest') return JSON.stringify(cell) === JSON.stringify(current);
+  if (current.be?.type !== 'furnace' || cell.be.type !== 'furnace') return false;
+  // A leased furnace still animates burn/cook progress. Permit that ordinary
+  // update only while all three item slots remain byte-for-byte unchanged.
+  return JSON.stringify([cell.be.input, cell.be.fuel, cell.be.output]) ===
+    JSON.stringify([current.be.input, current.be.fuel, current.be.output]);
+}
+
+function validContainerRef(d: unknown, k: unknown): boolean {
+  return (d === 'overworld' || d === 'nether') && typeof k === 'string' && /^-?\d+,-?\d+,-?\d+$/.test(k);
 }
 
 export class WorldCore {
   readonly conns = new Map<number, Conn>();
+  /** One editor per chest/furnace. Clients commit each item change while the
+   *  lease is held; close or disconnect releases it. */
+  private readonly containerLocks = new Map<string, number>();
+  private readonly clientContainer = new Map<number, string>();
   private nextId = 1;
   private skipTimer: ReturnType<typeof setTimeout> | null = null;
   private sinceSync = 0;
@@ -131,10 +261,32 @@ export class WorldCore {
 
   disconnect(c: Conn): void {
     if (!this.conns.delete(c.id) || !c.joined) return;
+    this.releaseContainer(c.id);
     this.orphan(c);
     this.broadcast({ t: 'leave', id: c.id, name: c.name });
     this.system(`${c.name} left the game`);
     this.updateSleepers();
+  }
+
+  private releaseContainer(clientId: number, expected?: string): void {
+    const held = this.clientContainer.get(clientId);
+    if (held && (expected === undefined || held === expected)) {
+      if (this.containerLocks.get(held) === clientId) {
+        this.containerLocks.delete(held);
+        this.broadcastContainerLock(held, null);
+      }
+      this.clientContainer.delete(clientId);
+    }
+  }
+
+  private broadcastContainerLock(key: string, owner: number | null, only?: Conn): void {
+    const bar = key.indexOf('|');
+    if (bar < 0) return;
+    const msg: ServerMsg = {
+      t: 'containerLock', d: key.slice(0, bar) as CellState['d'], k: key.slice(bar + 1), owner,
+    };
+    if (only) this.send(only, msg);
+    else this.broadcast(msg);
   }
 
   send(c: Conn, msg: ServerMsg): void {
@@ -334,6 +486,9 @@ export class WorldCore {
       for (let i = 0; i < all.length; i += CELLS_PER_BATCH) {
         this.send(c, { t: 'cells', from: 0, cells: all.slice(i, i + CELLS_PER_BATCH) });
       }
+      // Locks are transient rather than persisted, but a joining client must
+      // know about every lease before it can safely destroy a container.
+      for (const [key, owner] of this.containerLocks) this.broadcastContainerLock(key, owner, c);
       this.broadcast({ t: 'join', id: c.id, name }, c);
       this.system(`${name} joined the game`);
       return;
@@ -342,22 +497,97 @@ export class WorldCore {
       case 'pose': {
         const p = msg.p;
         if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return;
+        if (p.view !== undefined) p.view = Number.isFinite(p.view) ? Math.max(2, Math.min(32, Math.floor(p.view))) : 8;
         const wasDim = c.pose?.dim;
         c.pose = p;
         this.broadcast({ t: 'pose', id: c.id, p }, c);
         if (wasDim !== p.dim) this.updateSleepers();
         break;
       }
+      case 'container': {
+        if (!validContainerRef(msg.d, msg.k)) return;
+        const key = `${msg.d}|${msg.k}`;
+        if (msg.op === 'close') {
+          this.releaseContainer(c.id, key);
+          break;
+        }
+        if (msg.op !== 'open' || !Number.isInteger(msg.req) || msg.req < 1) return;
+        const ownerId = this.containerLocks.get(key);
+        if (ownerId !== undefined && ownerId !== c.id) {
+          const owner = this.conns.get(ownerId);
+          this.send(c, {
+            t: 'container', d: msg.d, k: msg.k, req: msg.req, ok: false,
+            ...(owner?.name ? { owner: owner.name } : {}),
+            ...(w.cells.get(key) ? { cell: w.cells.get(key)! } : {}),
+          });
+          break;
+        }
+        if (ownerId === c.id && this.clientContainer.get(c.id) === key) {
+          this.send(c, {
+            t: 'container', d: msg.d, k: msg.k, req: msg.req, ok: true,
+            ...(w.cells.get(key) ? { cell: w.cells.get(key)! } : {}),
+          });
+          break;
+        }
+        // A normal client can only display one container. Releasing an older
+        // lease also prevents a stale/malicious client from reserving the map.
+        this.releaseContainer(c.id);
+        this.containerLocks.set(key, c.id);
+        this.clientContainer.set(c.id, key);
+        this.broadcastContainerLock(key, c.id);
+        this.send(c, {
+          t: 'container', d: msg.d, k: msg.k, req: msg.req, ok: true,
+          ...(w.cells.get(key) ? { cell: w.cells.get(key)! } : {}),
+        });
+        break;
+      }
       case 'cells': {
         if (!Array.isArray(msg.cells)) return;
         const cells = msg.cells.slice(0, MAX_CELLS_PER_MSG).filter(validCell);
         if (!cells.length) return;
+        const accepted: CellState[] = [];
+        const corrections: CellState[] = [];
         for (const cell of cells) {
           const key = `${cell.d}|${cell.k}`;
+          const current = w.cells.get(key);
+          const ownerId = this.containerLocks.get(key);
+          if (ownerId !== undefined &&
+              (ownerId !== c.id || !validLeasedCellUpdate(cell, current))) {
+            // Destruction is an edit too. Clients learn leases eagerly and
+            // avoid producing speculative container drops; the server still
+            // rejects a stale/racing writer (including the owner bypassing the
+            // atomic commit path) rather than revoking the lease.
+            if (current) corrections.push(current);
+            continue;
+          }
           w.cells.set(key, cell);
           this.dirtyCells.add(key);
+          accepted.push(cell);
         }
-        this.broadcast({ t: 'cells', from: c.id, cells }, c);
+        if (accepted.length) this.broadcast({ t: 'cells', from: c.id, cells: accepted }, c);
+        // Undo an optimistic local break/explosion that touched a container
+        // another player currently has open.
+        if (corrections.length) this.send(c, { t: 'cells', from: 0, cells: corrections });
+        break;
+      }
+      case 'containerCommit': {
+        const cell = msg.cell;
+        if (!validCell(cell)) return;
+        const key = `${cell.d}|${cell.k}`;
+        if (this.containerLocks.get(key) !== c.id || this.clientContainer.get(c.id) !== key) {
+          const current = w.cells.get(key);
+          if (current) this.send(c, { t: 'cells', from: 0, cells: [current] });
+          return;
+        }
+        if (!validContainerCommit(cell, w.cells.get(key), msg.save)) return;
+        // One message and one synchronous core operation make the two halves
+        // inseparable. Both persistence adapters later flush these dirty rows
+        // together (the Worker adapter does so in a SQLite transaction).
+        w.cells.set(key, cell);
+        w.players.set(c.name, msg.save);
+        this.dirtyCells.add(key);
+        this.dirtyPlayers.add(c.name);
+        this.broadcast({ t: 'cells', from: c.id, cells: [cell] }, c);
         break;
       }
       case 'chat': {

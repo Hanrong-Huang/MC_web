@@ -47,6 +47,8 @@ export class Input {
     document.addEventListener('wheel', this.wheel, { passive: false });
     document.addEventListener('pointerlockchange', this.plc);
     document.addEventListener('contextmenu', this.ctxmenu);
+    window.addEventListener('blur', this.clearHeld);
+    document.addEventListener('visibilitychange', this.visibilityChange);
   }
 
   private keydown = (e: KeyboardEvent): void => {
@@ -121,6 +123,22 @@ export class Input {
 
   private ctxmenu = (e: Event): void => e.preventDefault();
 
+  /** A key/button released while this tab is unfocused never sends us its
+   *  keyup/pointerup. Forget every held input so returning to the game cannot
+   *  leave the player walking, mining, or using an item on its own. */
+  private clearHeld = (): void => {
+    this.keys.clear();
+    this.lastTap.clear();
+    this.mouseDX = 0;
+    this.mouseDY = 0;
+    this.moveAxis = null;
+    this.clearClicks();
+  };
+
+  private visibilityChange = (): void => {
+    if (document.hidden) this.clearHeld();
+  };
+
   /** Returns accumulated mouse deltas and clears them. */
   consumeMouse(): [number, number] {
     const d: [number, number] = [this.mouseDX, this.mouseDY];
@@ -159,6 +177,8 @@ export class Input {
     document.removeEventListener('wheel', this.wheel);
     document.removeEventListener('pointerlockchange', this.plc);
     document.removeEventListener('contextmenu', this.ctxmenu);
+    window.removeEventListener('blur', this.clearHeld);
+    document.removeEventListener('visibilitychange', this.visibilityChange);
   }
 }
 
