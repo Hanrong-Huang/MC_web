@@ -31,7 +31,7 @@ type State = 'idle' | 'loading' | 'ready' | 'failed';
 
 interface Spec {
   notes: number[];   // MIDI pitches that have a <Note>.mp3
-  gain: number;      // velocity → level, matched to the synth voice by offline RMS (sample-test.mjs)
+  gain: number;      // velocity → level, matched by tests/e2e/sample-test.mjs
   lp: number;        // voice-group lowpass (Hz): a warmer, felt-hammer top end
   bowed?: boolean;   // sustained: swell in / out, re-bowed past the sample's length
 }

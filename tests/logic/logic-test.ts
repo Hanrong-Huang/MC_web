@@ -1,18 +1,18 @@
 // Node-side logic tests (no DOM): RLE codec, crafting matcher, furnace, break times.
-import { rleEncode, rleDecode, rleIsLegacy, rleEncodeLegacy } from './src/engine/Persistence.ts';
-import { matchRecipe, FurnaceState, ChestState, Slot, smeltResult, furnaceSlotFor, SMELT_TIME } from './src/engine/Inventory.ts';
+import { rleEncode, rleDecode, rleIsLegacy, rleEncodeLegacy } from '../../src/engine/Persistence.ts';
+import { matchRecipe, FurnaceState, ChestState, Slot, smeltResult, furnaceSlotFor, SMELT_TIME } from '../../src/engine/Inventory.ts';
 import {
   B, B2, I, breakTime, canHarvest, attackCooldown, attackStrength, foodSaturation, pickItemFor, def,
   CREATIVE_ITEMS, shapeBoxes, slabFullBlock, connectsTo, enchantsFor, enchantLabel, repairMaterial,
   ID_LIMIT, allDefs, crossTile, CLIMBABLE, vineDrops,
   DOOR_IDS, DOOR_LOWERS, DOOR_UPPERS, TRAPDOOR_IDS, doorBlocksFor, doorItemFor, FLAMMABLE,
-} from './src/engine/Blocks.ts';
-import { craftRemainders, ingredientOptions, isWoodSpecific } from './src/engine/Inventory.ts';
-import { xpForLevel } from './src/engine/Player.ts';
-import { campfireCooks } from './src/engine/Campfires.ts';
-import { migrateLegacyChunk } from './src/engine/World.ts';
+} from '../../src/engine/Blocks.ts';
+import { craftRemainders, ingredientOptions, isWoodSpecific } from '../../src/engine/Inventory.ts';
+import { xpForLevel } from '../../src/engine/Player.ts';
+import { campfireCooks } from '../../src/engine/Campfires.ts';
+import { migrateLegacyChunk } from '../../src/engine/World.ts';
 import * as THREE from 'three';
-import { Entity, EntityManager } from './src/engine/EntityManager.ts';
+import { Entity, EntityManager } from '../../src/engine/EntityManager.ts';
 
 let failures = 0;
 function check(name: string, cond: boolean): void {

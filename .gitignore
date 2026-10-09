@@ -19,3 +19,13 @@ dist-server/
 server-data/
 .wrangler/
 admin-password.txt
+
+# Local AI-assisted development files (never publish these).
+/.openai/
+/.claude/
+/CLAUDE.md
+/AGENTS.md
+
+# Browser screenshots and profiling output.
+/tests/artifacts/*
+!/tests/artifacts/.gitkeep

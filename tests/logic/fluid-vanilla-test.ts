@@ -1,9 +1,10 @@
 // Headless logic test for the vanilla fluid port (World "flowing fluids"):
 // levels, ranges, timing, waterfalls, infinite water, washing, lava reactions
 // and the flow vector. Run:
-//   npx esbuild fluid-vanilla-test.ts --bundle --format=esm --platform=node --outfile=t.mjs && node t.mjs
-import { World } from './src/engine/World';
-import { B } from './src/engine/Blocks';
+//   npx esbuild tests/logic/fluid-vanilla-test.ts --bundle --format=esm --platform=node --outfile=tests/artifacts/fluid-test.mjs
+//   node tests/artifacts/fluid-test.mjs
+import { World } from '../../src/engine/World';
+import { B } from '../../src/engine/Blocks';
 
 const w = new World(4242);
 w.update(8, 8, 5000);

@@ -1,9 +1,9 @@
 // Deterministic check of the torch flood-fill: generate terrain, place a
 // torch, mesh the chunk, and verify nearby vertices carry block light.
-import { World } from './src/engine/World.ts';
-import { buildChunkGeometry } from './src/engine/Mesher.ts';
-import { B } from './src/engine/Blocks.ts';
-import type { Atlas } from './src/engine/Textures.ts';
+import { World } from '../../src/engine/World.ts';
+import { buildChunkGeometry } from '../../src/engine/Mesher.ts';
+import { B } from '../../src/engine/Blocks.ts';
+import type { Atlas } from '../../src/engine/Textures.ts';
 
 const mockAtlas = {
   rect: () => ({ u0: 0, v0: 0, u1: 1, v1: 1 }),

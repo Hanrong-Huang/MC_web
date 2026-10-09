@@ -1,8 +1,8 @@
 // Lightweight Node-side fire lifecycle regression. Bundle with esbuild, then
 // run under Node; no DOM, renderer, or browser is required.
-import { B } from './src/engine/Blocks.ts';
-import { FireSystem } from './src/engine/Fire.ts';
-import type { World } from './src/engine/World.ts';
+import { B } from '../../src/engine/Blocks.ts';
+import { FireSystem } from '../../src/engine/Fire.ts';
+import type { World } from '../../src/engine/World.ts';
 
 const cells = new Map<string, number>([
   ['0,0,0', B.AIR],

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { WorldCore, newWorld, type Socket } from './server/core';
-import { B, I } from './src/engine/Blocks';
-import { World } from './src/engine/World';
-import { NetSync } from './src/net/NetSync';
-import type { NetClient } from './src/net/NetClient';
-import { PROTOCOL, type CellState, type ClientMsg, type PlayerSave, type ServerMsg } from './src/net/protocol';
+import { WorldCore, newWorld, type Socket } from '../../server/core';
+import { B, I } from '../../src/engine/Blocks';
+import { World } from '../../src/engine/World';
+import { NetSync } from '../../src/net/NetSync';
+import type { NetClient } from '../../src/net/NetClient';
+import { PROTOCOL, type CellState, type ClientMsg, type PlayerSave, type ServerMsg } from '../../src/net/protocol';
 
 class TestSocket implements Socket {
   open = true;

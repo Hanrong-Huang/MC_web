@@ -2,7 +2,7 @@
 // cliff waterfall) and captures noon / sunset / waterfall / shore / underwater
 // views, then drives the player into the lake from a height to exercise the
 // splash + exit wiring. Screenshots go to $SHOT_DIR (default: cwd).
-// Usage: node water-visual-test.mjs [port]
+// Usage: node tests/visual/water-visual-test.mjs [port]
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
 import path from 'node:path';

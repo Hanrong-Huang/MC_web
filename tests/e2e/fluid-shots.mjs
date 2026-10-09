@@ -2,7 +2,7 @@
 // pouring into a pool, a lava ledge pouring onto the floor, a lava/water
 // meeting point (obsidian/cobble), and a roof with fluid on top (drips), lets
 // the fluids settle, then screenshots day and night views.
-// Usage: node fluid-shots.mjs   (PORT, SHOT_DIR env; NO_SHOTS=1 for asserts only)
+// Usage: node tests/e2e/fluid-shots.mjs (PORT, SHOT_DIR env; NO_SHOTS=1 for asserts only)
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
 import path from 'node:path';

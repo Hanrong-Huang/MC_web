@@ -1,8 +1,8 @@
 // Lightweight Node-side collision regressions. Bundle with esbuild, then run
 // the resulting module under Node; no DOM, renderer, or browser is required.
-import { B } from './src/engine/Blocks.ts';
-import { canHopUp, moveEntity } from './src/engine/Physics.ts';
-import type { World } from './src/engine/World.ts';
+import { B } from '../../src/engine/Blocks.ts';
+import { canHopUp, moveEntity } from '../../src/engine/Physics.ts';
+import type { World } from '../../src/engine/World.ts';
 
 let failures = 0;
 function check(name: string, cond: boolean): void {

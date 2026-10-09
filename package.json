@@ -11,7 +11,6 @@
     "server:only": "npm run build:server && node dist-server/server.mjs",
     "worker:dev": "wrangler dev",
     "worker:deploy": "wrangler deploy",
-    "build:sites": "npm run build && node scripts/build-sites.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
